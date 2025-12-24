@@ -1,16 +1,109 @@
 package replay
 
 import (
-	"errors"
+	"context"
+	"encoding/base64"
+	"fmt"
+	"os"
 	"time"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/service"
 )
 
 func send(timeout time.Duration, flow, bundle, file, body, target string, headers, removeHeaders []string, followRedirects bool, requestTimeout time.Duration, force bool) error {
-	_, _, _, _, _, _, _, _, _, _, _ = timeout, flow, bundle, file, body, target, headers, removeHeaders, followRedirects, requestTimeout, force
-	return errors.New("not implemented: replay send")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	client := service.NewClient(workDir, service.WithTimeout(timeout))
+	if err := client.EnsureService(ctx); err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
+	}
+
+	req := &service.ReplaySendRequest{
+		FlowID:          flow,
+		BundlePath:      bundle,
+		FilePath:        file,
+		BodyPath:        body,
+		Target:          target,
+		AddHeaders:      headers,
+		RemoveHeaders:   removeHeaders,
+		FollowRedirects: followRedirects,
+		Force:           force,
+	}
+	if requestTimeout > 0 {
+		req.Timeout = requestTimeout.String()
+	}
+
+	resp, err := client.ReplaySend(ctx, req)
+	if err != nil {
+		return fmt.Errorf("replay send failed: %w", err)
+	}
+
+	// Output result as markdown
+	fmt.Printf("## Replay Result\n\n")
+	fmt.Printf("**Replay ID:** `%s`\n", resp.ReplayID)
+	fmt.Printf("**Duration:** %s\n\n", resp.Duration)
+
+	fmt.Printf("### Response\n\n")
+	fmt.Printf("**Status:** %d %s\n", resp.Status, resp.StatusLine)
+	fmt.Printf("**Size:** %d bytes\n\n", resp.RespSize)
+
+	if resp.RespHeaders != "" {
+		fmt.Printf("**Headers:**\n```\n%s```\n\n", resp.RespHeaders)
+	}
+
+	if resp.RespPreview != "" {
+		fmt.Printf("**Body Preview:**\n```\n%s\n```\n", resp.RespPreview)
+	}
+
+	return nil
 }
 
 func get(timeout time.Duration, replayID string) error {
-	_, _ = timeout, replayID
-	return errors.New("not implemented: replay get")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	client := service.NewClient(workDir, service.WithTimeout(timeout))
+	if err := client.EnsureService(ctx); err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
+	}
+
+	resp, err := client.ReplayGet(ctx, &service.ReplayGetRequest{
+		ReplayID: replayID,
+	})
+	if err != nil {
+		return fmt.Errorf("replay get failed: %w", err)
+	}
+
+	// Output result as markdown
+	fmt.Printf("## Replay Details\n\n")
+	fmt.Printf("**Replay ID:** `%s`\n", resp.ReplayID)
+	fmt.Printf("**Duration:** %s\n", resp.Duration)
+	fmt.Printf("**Status:** %d %s\n", resp.Status, resp.StatusLine)
+	fmt.Printf("**Size:** %d bytes\n\n", resp.RespSize)
+
+	if resp.RespHeaders != "" {
+		fmt.Printf("**Headers:**\n```\n%s```\n\n", resp.RespHeaders)
+	}
+
+	if resp.RespBody != "" {
+		body, err := base64.StdEncoding.DecodeString(resp.RespBody)
+		if err != nil {
+			fmt.Printf("**Body:** (failed to decode: %v)\n", err)
+		} else {
+			fmt.Printf("**Body:**\n```\n%s\n```\n", string(body))
+		}
+	}
+
+	return nil
 }

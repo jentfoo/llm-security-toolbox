@@ -1,23 +1,130 @@
 package proxy
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"strings"
 	"time"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/service"
 )
 
 func list(timeout time.Duration, host, path, method, status, contains, containsBody, since, excludeHost, excludePath string) error {
-	_, _, _, _, _, _, _, _, _, _ = timeout, host, path, method, status, contains, containsBody, since, excludeHost, excludePath
-	return errors.New("not implemented: proxy list")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	client := service.NewClient(workDir, service.WithTimeout(timeout))
+	if err := client.EnsureService(ctx); err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
+	}
+
+	resp, err := client.ProxyList(ctx, &service.ProxyListRequest{
+		Host:         host,
+		Path:         path,
+		Method:       method,
+		Status:       status,
+		Contains:     contains,
+		ContainsBody: containsBody,
+		Since:        since,
+		ExcludeHost:  excludeHost,
+		ExcludePath:  excludePath,
+	})
+	if err != nil {
+		return fmt.Errorf("proxy list failed: %w", err)
+	}
+
+	// Format output as markdown
+	if len(resp.Aggregates) > 0 {
+		printAggregateTable(resp.Aggregates)
+	} else if len(resp.Flows) > 0 {
+		printFlowTable(resp.Flows)
+	} else {
+		fmt.Println("No matching entries found.")
+	}
+
+	return nil
 }
 
-func get(timeout time.Duration, flowID string) error {
-	_, _ = timeout, flowID
-	return errors.New("not implemented: proxy get")
+func printAggregateTable(agg []service.AggregateEntry) {
+	// Print markdown table
+	fmt.Println("| host | path | method | status | count |")
+	fmt.Println("|------|------|--------|--------|-------|")
+	for _, e := range agg {
+		fmt.Printf("| %s | %s | %s | %d | %d |\n",
+			escapeMarkdown(e.Host),
+			escapeMarkdown(e.Path),
+			e.Method,
+			e.Status,
+			e.Count,
+		)
+	}
+	fmt.Printf("\n*%d unique request patterns*\n", len(agg))
+}
+
+func printFlowTable(flows []service.FlowSummary) {
+	// Print markdown table
+	fmt.Println("| flow_id | method | host | path | status | size |")
+	fmt.Println("|---------|--------|------|------|--------|------|")
+	for _, f := range flows {
+		fmt.Printf("| %s | %s | %s | %s | %d | %d |\n",
+			f.FlowID,
+			f.Method,
+			escapeMarkdown(f.Host),
+			escapeMarkdown(f.Path),
+			f.Status,
+			f.ResponseLength,
+		)
+	}
+	fmt.Printf("\n*%d flows*\n", len(flows))
+}
+
+func escapeMarkdown(s string) string {
+	// Escape characters that break markdown tables
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
 }
 
 func export(timeout time.Duration, flowID, out string) error {
-	_, _, _ = timeout, flowID, out
-	return errors.New("not implemented: proxy export")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	client := service.NewClient(workDir, service.WithTimeout(timeout))
+	if err := client.EnsureService(ctx); err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
+	}
+
+	resp, err := client.ProxyExport(ctx, &service.ProxyExportRequest{
+		FlowID: flowID,
+		OutDir: out,
+	})
+	if err != nil {
+		return fmt.Errorf("proxy export failed: %w", err)
+	}
+
+	// Output result
+	fmt.Printf("Exported flow `%s` to bundle `%s`\n\n", flowID, resp.BundleID)
+	fmt.Printf("**Bundle path:** `%s`\n\n", resp.BundlePath)
+	fmt.Println("Files created:")
+	fmt.Println("- `request.http` - HTTP headers with body placeholder")
+	fmt.Println("- `body.bin` - Request body (edit for modifications)")
+	fmt.Println("- `request.meta.json` - Metadata")
+	fmt.Println("\nTo replay: `sectool replay send --bundle " + resp.BundlePath + "`")
+
+	return nil
 }
 
 func intercept(timeout time.Duration, state string) error {

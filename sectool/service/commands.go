@@ -36,10 +36,6 @@ func status(timeout time.Duration) error {
 		if st.Health != nil {
 			fmt.Printf("**Version**: %s\n", st.Health.Version)
 			fmt.Printf("**Started At**: %s\n", st.Health.StartedAt)
-			fmt.Printf("**Burp Connected**: %v\n", st.Health.BurpConnected)
-			if st.Health.BurpMCPURL != "" {
-				fmt.Printf("**Burp MCP URL**: %s\n", st.Health.BurpMCPURL)
-			}
 			if len(st.Health.Metrics) > 0 {
 				fmt.Println()
 				fmt.Println("### Metrics")

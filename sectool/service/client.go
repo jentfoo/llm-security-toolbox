@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -54,6 +55,9 @@ func NewClient(workDir string, opts ...ClientOption) *Client {
 			},
 		},
 		Timeout: c.timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return errors.New("redirect not allowed")
+		},
 	}
 
 	return c
@@ -245,4 +249,113 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	}
 
 	return &apiResp, nil
+}
+
+// doJSONRequest sends a POST request with a JSON body and parses the response into result.
+func (c *Client) doJSONRequest(ctx context.Context, path string, reqBody interface{}, result interface{}) error {
+	var body io.Reader
+	if reqBody != nil {
+		data, err := json.Marshal(reqBody)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request: %w", err)
+		}
+		body = bytes.NewReader(data)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return err
+	}
+
+	if result != nil && len(resp.Data) > 0 {
+		if err := json.Unmarshal(resp.Data, result); err != nil {
+			return fmt.Errorf("failed to parse response: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// =============================================================================
+// Proxy API
+// =============================================================================
+
+// ProxyList lists proxy history entries.
+func (c *Client) ProxyList(ctx context.Context, req *ProxyListRequest) (*ProxyListResponse, error) {
+	var resp ProxyListResponse
+	if err := c.doJSONRequest(ctx, "/proxy/list", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ProxyExport exports a flow to disk for editing.
+func (c *Client) ProxyExport(ctx context.Context, req *ProxyExportRequest) (*ProxyExportResponse, error) {
+	var resp ProxyExportResponse
+	if err := c.doJSONRequest(ctx, "/proxy/export", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// =============================================================================
+// Replay API
+// =============================================================================
+
+// ReplaySend sends a request through the repeater.
+func (c *Client) ReplaySend(ctx context.Context, req *ReplaySendRequest) (*ReplaySendResponse, error) {
+	var resp ReplaySendResponse
+	if err := c.doJSONRequest(ctx, "/replay/send", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ReplayGet retrieves details for a previous replay.
+func (c *Client) ReplayGet(ctx context.Context, req *ReplayGetRequest) (*ReplayGetResponse, error) {
+	var resp ReplayGetResponse
+	if err := c.doJSONRequest(ctx, "/replay/get", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// =============================================================================
+// OAST API
+// =============================================================================
+
+// OastCreate creates a new OAST session.
+func (c *Client) OastCreate(ctx context.Context) (*OastCreateResponse, error) {
+	var resp OastCreateResponse
+	if err := c.doJSONRequest(ctx, "/oast/create", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// OastPoll polls for OAST interaction events.
+func (c *Client) OastPoll(ctx context.Context, req *OastPollRequest) (*OastPollResponse, error) {
+	var resp OastPollResponse
+	if err := c.doJSONRequest(ctx, "/oast/poll", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// OastList lists active OAST sessions.
+func (c *Client) OastList(ctx context.Context) (*OastListResponse, error) {
+	var resp OastListResponse
+	if err := c.doJSONRequest(ctx, "/oast/list", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// OastDelete deletes an OAST session.
+func (c *Client) OastDelete(ctx context.Context, req *OastDeleteRequest) (*OastDeleteResponse, error) {
+	var resp OastDeleteResponse
+	if err := c.doJSONRequest(ctx, "/oast/delete", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }

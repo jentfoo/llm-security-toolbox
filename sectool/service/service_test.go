@@ -9,16 +9,21 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/config"
 )
 
 func TestServiceEndToEnd(t *testing.T) {
 	t.Parallel()
 
 	t.Run("client_health_check", func(t *testing.T) {
+		mockMCP := NewTestMCPServer()
+		defer mockMCP.Close()
+
 		workDir := t.TempDir()
 		srv, err := NewServer(DaemonFlags{
 			WorkDir:    workDir,
-			BurpMCPURL: "http://test.burp:9876/sse",
+			BurpMCPURL: mockMCP.URL(),
 		})
 		require.NoError(t, err)
 
@@ -42,11 +47,11 @@ func TestServiceEndToEnd(t *testing.T) {
 			health, err := client.Health(t.Context())
 			require.NoError(t, err)
 
-			assert.Equal(t, Version, health.Version)
+			assert.Equal(t, config.Version, health.Version)
 			assert.NotEmpty(t, health.StartedAt)
-			assert.False(t, health.BurpConnected)
-			assert.Equal(t, "http://test.burp:9876/sse", health.BurpMCPURL)
-			assert.Nil(t, health.Metrics) // No metrics registered by default
+			// Flow metric is registered by default
+			require.NotNil(t, health.Metrics)
+			assert.Equal(t, "0", health.Metrics["flows"])
 		})
 	})
 
@@ -64,9 +69,12 @@ func TestServiceEndToEnd(t *testing.T) {
 		})
 
 		t.Run("running", func(t *testing.T) {
+			mockMCP := NewTestMCPServer()
+			defer mockMCP.Close()
+
 			srv, err := NewServer(DaemonFlags{
 				WorkDir:    workDir,
-				BurpMCPURL: "http://127.0.0.1:9876/sse",
+				BurpMCPURL: mockMCP.URL(),
 			})
 			require.NoError(t, err)
 
@@ -91,11 +99,14 @@ func TestServiceEndToEnd(t *testing.T) {
 	})
 
 	t.Run("client_stop", func(t *testing.T) {
+		mockMCP := NewTestMCPServer()
+		defer mockMCP.Close()
+
 		workDir := t.TempDir()
 
 		srv, err := NewServer(DaemonFlags{
 			WorkDir:    workDir,
-			BurpMCPURL: "http://127.0.0.1:9876/sse",
+			BurpMCPURL: mockMCP.URL(),
 		})
 		require.NoError(t, err)
 
@@ -150,6 +161,9 @@ func TestServiceEndToEnd(t *testing.T) {
 	})
 
 	t.Run("bundle_cleanup_on_shutdown", func(t *testing.T) {
+		mockMCP := NewTestMCPServer()
+		defer mockMCP.Close()
+
 		workDir := t.TempDir()
 		requestsDir := filepath.Join(workDir, ".sectool", "requests")
 
@@ -162,7 +176,7 @@ func TestServiceEndToEnd(t *testing.T) {
 
 		srv, err := NewServer(DaemonFlags{
 			WorkDir:    workDir,
-			BurpMCPURL: "http://127.0.0.1:9876/sse",
+			BurpMCPURL: mockMCP.URL(),
 		})
 		require.NoError(t, err)
 
@@ -222,11 +236,14 @@ func TestServiceEndToEnd(t *testing.T) {
 func TestClientErrorHandling(t *testing.T) {
 	t.Parallel()
 
+	mockMCP := NewTestMCPServer()
+	defer mockMCP.Close()
+
 	workDir := t.TempDir()
 
 	srv, err := NewServer(DaemonFlags{
 		WorkDir:    workDir,
-		BurpMCPURL: "http://127.0.0.1:9876/sse",
+		BurpMCPURL: mockMCP.URL(),
 	})
 	require.NoError(t, err)
 
@@ -243,7 +260,8 @@ func TestClientErrorHandling(t *testing.T) {
 	client := NewClient(workDir)
 
 	t.Run("returns_api_error_from_server", func(t *testing.T) {
-		_, err := client.doRequest(t.Context(), "POST", "/proxy/list", nil)
+		// Use an endpoint that is still not implemented (OAST)
+		_, err := client.doRequest(t.Context(), "POST", "/oast/create", nil)
 
 		require.Error(t, err)
 		var apiErr *APIError
@@ -256,11 +274,14 @@ func TestClientErrorHandling(t *testing.T) {
 func TestRegisterHealthMetric(t *testing.T) {
 	t.Parallel()
 
+	mockMCP := NewTestMCPServer()
+	defer mockMCP.Close()
+
 	workDir := t.TempDir()
 
 	srv, err := NewServer(DaemonFlags{
 		WorkDir:    workDir,
-		BurpMCPURL: "http://127.0.0.1:9876/sse",
+		BurpMCPURL: mockMCP.URL(),
 	})
 	require.NoError(t, err)
 

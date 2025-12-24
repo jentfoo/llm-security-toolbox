@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jentfoo/llm-security-toolbox/sectool/config"
 	"github.com/jentfoo/llm-security-toolbox/sectool/encode"
 	"github.com/jentfoo/llm-security-toolbox/sectool/initialize"
 	"github.com/jentfoo/llm-security-toolbox/sectool/oast"
@@ -35,7 +36,7 @@ func Run(args []string) int {
 	case "encode":
 		err = encode.Parse(args[1:])
 	case "version", "--version", "-v":
-		fmt.Printf("sectool version %s\n", Version)
+		fmt.Printf("sectool version %s\n", config.Version)
 		return 0
 	case "help", "--help", "-h":
 		printRootUsage()

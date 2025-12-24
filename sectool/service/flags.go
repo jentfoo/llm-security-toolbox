@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/config"
 )
 
 type DaemonFlags struct {
@@ -15,7 +17,7 @@ type DaemonFlags struct {
 
 func ParseDaemonFlags(args []string) (DaemonFlags, error) {
 	fs := flag.NewFlagSet("service", flag.ContinueOnError)
-	flags := DaemonFlags{BurpMCPURL: "http://127.0.0.1:9876/sse"}
+	flags := DaemonFlags{BurpMCPURL: config.DefaultBurpMCPURL}
 
 	fs.StringVar(&flags.WorkDir, "workdir", "", "working directory for service state")
 	fs.StringVar(&flags.BurpMCPURL, "burp-mcp-url", flags.BurpMCPURL, "Burp MCP SSE endpoint URL")

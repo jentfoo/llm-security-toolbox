@@ -1,0 +1,423 @@
+package service
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/service/ids"
+	"github.com/jentfoo/llm-security-toolbox/sectool/service/store"
+)
+
+const (
+	schemeHTTPS = "https"
+	schemeHTTP  = "http"
+)
+
+// updateContentLength updates or adds Content-Length header.
+func updateContentLength(headers []byte, length int) []byte {
+	// Match Content-Length header line (case-insensitive)
+	re := regexp.MustCompile(`(?im)^Content-Length:\s*\d+\r?\n`)
+	newHeader := fmt.Sprintf("Content-Length: %d\r\n", length)
+
+	if re.Match(headers) {
+		return re.ReplaceAll(headers, []byte(newHeader))
+	}
+
+	// Insert before blank line if not present and length > 0
+	if length > 0 {
+		return bytes.Replace(headers, []byte("\r\n\r\n"), []byte("\r\n"+newHeader+"\r\n"), 1)
+	}
+	return headers
+}
+
+// setHeader adds or replaces a header.
+func setHeader(headers []byte, name, value string) []byte {
+	re := regexp.MustCompile(`(?im)^` + regexp.QuoteMeta(name) + `:\s*.+\r?\n`)
+	newHeader := []byte(name + ": " + value + "\r\n")
+
+	if re.Match(headers) {
+		return re.ReplaceAll(headers, newHeader)
+	}
+
+	// Insert before the blank line (preserve the first \r\n, which ends the previous header)
+	return bytes.Replace(headers, []byte("\r\n\r\n"),
+		append([]byte("\r\n"), append(newHeader, []byte("\r\n")...)...), 1)
+}
+
+// removeHeader removes a header.
+func removeHeader(headers []byte, name string) []byte {
+	re := regexp.MustCompile(`(?im)^` + regexp.QuoteMeta(name) + `:\s*.+\r?\n`)
+	return re.ReplaceAll(headers, nil)
+}
+
+// applyModifications applies all requested modifications.
+func applyModifications(headers, body []byte, req *ReplaySendRequest) ([]byte, []byte) {
+	for _, name := range req.RemoveHeaders {
+		headers = removeHeader(headers, name)
+	}
+	for _, h := range req.AddHeaders {
+		parts := strings.SplitN(h, ":", 2)
+		if len(parts) == 2 {
+			headers = setHeader(headers, strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+		}
+	}
+
+	// Handle --target (update Host header)
+	if req.Target != "" {
+		u, err := url.Parse(req.Target)
+		if err == nil && u.Host != "" {
+			headers = setHeader(headers, "Host", u.Host)
+		}
+	}
+
+	// Always update Content-Length to match body
+	// TODO - what if chunked encoding?
+	headers = updateContentLength(headers, len(body))
+
+	return headers, body
+}
+
+// checkLineEndings detects line ending issues in HTTP headers.
+// Returns an issue description or empty string if OK.
+func checkLineEndings(headers []byte) string {
+	hasCRLF := bytes.Contains(headers, []byte("\r\n"))
+	var hasBareLF bool
+	// Check for bare LF (LF not preceded by CR)
+	for i := 0; i < len(headers); i++ {
+		if headers[i] == '\n' {
+			if i == 0 || headers[i-1] != '\r' {
+				hasBareLF = true
+				break
+			}
+		}
+	}
+
+	if hasBareLF && hasCRLF {
+		return "mixed line endings (some CRLF, some bare LF)"
+	} else if hasBareLF {
+		return "using LF instead of CRLF line endings"
+	}
+	return ""
+}
+
+// validationIssue represents a single validation problem.
+type validationIssue struct { // TODO - move?
+	Check    string `json:"check"`    // TODO - json tags useful?
+	Severity string `json:"severity"` // "error" or "warning"
+	Detail   string `json:"detail"`
+}
+
+// validateRequest checks request for common issues.
+func validateRequest(raw []byte) []validationIssue {
+	var issues []validationIssue
+
+	// Use Go's parser to check structure
+	_, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(raw)))
+	if err != nil {
+		issues = append(issues, validationIssue{
+			Check:    "parse",
+			Severity: "error",
+			Detail:   err.Error(),
+		})
+	}
+
+	// Check Content-Length matches body
+	headers, body := splitHeadersBody(raw)
+	clMatch := regexp.MustCompile(`(?im)^Content-Length:\s*(\d+)`).FindSubmatch(headers)
+	if clMatch != nil {
+		cl, _ := strconv.Atoi(string(clMatch[1]))
+		if cl != len(body) {
+			issues = append(issues, validationIssue{
+				Check:    "content_length",
+				Severity: "error",
+				Detail:   fmt.Sprintf("header says %d, body is %d bytes", cl, len(body)),
+			})
+		}
+	}
+
+	// Check Host header (warning only)
+	if !regexp.MustCompile(`(?im)^Host:`).Match(headers) {
+		issues = append(issues, validationIssue{
+			Check:    "host",
+			Severity: "warning",
+			Detail:   "missing Host header",
+		})
+	}
+
+	// Check line endings (warning only)
+	// Detect bare LF (not preceded by CR) which indicates improper line endings
+	if issue := checkLineEndings(headers); issue != "" {
+		issues = append(issues, validationIssue{
+			Check:    "crlf",
+			Severity: "warning",
+			Detail:   issue,
+		})
+	}
+
+	return issues
+}
+
+// formatIssues formats validation issues as markdown.
+func formatIssues(issues []validationIssue) string {
+	var sb strings.Builder
+	sb.WriteString("| Issue | Severity | Detail |\n")
+	sb.WriteString("|-------|----------|--------|\n")
+	for _, i := range issues {
+		sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", i.Check, i.Severity, i.Detail))
+	}
+	return sb.String()
+}
+
+// parseTarget determines host, port, and HTTPS from request or --target override.
+func parseTarget(raw []byte, targetOverride string) (host string, port int, usesHTTPS bool) {
+	if targetOverride != "" {
+		u, err := url.Parse(targetOverride)
+		if err == nil {
+			host = u.Hostname()
+			port = 443
+			if u.Port() != "" {
+				port, _ = strconv.Atoi(u.Port())
+			} else if u.Scheme == schemeHTTP {
+				port = 80
+			}
+			usesHTTPS = u.Scheme == schemeHTTPS
+			return
+		}
+	}
+
+	// Extract from Host header
+	_, hostHeader, _ := extractRequestMeta(string(raw))
+	host = hostHeader
+
+	// Parse port from host
+	if idx := strings.LastIndex(host, ":"); idx > 0 {
+		if p, err := strconv.Atoi(host[idx+1:]); err == nil {
+			port = p
+			host = host[:idx]
+			usesHTTPS = port != 80
+			return
+		}
+	}
+
+	// Default to HTTPS
+	port = 443
+	usesHTTPS = true
+	return
+}
+
+// handleReplaySend handles POST /replay/send
+func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
+	var req ReplaySendRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", err.Error())
+		return
+	}
+
+	// Validate stdin usage - can't read both file and body from stdin
+	if req.FilePath == "-" && req.BodyPath == "-" {
+		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"cannot read both file and body from stdin", "use stdin for file OR body, not both")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Resolve input
+	var rawRequest []byte
+	var bundlePath string
+	switch {
+	case req.FlowID != "":
+		// Fetch from backend via flow_id
+		entry, ok := s.flowStore.Lookup(req.FlowID)
+		if !ok {
+			s.writeError(w, http.StatusNotFound, ErrCodeNotFound,
+				"flow_id not found", "run 'sectool proxy list' to see available flows")
+			return
+		}
+		proxyEntries, err := s.backend.GetProxyHistory(ctx, 1, entry.Offset)
+		if err != nil {
+			s.writeError(w, http.StatusBadGateway, ErrCodeBackendError, "failed to fetch flow", err.Error())
+			return
+		} else if len(proxyEntries) == 0 {
+			s.writeError(w, http.StatusNotFound, ErrCodeNotFound, "flow not found in proxy history", "")
+			return
+		}
+		rawRequest = []byte(proxyEntries[0].Request)
+
+	case req.BundlePath != "":
+		// Read from bundle
+		bundlePath = req.BundlePath
+		headers, body, _, err := readBundle(req.BundlePath)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to read bundle", err.Error())
+			return
+		}
+		rawRequest = reconstructRequest(headers, body)
+
+	case req.FilePath != "":
+		// Read raw file
+		var fileContent []byte
+		var err error
+
+		if req.FilePath == "-" {
+			fileContent, err = io.ReadAll(os.Stdin)
+		} else {
+			fileContent, err = os.ReadFile(req.FilePath)
+		}
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to read file", err.Error())
+			return
+		}
+
+		var body []byte
+		if req.BodyPath != "" {
+			var bodyErr error
+			if req.BodyPath == "-" {
+				body, bodyErr = io.ReadAll(os.Stdin)
+			} else {
+				body, bodyErr = os.ReadFile(req.BodyPath)
+			}
+			if bodyErr != nil {
+				s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					"failed to read body file", bodyErr.Error())
+				return
+			}
+		}
+		rawRequest = reconstructRequest(fileContent, body)
+
+	default:
+		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"no input specified", "use --flow, --bundle, or --file")
+		return
+	}
+
+	// When --force is set, send raw bytes without any modification or validation.
+	// This is useful for testing HTTP parser behavior with intentionally malformed requests.
+	if !req.Force {
+		// Apply modifications (--header, --remove-header, --target, Content-Length update)
+		headers, body := splitHeadersBody(rawRequest)
+		headers, body = applyModifications(headers, body, &req)
+		rawRequest = append(headers, body...)
+
+		// Validate the modified request
+		issues := validateRequest(rawRequest)
+		if slices.ContainsFunc(issues, func(i validationIssue) bool { return i.Severity == "error" }) {
+			s.writeError(w, http.StatusBadRequest, ErrCodeValidation, "validation failed", formatIssues(issues))
+			return
+		}
+	}
+
+	// Determine target
+	host, port, usesHTTPS := parseTarget(rawRequest, req.Target)
+
+	// Generate replay_id
+	replayID := ids.Generate(ids.DefaultLength)
+
+	// Parse timeout if specified
+	var timeout time.Duration
+	if req.Timeout != "" {
+		if parsed, err := time.ParseDuration(req.Timeout); err == nil {
+			timeout = parsed
+		}
+	}
+
+	sendInput := SendRequestInput{
+		RawRequest: rawRequest,
+		Target: Target{
+			Hostname:  host,
+			Port:      port,
+			UsesHTTPS: usesHTTPS,
+		},
+		FollowRedirects: req.FollowRedirects,
+		Timeout:         timeout,
+	}
+
+	result, err := s.backend.SendRequest(ctx, "sectool-"+replayID, sendInput)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, ErrCodeBackendError, "request failed", err.Error())
+		return
+	}
+
+	respHeaders := result.Headers
+	respBody := result.Body
+
+	// Store replay result for later retrieval
+	s.requestStore.Store(replayID, &store.RequestEntry{
+		Headers:  respHeaders,
+		Body:     respBody,
+		Duration: result.Duration,
+	})
+
+	// Write response to bundle if applicable
+	if bundlePath != "" {
+		_ = writeResponseToBundle(bundlePath, respHeaders, respBody)
+	}
+
+	// Build response
+	respHeaderStr := string(respHeaders)
+	status := extractStatus(respHeaderStr)
+	var statusLine string
+	if parts := strings.SplitN(respHeaderStr, "\r\n", 2); len(parts) > 0 {
+		statusLine = parts[0]
+	}
+
+	s.writeJSON(w, http.StatusOK, ReplaySendResponse{
+		ReplayID: replayID,
+		Duration: result.Duration.String(),
+		ResponseDetails: ResponseDetails{
+			Status:      status,
+			StatusLine:  statusLine,
+			RespHeaders: respHeaderStr,
+			RespSize:    len(respBody),
+			RespPreview: previewBody(respBody, responsePreviewSize),
+		},
+	})
+}
+
+// handleReplayGet handles POST /replay/get
+func (s *Server) handleReplayGet(w http.ResponseWriter, r *http.Request) {
+	var req ReplayGetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", err.Error())
+		return
+	} else if req.ReplayID == "" {
+		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "replay_id is required", "")
+		return
+	}
+
+	result, ok := s.requestStore.Get(req.ReplayID)
+	if !ok {
+		s.writeError(w, http.StatusNotFound, ErrCodeNotFound,
+			"replay not found", "replay results are ephemeral and cleared on service restart")
+		return
+	}
+
+	respHeaderStr := string(result.Headers)
+	status := extractStatus(respHeaderStr)
+	var statusLine string
+	if parts := strings.SplitN(respHeaderStr, "\r\n", 2); len(parts) > 0 {
+		statusLine = parts[0]
+	}
+
+	s.writeJSON(w, http.StatusOK, ReplayGetResponse{
+		ReplayID:    req.ReplayID,
+		Duration:    result.Duration.String(),
+		Status:      status,
+		StatusLine:  statusLine,
+		RespHeaders: respHeaderStr,
+		RespBody:    base64.StdEncoding.EncodeToString(result.Body),
+		RespSize:    len(result.Body),
+	})
+}

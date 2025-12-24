@@ -17,8 +17,6 @@ func Parse(args []string) error {
 	switch args[0] {
 	case "list":
 		return parseList(args[1:])
-	case "get":
-		return parseGet(args[1:])
 	case "export":
 		return parseExport(args[1:])
 	case "intercept":
@@ -40,7 +38,6 @@ Query and manage proxy history.
 
 Commands:
   list       List proxy history (aggregate or filtered)
-  get        Get detailed view of a specific flow
   export     Export a flow to disk for editing
   intercept  Enable/disable proxy intercept mode (planned)
   rule       Manage intercept rules (planned)
@@ -80,34 +77,6 @@ Options:
 	}
 
 	return list(timeout, host, path, method, status, contains, containsBody, since, excludeHost, excludePath)
-}
-
-func parseGet(args []string) error {
-	fs := flag.NewFlagSet("proxy get", flag.ContinueOnError)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
-
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `Usage: sectool proxy get <flow_id> [options]
-
-Get detailed view of a specific flow.
-
-Options:
-`)
-		fs.PrintDefaults()
-	}
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	if len(fs.Args()) < 1 {
-		fs.Usage()
-		return errors.New("flow_id required")
-	}
-
-	return get(timeout, fs.Args()[0])
 }
 
 func parseExport(args []string) error {

@@ -15,17 +15,18 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/config"
+	"github.com/jentfoo/llm-security-toolbox/sectool/service/store"
 )
 
-const (
-	Version         = "0.1.0"
-	shutdownTimeout = 10 * time.Second
-)
+const shutdownTimeout = 10 * time.Second
 
 // Server is the sectool service daemon.
 type Server struct {
-	paths      ServicePaths
-	burpMCPURL string
+	paths          ServicePaths
+	flagBurpMCPURL string // from command-line flag (may be empty)
+	cfg            *config.Config
 
 	// Runtime state
 	listener   net.Listener
@@ -38,8 +39,14 @@ type Server struct {
 	mu             sync.RWMutex
 	metricProvider map[string]HealthMetricProvider
 
-	// Burp MCP connection state
-	burpConnected bool
+	// Backend implementations for handling proxy, sending requests, OAST, etc
+	backend HttpBackend
+
+	// Flow ID mapping (ephemeral)
+	flowStore *store.FlowStore
+
+	// Request/response results store (ephemeral)
+	requestStore *store.RequestStore
 
 	// Shutdown coordination
 	shutdownCh chan struct{}
@@ -53,17 +60,17 @@ func NewServer(flags DaemonFlags) (*Server, error) {
 
 	s := &Server{
 		paths:          NewServicePaths(flags.WorkDir),
-		burpMCPURL:     flags.BurpMCPURL,
+		flagBurpMCPURL: flags.BurpMCPURL,
 		metricProvider: make(map[string]HealthMetricProvider),
 		started:        make(chan struct{}),
 		shutdownCh:     make(chan struct{}),
+		flowStore:      store.NewFlowStore(),
+		requestStore:   store.NewRequestStore(),
 	}
 
-	// TODO: Register ID count metrics once the ID tracking maps are defined:
-	// s.RegisterHealthMetric("flows", func() string { return strconv.Itoa(len(s.flows)) })
-	// s.RegisterHealthMetric("replays", func() string { return strconv.Itoa(len(s.replays)) })
-	// s.RegisterHealthMetric("bundles", func() string { return strconv.Itoa(len(s.bundles)) })
-	// s.RegisterHealthMetric("oast_sessions", func() string { return strconv.Itoa(len(s.oastSessions)) })
+	// Register health metrics for store counts
+	s.RegisterHealthMetric("flows", func() string { return strconv.Itoa(s.flowStore.Count()) })
+	s.RegisterHealthMetric("requests", func() string { return strconv.Itoa(s.requestStore.Count()) })
 
 	return s, nil
 }
@@ -82,9 +89,14 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Ensure directories exist
 	if err := os.MkdirAll(s.paths.ServiceDir, 0755); err != nil {
-		return fmt.Errorf("failed to create logs directory: %w", err)
+		return fmt.Errorf("failed to create service directory: %w", err)
 	} else if err := os.MkdirAll(s.paths.RequestsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create requests directory: %w", err)
+	}
+
+	// Load or create config
+	if err := s.loadOrCreateConfig(); err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// Acquire exclusive lock on PID file (non-blocking, fail fast if another instance is running)
@@ -113,8 +125,10 @@ func (s *Server) Run(ctx context.Context) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// TODO - Connect to Burp MCP here
-	s.burpConnected = false
+	// Connect to Burp MCP
+	if err := s.connectBurpMCP(ctx); err != nil {
+		return fmt.Errorf("failed to connect to Burp MCP: %w", err)
+	}
 
 	// Run server in goroutine
 	serverErr := make(chan error, 1)
@@ -161,7 +175,12 @@ func (s *Server) shutdown() error {
 		log.Printf("warning: failed to cleanup requests: %v", err)
 	}
 
-	// TODO: Close Burp MCP connection
+	// Close proxy backend connection
+	if s.backend != nil {
+		if err := s.backend.Close(); err != nil {
+			log.Printf("warning: failed to close proxy backend connection: %v", err)
+		}
+	}
 
 	log.Printf("service stopped")
 	return nil
@@ -249,12 +268,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("POST /srv/stop", s.handleStop)
 
-	mux.HandleFunc("POST /proxy/list", s.handleNotImplemented)
-	mux.HandleFunc("POST /proxy/get", s.handleNotImplemented)
-	mux.HandleFunc("POST /proxy/export", s.handleNotImplemented)
+	mux.HandleFunc("POST /proxy/list", s.handleProxyList)
+	mux.HandleFunc("POST /proxy/export", s.handleProxyExport)
 
-	mux.HandleFunc("POST /replay/send", s.handleNotImplemented)
-	mux.HandleFunc("POST /replay/get", s.handleNotImplemented)
+	mux.HandleFunc("POST /replay/send", s.handleReplaySend)
+	mux.HandleFunc("POST /replay/get", s.handleReplayGet)
 
 	mux.HandleFunc("POST /oast/create", s.handleNotImplemented)
 	mux.HandleFunc("POST /oast/poll", s.handleNotImplemented)
@@ -274,15 +292,13 @@ func (s *Server) RegisterHealthMetric(key string, provider HealthMetricProvider)
 
 // handleHealth handles GET /health
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
 	health := HealthResponse{
-		Version:       Version,
-		StartedAt:     s.startedAt.UTC().Format(time.RFC3339),
-		BurpConnected: s.burpConnected,
-		BurpMCPURL:    s.burpMCPURL,
+		Version:   config.Version,
+		StartedAt: s.startedAt.UTC().Format(time.RFC3339),
 	}
 
-	// Collect metrics from registered providers
+	// Collect metrics from registered providers (requires lock)
+	s.mu.RLock()
 	if len(s.metricProvider) > 0 {
 		health.Metrics = make(map[string]string, len(s.metricProvider))
 		for key, provider := range s.metricProvider {
@@ -345,4 +361,54 @@ func (s *Server) RequestShutdown() {
 	default:
 		close(s.shutdownCh)
 	}
+}
+
+// loadOrCreateConfig loads config from disk or creates default if missing.
+// Command-line flags override config file values.
+func (s *Server) loadOrCreateConfig() error {
+	cfg, err := config.Load(s.paths.ConfigPath)
+	if os.IsNotExist(err) {
+		cfg = config.DefaultConfig(config.Version)
+		if err := cfg.Save(s.paths.ConfigPath); err != nil {
+			return fmt.Errorf("failed to save default config: %w", err)
+		}
+		log.Printf("created default config at %s", s.paths.ConfigPath)
+	} else if err != nil {
+		return err
+	}
+
+	if s.flagBurpMCPURL != "" {
+		cfg.BurpMCPURL = s.flagBurpMCPURL
+	}
+
+	s.cfg = cfg
+	return nil
+}
+
+// burpMCPURL returns the effective Burp MCP URL from config.
+func (s *Server) burpMCPURL() string {
+	if s.cfg != nil {
+		return s.cfg.BurpMCPURL
+	}
+	return config.DefaultBurpMCPURL
+}
+
+// connectBurpMCP establishes the connection to Burp MCP.
+func (s *Server) connectBurpMCP(ctx context.Context) error {
+	// TODO - replace this with a backend selection
+
+	url := s.burpMCPURL()
+	burpBackend := NewBurpBackend(url)
+
+	burpBackend.OnConnectionLost(func(err error) {
+		log.Printf("BurpSuite MCP connection lost: %v", err)
+	})
+
+	if err := burpBackend.Connect(ctx); err != nil {
+		return err
+	}
+
+	s.backend = burpBackend
+	log.Printf("connected to Burp MCP at %s", url)
+	return nil
 }

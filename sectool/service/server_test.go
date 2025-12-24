@@ -34,10 +34,13 @@ func TestServerRun(t *testing.T) {
 	t.Parallel()
 
 	t.Run("creates_dirs_on_start", func(t *testing.T) {
+		mockMCP := NewTestMCPServer()
+		defer mockMCP.Close()
+
 		workDir := t.TempDir()
 		srv, err := NewServer(DaemonFlags{
 			WorkDir:    workDir,
-			BurpMCPURL: "http://127.0.0.1:9876/sse",
+			BurpMCPURL: mockMCP.URL(),
 		})
 		require.NoError(t, err)
 
@@ -76,10 +79,13 @@ func TestServerRun(t *testing.T) {
 func TestRequestShutdownIdempotent(t *testing.T) {
 	t.Parallel()
 
+	mockMCP := NewTestMCPServer()
+	defer mockMCP.Close()
+
 	workDir := t.TempDir()
 	srv, err := NewServer(DaemonFlags{
 		WorkDir:    workDir,
-		BurpMCPURL: "http://127.0.0.1:9876/sse",
+		BurpMCPURL: mockMCP.URL(),
 	})
 	require.NoError(t, err)
 
@@ -105,11 +111,14 @@ func TestRequestShutdownIdempotent(t *testing.T) {
 func TestServerLockPreventsSecondInstance(t *testing.T) {
 	t.Parallel()
 
+	mockMCP := NewTestMCPServer()
+	defer mockMCP.Close()
+
 	workDir := t.TempDir()
 
 	srv1, err := NewServer(DaemonFlags{
 		WorkDir:    workDir,
-		BurpMCPURL: "http://127.0.0.1:9876/sse",
+		BurpMCPURL: mockMCP.URL(),
 	})
 	require.NoError(t, err)
 
@@ -125,7 +134,7 @@ func TestServerLockPreventsSecondInstance(t *testing.T) {
 
 	srv2, err := NewServer(DaemonFlags{
 		WorkDir:    workDir,
-		BurpMCPURL: "http://127.0.0.1:9876/sse",
+		BurpMCPURL: mockMCP.URL(),
 	})
 	require.NoError(t, err)
 
