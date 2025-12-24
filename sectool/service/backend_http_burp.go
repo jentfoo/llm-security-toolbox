@@ -19,7 +19,10 @@ type BurpBackend struct {
 	client *mcp.BurpClient
 }
 
-// NewBurpBackend creates a new Burp backend with the given MCP URL.
+// Compile-time check that BurpBackend implements HttpBackend
+var _ HttpBackend = (*BurpBackend)(nil)
+
+// NewBurpBackend creates a new Burp HttpBackend with the given MCP URL.
 func NewBurpBackend(url string, opts ...mcp.Option) *BurpBackend {
 	return &BurpBackend{
 		client: mcp.New(url, opts...),
@@ -38,23 +41,23 @@ func (b *BurpBackend) OnConnectionLost(handler func(error)) {
 	b.client.OnConnectionLost(handler)
 }
 
-func (b *BurpBackend) GetProxyHistory(ctx context.Context, count, offset int) ([]ProxyEntry, error) {
-	entries, err := b.client.GetProxyHistory(ctx, count, offset)
+func (b *BurpBackend) GetProxyHistory(ctx context.Context, count int, offset uint32) ([]ProxyEntry, error) {
+	entries, err := b.client.GetProxyHistory(ctx, count, int(offset))
 	if err != nil {
 		return nil, err
 	}
 	return convertMCPEntries(entries), nil
 }
 
-func (b *BurpBackend) GetProxyHistoryRegex(ctx context.Context, regex string, count, offset int) ([]ProxyEntry, error) {
-	entries, err := b.client.GetProxyHistoryRegex(ctx, regex, count, offset)
+func (b *BurpBackend) GetProxyHistoryRegex(ctx context.Context, regex string, count int, offset uint32) ([]ProxyEntry, error) {
+	entries, err := b.client.GetProxyHistoryRegex(ctx, regex, count, int(offset))
 	if err != nil {
 		return nil, err
 	}
 	return convertMCPEntries(entries), nil
 }
 
-// convertMCPEntries converts MCP-specific entries to backend-agnostic form.
+// convertMCPEntries converts MCP-specific entries to HttpBackend-agnostic form.
 func convertMCPEntries(entries []mcp.ProxyHistoryEntry) []ProxyEntry {
 	result := make([]ProxyEntry, len(entries))
 	for i, e := range entries {
@@ -314,7 +317,7 @@ func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Tar
 	}
 
 	// Write new Host header first
-	fmt.Fprintf(buf, "Host: %s\r\n", newHost)
+	_, _ = fmt.Fprintf(buf, "Host: %s\r\n", newHost)
 
 	// Process each header line
 	for _, line := range bytes.Split(headers, []byte("\r\n")) {
@@ -412,9 +415,6 @@ func parseBurpResponse(raw string) (headers, body []byte, err error) {
 	headers, body = splitHeadersBody(responseBytes)
 	return
 }
-
-// Compile-time check that BurpBackend implements HttpBackend
-var _ HttpBackend = (*BurpBackend)(nil)
 
 // SetInterceptState exposes Burp-specific intercept control.
 // This is not part of the HttpBackend interface as it's Burp-specific.

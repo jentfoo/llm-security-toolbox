@@ -9,7 +9,7 @@ import (
 
 // FlowEntry represents a cached mapping from flow_id to Burp history offset.
 type FlowEntry struct {
-	Offset int    // Burp history offset
+	Offset uint32 // Burp history offset
 	Hash   string // Content hash for re-identification
 }
 
@@ -18,7 +18,7 @@ type FlowStore struct {
 	mu       sync.RWMutex
 	byID     map[string]*FlowEntry // flow_id -> entry
 	byHash   map[string][]string   // hash -> []flow_id (collision handling)
-	byOffset map[int]string        // offset -> flow_id (for updates)
+	byOffset map[uint32]string     // offset -> flow_id (for updates)
 }
 
 // NewFlowStore creates a new empty FlowStore.
@@ -26,26 +26,21 @@ func NewFlowStore() *FlowStore {
 	return &FlowStore{
 		byID:     make(map[string]*FlowEntry),
 		byHash:   make(map[string][]string),
-		byOffset: make(map[int]string),
+		byOffset: make(map[uint32]string),
 	}
 }
 
 // Register creates a new flow_id for the given offset and hash.
 // If an entry with the same offset already exists, it returns the existing flow_id.
-// Returns the flow_id for the entry.
-func (s *FlowStore) Register(offset int, hash string) string {
+func (s *FlowStore) Register(offset uint32, hash string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check if we already have this offset registered
 	if existingID, ok := s.byOffset[offset]; ok {
 		return existingID
 	}
 
-	// Generate new flow_id
 	flowID := ids.Generate(ids.DefaultLength)
-
-	// Ensure uniqueness (very unlikely to collide, but handle it)
 	for s.byID[flowID] != nil {
 		flowID = ids.Generate(ids.DefaultLength)
 	}
@@ -94,8 +89,7 @@ func (s *FlowStore) LookupByHash(hash string) []string {
 }
 
 // LookupByOffset finds the flow_id for a given offset.
-// Returns empty string and false if not found.
-func (s *FlowStore) LookupByOffset(offset int) (string, bool) {
+func (s *FlowStore) LookupByOffset(offset uint32) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -104,8 +98,7 @@ func (s *FlowStore) LookupByOffset(offset int) (string, bool) {
 }
 
 // UpdateOffset updates the offset for an existing flow_id.
-// Returns false if the flow_id doesn't exist.
-func (s *FlowStore) UpdateOffset(flowID string, newOffset int) bool {
+func (s *FlowStore) UpdateOffset(flowID string, newOffset uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -114,13 +107,8 @@ func (s *FlowStore) UpdateOffset(flowID string, newOffset int) bool {
 		return false
 	}
 
-	// Remove old offset mapping
 	delete(s.byOffset, entry.Offset)
-
-	// Update entry
 	entry.Offset = newOffset
-
-	// Add new offset mapping
 	s.byOffset[newOffset] = flowID
 
 	return true
@@ -132,7 +120,7 @@ func (s *FlowStore) Clear() {
 
 	s.byID = make(map[string]*FlowEntry)
 	s.byHash = make(map[string][]string)
-	s.byOffset = make(map[int]string)
+	s.byOffset = make(map[uint32]string)
 }
 
 func (s *FlowStore) Count() int {

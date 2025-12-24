@@ -263,7 +263,8 @@ type OastPollRequest struct {
 
 // OastPollResponse is the response for POST /oast/poll.
 type OastPollResponse struct {
-	Events []OastEvent `json:"events"`
+	Events       []OastEvent `json:"events"`
+	DroppedCount int         `json:"dropped_count,omitempty"`
 }
 
 // OastEvent represents a single OAST interaction event.
@@ -294,6 +295,4 @@ type OastDeleteRequest struct {
 }
 
 // OastDeleteResponse is the response for POST /oast/delete.
-type OastDeleteResponse struct {
-	Message string `json:"message"`
-}
+type OastDeleteResponse struct{}

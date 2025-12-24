@@ -75,7 +75,7 @@ func parsePoll(args []string) error {
 	var since string
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
-	fs.StringVar(&since, "since", "", "filter events since event_id or timestamp")
+	fs.StringVar(&since, "since", "", "filter events since event_id or 'last'")
 	fs.DurationVar(&wait, "wait", 120*time.Second, "max wait time for events (max 120s)")
 
 	fs.Usage = func() {
@@ -95,10 +95,6 @@ Options:
 	if len(fs.Args()) < 1 {
 		fs.Usage()
 		return errors.New("oast_id required")
-	}
-
-	if wait > 120*time.Second {
-		wait = 120 * time.Second
 	}
 
 	return poll(timeout, fs.Args()[0], since, wait)

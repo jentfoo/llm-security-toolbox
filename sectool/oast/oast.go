@@ -1,26 +1,184 @@
 package oast
 
 import (
-	"errors"
+	"context"
+	"fmt"
+	"os"
+	"strings"
 	"time"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/service"
 )
 
 func create(timeout time.Duration) error {
-	_ = timeout
-	return errors.New("not implemented: oast create")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	client := service.NewClient(workDir, service.WithTimeout(timeout))
+	if err := client.EnsureService(ctx); err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
+	}
+
+	resp, err := client.OastCreate(ctx)
+	if err != nil {
+		return fmt.Errorf("oast create failed: %w", err)
+	}
+
+	// Format output as markdown
+	fmt.Println("## OAST Session Created")
+	fmt.Println()
+	fmt.Printf("**ID:** `%s`\n", resp.OastID)
+	fmt.Printf("**Domain:** `%s`\n", resp.Domain)
+	fmt.Println()
+	fmt.Println("### Usage Examples")
+	fmt.Println()
+	for _, example := range resp.Examples {
+		fmt.Printf("- `%s`\n", example)
+	}
+	fmt.Println()
+	fmt.Println("Use any subdomain for tagging (e.g., `sqli-test." + resp.Domain + "`)")
+	fmt.Println()
+	fmt.Printf("To poll for events: `sectool oast poll %s`\n", resp.OastID)
+
+	return nil
 }
 
 func poll(timeout time.Duration, oastID, since string, wait time.Duration) error {
-	_, _, _, _ = timeout, oastID, since, wait
-	return errors.New("not implemented: oast poll")
+	// Extend timeout to include wait duration
+	totalTimeout := timeout + wait
+	ctx, cancel := context.WithTimeout(context.Background(), totalTimeout)
+	defer cancel()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	client := service.NewClient(workDir, service.WithTimeout(totalTimeout))
+	if err := client.EnsureService(ctx); err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
+	}
+
+	resp, err := client.OastPoll(ctx, &service.OastPollRequest{
+		OastID: oastID,
+		Since:  since,
+		Wait:   wait.String(),
+	})
+	if err != nil {
+		return fmt.Errorf("oast poll failed: %w", err)
+	}
+
+	// Format output as markdown
+	if len(resp.Events) == 0 {
+		fmt.Println("No events received.")
+		if resp.DroppedCount > 0 {
+			fmt.Printf("\n*Note: %d events were dropped due to buffer limit*\n", resp.DroppedCount)
+		}
+		return nil
+	}
+
+	fmt.Printf("## OAST Events (%d)\n\n", len(resp.Events))
+
+	for _, event := range resp.Events {
+		fmt.Printf("### Event `%s` [%s]\n\n", event.EventID, strings.ToUpper(event.Type))
+		fmt.Printf("- **Time:** %s\n", event.Time)
+		fmt.Printf("- **Source IP:** %s\n", event.SourceIP)
+		fmt.Printf("- **Subdomain:** `%s`\n", event.Subdomain)
+
+		if len(event.Details) > 0 {
+			fmt.Println("\n**Details:**")
+			for k, v := range event.Details {
+				if s, ok := v.(string); ok && len(s) > 200 {
+					fmt.Printf("- %s: (truncated, %d bytes)\n", k, len(s))
+				} else {
+					fmt.Printf("- %s: %v\n", k, v)
+				}
+			}
+		}
+		fmt.Println()
+	}
+
+	if resp.DroppedCount > 0 {
+		fmt.Printf("*Note: %d events were dropped due to buffer limit*\n", resp.DroppedCount)
+	}
+
+	// Show hint for --since last
+	if len(resp.Events) > 0 {
+		lastEvent := resp.Events[len(resp.Events)-1]
+		fmt.Printf("\nTo poll for new events: `sectool oast poll %s --since last`\n", oastID)
+		fmt.Printf("Or after specific event: `sectool oast poll %s --since %s`\n", oastID, lastEvent.EventID)
+	}
+
+	return nil
 }
 
 func list(timeout time.Duration) error {
-	_ = timeout
-	return errors.New("not implemented: oast list")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	client := service.NewClient(workDir, service.WithTimeout(timeout))
+	if err := client.EnsureService(ctx); err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
+	}
+
+	resp, err := client.OastList(ctx)
+	if err != nil {
+		return fmt.Errorf("oast list failed: %w", err)
+	}
+
+	if len(resp.Sessions) == 0 {
+		fmt.Println("No active OAST sessions.")
+		fmt.Println("\nTo create one: `sectool oast create`")
+		return nil
+	}
+
+	// Format output as markdown table
+	fmt.Println("| oast_id | domain | created_at |")
+	fmt.Println("|---------|--------|------------|")
+	for _, sess := range resp.Sessions {
+		fmt.Printf("| %s | %s | %s |\n",
+			sess.OastID,
+			sess.Domain,
+			sess.CreatedAt,
+		)
+	}
+	fmt.Printf("\n*%d active session(s)*\n", len(resp.Sessions))
+
+	return nil
 }
 
 func del(timeout time.Duration, oastID string) error {
-	_, _ = timeout, oastID
-	return errors.New("not implemented: oast delete")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	client := service.NewClient(workDir, service.WithTimeout(timeout))
+	if err := client.EnsureService(ctx); err != nil {
+		return fmt.Errorf("failed to start service: %w", err)
+	}
+
+	_, err = client.OastDelete(ctx, &service.OastDeleteRequest{
+		OastID: oastID,
+	})
+	if err != nil {
+		return fmt.Errorf("oast delete failed: %w", err)
+	}
+
+	fmt.Printf("OAST session `%s` deleted.\n", oastID)
+
+	return nil
 }

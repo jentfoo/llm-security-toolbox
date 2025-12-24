@@ -20,7 +20,7 @@ func TestStore(t *testing.T) {
 
 		entry, ok := store.Lookup(flowID)
 		require.True(t, ok)
-		assert.Equal(t, 0, entry.Offset)
+		assert.Equal(t, uint32(0), entry.Offset)
 		assert.Equal(t, "hash1", entry.Hash)
 	})
 
@@ -94,19 +94,15 @@ func TestStore(t *testing.T) {
 
 		flowID := store.Register(0, "hash")
 
-		// Update offset
 		ok := store.UpdateOffset(flowID, 100)
 		assert.True(t, ok)
 
-		// Verify new offset
 		entry, _ := store.Lookup(flowID)
-		assert.Equal(t, 100, entry.Offset)
+		assert.Equal(t, uint32(100), entry.Offset)
 
-		// Verify old offset mapping is removed
 		_, found := store.LookupByOffset(0)
 		assert.False(t, found)
 
-		// Verify new offset mapping exists
 		foundID, found := store.LookupByOffset(100)
 		assert.True(t, found)
 		assert.Equal(t, flowID, foundID)
@@ -188,10 +184,10 @@ func TestStoreConcurrency(t *testing.T) {
 	// Concurrent registrations
 	for i := range 100 {
 		wg.Add(1)
-		go func(offset int) {
+		go func(offset uint32) {
 			defer wg.Done()
 			store.Register(offset, "hash")
-		}(i)
+		}(uint32(i))
 	}
 
 	// Concurrent lookups

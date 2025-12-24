@@ -587,7 +587,7 @@ func TestApplyClientFilters(t *testing.T) {
 
 	t.Run("filter by method", func(t *testing.T) {
 		req := &ProxyListRequest{Method: "GET"}
-		result := applyClientFilters(entries, req, nil)
+		result := applyClientFilters(entries, req, nil, 0)
 		assert.Len(t, result, 2)
 		for _, e := range result {
 			assert.Equal(t, "GET", e.method)
@@ -596,26 +596,26 @@ func TestApplyClientFilters(t *testing.T) {
 
 	t.Run("filter by status", func(t *testing.T) {
 		req := &ProxyListRequest{Status: "200,201"}
-		result := applyClientFilters(entries, req, nil)
+		result := applyClientFilters(entries, req, nil, 0)
 		assert.Len(t, result, 2)
 	})
 
 	t.Run("filter by host glob", func(t *testing.T) {
 		req := &ProxyListRequest{Host: "*.example.com"}
-		result := applyClientFilters(entries, req, nil)
+		result := applyClientFilters(entries, req, nil, 0)
 		assert.Len(t, result, 3)
 	})
 
 	t.Run("exclude host", func(t *testing.T) {
 		req := &ProxyListRequest{ExcludeHost: "other.com", Method: "GET"}
-		result := applyClientFilters(entries, req, nil)
+		result := applyClientFilters(entries, req, nil, 0)
 		assert.Len(t, result, 1)
 		assert.Equal(t, "api.example.com", result[0].host)
 	})
 
 	t.Run("exclude path", func(t *testing.T) {
 		req := &ProxyListRequest{ExcludePath: "/users*", Method: "GET,POST,DELETE"}
-		result := applyClientFilters(entries, req, nil)
+		result := applyClientFilters(entries, req, nil, 0)
 		assert.Len(t, result, 1)
 		assert.Equal(t, "/page", result[0].path)
 	})

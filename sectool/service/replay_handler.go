@@ -239,14 +239,14 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 	var bundlePath string
 	switch {
 	case req.FlowID != "":
-		// Fetch from backend via flow_id
+		// Fetch from HttpBackend via flow_id
 		entry, ok := s.flowStore.Lookup(req.FlowID)
 		if !ok {
 			s.writeError(w, http.StatusNotFound, ErrCodeNotFound,
 				"flow_id not found", "run 'sectool proxy list' to see available flows")
 			return
 		}
-		proxyEntries, err := s.backend.GetProxyHistory(ctx, 1, entry.Offset)
+		proxyEntries, err := s.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)
 		if err != nil {
 			s.writeError(w, http.StatusBadGateway, ErrCodeBackendError, "failed to fetch flow", err.Error())
 			return
@@ -344,7 +344,7 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 		Timeout:         timeout,
 	}
 
-	result, err := s.backend.SendRequest(ctx, "sectool-"+replayID, sendInput)
+	result, err := s.httpBackend.SendRequest(ctx, "sectool-"+replayID, sendInput)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, ErrCodeBackendError, "request failed", err.Error())
 		return

@@ -83,6 +83,13 @@ func printFlowTable(flows []service.FlowSummary) {
 		)
 	}
 	fmt.Printf("\n*%d flows*\n", len(flows))
+
+	// Show hint for --since last
+	if len(flows) > 0 {
+		lastFlow := flows[len(flows)-1]
+		fmt.Printf("\nTo list new flows: `sectool proxy list --since last`\n")
+		fmt.Printf("Or after specific flow: `sectool proxy list --since %s`\n", lastFlow.FlowID)
+	}
 }
 
 func escapeMarkdown(s string) string {

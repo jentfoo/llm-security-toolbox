@@ -260,14 +260,16 @@ func TestClientErrorHandling(t *testing.T) {
 	client := NewClient(workDir)
 
 	t.Run("returns_api_error_from_server", func(t *testing.T) {
-		// Use an endpoint that is still not implemented (OAST)
-		_, err := client.doRequest(t.Context(), "POST", "/oast/create", nil)
+		// Poll for a non-existent OAST session to trigger an error
+		_, err := client.OastPoll(t.Context(), &OastPollRequest{
+			OastID: "nonexistent",
+		})
 
 		require.Error(t, err)
 		var apiErr *APIError
 		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, ErrCodeInternal, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "not implemented")
+		assert.Equal(t, ErrCodeNotFound, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "not found")
 	})
 }
 

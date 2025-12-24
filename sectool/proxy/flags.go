@@ -58,7 +58,7 @@ func parseList(args []string) error {
 	fs.StringVar(&status, "status", "", "filter by status code (comma-separated)")
 	fs.StringVar(&contains, "contains", "", "search in URL and headers")
 	fs.StringVar(&containsBody, "contains-body", "", "search in request/response body")
-	fs.StringVar(&since, "since", "", "filter since timestamp or flow_id")
+	fs.StringVar(&since, "since", "", "filter since flow_id or 'last'")
 	fs.StringVar(&excludeHost, "exclude-host", "", "exclude hosts matching pattern")
 	fs.StringVar(&excludePath, "exclude-path", "", "exclude paths matching pattern")
 

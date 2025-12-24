@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,13 +41,19 @@ type Server struct {
 	metricProvider map[string]HealthMetricProvider
 
 	// Backend implementations for handling proxy, sending requests, OAST, etc
-	backend HttpBackend
+	httpBackend HttpBackend
+	oastBackend OastBackend
 
 	// Flow ID mapping (ephemeral)
 	flowStore *store.FlowStore
 
 	// Request/response results store (ephemeral)
 	requestStore *store.RequestStore
+
+	// proxyLastOffset tracks the highest offset seen across all proxy list queries.
+	// Enables --since last to show only new traffic since the last query.
+	// Global (not per-filter), unlike OAST which tracks per-session.
+	proxyLastOffset atomic.Uint32
 
 	// Shutdown coordination
 	shutdownCh chan struct{}
@@ -129,6 +136,8 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.connectBurpMCP(ctx); err != nil {
 		return fmt.Errorf("failed to connect to Burp MCP: %w", err)
 	}
+	// Setup OAST (nothing connected till used)
+	s.oastBackend = NewInteractshBackend()
 
 	// Run server in goroutine
 	serverErr := make(chan error, 1)
@@ -175,10 +184,15 @@ func (s *Server) shutdown() error {
 		log.Printf("warning: failed to cleanup requests: %v", err)
 	}
 
-	// Close proxy backend connection
-	if s.backend != nil {
-		if err := s.backend.Close(); err != nil {
-			log.Printf("warning: failed to close proxy backend connection: %v", err)
+	// Close backends
+	if s.httpBackend != nil {
+		if err := s.httpBackend.Close(); err != nil {
+			log.Printf("warning: failed to close proxy HttpBackend connection: %v", err)
+		}
+	}
+	if s.oastBackend != nil {
+		if err := s.oastBackend.Close(); err != nil {
+			log.Printf("warning: failed to close OastBackend: %v", err)
 		}
 	}
 
@@ -274,10 +288,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /replay/send", s.handleReplaySend)
 	mux.HandleFunc("POST /replay/get", s.handleReplayGet)
 
-	mux.HandleFunc("POST /oast/create", s.handleNotImplemented)
-	mux.HandleFunc("POST /oast/poll", s.handleNotImplemented)
-	mux.HandleFunc("POST /oast/list", s.handleNotImplemented)
-	mux.HandleFunc("POST /oast/delete", s.handleNotImplemented)
+	mux.HandleFunc("POST /oast/create", s.handleOastCreate)
+	mux.HandleFunc("POST /oast/poll", s.handleOastPoll)
+	mux.HandleFunc("POST /oast/list", s.handleOastList)
+	mux.HandleFunc("POST /oast/delete", s.handleOastDelete)
 
 	return mux
 }
@@ -319,13 +333,6 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 
 	// Signal shutdown after response is sent (use RequestShutdown for double-close protection)
 	time.AfterFunc(100*time.Millisecond, s.RequestShutdown)
-}
-
-// handleNotImplemented handles unimplemented endpoints
-func (s *Server) handleNotImplemented(w http.ResponseWriter, r *http.Request) {
-	s.writeError(w, http.StatusNotImplemented, ErrCodeInternal,
-		fmt.Sprintf("endpoint %s not implemented", r.URL.Path),
-		"this feature is coming in a future version")
 }
 
 // writeJSON writes a successful JSON response
@@ -395,7 +402,7 @@ func (s *Server) burpMCPURL() string {
 
 // connectBurpMCP establishes the connection to Burp MCP.
 func (s *Server) connectBurpMCP(ctx context.Context) error {
-	// TODO - replace this with a backend selection
+	// TODO - replace this with a HttpBackend selection
 
 	url := s.burpMCPURL()
 	burpBackend := NewBurpBackend(url)
@@ -408,7 +415,7 @@ func (s *Server) connectBurpMCP(ctx context.Context) error {
 		return err
 	}
 
-	s.backend = burpBackend
+	s.httpBackend = burpBackend
 	log.Printf("connected to Burp MCP at %s", url)
 	return nil
 }

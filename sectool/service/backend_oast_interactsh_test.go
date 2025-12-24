@@ -1,0 +1,604 @@
+package service
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestInteractshBackend_CreateAndClose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	backend := NewInteractshBackend()
+	defer func() { _ = backend.Close() }()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	sess, err := backend.CreateSession(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, sess.ID)
+	require.NotEmpty(t, sess.Domain)
+	require.NotEmpty(t, sess.Examples)
+	assert.True(t, sess.CreatedAt.Before(time.Now().Add(time.Second)))
+
+	// List sessions should include the new session
+	sessions, err := backend.ListSessions(ctx)
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, sess.ID, sessions[0].ID)
+	assert.Equal(t, sess.Domain, sessions[0].Domain)
+
+	// Delete the session
+	err = backend.DeleteSession(ctx, sess.ID)
+	require.NoError(t, err)
+
+	// List should now be empty
+	sessions, err = backend.ListSessions(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, sessions)
+}
+
+func TestInteractshBackend_PollSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nonexistent", func(t *testing.T) {
+		backend := NewInteractshBackend()
+		defer func() { _ = backend.Close() }()
+
+		_, err := backend.PollSession(t.Context(), "nonexistent", "", 0)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("by_domain", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skipping integration test in short mode")
+		}
+
+		backend := NewInteractshBackend()
+		defer func() { _ = backend.Close() }()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+
+		sess, err := backend.CreateSession(ctx)
+		require.NoError(t, err)
+
+		// Should be able to poll by domain
+		result, err := backend.PollSession(ctx, sess.Domain, "", 0)
+		require.NoError(t, err)
+		assert.Empty(t, result.Events)
+
+		// Should be able to delete by domain
+		err = backend.DeleteSession(ctx, sess.Domain)
+		require.NoError(t, err)
+	})
+
+	t.Run("since_last", func(t *testing.T) {
+		backend := NewInteractshBackend()
+		defer func() {
+			backend.mu.Lock()
+			backend.sessions = make(map[string]*oastSession)
+			backend.byDomain = make(map[string]string)
+			backend.mu.Unlock()
+		}()
+
+		sess := &oastSession{
+			info: OastSessionInfo{
+				ID:        "test123",
+				Domain:    "test.oast.fun",
+				CreatedAt: time.Now(),
+			},
+			stopPolling: make(chan struct{}),
+		}
+		backend.sessions["test123"] = sess
+		backend.byDomain["test.oast.fun"] = "test123"
+
+		sess.events = []OastEventInfo{
+			{ID: "e1", Time: time.Now(), Type: "dns"},
+			{ID: "e2", Time: time.Now(), Type: "http"},
+			{ID: "e3", Time: time.Now(), Type: "dns"},
+		}
+
+		result, err := backend.PollSession(t.Context(), "test123", "", 0)
+		require.NoError(t, err)
+		assert.Len(t, result.Events, 3)
+
+		// Poll with "last" should return nothing (we just polled)
+		result, err = backend.PollSession(t.Context(), "test123", "last", 0)
+		require.NoError(t, err)
+		assert.Empty(t, result.Events)
+
+		sess.events = append(sess.events, OastEventInfo{ID: "e4", Time: time.Now(), Type: "smtp"})
+
+		// Poll with "last" should return the new event
+		result, err = backend.PollSession(t.Context(), "test123", "last", 0)
+		require.NoError(t, err)
+		assert.Len(t, result.Events, 1)
+		assert.Equal(t, "e4", result.Events[0].ID)
+	})
+
+	t.Run("since_id", func(t *testing.T) {
+		backend := NewInteractshBackend()
+		defer func() {
+			backend.mu.Lock()
+			backend.sessions = make(map[string]*oastSession)
+			backend.byDomain = make(map[string]string)
+			backend.mu.Unlock()
+		}()
+
+		sess := &oastSession{
+			info: OastSessionInfo{
+				ID:        "test456",
+				Domain:    "test2.oast.fun",
+				CreatedAt: time.Now(),
+			},
+			stopPolling: make(chan struct{}),
+		}
+		backend.sessions["test456"] = sess
+		backend.byDomain["test2.oast.fun"] = "test456"
+
+		sess.events = []OastEventInfo{
+			{ID: "e1", Time: time.Now(), Type: "dns"},
+			{ID: "e2", Time: time.Now(), Type: "http"},
+			{ID: "e3", Time: time.Now(), Type: "dns"},
+		}
+
+		// Poll since e1 should return e2 and e3
+		result, err := backend.PollSession(t.Context(), "test456", "e1", 0)
+		require.NoError(t, err)
+		assert.Len(t, result.Events, 2)
+		assert.Equal(t, "e2", result.Events[0].ID)
+		assert.Equal(t, "e3", result.Events[1].ID)
+
+		// Poll since e3 should return nothing
+		result, err = backend.PollSession(t.Context(), "test456", "e3", 0)
+		require.NoError(t, err)
+		assert.Empty(t, result.Events)
+
+		// Poll since nonexistent ID should return all events
+		result, err = backend.PollSession(t.Context(), "test456", "nonexistent", 0)
+		require.NoError(t, err)
+		assert.Len(t, result.Events, 3)
+	})
+
+	t.Run("buffer_limit", func(t *testing.T) {
+		backend := NewInteractshBackend()
+		defer func() {
+			backend.mu.Lock()
+			backend.sessions = make(map[string]*oastSession)
+			backend.byDomain = make(map[string]string)
+			backend.mu.Unlock()
+		}()
+
+		sess := &oastSession{
+			info: OastSessionInfo{
+				ID:        "testlimit",
+				Domain:    "limit.oast.fun",
+				CreatedAt: time.Now(),
+			},
+			stopPolling: make(chan struct{}),
+		}
+		backend.sessions["testlimit"] = sess
+		backend.byDomain["limit.oast.fun"] = "testlimit"
+
+		// Fill buffer beyond limit
+		for i := 0; i < MaxOastEventsPerSession+100; i++ {
+			sess.mu.Lock()
+			if len(sess.events) >= MaxOastEventsPerSession {
+				sess.events = sess.events[1:]
+				sess.droppedCount++
+			}
+			sess.events = append(sess.events, OastEventInfo{
+				ID:   "e" + string(rune('0'+i%10)),
+				Time: time.Now(),
+				Type: "dns",
+			})
+			sess.mu.Unlock()
+		}
+
+		result, err := backend.PollSession(t.Context(), "testlimit", "", 0)
+		require.NoError(t, err)
+		assert.Len(t, result.Events, MaxOastEventsPerSession)
+		assert.Equal(t, 100, result.DroppedCount)
+	})
+
+	// Helper to create a backend with a mock session
+	setupBackend := func(id, domain string) (*InteractshBackend, *oastSession, func()) {
+		backend := NewInteractshBackend()
+		sess := &oastSession{
+			info: OastSessionInfo{
+				ID:        id,
+				Domain:    domain,
+				CreatedAt: time.Now(),
+			},
+			stopPolling: make(chan struct{}),
+		}
+		backend.sessions[id] = sess
+		backend.byDomain[domain] = id
+
+		cleanup := func() {
+			backend.mu.Lock()
+			backend.sessions = make(map[string]*oastSession)
+			backend.byDomain = make(map[string]string)
+			backend.mu.Unlock()
+		}
+		return backend, sess, cleanup
+	}
+
+	t.Run("context_cancellation_returns_promptly", func(t *testing.T) {
+		backend, _, cleanup := setupBackend("testctx", "ctx.oast.fun")
+		defer cleanup()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		type pollResult struct {
+			result *OastPollResultInfo
+			err    error
+		}
+		done := make(chan pollResult, 1)
+
+		go func() {
+			result, err := backend.PollSession(ctx, "testctx", "", 30*time.Second)
+			done <- pollResult{result, err}
+		}()
+
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+
+		select {
+		case pr := <-done:
+			require.NoError(t, pr.err)
+			assert.Empty(t, pr.result.Events)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("did not return after context cancellation")
+		}
+	})
+
+	t.Run("wait_returns_when_events_arrive", func(t *testing.T) {
+		backend, sess, cleanup := setupBackend("testwait", "wait.oast.fun")
+		defer cleanup()
+
+		type pollResult struct {
+			result *OastPollResultInfo
+			err    error
+		}
+		done := make(chan pollResult, 1)
+
+		go func() {
+			result, err := backend.PollSession(t.Context(), "testwait", "", 5*time.Second)
+			done <- pollResult{result, err}
+		}()
+
+		time.Sleep(50 * time.Millisecond)
+		sess.mu.Lock()
+		sess.events = append(sess.events, OastEventInfo{
+			ID:   "new_event",
+			Time: time.Now(),
+			Type: "http",
+		})
+		sess.mu.Unlock()
+
+		select {
+		case pr := <-done:
+			require.NoError(t, pr.err)
+			require.Len(t, pr.result.Events, 1)
+			assert.Equal(t, "new_event", pr.result.Events[0].ID)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("did not return after event was added")
+		}
+	})
+
+	t.Run("zero_wait_returns_immediately", func(t *testing.T) {
+		backend, _, cleanup := setupBackend("testzero", "zero.oast.fun")
+		defer cleanup()
+
+		start := time.Now()
+		result, err := backend.PollSession(t.Context(), "testzero", "", 0)
+		elapsed := time.Since(start)
+
+		require.NoError(t, err)
+		assert.Empty(t, result.Events)
+		assert.Less(t, elapsed, 50*time.Millisecond)
+	})
+
+	t.Run("stopped_session_returns_error", func(t *testing.T) {
+		backend, sess, cleanup := setupBackend("teststopped", "stopped.oast.fun")
+		defer cleanup()
+
+		sess.stopped = true
+
+		_, err := backend.PollSession(t.Context(), "teststopped", "", 0)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "deleted")
+	})
+
+	t.Run("updates_lastPollIdx_after_poll", func(t *testing.T) {
+		backend, sess, cleanup := setupBackend("testidx", "idx.oast.fun")
+		defer cleanup()
+
+		sess.events = []OastEventInfo{
+			{ID: "e1", Time: time.Now(), Type: "dns"},
+			{ID: "e2", Time: time.Now(), Type: "http"},
+		}
+
+		_, err := backend.PollSession(t.Context(), "testidx", "", 0)
+		require.NoError(t, err)
+		assert.Equal(t, 2, sess.lastPollIdx)
+
+		// Add more events
+		sess.mu.Lock()
+		sess.events = append(sess.events, OastEventInfo{ID: "e3", Time: time.Now(), Type: "dns"})
+		sess.mu.Unlock()
+
+		_, err = backend.PollSession(t.Context(), "testidx", "last", 0)
+		require.NoError(t, err)
+		assert.Equal(t, 3, sess.lastPollIdx)
+	})
+}
+
+func TestInteractshBackend_CloseWhileClosed(t *testing.T) {
+	t.Parallel()
+
+	backend := NewInteractshBackend()
+
+	// Close once
+	err := backend.Close()
+	require.NoError(t, err)
+
+	// Close again should be idempotent
+	err = backend.Close()
+	require.NoError(t, err)
+}
+
+func TestInteractshBackend_CreateAfterClose(t *testing.T) {
+	t.Parallel()
+
+	backend := NewInteractshBackend()
+	_ = backend.Close()
+
+	_, err := backend.CreateSession(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "closed")
+}
+
+func TestOastSession_FilterEvents(t *testing.T) {
+	t.Parallel()
+
+	baseTime := time.Now()
+	makeEvents := func(ids ...string) []OastEventInfo {
+		events := make([]OastEventInfo, len(ids))
+		for i, id := range ids {
+			events[i] = OastEventInfo{
+				ID:   id,
+				Time: baseTime.Add(time.Duration(i) * time.Second),
+				Type: "dns",
+			}
+		}
+		return events
+	}
+
+	t.Run("empty_since_returns_all", func(t *testing.T) {
+		sess := &oastSession{events: makeEvents("e1", "e2", "e3")}
+		result := sess.filterEvents("")
+		require.Len(t, result, 3)
+		assert.Equal(t, "e1", result[0].ID)
+		assert.Equal(t, "e3", result[2].ID)
+	})
+
+	t.Run("empty_since_with_no_events", func(t *testing.T) {
+		sess := &oastSession{}
+		result := sess.filterEvents("")
+		assert.Empty(t, result)
+	})
+
+	t.Run("last_returns_since_lastPollIdx", func(t *testing.T) {
+		sess := &oastSession{
+			events:      makeEvents("e1", "e2", "e3", "e4"),
+			lastPollIdx: 2,
+		}
+		result := sess.filterEvents("last")
+		require.Len(t, result, 2)
+		assert.Equal(t, "e3", result[0].ID)
+		assert.Equal(t, "e4", result[1].ID)
+	})
+
+	t.Run("last_at_end_returns_empty", func(t *testing.T) {
+		sess := &oastSession{
+			events:      makeEvents("e1", "e2"),
+			lastPollIdx: 2,
+		}
+		result := sess.filterEvents("last")
+		assert.Empty(t, result)
+	})
+
+	t.Run("last_beyond_end_returns_empty", func(t *testing.T) {
+		sess := &oastSession{
+			events:      makeEvents("e1"),
+			lastPollIdx: 5,
+		}
+		result := sess.filterEvents("last")
+		assert.Empty(t, result)
+	})
+
+	t.Run("event_id_returns_events_after", func(t *testing.T) {
+		sess := &oastSession{events: makeEvents("e1", "e2", "e3", "e4")}
+		result := sess.filterEvents("e2")
+		require.Len(t, result, 2)
+		assert.Equal(t, "e3", result[0].ID)
+		assert.Equal(t, "e4", result[1].ID)
+	})
+
+	t.Run("event_id_at_end_returns_empty", func(t *testing.T) {
+		sess := &oastSession{events: makeEvents("e1", "e2", "e3")}
+		result := sess.filterEvents("e3")
+		assert.Empty(t, result)
+	})
+
+	t.Run("event_id_first_returns_rest", func(t *testing.T) {
+		sess := &oastSession{events: makeEvents("e1", "e2", "e3")}
+		result := sess.filterEvents("e1")
+		require.Len(t, result, 2)
+		assert.Equal(t, "e2", result[0].ID)
+	})
+
+	t.Run("unknown_event_id_returns_all", func(t *testing.T) {
+		sess := &oastSession{events: makeEvents("e1", "e2", "e3")}
+		result := sess.filterEvents("nonexistent")
+		require.Len(t, result, 3)
+	})
+
+	t.Run("returns_copy_not_reference", func(t *testing.T) {
+		sess := &oastSession{events: makeEvents("e1", "e2")}
+		result := sess.filterEvents("")
+		result[0].ID = "modified"
+		assert.Equal(t, "e1", sess.events[0].ID, "original should be unchanged")
+	})
+}
+
+func TestOastSession_BufferRotation(t *testing.T) {
+	t.Parallel()
+
+	// Simulate the buffer rotation logic from pollLoop's callback
+	addEvent := func(sess *oastSession, id string) {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+
+		if len(sess.events) >= MaxOastEventsPerSession {
+			sess.events = sess.events[1:]
+			sess.droppedCount++
+			if sess.lastPollIdx > 0 {
+				sess.lastPollIdx--
+			}
+		}
+		sess.events = append(sess.events, OastEventInfo{
+			ID:   id,
+			Time: time.Now(),
+			Type: "dns",
+		})
+	}
+
+	t.Run("lastPollIdx_decrements_on_drop", func(t *testing.T) {
+		sess := &oastSession{
+			events:      make([]OastEventInfo, MaxOastEventsPerSession),
+			lastPollIdx: 100,
+		}
+
+		addEvent(sess, "new1")
+
+		assert.Equal(t, 99, sess.lastPollIdx)
+		assert.Equal(t, 1, sess.droppedCount)
+		assert.Len(t, sess.events, MaxOastEventsPerSession)
+	})
+
+	t.Run("lastPollIdx_stays_zero", func(t *testing.T) {
+		sess := &oastSession{
+			events:      make([]OastEventInfo, MaxOastEventsPerSession),
+			lastPollIdx: 0,
+		}
+
+		addEvent(sess, "new1")
+		addEvent(sess, "new2")
+
+		assert.Equal(t, 0, sess.lastPollIdx)
+		assert.Equal(t, 2, sess.droppedCount)
+	})
+
+	t.Run("since_last_with_buffer_overflow", func(t *testing.T) {
+		sess := &oastSession{}
+
+		// Fill buffer
+		for i := 0; i < MaxOastEventsPerSession; i++ {
+			sess.events = append(sess.events, OastEventInfo{
+				ID:   "e" + string(rune('a'+i%26)),
+				Time: time.Now(),
+				Type: "dns",
+			})
+		}
+
+		// Poll all events, setting lastPollIdx
+		result := sess.filterEvents("")
+		assert.Len(t, result, MaxOastEventsPerSession)
+		sess.lastPollIdx = len(sess.events)
+
+		// Add events that cause overflow
+		for i := 0; i < 10; i++ {
+			addEvent(sess, "new"+string(rune('0'+i)))
+		}
+
+		// lastPollIdx should have been adjusted
+		assert.Equal(t, MaxOastEventsPerSession-10, sess.lastPollIdx)
+
+		// "last" filter should return only the new events
+		result = sess.filterEvents("last")
+		assert.Len(t, result, 10)
+		assert.Equal(t, "new0", result[0].ID)
+	})
+
+	t.Run("lastPollIdx_does_not_go_negative", func(t *testing.T) {
+		sess := &oastSession{
+			events:      make([]OastEventInfo, MaxOastEventsPerSession),
+			lastPollIdx: 5,
+		}
+
+		// Add 10 events - should only decrement to 0, not go negative
+		for i := 0; i < 10; i++ {
+			addEvent(sess, "e"+string(rune('0'+i)))
+		}
+
+		assert.Equal(t, 0, sess.lastPollIdx)
+		assert.Equal(t, 10, sess.droppedCount)
+	})
+}
+
+func TestInteractshBackend_DeleteSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("second_delete_returns_not_found", func(t *testing.T) {
+		backend := NewInteractshBackend()
+		defer func() { _ = backend.Close() }()
+
+		sess := &oastSession{
+			info: OastSessionInfo{
+				ID:     "testdel",
+				Domain: "del.oast.fun",
+			},
+			stopPolling: make(chan struct{}),
+		}
+		backend.sessions["testdel"] = sess
+		backend.byDomain["del.oast.fun"] = "testdel"
+
+		err := backend.DeleteSession(t.Context(), "testdel")
+		require.NoError(t, err)
+
+		err = backend.DeleteSession(t.Context(), "testdel")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("delete_by_domain", func(t *testing.T) {
+		backend := NewInteractshBackend()
+		defer func() { _ = backend.Close() }()
+
+		sess := &oastSession{
+			info: OastSessionInfo{
+				ID:     "testdeldomain",
+				Domain: "deldomain.oast.fun",
+			},
+			stopPolling: make(chan struct{}),
+		}
+		backend.sessions["testdeldomain"] = sess
+		backend.byDomain["deldomain.oast.fun"] = "testdeldomain"
+
+		err := backend.DeleteSession(t.Context(), "deldomain.oast.fun")
+		require.NoError(t, err)
+
+		sessions, _ := backend.ListSessions(t.Context())
+		assert.Empty(t, sessions)
+	})
+}

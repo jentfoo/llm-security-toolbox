@@ -163,7 +163,7 @@ func aggregateByTuple(entries []flowEntry) []AggregateEntry {
 
 // flowEntry holds parsed metadata for a proxy history entry.
 type flowEntry struct {
-	offset   int
+	offset   uint32
 	method   string
 	host     string
 	path     string
@@ -193,17 +193,17 @@ func (s *Server) handleProxyList(w http.ResponseWriter, r *http.Request) {
 		regex = buildJavaRegex(&req)
 	}
 
-	// Fetch all entries from backend
+	// Fetch all entries from HttpBackend
 	var allEntries []flowEntry
-	var offset int
+	var offset uint32
 	for {
 		var proxyEntries []ProxyEntry
 		var fetchErr error
 
 		if regex != "" {
-			proxyEntries, fetchErr = s.backend.GetProxyHistoryRegex(ctx, regex, fetchBatchSize, offset)
+			proxyEntries, fetchErr = s.httpBackend.GetProxyHistoryRegex(ctx, regex, fetchBatchSize, offset)
 		} else {
-			proxyEntries, fetchErr = s.backend.GetProxyHistory(ctx, fetchBatchSize, offset)
+			proxyEntries, fetchErr = s.httpBackend.GetProxyHistory(ctx, fetchBatchSize, offset)
 		}
 		if fetchErr != nil {
 			s.writeError(w, http.StatusBadGateway, ErrCodeBackendError,
@@ -222,7 +222,7 @@ func (s *Server) handleProxyList(w http.ResponseWriter, r *http.Request) {
 			_, respBody := splitHeadersBody([]byte(entry.Response))
 
 			allEntries = append(allEntries, flowEntry{
-				offset:   offset + i,
+				offset:   offset + uint32(i),
 				method:   method,
 				host:     host,
 				path:     path,
@@ -233,22 +233,30 @@ func (s *Server) handleProxyList(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		offset += len(proxyEntries)
+		offset += uint32(len(proxyEntries))
 
 		if len(proxyEntries) < fetchBatchSize {
 			break // Last page
 		}
 	}
 
+	lastOffset := s.proxyLastOffset.Load()
+
 	// Apply client-side filters
-	filtered := applyClientFilters(allEntries, &req, s.flowStore)
+	filtered := applyClientFilters(allEntries, &req, s.flowStore, lastOffset)
+
+	// Track max offset for updating lastOffset
+	var maxOffset uint32
+	for _, e := range allEntries {
+		if e.offset > maxOffset {
+			maxOffset = e.offset
+		}
+	}
 
 	// Build response
 	if req.HasFilters() {
-		// Return flow list with IDs
 		flows := make([]FlowSummary, 0, len(filtered))
 		for _, entry := range filtered {
-			// Compute hash and register in store
 			hash := store.ComputeFlowHashSimple(entry.method, entry.host, entry.path, nil, nil)
 			flowID := s.flowStore.Register(entry.offset, hash)
 
@@ -271,10 +279,14 @@ func (s *Server) handleProxyList(w http.ResponseWriter, r *http.Request) {
 		agg := aggregateByTuple(filtered)
 		s.writeJSON(w, http.StatusOK, ProxyListResponse{Aggregates: agg})
 	}
+
+	if maxOffset > lastOffset {
+		s.proxyLastOffset.Store(maxOffset)
+	}
 }
 
 // applyClientFilters applies filters that can't be expressed in Burp regex.
-func applyClientFilters(entries []flowEntry, req *ProxyListRequest, store *store.FlowStore) []flowEntry {
+func applyClientFilters(entries []flowEntry, req *ProxyListRequest, store *store.FlowStore, lastOffset uint32) []flowEntry {
 	if !req.HasFilters() {
 		return entries
 	}
@@ -282,17 +294,20 @@ func applyClientFilters(entries []flowEntry, req *ProxyListRequest, store *store
 	methods := parseCommaSeparated(req.Method)
 	statuses := parseStatusCodes(req.Status)
 
-	sinceOffset := -1
+	var sinceOffset uint32
+	var hasSince bool
 	if req.Since != "" {
-		// Try to parse as flow_id first
-		if entry, ok := store.Lookup(req.Since); ok {
+		if req.Since == "last" {
+			sinceOffset = lastOffset
+			hasSince = true
+		} else if entry, ok := store.Lookup(req.Since); ok {
 			sinceOffset = entry.Offset
+			hasSince = true
 		}
-		// TODO - Support timestamp parsing
 	}
 
 	return bulk.SliceFilter(func(e flowEntry) bool {
-		if sinceOffset >= 0 && e.offset <= sinceOffset {
+		if hasSince && e.offset <= sinceOffset {
 			return false // Since filter (exclusive - only entries after)
 		} else if len(methods) > 0 && !slices.Contains(methods, e.method) {
 			return false // Method filter
@@ -346,10 +361,10 @@ func (s *Server) handleProxyExport(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	proxyEntries, err := s.backend.GetProxyHistory(ctx, 1, entry.Offset)
+	proxyEntries, err := s.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, ErrCodeBackendError,
-			"failed to fetch flow from backend", err.Error())
+			"failed to fetch flow from HttpBackend", err.Error())
 		return
 	} else if len(proxyEntries) == 0 {
 		s.writeError(w, http.StatusNotFound, ErrCodeNotFound,
