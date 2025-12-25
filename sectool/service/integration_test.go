@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -94,8 +96,10 @@ func TestParseBurpResponse_Integration(t *testing.T) {
 	assert.True(t, bytes.HasSuffix(headers, []byte("\r\n\r\n")), "headers should end with CRLF CRLF")
 
 	// Validate status can be extracted
-	status := extractStatusFromHeaders(headers)
-	assert.Equal(t, 200, status, "should parse 200 status")
+	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(headers)), nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 200, resp.StatusCode)
 
 	// httpbin /get returns JSON body
 	assert.NotEmpty(t, body, "body should not be empty")

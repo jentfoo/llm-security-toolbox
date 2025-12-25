@@ -196,8 +196,7 @@ func parseTarget(raw []byte, targetOverride string) (host string, port int, uses
 	}
 
 	// Extract from Host header
-	_, hostHeader, _ := extractRequestMeta(string(raw))
-	host = hostHeader
+	_, host, _ = extractRequestMeta(string(raw))
 
 	// Parse port from host
 	if idx := strings.LastIndex(host, ":"); idx > 0 {
@@ -379,7 +378,16 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 
 	respHeaders := result.Headers
 	respBody := result.Body
-	status := extractStatus(string(respHeaders))
+
+	var status int
+	var statusLine string
+	if resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(respHeaders)), nil); err == nil {
+		_ = resp.Body.Close()
+		status = resp.StatusCode
+		statusLine = resp.Proto + " " + resp.Status
+	} else {
+		log.Printf("replay/send: failed to parse response headers: %v", err)
+	}
 	log.Printf("replay/send: %s completed in %v (status=%d, size=%d)", replayID, result.Duration, status, len(respBody))
 
 	// Store replay result for later retrieval
@@ -395,19 +403,13 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build response
-	respHeaderStr := string(respHeaders)
-	var statusLine string
-	if parts := strings.SplitN(respHeaderStr, "\r\n", 2); len(parts) > 0 {
-		statusLine = parts[0]
-	}
-
 	s.writeJSON(w, http.StatusOK, ReplaySendResponse{
 		ReplayID: replayID,
 		Duration: result.Duration.String(),
 		ResponseDetails: ResponseDetails{
 			Status:      status,
 			StatusLine:  statusLine,
-			RespHeaders: respHeaderStr,
+			RespHeaders: string(respHeaders),
 			RespSize:    len(respBody),
 			RespPreview: previewBody(respBody, responsePreviewSize),
 		},
@@ -433,11 +435,14 @@ func (s *Server) handleReplayGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respHeaderStr := string(result.Headers)
-	status := extractStatus(respHeaderStr)
+	var status int
 	var statusLine string
-	if parts := strings.SplitN(respHeaderStr, "\r\n", 2); len(parts) > 0 {
-		statusLine = parts[0]
+	if resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(result.Headers)), nil); err == nil {
+		_ = resp.Body.Close()
+		status = resp.StatusCode
+		statusLine = resp.Proto + " " + resp.Status
+	} else {
+		log.Printf("replay/get: failed to parse response headers: %v", err)
 	}
 
 	s.writeJSON(w, http.StatusOK, ReplayGetResponse{
@@ -445,7 +450,7 @@ func (s *Server) handleReplayGet(w http.ResponseWriter, r *http.Request) {
 		Duration:    result.Duration.String(),
 		Status:      status,
 		StatusLine:  statusLine,
-		RespHeaders: respHeaderStr,
+		RespHeaders: string(result.Headers),
 		RespBody:    base64.StdEncoding.EncodeToString(result.Body),
 		RespSize:    len(result.Body),
 	})

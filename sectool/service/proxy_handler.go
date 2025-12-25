@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"log"
@@ -231,7 +233,13 @@ func (s *Server) handleProxyList(w http.ResponseWriter, r *http.Request) {
 		// Parse entries into flowEntry format
 		for i, entry := range proxyEntries {
 			method, host, path := extractRequestMeta(entry.Request)
-			status := extractStatus(entry.Response)
+			var status int
+			if resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader([]byte(entry.Response))), nil); err == nil {
+				_ = resp.Body.Close()
+				status = resp.StatusCode
+			} else {
+				log.Printf("proxy/list: failed to parse response at offset %d: %v", offset+uint32(i), err)
+			}
 			_, respBody := splitHeadersBody([]byte(entry.Response))
 
 			allEntries = append(allEntries, flowEntry{

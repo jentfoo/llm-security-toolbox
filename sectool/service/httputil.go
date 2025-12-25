@@ -32,48 +32,6 @@ func extractRequestMeta(raw string) (method, host, path string) {
 	return method, host, path
 }
 
-// extractStatus extracts HTTP status code from raw response. Returns 0 on parse failure.
-func extractStatus(raw string) int {
-	lines := strings.SplitN(raw, "\r\n", 2)
-	if len(lines) == 0 {
-		return 0
-	}
-
-	// Status line: "HTTP/1.1 200 OK"
-	parts := strings.SplitN(lines[0], " ", 3)
-	if len(parts) >= 2 {
-		status, _ := strconv.Atoi(parts[1])
-		return status
-	}
-	return 0
-}
-
-// extractStatusFromHeaders extracts status code from response headers.
-func extractStatusFromHeaders(headers []byte) int {
-	lines := bytes.SplitN(headers, []byte("\r\n"), 2)
-	if len(lines) == 0 {
-		return 0
-	}
-	parts := bytes.SplitN(lines[0], []byte(" "), 3)
-	if len(parts) < 2 {
-		return 0
-	}
-	status, _ := strconv.Atoi(string(parts[1]))
-	return status
-}
-
-// extractHeader extracts a header value (case-insensitive).
-func extractHeader(headers []byte, name string) string {
-	for _, line := range bytes.Split(headers, []byte("\r\n")) {
-		if idx := bytes.IndexByte(line, ':'); idx > 0 {
-			if strings.EqualFold(name, string(bytes.TrimSpace(line[:idx]))) {
-				return string(bytes.TrimSpace(line[idx+1:]))
-			}
-		}
-	}
-	return ""
-}
-
 // splitHeadersBody splits raw HTTP at the \r\n\r\n boundary.
 func splitHeadersBody(raw []byte) (headers, body []byte) {
 	idx := bytes.Index(raw, []byte("\r\n\r\n"))

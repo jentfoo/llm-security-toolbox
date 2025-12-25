@@ -1,11 +1,13 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"path"
 	"strconv"
@@ -154,13 +156,19 @@ func (b *BurpBackend) sendWithRedirects(ctx context.Context, req SendRequestInpu
 			return nil, err
 		}
 
-		status := extractStatusFromHeaders(result.Headers)
-		if status < 300 || status >= 400 {
+		resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(result.Headers)), nil)
+		if err != nil {
+			result.Duration = time.Since(start)
+			return result, nil
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode < 300 || resp.StatusCode >= 400 {
 			result.Duration = time.Since(start)
 			return result, nil
 		}
 
-		location := extractHeader(result.Headers, "Location")
+		location := resp.Header.Get("Location")
 		if location == "" {
 			result.Duration = time.Since(start)
 			return result, nil
@@ -168,7 +176,7 @@ func (b *BurpBackend) sendWithRedirects(ctx context.Context, req SendRequestInpu
 
 		// Build redirect request with proper browser behavior
 		newReq, newTarget, newPath, err := buildRedirectRequest(
-			currentReq.RawRequest, location, currentReq.Target, currentPath, status)
+			currentReq.RawRequest, location, currentReq.Target, currentPath, resp.StatusCode)
 		if err != nil {
 			result.Duration = time.Since(start)
 			return result, nil
@@ -418,8 +426,8 @@ func parseBurpResponse(raw string) (headers, body []byte, err error) {
 
 	response := raw[start : start+end]
 
-	// Handle escaped newlines in the response
-	responseBytes := []byte(response)
+	// Convert escaped newlines to actual CRLF bytes
+	responseBytes := bytes.ReplaceAll([]byte(response), []byte(`\r\n`), []byte("\r\n"))
 
 	// Look for the HTTP/ prefix to validate we found the response
 	if !bytes.Contains(responseBytes, []byte("HTTP/")) {

@@ -74,53 +74,6 @@ func TestExtractRequestMeta(t *testing.T) {
 	}
 }
 
-func TestExtractStatus(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		raw    string
-		status int
-	}{
-		{
-			name:   "200 OK",
-			raw:    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n",
-			status: 200,
-		},
-		{
-			name:   "404 Not Found",
-			raw:    "HTTP/1.1 404 Not Found\r\n\r\n",
-			status: 404,
-		},
-		{
-			name:   "302 redirect",
-			raw:    "HTTP/1.1 302 Found\r\nLocation: /new\r\n\r\n",
-			status: 302,
-		},
-		{
-			name:   "HTTP/2",
-			raw:    "HTTP/2 200 OK\r\n\r\n",
-			status: 200,
-		},
-		{
-			name:   "malformed - no crash",
-			raw:    "garbage",
-			status: 0,
-		},
-		{
-			name:   "empty",
-			raw:    "",
-			status: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.status, extractStatus(tt.raw))
-		})
-	}
-}
-
 func TestSplitHeadersBody(t *testing.T) {
 	t.Parallel()
 
