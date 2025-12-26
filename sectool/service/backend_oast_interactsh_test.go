@@ -452,13 +452,6 @@ func TestOastSession_FilterEvents(t *testing.T) {
 		result := sess.filterEvents("nonexistent")
 		require.Len(t, result, 3)
 	})
-
-	t.Run("returns_copy_not_reference", func(t *testing.T) {
-		sess := &oastSession{events: makeEvents("e1", "e2")}
-		result := sess.filterEvents("")
-		result[0].ID = "modified"
-		assert.Equal(t, "e1", sess.events[0].ID, "original should be unchanged")
-	})
 }
 
 func TestOastSession_BufferRotation(t *testing.T) {

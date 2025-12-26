@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -40,8 +41,7 @@ func computeHash(method, host, path string, headerLines []string, body []byte) s
 	h.Write([]byte(path)) // Path (as-is, preserving case for path sensitivity)
 	h.Write(separator)
 
-	sorted := make([]string, len(headerLines))
-	copy(sorted, headerLines)
+	sorted := slices.Clone(headerLines)
 	sort.Strings(sorted)
 	for _, line := range sorted {
 		h.Write([]byte(line))

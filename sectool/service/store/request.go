@@ -31,6 +31,7 @@ func NewRequestStore() *RequestStore {
 func (s *RequestStore) Store(id string, entry *RequestEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Now()
 	}
@@ -41,6 +42,7 @@ func (s *RequestStore) Store(id string, entry *RequestEntry) {
 func (s *RequestStore) Get(id string) (*RequestEntry, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	e, ok := s.entries[id]
 	return e, ok
 }
@@ -49,6 +51,7 @@ func (s *RequestStore) Get(id string) (*RequestEntry, bool) {
 func (s *RequestStore) Delete(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	delete(s.entries, id)
 }
 
@@ -56,12 +59,13 @@ func (s *RequestStore) Delete(id string) {
 func (s *RequestStore) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	return len(s.entries)
 }
 
-// Clear removes all entries.
 func (s *RequestStore) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.entries = make(map[string]*RequestEntry)
 }

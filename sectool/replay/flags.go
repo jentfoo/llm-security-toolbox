@@ -10,7 +10,10 @@ import (
 
 type stringSlice []string
 
-func (s *stringSlice) String() string { return fmt.Sprintf("%v", *s) }
+func (s *stringSlice) String() string {
+	return fmt.Sprintf("%v", *s)
+}
+
 func (s *stringSlice) Set(v string) error {
 	*s = append(*s, v)
 	return nil

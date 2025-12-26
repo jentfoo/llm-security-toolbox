@@ -28,7 +28,7 @@ Options:
 
 	// Find mode first (first non-flag argument)
 	var mode string
-	var flagArgs []string
+	flagArgs := make([]string, 0, len(args))
 	for _, arg := range args {
 		if arg == "test-report" || arg == "explore" {
 			mode = arg

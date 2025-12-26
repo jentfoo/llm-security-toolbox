@@ -52,7 +52,7 @@ func globToJavaRegex(glob string) string {
 
 // buildJavaRegex builds a regex for Burp's regex filter from request filters.
 func buildJavaRegex(req *ProxyListRequest) string {
-	var parts []string
+	parts := make([]string, 0, 4)
 
 	if req.Host != "" {
 		parts = append(parts, `Host:\s*`+globToJavaRegex(req.Host))

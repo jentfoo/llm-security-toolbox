@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"github.com/projectdiscovery/interactsh/pkg/client"
 	"github.com/projectdiscovery/interactsh/pkg/server"
 
@@ -143,6 +144,13 @@ func (b *InteractshBackend) pollLoop(sess *oastSession) {
 			details["smtp_from"] = interaction.SMTPFrom
 		}
 
+		if len(sess.events) >= MaxOastEventsPerSession {
+			sess.events = sess.events[1:]
+			sess.droppedCount++
+			if sess.lastPollIdx > 0 {
+				sess.lastPollIdx--
+			}
+		}
 		event := OastEventInfo{
 			ID:        ids.Generate(ids.DefaultLength),
 			Time:      eventTime,
@@ -151,15 +159,6 @@ func (b *InteractshBackend) pollLoop(sess *oastSession) {
 			Subdomain: interaction.FullId,
 			Details:   details,
 		}
-
-		if len(sess.events) >= MaxOastEventsPerSession {
-			sess.events = sess.events[1:]
-			sess.droppedCount++
-			if sess.lastPollIdx > 0 {
-				sess.lastPollIdx--
-			}
-		}
-
 		sess.events = append(sess.events, event)
 		log.Printf("oast: session %s received %s event from %s", sess.info.ID, event.Type, event.SourceIP)
 	}
@@ -215,20 +214,16 @@ func (b *InteractshBackend) PollSession(ctx context.Context, idOrDomain string, 
 	}
 }
 
-// filterEvents returns events based on the since filter. Caller must hold s.mu.
+// filterEvents returns events based on the since filter. Caller must hold s.mu until result slice is discarded.
 func (s *oastSession) filterEvents(since string) []OastEventInfo {
-	if since == "" {
-		result := make([]OastEventInfo, len(s.events))
-		copy(result, s.events)
-		return result
-	}
-	if since == "last" {
+	switch since {
+	case "":
+		return s.events
+	case "last":
 		if s.lastPollIdx >= len(s.events) {
 			return nil
 		}
-		result := make([]OastEventInfo, len(s.events)-s.lastPollIdx)
-		copy(result, s.events[s.lastPollIdx:])
-		return result
+		return s.events[s.lastPollIdx:]
 	}
 
 	// Find event by ID and return everything after it
@@ -237,16 +232,12 @@ func (s *oastSession) filterEvents(since string) []OastEventInfo {
 			if i+1 >= len(s.events) {
 				return nil
 			}
-			result := make([]OastEventInfo, len(s.events)-i-1)
-			copy(result, s.events[i+1:])
-			return result
+			return s.events[i+1:]
 		}
 	}
 
 	// Event ID not found - return all events
-	result := make([]OastEventInfo, len(s.events))
-	copy(result, s.events)
-	return result
+	return s.events
 }
 
 func (b *InteractshBackend) ListSessions(ctx context.Context) ([]OastSessionInfo, error) {
@@ -316,10 +307,7 @@ func (b *InteractshBackend) Close() error {
 		return nil
 	}
 	b.closed = true
-	sessions := make([]*oastSession, 0, len(b.sessions))
-	for _, sess := range b.sessions {
-		sessions = append(sessions, sess)
-	}
+	sessions := bulk.MapValuesSlice(b.sessions)
 	b.mu.Unlock()
 
 	var wg sync.WaitGroup

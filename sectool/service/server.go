@@ -146,7 +146,7 @@ func (s *Server) Run(ctx context.Context) error {
 	serverErr := make(chan error, 1)
 	go func() {
 		markStarted()
-		if err := s.httpServer.Serve(s.listener); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(s.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
 		close(serverErr)

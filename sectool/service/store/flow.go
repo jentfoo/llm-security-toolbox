@@ -4,6 +4,8 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/go-analyze/bulk"
+
 	"github.com/jentfoo/llm-security-toolbox/sectool/service/ids"
 )
 
@@ -126,6 +128,7 @@ func (s *FlowStore) Clear() {
 func (s *FlowStore) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	return len(s.byID)
 }
 
@@ -134,9 +137,5 @@ func (s *FlowStore) AllFlowIDs() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	flowIDs := make([]string, 0, len(s.byID))
-	for id := range s.byID {
-		flowIDs = append(flowIDs, id)
-	}
-	return flowIDs
+	return bulk.MapKeysSlice(s.byID)
 }
