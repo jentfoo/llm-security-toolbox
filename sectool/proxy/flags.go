@@ -11,7 +11,7 @@ import (
 	"github.com/jentfoo/llm-security-toolbox/sectool/cli"
 )
 
-var proxySubcommands = []string{"list", "export", "intercept", "rule", "help"}
+var proxySubcommands = []string{"list", "export", "help"} // TODO: "intercept", "rule" planned
 
 func Parse(args []string) error {
 	if len(args) < 1 {
@@ -24,10 +24,11 @@ func Parse(args []string) error {
 		return parseList(args[1:])
 	case "export":
 		return parseExport(args[1:])
-	case "intercept":
-		return parseIntercept(args[1:])
-	case "rule":
-		return parseRule(args[1:])
+	// TODO: planned features
+	// case "intercept":
+	// 	return parseIntercept(args[1:])
+	// case "rule":
+	// 	return parseRule(args[1:])
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
@@ -44,8 +45,6 @@ Query and manage proxy history.
 Commands:
   list       List proxy history (aggregate or filtered)
   export     Export a flow to disk for editing
-  intercept  Enable/disable proxy intercept mode (planned)
-  rule       Manage intercept rules (planned)
 
 Use "sectool proxy <command> --help" for more information.
 `)
