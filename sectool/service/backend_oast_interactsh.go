@@ -158,9 +158,13 @@ func (b *InteractshBackend) pollLoop(sess *oastSession) {
 		log.Printf("oast: session %s received %s event from %s", sess.info.ID, event.Type, event.SourceIP)
 	}
 
-	if err := sess.client.StartPolling(interactshPollInterval, callback); err != nil {
-		log.Printf("oast: polling error for session %s: %v", sess.info.ID, err)
+	sess.mu.Lock()
+	if !sess.stopped {
+		if err := sess.client.StartPolling(interactshPollInterval, callback); err != nil {
+			log.Printf("oast: polling error for session %s: %v", sess.info.ID, err)
+		}
 	}
+	sess.mu.Unlock()
 
 	<-sess.stopPolling
 }
@@ -291,10 +295,6 @@ func (b *InteractshBackend) deleteSession(sess *oastSession) error {
 	close(sess.stopPolling)
 
 	if sess.client != nil {
-		if err := sess.client.StopPolling(); err != nil {
-			log.Printf("oast: error stopping polling for session %s: %v", sess.info.ID, err)
-		}
-
 		done := make(chan error, 1)
 		go func() {
 			done <- sess.client.Close()
