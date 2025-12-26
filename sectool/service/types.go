@@ -232,6 +232,10 @@ type ReplaySendRequest struct {
 	Target          string   `json:"target,omitempty"`
 	AddHeaders      []string `json:"add_headers,omitempty"`
 	RemoveHeaders   []string `json:"remove_headers,omitempty"`
+	Path            string   `json:"path,omitempty"`
+	Query           string   `json:"query,omitempty"`
+	SetQuery        []string `json:"set_query,omitempty"`
+	RemoveQuery     []string `json:"remove_query,omitempty"`
 	FollowRedirects bool     `json:"follow_redirects,omitempty"`
 	Timeout         string   `json:"timeout,omitempty"`
 	Force           bool     `json:"force,omitempty"`

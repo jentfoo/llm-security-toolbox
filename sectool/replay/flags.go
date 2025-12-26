@@ -52,6 +52,8 @@ func parseSend(args []string) error {
 	var flow, bundle, file, body, target string
 	var followRedirects, force bool
 	var headers, removeHeaders []string
+	var path, query string
+	var setQuery, removeQuery []string
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&flow, "flow", "", "flow_id to replay from proxy history")
@@ -59,8 +61,12 @@ func parseSend(args []string) error {
 	fs.StringVar(&file, "file", "", "path to request.http file (- for stdin)")
 	fs.StringVar(&body, "body", "", "path to body file (use with --file)")
 	fs.StringVar(&target, "target", "", "override target URL (scheme://host:port)")
-	fs.StringArrayVar(&headers, "header", nil, "add/replace header (repeatable)")
+	fs.StringArrayVar(&headers, "set-header", nil, "add or replace header (repeatable)")
 	fs.StringArrayVar(&removeHeaders, "remove-header", nil, "remove header by name (repeatable)")
+	fs.StringVar(&path, "path", "", "replace URL path (e.g., /api/v2/users)")
+	fs.StringVar(&query, "query", "", "replace entire query string (e.g., id=1&debug=true)")
+	fs.StringArrayVar(&setQuery, "set-query", nil, "add or replace query param (repeatable, e.g., id=123)")
+	fs.StringArrayVar(&removeQuery, "remove-query", nil, "remove query param by name (repeatable)")
 	fs.BoolVar(&followRedirects, "follow-redirects", false, "follow 3xx redirects")
 	fs.DurationVar(&requestTimeout, "request-timeout", 0, "HTTP request timeout (0 = no timeout)")
 	fs.BoolVar(&force, "force", false, "send request even if validation fails")
@@ -83,6 +89,24 @@ File format (--file):
   Most text editors save with LF by default. To create a valid request file:
     printf 'GET / HTTP/1.1\r\nHost: example.com\r\n\r\n' > request.http
   Or use 'sectool proxy export' to create an editable bundle from captured traffic.
+
+Request modifications:
+  Modify request without editing files. Multiple modifications can be combined.
+
+  Headers:
+    --set-header "Name: Value"    Add or replace a header
+    --remove-header "Name"        Remove a header by name
+
+  Path and query string:
+    --path "/new/path"        Replace the URL path
+    --query "key=val&k2=v2"   Replace the entire query string
+    --set-query "key=value"   Add or replace a query parameter
+    --remove-query "key"      Remove a query parameter by name
+
+  Target:
+    --target scheme://host    Override destination host and scheme
+
+  Query modification order: remove -> set
 
 Validation:
   Requests are validated before sending. If validation fails, the request
@@ -115,7 +139,9 @@ Options:
 		return errors.New("only one of --flow, --bundle, or --file can be specified")
 	}
 
-	return send(timeout, flow, bundle, file, body, target, headers, removeHeaders, followRedirects, requestTimeout, force)
+	return send(timeout, flow, bundle, file, body, target, headers, removeHeaders,
+		path, query, setQuery, removeQuery,
+		followRedirects, requestTimeout, force)
 }
 
 func parseGet(args []string) error {

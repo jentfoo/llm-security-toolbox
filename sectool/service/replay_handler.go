@@ -297,6 +297,14 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply path/query modifications first (modifies request line)
+	rawRequest = modifyRequestLine(rawRequest, &PathQueryOpts{
+		Path:        req.Path,
+		Query:       req.Query,
+		SetQuery:    req.SetQuery,
+		RemoveQuery: req.RemoveQuery,
+	})
+
 	// Apply header modifications (--header, --remove-header, --target) regardless of --force
 	headers, body := splitHeadersBody(rawRequest)
 	headers = applyHeaderModifications(headers, &req)

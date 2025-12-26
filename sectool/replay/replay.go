@@ -13,7 +13,9 @@ import (
 	"github.com/jentfoo/llm-security-toolbox/sectool/service"
 )
 
-func send(timeout time.Duration, flow, bundle, file, body, target string, headers, removeHeaders []string, followRedirects bool, requestTimeout time.Duration, force bool) error {
+func send(timeout time.Duration, flow, bundle, file, body, target string, headers, removeHeaders []string,
+	path, query string, setQuery, removeQuery []string,
+	followRedirects bool, requestTimeout time.Duration, force bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -74,6 +76,10 @@ func send(timeout time.Duration, flow, bundle, file, body, target string, header
 		Target:          target,
 		AddHeaders:      headers,
 		RemoveHeaders:   removeHeaders,
+		Path:            path,
+		Query:           query,
+		SetQuery:        setQuery,
+		RemoveQuery:     removeQuery,
 		FollowRedirects: followRedirects,
 		Force:           force,
 	}

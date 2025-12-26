@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -150,5 +151,112 @@ func extractHeaderLines(raw string) []string {
 			result = append(result, line)
 		}
 	}
+	return result
+}
+
+// PathQueryOpts contains options for modifying the path and query string.
+type PathQueryOpts struct {
+	Path        string   // replace entire path (without query)
+	Query       string   // replace entire query string
+	SetQuery    []string // add or replace query params ("key=value")
+	RemoveQuery []string // remove query params by key
+}
+
+// HasModifications returns true if any path/query modification is specified.
+func (o *PathQueryOpts) HasModifications() bool {
+	return o.Path != "" || o.Query != "" ||
+		len(o.SetQuery) > 0 || len(o.RemoveQuery) > 0
+}
+
+// parseRequestLine parses the HTTP request line into method, path, query, and version.
+// Example: "GET /api/users?id=123 HTTP/1.1" -> "GET", "/api/users", "id=123", "HTTP/1.1"
+func parseRequestLine(line string) (method, path, query, version string) {
+	parts := strings.SplitN(line, " ", 3)
+	if len(parts) < 2 {
+		return "", "", "", ""
+	}
+	method = parts[0]
+	fullPath := parts[1]
+	if len(parts) >= 3 {
+		version = parts[2]
+	}
+
+	// Split path and query
+	if idx := strings.Index(fullPath, "?"); idx >= 0 {
+		path = fullPath[:idx]
+		query = fullPath[idx+1:]
+	} else {
+		path = fullPath
+	}
+	return method, path, query, version
+}
+
+// buildRequestLine reconstructs the request line from components.
+func buildRequestLine(method, path, query, version string) string {
+	if query != "" {
+		return method + " " + path + "?" + query + " " + version
+	}
+	return method + " " + path + " " + version
+}
+
+// applyQueryModifications applies set and remove operations to query values.
+func applyQueryModifications(values url.Values, opts *PathQueryOpts) url.Values {
+	// Remove params first
+	for _, key := range opts.RemoveQuery {
+		values.Del(key)
+	}
+
+	// Set params (add or replace existing)
+	for _, kv := range opts.SetQuery {
+		if key, val, ok := strings.Cut(kv, "="); ok {
+			values.Set(key, val)
+		}
+	}
+
+	return values
+}
+
+// modifyRequestLine applies path and query modifications to raw HTTP request bytes.
+// Returns the modified request.
+func modifyRequestLine(raw []byte, opts *PathQueryOpts) []byte {
+	if opts == nil || !opts.HasModifications() {
+		return raw
+	}
+
+	// Find end of first line
+	lineEnd := bytes.Index(raw, []byte("\r\n"))
+	if lineEnd < 0 {
+		return raw
+	}
+
+	firstLine := string(raw[:lineEnd])
+	method, path, query, version := parseRequestLine(firstLine)
+	if method == "" {
+		return raw
+	}
+
+	// Apply path replacement
+	if opts.Path != "" {
+		path = opts.Path
+	}
+
+	// Apply query modifications
+	if opts.Query != "" {
+		// Complete replacement
+		query = opts.Query
+	} else if len(opts.SetQuery) > 0 || len(opts.RemoveQuery) > 0 {
+		// Parse existing query and apply modifications
+		values, _ := url.ParseQuery(query)
+		values = applyQueryModifications(values, opts)
+		query = values.Encode()
+	}
+
+	// Build new request line
+	newLine := buildRequestLine(method, path, query, version)
+
+	// Replace first line
+	result := make([]byte, 0, len(newLine)+len(raw)-lineEnd)
+	result = append(result, []byte(newLine)...)
+	result = append(result, raw[lineEnd:]...)
 	return result
 }
