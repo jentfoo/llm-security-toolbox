@@ -51,6 +51,8 @@ Workflow:
   4. Replay with modifications:
        sectool replay send --bundle .sectool/requests/f7k2x
 
+Run 'sectool replay --help' to see all replay options (header manipulation, target override, etc).
+
 ---
 
 proxy list [options]
@@ -120,6 +122,8 @@ func parseList(args []string) error {
 	fs.StringVar(&excludeHost, "exclude-host", "", "exclude hosts matching pattern")
 	fs.StringVar(&excludePath, "exclude-path", "", "exclude paths matching pattern")
 	fs.IntVar(&limit, "limit", 0, "maximum number of flows to return")
+	fs.IntVar(&limit, "count", 0, "alias for --limit")
+	_ = fs.MarkHidden("count")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `Usage: sectool proxy list [options]

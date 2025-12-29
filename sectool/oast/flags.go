@@ -159,6 +159,8 @@ func parsePoll(args []string) error {
 	fs.StringVar(&since, "since", "", "filter events since event_id or 'last'")
 	fs.DurationVar(&wait, "wait", 120*time.Second, "max wait time for events (max 120s)")
 	fs.IntVar(&limit, "limit", 0, "maximum number of events to return")
+	fs.IntVar(&limit, "count", 0, "alias for --limit")
+	_ = fs.MarkHidden("count")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `Usage: sectool oast poll <oast_id> [options]
@@ -226,6 +228,8 @@ func parseList(args []string) error {
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.IntVar(&limit, "limit", 0, "maximum number of sessions to return (most recent first)")
+	fs.IntVar(&limit, "count", 0, "alias for --limit")
+	_ = fs.MarkHidden("count")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `Usage: sectool oast list [options]

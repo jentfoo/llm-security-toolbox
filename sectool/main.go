@@ -90,7 +90,7 @@ func printRootUsage() {
 	fmt.Fprint(os.Stderr, `Usage: sectool <command> [options]
 
 Commands:
-  init       Initialize working directory for security agent task
+  init       Initialize working directory for security agent task (user only)
   proxy      Query and manage proxy history
   replay     Replay HTTP requests (with modifications)
   oast       Manage OAST domains for out-of-band testing
