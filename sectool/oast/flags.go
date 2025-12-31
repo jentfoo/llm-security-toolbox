@@ -62,7 +62,7 @@ oast create [options]
   Create a new OAST session with unique domain.
 
   Options:
-    --label <str>      optional label for easier reference
+    --label <str>      optional unique label for easier reference
 
   Output: oast_id and domain (e.g., xyz123.oast.fun)
 

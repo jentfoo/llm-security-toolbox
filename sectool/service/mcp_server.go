@@ -114,33 +114,31 @@ func (m *mcpServer) registerTools() {
 
 func (m *mcpServer) proxyListTool() mcp.Tool {
 	return mcp.NewTool("proxy_list",
-		mcp.WithDescription(`Query HTTP proxy history captured by Burp Suite.
+		mcp.WithDescription(`Query Burp proxy history.
 
-Without filters, returns aggregated summary grouped by (host, path, method, status),
-sorted by count descending.
+Modes:
+- Summary (default, no filters): aggregates by (host,path,method,status), sorted by count desc
+- Flow (any filter or limit set): returns individual flows with flow_id for replay_send
 
-With filters, returns individual flow entries with flow_id for further operations.
-
-Filters support glob patterns (* for any chars, ? for single char).`),
+Filters: host/path/exclude_host/exclude_path use glob (*, ?). method/status are comma-separated.
+Search: contains searches URL+headers; contains_body searches bodies.
+Incremental: since=flow_id or "last" for new entries only.`),
 		mcp.WithString("host", mcp.Description("Filter by host (glob pattern, e.g., '*.example.com')")),
 		mcp.WithString("path", mcp.Description("Filter by path (glob pattern, e.g., '/api/*')")),
 		mcp.WithString("method", mcp.Description("Filter by HTTP method(s), comma-separated (e.g., 'GET,POST')")),
 		mcp.WithString("status", mcp.Description("Filter by status code(s), comma-separated (e.g., '200,302')")),
 		mcp.WithString("contains", mcp.Description("Filter by text in URL or headers (does not search body)")),
 		mcp.WithString("contains_body", mcp.Description("Filter by text in request or response body")),
-		mcp.WithString("since", mcp.Description("Show entries after this flow_id, or 'last' for entries since last query")),
+		mcp.WithString("since", mcp.Description("Only entries after this flow_id (exclusive), or 'last' for new entries (server remembers last position)")),
 		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob pattern")),
 		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob pattern")),
-		mcp.WithNumber("limit", mcp.Description("Maximum number of results to return")),
+		mcp.WithNumber("limit", mcp.Description("Max results (setting this switches to flow mode)")),
 	)
 }
 
 func (m *mcpServer) proxyRuleListTool() mcp.Tool {
 	return mcp.NewTool("proxy_rule_list",
-		mcp.WithDescription(`List proxy match and replace rules.
-
-Rules modify requests/responses as they pass through the proxy.
-Use websocket=true to list WebSocket-specific rules.`),
+		mcp.WithDescription("List Burp proxy match/replace rules (HTTP by default; websocket=true for WS)."),
 		mcp.WithBoolean("websocket", mcp.Description("List WebSocket rules instead of HTTP rules")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of rules to return")),
 	)
@@ -148,24 +146,20 @@ Use websocket=true to list WebSocket-specific rules.`),
 
 func (m *mcpServer) proxyRuleAddTool() mcp.Tool {
 	return mcp.NewTool("proxy_rule_add",
-		mcp.WithDescription(`Add a new proxy match and replace rule.
+		mcp.WithDescription(`Add Burp proxy match/replace rule (HTTP default; websocket=true for WS). Persists across all traffic (vs replay_send for one-off edits).
 
-Rules are applied to traffic as it passes through the Burp proxy.
+type: request_header|request_body|response_header|response_body
 
-Types:
-- request_header: Match/replace in request headers
-- request_body: Match/replace in request body
-- response_header: Match/replace in response headers
-- response_body: Match/replace in response body
+Usage:
+- Substitute: set both match and replace
+- Delete pattern: set match only
+- Add header: set replace only (e.g., "X-Test: 1")
 
-For header additions: only 'replace' is needed (adds header without matching).
-For replacements: both 'match' and 'replace' are needed.
-
-Set is_regex=true for regex patterns (Java regex syntax).`),
+Regex: is_regex=true (Java regex). Labels must be unique.`),
 		mcp.WithString("type", mcp.Required(), mcp.Description("Rule type: request_header, request_body, response_header, response_body")),
 		mcp.WithString("match", mcp.Description("Pattern to match")),
 		mcp.WithString("replace", mcp.Description("Replacement text")),
-		mcp.WithString("label", mcp.Description("Optional label for the rule")),
+		mcp.WithString("label", mcp.Description("Optional unique label (usable as rule_id)")),
 		mcp.WithBoolean("is_regex", mcp.Description("Treat match as regex pattern (Java regex syntax)")),
 		mcp.WithBoolean("websocket", mcp.Description("Add as WebSocket rule instead of HTTP")),
 	)
@@ -173,63 +167,57 @@ Set is_regex=true for regex patterns (Java regex syntax).`),
 
 func (m *mcpServer) proxyRuleUpdateTool() mcp.Tool {
 	return mcp.NewTool("proxy_rule_update",
-		mcp.WithDescription(`Update an existing proxy match and replace rule.
+		mcp.WithDescription(`Update a Burp match/replace rule by rule_id or label (searches HTTP+WS).
 
-Searches both HTTP and WebSocket rules automatically.`),
+Requires at least match or replace. To rename label only, resend existing values with new label.`),
 		mcp.WithString("rule_id", mcp.Required(), mcp.Description("Rule ID or label to update")),
 		mcp.WithString("type", mcp.Required(), mcp.Description("Rule type: request_header, request_body, response_header, response_body")),
 		mcp.WithString("match", mcp.Description("Pattern to match")),
 		mcp.WithString("replace", mcp.Description("Replacement text")),
-		mcp.WithString("label", mcp.Description("Optional label for the rule")),
+		mcp.WithString("label", mcp.Description("Optional new label (unique); omit to keep existing")),
 		mcp.WithBoolean("is_regex", mcp.Description("Treat match as regex pattern (Java regex syntax)")),
 	)
 }
 
 func (m *mcpServer) proxyRuleDeleteTool() mcp.Tool {
 	return mcp.NewTool("proxy_rule_delete",
-		mcp.WithDescription("Delete a proxy match and replace rule. Searches both HTTP and WebSocket rules automatically."),
+		mcp.WithDescription("Delete a Burp match/replace rule by rule_id or label (searches HTTP+WS)."),
 		mcp.WithString("rule_id", mcp.Required(), mcp.Description("Rule ID or label to delete")),
 	)
 }
 
 func (m *mcpServer) replaySendTool() mcp.Tool {
 	return mcp.NewTool("replay_send",
-		mcp.WithDescription(`Send or replay an HTTP request with optional modifications.
+		mcp.WithDescription(`Replay a proxied request (flow_id from proxy_list) with edits.
 
-Start with a flow_id from proxy_list as the base request, then apply modifications.
+Returns: replay_id, status, headers, response_preview. Full body via replay_get.
 
-Request modifications:
-- Headers: add/remove headers via add_headers/remove_headers, change target host
-- Path/Query: modify URL path and query parameters
-- Body: provide new body content or modify JSON fields
+Edits:
+- target: scheme+host[:port] (e.g., 'https://staging.example.com')
+- path/query: override path or entire query string
+- set_query/remove_query: selective query param edits
+- add_headers/remove_headers: header edits
+- body: replace entire body
+- set_json/remove_json: selective JSON edits; requires body to be valid JSON
 
-JSON body modifications (set_json, remove_json):
-- Nested paths use dot notation: user.email, items[0].id
-- Type inference: null/true/false are literals, numbers are parsed, {} and [] are objects/arrays
-- Modification order: remove operations apply first, then set operations
-
-Query string modifications (set_query, remove_query):
-- Modification order: remove operations apply first, then set operations
-
-Validation:
-- Requests are validated before sending (structure, Content-Length, line endings)
-- Validation errors prevent sending; use force=true to bypass (useful for testing malformed requests)
-
-Note: Content-Length header is automatically updated when body changes.`),
+JSON paths: dot notation (user.email, items[0].id). Format: "path=value".
+Types auto-parsed: null/true/false/numbers/{}/[], else string.
+Processing: remove_* then set_*. Content-Length/Host auto-updated.
+Validation: fix issues or use force=true for protocol testing.`),
 		mcp.WithString("flow_id", mcp.Required(), mcp.Description("Flow ID from proxy_list to use as base request")),
 		mcp.WithString("body", mcp.Description("Request body content (replaces existing body)")),
-		mcp.WithString("target", mcp.Description("Override target URL (e.g., 'https://other.example.com')")),
+		mcp.WithString("target", mcp.Description("Override destination (scheme+host[:port]); keeps original path/query")),
 		mcp.WithArray("add_headers", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Headers to add/replace (format: 'Name: Value')")),
 		mcp.WithArray("remove_headers", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Header names to remove")),
-		mcp.WithString("path", mcp.Description("Override request path")),
-		mcp.WithString("query", mcp.Description("Override entire query string")),
+		mcp.WithString("path", mcp.Description("Override request path (include leading '/')")),
+		mcp.WithString("query", mcp.Description("Override entire query string (no leading '?')")),
 		mcp.WithArray("set_query", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Query params to set (format: 'name=value')")),
 		mcp.WithArray("remove_query", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Query param names to remove")),
-		mcp.WithArray("set_json", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("JSON fields to set (format: 'path=value', uses JSONPath)")),
-		mcp.WithArray("remove_json", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("JSON fields to remove (JSONPath)")),
-		mcp.WithBoolean("follow_redirects", mcp.Description("Follow HTTP redirects")),
+		mcp.WithArray("set_json", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("JSON fields to set (dot path: 'user.email=x', 'items[0].id=5')")),
+		mcp.WithArray("remove_json", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("JSON fields to remove (dot path: 'user.temp', 'items[2]')")),
+		mcp.WithBoolean("follow_redirects", mcp.Description("Follow HTTP redirects (default: false)")),
 		mcp.WithString("timeout", mcp.Description("Request timeout (e.g., '30s', '1m')")),
-		mcp.WithBoolean("force", mcp.Description("Skip request validation (for testing malformed requests)")),
+		mcp.WithBoolean("force", mcp.Description("Skip validation for protocol-level tests (smuggling, CRLF injection)")),
 	)
 }
 
@@ -237,37 +225,34 @@ func (m *mcpServer) replayGetTool() mcp.Tool {
 	return mcp.NewTool("replay_get",
 		mcp.WithDescription(`Retrieve full response from a previous replay_send.
 
-Returns the complete response including headers and base64-encoded body.
-Replay results are ephemeral and cleared when the service restarts.`),
+Returns headers and base64-encoded body. Results are ephemeral and cleared on service restart.`),
 		mcp.WithString("replay_id", mcp.Required(), mcp.Description("Replay ID from replay_send response")),
 	)
 }
 
 func (m *mcpServer) oastCreateTool() mcp.Tool {
 	return mcp.NewTool("oast_create",
-		mcp.WithDescription(`Create a new OAST (Out-of-Band Application Security Testing) session.
+		mcp.WithDescription(`Create OAST (Out-of-Band Application Security Testing) session.
 
-Returns a unique domain that can be used to detect out-of-band interactions
-(DNS lookups, HTTP requests, SMTP, etc.) from target applications.
-
-Use the returned domain in payloads to detect blind vulnerabilities like:
-- Blind SSRF
-- Blind XXE
-- DNS exfiltration
-- Log4Shell-style JNDI injection`),
-		mcp.WithString("label", mcp.Description("Optional label to identify this session")),
+Returns {oast_id, domain} for blind out-of-band detection (DNS/HTTP/SMTP).
+Workflow: create -> inject domain in payload -> trigger target -> oast_poll -> oast_get for details.
+Use cases: blind SSRF, blind XXE, DNS exfiltration, email verification bypass.`),
+		mcp.WithString("label", mcp.Description("Optional unique label for this session")),
 	)
 }
 
 func (m *mcpServer) oastPollTool() mcp.Tool {
 	return mcp.NewTool("oast_poll",
-		mcp.WithDescription(`Poll for OAST interaction events.
+		mcp.WithDescription(`Poll for OAST interaction events (DNS/HTTP/SMTP).
 
-Returns events (DNS, HTTP, SMTP, etc.) that occurred on the OAST domain.
-Use 'wait' for long-polling to wait for events up to the specified duration (max 120s).
-Use 'since' with an event_id to get only newer events, or 'last' for events since last poll.`),
+Options:
+- Immediate: omit wait
+- Long-poll: set wait (e.g., '30s', max 120s)
+- Incremental: since=event_id or "last" for only new events
+
+Response includes events (event_id) and optional dropped_count; use oast_get for full event details.`),
 		mcp.WithString("oast_id", mcp.Required(), mcp.Description("OAST session ID, label, or domain")),
-		mcp.WithString("since", mcp.Description("Return events after this event_id, or 'last' for new events")),
+		mcp.WithString("since", mcp.Description("Return events after this event_id, or 'last' for new events (server remembers last position)")),
 		mcp.WithString("wait", mcp.Description("Long-poll duration (e.g., '30s', max 120s)")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of events to return")),
 	)
@@ -275,7 +260,7 @@ Use 'since' with an event_id to get only newer events, or 'last' for events sinc
 
 func (m *mcpServer) oastGetTool() mcp.Tool {
 	return mcp.NewTool("oast_get",
-		mcp.WithDescription("Get full details of a specific OAST event without truncation."),
+		mcp.WithDescription("Get full OAST event data: HTTP request/response, DNS query type/answer, SMTP headers/body."),
 		mcp.WithString("oast_id", mcp.Required(), mcp.Description("OAST session ID, label, or domain")),
 		mcp.WithString("event_id", mcp.Required(), mcp.Description("Event ID from oast_poll")),
 	)
@@ -344,8 +329,6 @@ func (m *mcpServer) handleProxyList(ctx context.Context, req mcp.CallToolRequest
 func (m *mcpServer) handleProxyRuleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	websocket := req.GetBool("websocket", false)
 	limit := req.GetInt("limit", 0)
-
-	log.Printf("mcp/proxy_rule_list: websocket=%t", websocket)
 
 	rules, err := m.service.httpBackend.ListRules(ctx, websocket)
 	if err != nil {
@@ -418,8 +401,6 @@ func (m *mcpServer) handleProxyRuleUpdate(ctx context.Context, req mcp.CallToolR
 		return errorResult("match or replace is required"), nil
 	}
 
-	log.Printf("mcp/proxy_rule_update: rule=%s", ruleID)
-
 	rule, err := m.service.httpBackend.UpdateRule(ctx, ruleID, ProxyRuleInput{
 		Label:   req.GetString("label", ""),
 		Type:    ruleType,
@@ -446,8 +427,6 @@ func (m *mcpServer) handleProxyRuleDelete(ctx context.Context, req mcp.CallToolR
 	if ruleID == "" {
 		return errorResult("rule_id is required"), nil
 	}
-
-	log.Printf("mcp/proxy_rule_delete: rule=%s", ruleID)
 
 	if err := m.service.httpBackend.DeleteRule(ctx, ruleID); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -605,7 +584,6 @@ func (m *mcpServer) handleReplayGet(ctx context.Context, req mcp.CallToolRequest
 
 func (m *mcpServer) handleOastCreate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	label := req.GetString("label", "")
-	log.Printf("mcp/oast_create: creating new session (label=%q)", label)
 
 	sess, err := m.service.oastBackend.CreateSession(ctx, label)
 	if err != nil {
@@ -690,7 +668,6 @@ func (m *mcpServer) handleOastGet(ctx context.Context, req mcp.CallToolRequest) 
 		return errorResult("failed to get event: " + err.Error()), nil
 	}
 
-	log.Printf("mcp/oast_get: returning event %s", eventID)
 	return jsonResult(OastGetResponse{
 		EventID:   event.ID,
 		Time:      event.Time.UTC().Format(time.RFC3339),
