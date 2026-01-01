@@ -13,6 +13,7 @@ func TestInteractshBackend_CreateAndClose(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	backend := NewInteractshBackend()
 	t.Cleanup(func() { _ = backend.Close() })
@@ -59,6 +60,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 		if testing.Short() {
 			t.Skip("skipping integration test in short mode")
 		}
+		t.Parallel()
 
 		backend := NewInteractshBackend()
 		t.Cleanup(func() { _ = backend.Close() })
@@ -278,7 +280,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 			done <- pollResult{result, err}
 		}()
 
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 		sess.mu.Lock()
 		sess.events = append(sess.events, OastEventInfo{
 			ID:   "new_event",

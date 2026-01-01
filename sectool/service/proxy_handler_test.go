@@ -170,7 +170,7 @@ func TestHandleProxySummary(t *testing.T) {
 	t.Parallel()
 
 	t.Run("empty", func(t *testing.T) {
-		srv, _ := testServerWithMCP(t)
+		srv, _, _ := testServerWithMCP(t)
 
 		w := doRequest(t, srv, "POST", "/proxy/summary", ProxyListRequest{})
 
@@ -186,7 +186,7 @@ func TestHandleProxySummary(t *testing.T) {
 	})
 
 	t.Run("aggregate", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		// Add some proxy history entries
 		mockMCP.AddProxyEntries(
@@ -221,7 +221,7 @@ func TestHandleProxyList(t *testing.T) {
 	t.Parallel()
 
 	t.Run("requires_filters", func(t *testing.T) {
-		srv, _ := testServerWithMCP(t)
+		srv, _, _ := testServerWithMCP(t)
 
 		w := doRequest(t, srv, "POST", "/proxy/list", ProxyListRequest{})
 
@@ -234,7 +234,7 @@ func TestHandleProxyList(t *testing.T) {
 	})
 
 	t.Run("filters", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		mockMCP.AddProxyEntries(
 			MakeProxyEntry("GET", "/api/users", "example.com", 200, "ok"),
@@ -264,7 +264,7 @@ func TestHandleProxyList(t *testing.T) {
 	})
 
 	t.Run("host_filter", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		mockMCP.AddProxyEntries(
 			MakeProxyEntry("GET", "/api", "api.example.com", 200, "ok"),
@@ -291,7 +291,7 @@ func TestHandleProxyList(t *testing.T) {
 	})
 
 	t.Run("exclude_host", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		mockMCP.AddProxyEntries(
 			MakeProxyEntry("GET", "/api", "api.example.com", 200, "ok"),
@@ -318,7 +318,7 @@ func TestHandleProxyList(t *testing.T) {
 	})
 
 	t.Run("limit", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		mockMCP.AddProxyEntries(
 			MakeProxyEntry("GET", "/api/1", "example.com", 200, "ok"),
@@ -344,7 +344,7 @@ func TestHandleProxyList(t *testing.T) {
 	})
 
 	t.Run("limit_is_filter", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		mockMCP.AddProxyEntries(
 			MakeProxyEntry("GET", "/api/1", "example.com", 200, "ok"),
@@ -367,7 +367,7 @@ func TestHandleProxyList(t *testing.T) {
 	})
 
 	t.Run("since_last_with_limit", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		mockMCP.AddProxyEntries(
 			MakeProxyEntry("GET", "/api/1", "example.com", 200, "ok"),
@@ -403,7 +403,7 @@ func TestHandleProxyExport(t *testing.T) {
 	t.Parallel()
 
 	t.Run("success", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		mockMCP.AddProxyEntry(
 			"GET /api/test HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -448,7 +448,7 @@ func TestHandleProxyExport(t *testing.T) {
 		// Regression test: verify body is not corrupted by header manipulation.
 		// Previously, splitHeadersBody returned slices sharing the same underlying array,
 		// and append() to headers could overwrite body data.
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		bodyContent := `{"user":"test","token":"abc123xyz"}`
 		mockMCP.AddProxyEntry(
@@ -484,7 +484,7 @@ func TestHandleProxyExport(t *testing.T) {
 	})
 
 	t.Run("not_found", func(t *testing.T) {
-		srv, _ := testServerWithMCP(t)
+		srv, _, _ := testServerWithMCP(t)
 
 		w := doRequest(t, srv, "POST", "/proxy/export", ProxyExportRequest{FlowID: "nonexistent"})
 
@@ -497,7 +497,7 @@ func TestHandleProxyExport(t *testing.T) {
 	})
 
 	t.Run("missing_id", func(t *testing.T) {
-		srv, _ := testServerWithMCP(t)
+		srv, _, _ := testServerWithMCP(t)
 
 		w := doRequest(t, srv, "POST", "/proxy/export", ProxyExportRequest{})
 

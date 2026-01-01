@@ -118,18 +118,15 @@ proxy export <flow_id>
   Note: Prefer 'replay send --flow' with modification flags for simple changes.
   Export is useful for complex edits (raw body, binary data, etc).
 
-  Creates bundle in .sectool/requests/<id>/:
+  Creates bundle in .sectool/requests/<bundle_id>/:
     request.http       HTTP headers with body placeholder
     body               request body (edit this for modifications)
     request.meta.json  metadata (method, URL, timestamps)
 
-  Options:
-    --out <path>            custom output directory
-
   Examples:
     sectool proxy list --host example.com     # find flow_id
-    sectool proxy export f7k2x                # outputs: .sectool/requests/f7k2x/
-    sectool replay send --bundle .sectool/requests/f7k2x
+    sectool proxy export f7k2x                # exports to .sectool/requests/<bundle_id>/
+    sectool replay send --bundle <bundle_id>  # replay the exported bundle
 
   Output: Bundle path and files created
 
@@ -300,10 +297,8 @@ func parseExport(args []string) error {
 	fs := pflag.NewFlagSet("proxy export", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
-	var out string
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
-	fs.StringVar(&out, "out", "", "output directory (default: .sectool/requests/<auto>)")
 
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `Usage: sectool proxy export <flow_id> [options]
@@ -338,7 +333,7 @@ Options:
 		return errors.New("flow_id required (get from 'sectool proxy list' with filters)")
 	}
 
-	return export(timeout, fs.Args()[0], out)
+	return export(timeout, fs.Args()[0])
 }
 
 // TODO - planned intercept feature

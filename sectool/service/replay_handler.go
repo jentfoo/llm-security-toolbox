@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -249,10 +250,15 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 		}
 		rawRequest = []byte(proxyEntries[0].Request)
 
-	case req.BundlePath != "":
-		inputSource = "bundle:" + req.BundlePath
-		// Resolve path relative to working directory
-		bundlePath = s.paths.ResolvePath(req.BundlePath)
+	case req.BundleID != "":
+		inputSource = "bundle:" + req.BundleID
+		// Validate bundle ID is safe (alphanumeric only, no path traversal)
+		if !ids.IsValid(req.BundleID) {
+			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"invalid bundle_id", "bundle_id must contain only alphanumeric characters")
+			return
+		}
+		bundlePath = filepath.Join(s.paths.RequestsDir, req.BundleID)
 		headers, body, meta, err := readBundle(bundlePath)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to read bundle", err.Error())
@@ -265,8 +271,12 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 
 	case req.FilePath != "":
 		inputSource = "file:" + req.FilePath
-		// Resolve path relative to working directory
-		filePath := s.paths.ResolvePath(req.FilePath)
+		// Resolve path relative to working directory with traversal protection
+		filePath, err := s.paths.SafePath(req.FilePath)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid file path", err.Error())
+			return
+		}
 		fileContent, err := os.ReadFile(filePath)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to read file", err.Error())
@@ -275,7 +285,11 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 
 		if req.BodyPath != "" {
 			// Body provided separately - merge headers from file with body from --body
-			bodyPath := s.paths.ResolvePath(req.BodyPath)
+			bodyPath, err := s.paths.SafePath(req.BodyPath)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid body path", err.Error())
+				return
+			}
 			body, err := os.ReadFile(bodyPath)
 			if err != nil {
 				s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,

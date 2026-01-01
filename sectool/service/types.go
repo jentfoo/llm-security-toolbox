@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ServicePaths holds all the filesystem paths used by the service.
@@ -45,6 +46,24 @@ func (p *ServicePaths) ResolvePath(path string) string {
 		return path
 	}
 	return filepath.Join(p.WorkDir, path)
+}
+
+// ErrPathTraversal is returned when a path would escape the working directory.
+var ErrPathTraversal = errors.New("path escapes working directory")
+
+// SafePath resolves a path and validates it stays within the working directory.
+// Returns ErrPathTraversal if the cleaned path would escape WorkDir.
+func (p *ServicePaths) SafePath(path string) (string, error) {
+	resolved := p.ResolvePath(path)     // absolute path
+	cleaned := filepath.Clean(resolved) // remove .. and other path tricks
+
+	cleanedWorkDir := filepath.Clean(p.WorkDir) // Clean workdir for consistent comparison
+
+	// Ensure the cleaned path is within WorkDir
+	if cleaned != cleanedWorkDir && !strings.HasPrefix(cleaned, cleanedWorkDir+string(filepath.Separator)) {
+		return "", ErrPathTraversal
+	}
+	return cleaned, nil
 }
 
 // RelPath returns the path relative to WorkDir for cleaner output.
@@ -217,7 +236,6 @@ type FlowSummary struct {
 // ProxyExportRequest is the request for POST /proxy/export.
 type ProxyExportRequest struct {
 	FlowID string `json:"flow_id"`
-	OutDir string `json:"out_dir,omitempty"`
 }
 
 // ProxyExportResponse is the response for POST /proxy/export.
@@ -271,10 +289,10 @@ type ResponseDetails struct {
 // =============================================================================
 
 // ReplaySendRequest is the request for POST /replay/send.
-// Exactly one of FlowID, BundlePath, or FilePath must be set.
+// Exactly one of FlowID, BundleID, or FilePath must be set.
 type ReplaySendRequest struct {
 	FlowID          string   `json:"flow_id,omitempty"`
-	BundlePath      string   `json:"bundle_path,omitempty"`
+	BundleID        string   `json:"bundle_id,omitempty"`
 	FilePath        string   `json:"file_path,omitempty"`
 	BodyPath        string   `json:"body_path,omitempty"`
 	Target          string   `json:"target,omitempty"`

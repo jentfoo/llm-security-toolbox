@@ -30,3 +30,20 @@ func Generate(length int) string {
 
 	return string(result)
 }
+
+// IsValid returns true if the ID contains only valid base62 characters.
+// Used to validate user-supplied IDs to prevent path traversal.
+func IsValid(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, c := range id {
+		isDigit := c >= '0' && c <= '9'
+		isUpper := c >= 'A' && c <= 'Z'
+		isLower := c >= 'a' && c <= 'z'
+		if !isDigit && !isUpper && !isLower {
+			return false
+		}
+	}
+	return true
+}

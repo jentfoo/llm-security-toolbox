@@ -16,7 +16,6 @@ make build          # Build to bin/sectool
 make build-cross    # Cross-compile (linux/darwin, amd64/arm64)
 make test           # Quick tests (-short flag)
 make test-all       # Full tests with -race and coverage
-make test-cover     # Generate HTML coverage report (test.out)
 make lint           # Run golangci-lint and go vet
 ```
 
@@ -256,7 +255,7 @@ All endpoints over Unix socket at `.sectool/service/socket`:
 - Test case names should be at most 3 to 5 words and in lower case with underscores
 - Assertions rely on `testify` (`require` for setup, `assert` for assertions)
 - With assertions don't include messages unless the message provides context outside of the test point, or the two variables being evaluated
-- Always verify with `make test` and `make lint` before considering changes complete
+- Always verify with `make test-all` and `make lint` before considering changes complete
 - Isolated temp directories via `t.TempDir()`
 - Context timeouts via `t.Context()`
 - Mock MCP server available via `service/mcp.NewTestMCPServer()`

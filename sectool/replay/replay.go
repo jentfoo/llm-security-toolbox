@@ -69,9 +69,15 @@ func send(timeout time.Duration, flow, bundle, file, body, target string, header
 		return fmt.Errorf("failed to start service: %w (check %s)", err, client.LogPath())
 	}
 
+	// Extract base name for backward compat with full paths
+	bundleID := bundle
+	if bundle != "" {
+		bundleID = filepath.Base(bundle)
+	}
+
 	req := &service.ReplaySendRequest{
 		FlowID:          flow,
-		BundlePath:      bundle,
+		BundleID:        bundleID,
 		FilePath:        file,
 		BodyPath:        body,
 		Target:          target,

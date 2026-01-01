@@ -409,10 +409,7 @@ func (s *Server) handleProxyExport(w http.ResponseWriter, r *http.Request) {
 
 	// Generate bundle ID and path
 	bundleID := ids.Generate(ids.DefaultLength)
-	bundlePath := req.OutDir
-	if bundlePath == "" {
-		bundlePath = filepath.Join(s.paths.RequestsDir, bundleID)
-	}
+	bundlePath := filepath.Join(s.paths.RequestsDir, bundleID)
 
 	// Determine scheme from host port
 	scheme, _, _ := inferSchemeAndPort(host)

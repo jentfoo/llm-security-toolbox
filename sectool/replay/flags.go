@@ -45,7 +45,7 @@ Workflow:
   3. Or export, edit files, then replay:
        sectool proxy export <flow_id>
        # edit .sectool/requests/<bundle_id>/body
-       sectool replay send --bundle .sectool/requests/<bundle_id>
+       sectool replay send --bundle <bundle_id>
 
 ---
 
@@ -55,7 +55,7 @@ replay send [options]
 
   Input sources (exactly one required):
     --flow <flow_id>      replay from proxy history
-    --bundle <path>       replay from exported bundle directory
+    --bundle <bundle_id>  replay from exported bundle (from proxy export)
     --file <path>         replay from raw HTTP file (- for stdin)
 
   Request modifications (combine multiple):
@@ -88,7 +88,7 @@ replay send [options]
     sectool replay send --flow f7k2x --set-header "Authorization: Bearer tok"
     sectool replay send --flow f7k2x --path /api/v2/users --set-query "id=123"
     sectool replay send --flow f7k2x --set-json "user.role=admin"
-    sectool replay send --bundle .sectool/requests/abc123
+    sectool replay send --bundle abc123
     sectool replay send --file request.http --body payload
 
   Output: Markdown with replay_id, status, headers, body preview
@@ -119,7 +119,7 @@ func parseSend(args []string) error {
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&flow, "flow", "", "flow_id to replay from proxy history")
-	fs.StringVar(&bundle, "bundle", "", "path to request bundle directory")
+	fs.StringVar(&bundle, "bundle", "", "bundle_id from proxy export")
 	fs.StringVar(&file, "file", "", "path to request.http file (- for stdin)")
 	fs.StringVar(&body, "body", "", "path to body file (use with --file)")
 	fs.StringVar(&target, "target", "", "override target URL (scheme://host:port)")
@@ -142,7 +142,7 @@ Send a request through the HTTP backend.
 
 Input sources (exactly one required):
   --flow <flow_id>      Replay from proxy history (get flow_id from 'sectool proxy list')
-  --bundle <path>       Replay from exported bundle (create with 'sectool proxy export')
+  --bundle <bundle_id>  Replay from exported bundle (create with 'sectool proxy export')
   --file <path>         Replay from raw HTTP file (- for stdin)
 
 File format (--file):

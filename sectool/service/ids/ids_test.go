@@ -54,6 +54,37 @@ func TestGenerate(t *testing.T) {
 	})
 }
 
+func TestIsValid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		id    string
+		valid bool
+	}{
+		{"valid_alphanumeric", "abc123XYZ", true},
+		{"valid_numbers", "123456", true},
+		{"valid_lowercase", "abcdef", true},
+		{"valid_uppercase", "ABCDEF", true},
+		{"valid_generated", Generate(DefaultLength), true},
+		{"empty", "", false},
+		{"with_slash", "abc/def", false},
+		{"with_backslash", "abc\\def", false},
+		{"with_dot", "abc.def", false},
+		{"with_dotdot", "..", false},
+		{"path_traversal", "../etc/passwd", false},
+		{"with_space", "abc def", false},
+		{"with_dash", "abc-def", false},
+		{"with_underscore", "abc_def", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.valid, IsValid(tc.id))
+		})
+	}
+}
+
 func BenchmarkGenerate(b *testing.B) {
 	for range b.N {
 		Generate(DefaultLength)

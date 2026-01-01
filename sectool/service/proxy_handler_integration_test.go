@@ -110,9 +110,9 @@ func TestBurp_ProxyExportAndReplay(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("Exported request:\n%s", string(reqContent))
 
-	// Replay the request from the bundle
+	// Replay the request from the bundle using bundle ID
 	w = doBurpRequest(t, srv, "POST", "/replay/send", ReplaySendRequest{
-		BundlePath: exportResp.BundlePath,
+		BundleID: exportResp.BundleID,
 	})
 
 	require.Equal(t, http.StatusOK, w.Code)

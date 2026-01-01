@@ -104,9 +104,7 @@ func TestServiceEndToEnd(t *testing.T) {
 		require.NoError(t, err)
 
 		serverErr := make(chan error, 1)
-		go func() {
-			serverErr <- srv.Run(t.Context())
-		}()
+		go func() { serverErr <- srv.Run(t.Context()) }()
 		srv.WaitTillStarted()
 
 		client := NewClient(workDir)

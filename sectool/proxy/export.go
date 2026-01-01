@@ -10,7 +10,7 @@ import (
 	"github.com/jentfoo/llm-security-toolbox/sectool/service"
 )
 
-func export(timeout time.Duration, flowID, out string) error {
+func export(timeout time.Duration, flowID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -26,7 +26,6 @@ func export(timeout time.Duration, flowID, out string) error {
 
 	resp, err := client.ProxyExport(ctx, &service.ProxyExportRequest{
 		FlowID: flowID,
-		OutDir: out,
 	})
 	if err != nil {
 		return fmt.Errorf("proxy export failed: %w", err)

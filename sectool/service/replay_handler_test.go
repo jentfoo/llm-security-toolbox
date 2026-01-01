@@ -405,16 +405,18 @@ func TestHandleReplaySend(t *testing.T) {
 	t.Parallel()
 
 	t.Run("from_bundle", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, workDir := testServerWithMCP(t)
 
-		// Create a bundle manually
-		bundleDir := filepath.Join(t.TempDir(), "test-bundle")
+		// Create a bundle in the requests directory (where bundles are stored)
+		bundleID := "testbundle123"
+		requestsDir := filepath.Join(workDir, ".sectool", "requests")
+		bundleDir := filepath.Join(requestsDir, bundleID)
 		require.NoError(t, os.MkdirAll(bundleDir, 0755))
 
 		headers := []byte("GET /api/test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 		body := []byte("")
 		meta := &bundleMeta{
-			BundleID: "test123",
+			BundleID: bundleID,
 			URL:      "https://example.com/api/test",
 			Method:   "GET",
 		}
@@ -422,7 +424,7 @@ func TestHandleReplaySend(t *testing.T) {
 
 		mockMCP.SetSendResponse(`HttpRequestResponse{httpRequest=GET /api/test HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"status": "ok"}, messageAnnotations=Annotations{}}`)
 
-		w := doRequest(t, srv, "POST", "/replay/send", ReplaySendRequest{BundlePath: bundleDir})
+		w := doRequest(t, srv, "POST", "/replay/send", ReplaySendRequest{BundleID: bundleID})
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
@@ -439,7 +441,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("from_id", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, _ := testServerWithMCP(t)
 
 		mockMCP.AddProxyEntry(
 			"GET /api/test HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -478,21 +480,23 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("header_modify", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, workDir := testServerWithMCP(t)
 
-		// Create a bundle
-		bundleDir := filepath.Join(t.TempDir(), "test-bundle")
+		// Create a bundle in the requests directory
+		bundleID := "headertest"
+		requestsDir := filepath.Join(workDir, ".sectool", "requests")
+		bundleDir := filepath.Join(requestsDir, bundleID)
 		require.NoError(t, os.MkdirAll(bundleDir, 0755))
 
 		headers := []byte("GET /api HTTP/1.1\r\nHost: example.com\r\nCookie: session=abc\r\n\r\n")
-		require.NoError(t, writeBundle(bundleDir, headers, nil, &bundleMeta{BundleID: "test"}))
+		require.NoError(t, writeBundle(bundleDir, headers, nil, &bundleMeta{BundleID: bundleID}))
 
 		mockMCP.SetSendResponse(
 			`HttpRequestResponse{httpRequest=modified, httpResponse=HTTP/1.1 200 OK\r\n\r\nok, messageAnnotations=Annotations{}}`,
 		)
 
 		w := doRequest(t, srv, "POST", "/replay/send", ReplaySendRequest{
-			BundlePath:    bundleDir,
+			BundleID:      bundleID,
 			AddHeaders:    []string{"Authorization: Bearer token"},
 			RemoveHeaders: []string{"Cookie"},
 		})
@@ -505,10 +509,10 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("from_file_complete", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, workDir := testServerWithMCP(t)
 
-		// Create a file with a complete request (headers + body)
-		tmpFile := filepath.Join(t.TempDir(), "request.http")
+		// Create a file with a complete request (headers + body) within workDir
+		tmpFile := filepath.Join(workDir, "request.http")
 		completeRequest := "POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 13\r\n\r\n{\"foo\":\"bar\"}"
 		require.NoError(t, os.WriteFile(tmpFile, []byte(completeRequest), 0644))
 
@@ -528,17 +532,15 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("from_file_with_body", func(t *testing.T) {
-		srv, mockMCP := testServerWithMCP(t)
+		srv, mockMCP, workDir := testServerWithMCP(t)
 
-		tmpDir := t.TempDir()
-
-		// Create headers file with placeholder
-		headersFile := filepath.Join(tmpDir, "request.http")
+		// Create headers file with placeholder within workDir
+		headersFile := filepath.Join(workDir, "request.http")
 		headers := "POST /api HTTP/1.1\r\nHost: example.com\r\n" + bodyPlaceholder + "\n"
 		require.NoError(t, os.WriteFile(headersFile, []byte(headers), 0644))
 
 		// Create separate body file
-		bodyFile := filepath.Join(tmpDir, "body")
+		bodyFile := filepath.Join(workDir, "body")
 		body := `{"merged":"body"}`
 		require.NoError(t, os.WriteFile(bodyFile, []byte(body), 0644))
 
@@ -561,7 +563,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("no_input", func(t *testing.T) {
-		srv, _ := testServerWithMCP(t)
+		srv, _, _ := testServerWithMCP(t)
 
 		w := doRequest(t, srv, "POST", "/replay/send", ReplaySendRequest{})
 
@@ -574,7 +576,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("id_not_found", func(t *testing.T) {
-		srv, _ := testServerWithMCP(t)
+		srv, _, _ := testServerWithMCP(t)
 
 		w := doRequest(t, srv, "POST", "/replay/send", ReplaySendRequest{FlowID: "nonexistent"})
 
@@ -585,13 +587,43 @@ func TestHandleReplaySend(t *testing.T) {
 		assert.False(t, resp.OK)
 		assert.Equal(t, ErrCodeNotFound, resp.Error.Code)
 	})
+
+	t.Run("invalid_bundle_id_traversal", func(t *testing.T) {
+		srv, _, _ := testServerWithMCP(t)
+
+		// Try path traversal via bundle ID
+		w := doRequest(t, srv, "POST", "/replay/send", ReplaySendRequest{BundleID: "../etc/passwd"})
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+
+		var resp APIResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.False(t, resp.OK)
+		assert.Equal(t, ErrCodeInvalidRequest, resp.Error.Code)
+		assert.Contains(t, resp.Error.Message, "invalid bundle_id")
+	})
+
+	t.Run("invalid_file_path_traversal", func(t *testing.T) {
+		srv, _, _ := testServerWithMCP(t)
+
+		// Try path traversal via file path
+		w := doRequest(t, srv, "POST", "/replay/send", ReplaySendRequest{FilePath: "../../../etc/passwd"})
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+
+		var resp APIResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.False(t, resp.OK)
+		assert.Equal(t, ErrCodeInvalidRequest, resp.Error.Code)
+		assert.Contains(t, resp.Error.Message, "invalid file path")
+	})
 }
 
 func TestHandleReplayGet(t *testing.T) {
 	t.Parallel()
 
 	t.Run("not_found", func(t *testing.T) {
-		srv, _ := testServerWithMCP(t)
+		srv, _, _ := testServerWithMCP(t)
 
 		w := doRequest(t, srv, "POST", "/replay/get", ReplayGetRequest{ReplayID: "test123"})
 
