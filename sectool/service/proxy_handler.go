@@ -58,6 +58,40 @@ func pathWithoutQuery(path string) string {
 	return path
 }
 
+var (
+	numericSegmentRe = regexp.MustCompile(`^\d+$`)
+	uuidSegmentRe    = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	hexIDSegmentRe   = regexp.MustCompile(`^[0-9a-fA-F]{24,}$`)
+)
+
+// normalizePath replaces dynamic path segments (numeric IDs, UUIDs, hex IDs 24+ chars)
+// with * for grouping. Query strings are preserved.
+func normalizePath(path string) string {
+	if path == "" {
+		return path
+	}
+
+	queryIdx := strings.Index(path, "?")
+	var query string
+	pathOnly := path
+	if queryIdx != -1 {
+		query = path[queryIdx:]
+		pathOnly = path[:queryIdx]
+	}
+
+	segments := strings.Split(pathOnly, "/")
+	for i, seg := range segments {
+		if seg == "" {
+			continue
+		}
+		if numericSegmentRe.MatchString(seg) || uuidSegmentRe.MatchString(seg) || hexIDSegmentRe.MatchString(seg) {
+			segments[i] = "*"
+		}
+	}
+
+	return strings.Join(segments, "/") + query
+}
+
 // matchesGlob checks if s matches a simple glob pattern.
 func matchesGlob(s, pattern string) bool {
 	if pattern == "" {
@@ -112,7 +146,7 @@ func aggregateByTuple(entries []flowEntry) []AggregateEntry {
 	for _, e := range entries {
 		key := aggregateKey{
 			Host:   e.host,
-			Path:   e.path,
+			Path:   normalizePath(e.path),
 			Method: e.method,
 			Status: e.status,
 		}

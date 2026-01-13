@@ -143,27 +143,81 @@ func TestPathWithoutQuery(t *testing.T) {
 	}
 }
 
+func TestNormalizePath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"no_change", "/api/users", "/api/users"},
+		{"numeric", "/api/users/123", "/api/users/*"},
+		{"multiple_numeric", "/api/users/123/posts/456", "/api/users/*/posts/*"},
+		{"uuid", "/api/users/550e8400-e29b-41d4-a716-446655440000", "/api/users/*"},
+		{"uuid_no_dashes", "/api/users/550e8400e29b41d4a716446655440000", "/api/users/*"},
+		{"mongodb_objectid", "/api/users/507f1f77bcf86cd799439011", "/api/users/*"},
+		{"preserve_query", "/api/users/123?foo=bar", "/api/users/*?foo=bar"},
+		{"root", "/", "/"},
+		{"empty", "", ""},
+		{"trailing_slash", "/api/users/123/", "/api/users/*/"},
+		{"mixed", "/v2/orders/42/items/abc123def456789012345678", "/v2/orders/*/items/*"},
+		{"short_hex_unchanged", "/api/abc123", "/api/abc123"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalizePath(tt.path))
+		})
+	}
+}
+
 func TestAggregateByTuple(t *testing.T) {
 	t.Parallel()
 
-	entries := []flowEntry{
-		{method: "GET", host: "example.com", path: "/api", status: 200},
-		{method: "GET", host: "example.com", path: "/api", status: 200},
-		{method: "GET", host: "example.com", path: "/api", status: 200},
-		{method: "POST", host: "example.com", path: "/api", status: 201},
-		{method: "GET", host: "other.com", path: "/", status: 200},
-	}
+	t.Run("basic_grouping", func(t *testing.T) {
+		entries := []flowEntry{
+			{method: "GET", host: "example.com", path: "/api", status: 200},
+			{method: "GET", host: "example.com", path: "/api", status: 200},
+			{method: "GET", host: "example.com", path: "/api", status: 200},
+			{method: "POST", host: "example.com", path: "/api", status: 201},
+			{method: "GET", host: "other.com", path: "/", status: 200},
+		}
 
-	result := aggregateByTuple(entries)
+		result := aggregateByTuple(entries)
 
-	// Should have 3 unique tuples
-	assert.Len(t, result, 3)
+		// Should have 3 unique tuples
+		assert.Len(t, result, 3)
 
-	// First entry should have highest count (3)
-	assert.Equal(t, 3, result[0].Count)
-	assert.Equal(t, "GET", result[0].Method)
-	assert.Equal(t, "example.com", result[0].Host)
-	assert.Equal(t, 200, result[0].Status)
+		// First entry should have highest count (3)
+		assert.Equal(t, 3, result[0].Count)
+		assert.Equal(t, "GET", result[0].Method)
+		assert.Equal(t, "example.com", result[0].Host)
+		assert.Equal(t, 200, result[0].Status)
+	})
+
+	t.Run("path_normalization", func(t *testing.T) {
+		entries := []flowEntry{
+			{method: "GET", host: "example.com", path: "/api/users/1", status: 200},
+			{method: "GET", host: "example.com", path: "/api/users/2", status: 200},
+			{method: "GET", host: "example.com", path: "/api/users/999", status: 200},
+			{method: "GET", host: "example.com", path: "/api/posts/42", status: 200},
+		}
+
+		result := aggregateByTuple(entries)
+
+		// /api/users/1, /api/users/2, /api/users/999 should group into /api/users/*
+		// /api/posts/42 should be /api/posts/*
+		assert.Len(t, result, 2)
+
+		// First entry should have highest count (3 user requests)
+		assert.Equal(t, 3, result[0].Count)
+		assert.Equal(t, "/api/users/*", result[0].Path)
+
+		// Second entry should be the posts request
+		assert.Equal(t, 1, result[1].Count)
+		assert.Equal(t, "/api/posts/*", result[1].Path)
+	})
 }
 
 func TestHandleProxySummary(t *testing.T) {
