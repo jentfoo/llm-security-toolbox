@@ -244,6 +244,12 @@ func (s *Server) handleReplaySend(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case req.FlowID != "":
 		inputSource = "flow:" + req.FlowID
+		// Validate flow ID is safe (alphanumeric only)
+		if !ids.IsValid(req.FlowID) {
+			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"invalid flow_id", "flow_id must contain only alphanumeric characters")
+			return
+		}
 		// Try proxy flowStore first, then crawler backend
 		if entry, ok := s.flowStore.Lookup(req.FlowID); ok {
 			proxyEntries, err := s.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)

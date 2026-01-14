@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/service/ids"
 )
 
 // FlowGetRequest is the request for POST /flow/get.
@@ -49,6 +51,11 @@ func (s *Server) handleFlowGet(w http.ResponseWriter, r *http.Request) {
 
 	if req.FlowID == "" {
 		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "flow_id is required", "")
+		return
+	}
+	if !ids.IsValid(req.FlowID) {
+		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"invalid flow_id", "flow_id must contain only alphanumeric characters")
 		return
 	}
 
@@ -158,6 +165,11 @@ func (s *Server) handleFlowExport(w http.ResponseWriter, r *http.Request) {
 
 	if req.FlowID == "" {
 		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "flow_id is required", "")
+		return
+	}
+	if !ids.IsValid(req.FlowID) {
+		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"invalid flow_id", "flow_id must contain only alphanumeric characters")
 		return
 	}
 

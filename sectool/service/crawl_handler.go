@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/jentfoo/llm-security-toolbox/sectool/service/ids"
 )
 
 // =============================================================================
@@ -203,6 +205,15 @@ func (s *Server) handleCrawlCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate seed flow IDs (alphanumeric only)
+	for _, f := range req.SeedFlows {
+		if !ids.IsValid(f) {
+			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"invalid seed_flow", "seed_flows must contain only alphanumeric characters")
+			return
+		}
+	}
+
 	// Build seeds
 	seeds := make([]CrawlSeed, 0, len(req.SeedURLs)+len(req.SeedFlows))
 	for _, u := range req.SeedURLs {
@@ -277,6 +288,15 @@ func (s *Server) handleCrawlSeed(w http.ResponseWriter, r *http.Request) {
 	if req.SessionID == "" {
 		s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "session_id is required", "")
 		return
+	}
+
+	// Validate seed flow IDs (alphanumeric only)
+	for _, f := range req.SeedFlows {
+		if !ids.IsValid(f) {
+			s.writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"invalid seed_flow", "seed_flows must contain only alphanumeric characters")
+			return
+		}
 	}
 
 	seeds := make([]CrawlSeed, 0, len(req.SeedURLs)+len(req.SeedFlows))
