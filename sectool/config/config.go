@@ -41,6 +41,7 @@ type CrawlerConfig struct {
 	MaxRequests          int      `json:"max_requests,omitempty"`
 	ExtractForms         *bool    `json:"extract_forms,omitempty"`
 	SubmitForms          *bool    `json:"submit_forms,omitempty"`
+	Recon                *bool    `json:"recon,omitempty"`
 }
 
 // DefaultConfig returns a new Config with default values.
@@ -67,6 +68,7 @@ func DefaultConfig() *Config {
 			MaxRequests:  1000,
 			ExtractForms: &t,
 			SubmitForms:  &f,
+			Recon:        &f,
 		},
 	}
 }

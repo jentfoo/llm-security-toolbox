@@ -6,6 +6,7 @@ require (
 	github.com/agnivade/levenshtein v1.2.1
 	github.com/go-analyze/bulk v0.1.3
 	github.com/go-harden/interactsh-lite v0.0.1
+	github.com/go-harden/scout v0.0.1
 	github.com/gocolly/colly/v2 v2.3.0
 	github.com/mark3labs/mcp-go v0.43.2
 	github.com/spf13/pflag v1.0.10
@@ -40,6 +41,7 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect

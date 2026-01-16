@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-analyze/bulk"
+	"github.com/go-harden/scout"
 	"github.com/gocolly/colly/v2"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/config"
@@ -58,6 +59,7 @@ type crawlSession struct {
 	startedAt time.Time
 
 	mu              sync.RWMutex
+	reconWg         sync.WaitGroup        // Tracks background recon goroutines
 	flowsByID       map[string]*CrawlFlow // by flow ID for lookup
 	flowsOrdered    []*CrawlFlow          // ordered by discovery time
 	forms           []DiscoveredForm
@@ -71,6 +73,12 @@ type crawlSession struct {
 	// seedHeaders from resolved seed flows (auth cookies, tokens, etc.)
 	// Applied to all requests; can be extended via AddSeeds
 	seedHeaders map[string]string
+
+	// reconnedDomains tracks domains already expanded via scout (to avoid duplicate recon)
+	reconnedDomains map[string]bool
+
+	// allowedDomains for domain validation of discovered URLs
+	allowedDomains []string
 
 	// Parent URL tracking for FoundOn field
 	parentURLs sync.Map // url -> parent_url
@@ -247,6 +255,8 @@ func (b *CollyBackend) CreateSession(ctx context.Context, opts CrawlOptions) (*C
 		urlsSeen:          make(map[string]bool),
 		lastActivity:      time.Now(),
 		seedHeaders:       seedHeaders,
+		reconnedDomains:   make(map[string]bool),
+		allowedDomains:    allowedDomains,
 		disallowedRegexes: disallowedRegexes,
 		allowedRegexes:    allowedRegexes,
 		ctx:               sessionCtx,
@@ -521,6 +531,19 @@ func (b *CollyBackend) CreateSession(ctx context.Context, opts CrawlOptions) (*C
 
 	log.Printf("crawler: created session %s (label=%q) with %d domains", sessionID, opts.Label, len(allowedDomains))
 
+	// Start recon in background if enabled
+	var recon bool
+	if b.config.Recon != nil {
+		recon = *b.config.Recon
+	}
+	if recon && len(allowedDomains) > 0 {
+		sess.reconWg.Add(1)
+		go func() {
+			defer sess.reconWg.Done()
+			b.runReconForSession(sessionCtx, sess, allowedDomains)
+		}()
+	}
+
 	// Start crawling seeds in background
 	go func() {
 		for _, seedURL := range seedURLs {
@@ -530,7 +553,10 @@ func (b *CollyBackend) CreateSession(ctx context.Context, opts CrawlOptions) (*C
 			_ = c.Visit(seedURL)
 		}
 
-		// Wait for completion
+		// Wait for recon to finish discovering URLs
+		sess.reconWg.Wait()
+
+		// Wait for all URLs to be crawled
 		c.Wait()
 
 		sess.mu.Lock()
@@ -559,7 +585,7 @@ func (b *CollyBackend) AddSeeds(ctx context.Context, sessionID string, seeds []C
 		return fmt.Errorf("session %s is not running (state: %s); create a new session instead", sessionID, state)
 	}
 
-	_, seedURLs, newHeaders, err := b.resolveSeeds(ctx, seeds, nil)
+	newDomains, seedURLs, newHeaders, err := b.resolveSeeds(ctx, seeds, nil)
 	if err != nil {
 		return err
 	}
@@ -576,6 +602,19 @@ func (b *CollyBackend) AddSeeds(ctx context.Context, sessionID string, seeds []C
 			}
 		}
 		sess.mu.Unlock()
+	}
+
+	// Start recon for new domains if enabled
+	var recon bool
+	if b.config.Recon != nil {
+		recon = *b.config.Recon
+	}
+	if recon && len(newDomains) > 0 {
+		sess.reconWg.Add(1)
+		go func() {
+			defer sess.reconWg.Done()
+			b.runReconForSession(sess.ctx, sess, newDomains)
+		}()
 	}
 
 	for _, seedURL := range seedURLs {
@@ -955,6 +994,89 @@ func (b *CollyBackend) resolveSeeds(ctx context.Context, seeds []CrawlSeed, expl
 	return bulk.MapKeysSlice(domainSet), seedURLs, seedHeaders, nil
 }
 
+// runReconForSession discovers additional URLs via scout and adds them to the running session
+func (b *CollyBackend) runReconForSession(ctx context.Context, sess *crawlSession, domains []string) {
+	// Check session state before starting
+	sess.mu.RLock()
+	state := sess.info.State
+	includeSubdomains := *b.config.IncludeSubdomains && sess.opts.IncludeSubdomains
+	allowedDomains := sess.allowedDomains
+	sess.mu.RUnlock()
+
+	if state != crawlStateRunning {
+		return
+	}
+
+	// Filter domains we haven't reconned yet (with lock)
+	toRecon := make([]string, 0, len(domains))
+	sess.mu.Lock()
+	for _, d := range domains {
+		if !sess.reconnedDomains[d] {
+			toRecon = append(toRecon, d)
+			sess.reconnedDomains[d] = true
+		}
+	}
+	sess.mu.Unlock()
+
+	if len(toRecon) == 0 {
+		return
+	}
+
+	scoutOpts := []scout.Option{
+		scout.WithTimeout(20 * time.Second),
+	}
+
+	// Track stats for logging
+	var urlsAdded, domainsWithResults int
+	domainsAttempted := len(toRecon)
+
+	for _, domain := range toRecon {
+		var domainHadResults bool
+		for url, err := range scout.URLs(ctx, domain, scoutOpts...) {
+			// Check context and session state between results to exit quick
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			sess.mu.RLock()
+			state := sess.info.State
+			sess.mu.RUnlock()
+			if state != crawlStateRunning {
+				return
+			}
+
+			if err != nil {
+				continue // Silently ignore errors
+			} else if !isDomainAllowed(url, allowedDomains, includeSubdomains) {
+				continue // out of scope
+			}
+
+			// Add to crawler dynamically (same pattern as AddSeeds)
+			sess.mu.Lock()
+			seen := sess.urlsSeen[url]
+			if !seen {
+				sess.urlsSeen[url] = true
+			}
+			sess.mu.Unlock()
+
+			if !seen {
+				_ = sess.collector.Visit(url)
+				urlsAdded++
+				domainHadResults = true
+			}
+		}
+		if domainHadResults {
+			domainsWithResults++
+		}
+	}
+
+	if urlsAdded > 0 {
+		log.Printf("crawler: recon discovered %d URLs from %d/%d domains",
+			urlsAdded, domainsWithResults, domainsAttempted)
+	}
+}
+
 func matchesFlowFilters(flow *CrawlFlow, opts CrawlListOptions) bool {
 	if opts.Host != "" && !matchesGlob(flow.Host, opts.Host) {
 		return false
@@ -1051,6 +1173,25 @@ func buildDomainFilters(domains []string) []*regexp.Regexp {
 		}
 	}
 	return filters
+}
+
+// isDomainAllowed checks if a URL's host is within the allowed domains list.
+// Supports subdomain matching when includeSubdomains is true.
+func isDomainAllowed(urlStr string, allowedDomains []string, includeSubdomains bool) bool {
+	parsed, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+
+	host := parsed.Hostname()
+	for _, domain := range allowedDomains {
+		if host == domain {
+			return true
+		} else if includeSubdomains && strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractForm(e *colly.HTMLElement, sessionID string) DiscoveredForm {
