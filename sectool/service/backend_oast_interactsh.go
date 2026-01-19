@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/go-analyze/bulk"
-	"github.com/go-harden/interactsh-lite/pkg/oobclient"
+	"github.com/go-harden/interactsh-lite/oobclient"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/service/ids"
 )
@@ -176,7 +176,7 @@ func (b *InteractshBackend) pollLoop(sess *oastSession) {
 			Time:      eventTime,
 			Type:      strings.ToLower(interaction.Protocol),
 			SourceIP:  interaction.RemoteAddress,
-			Subdomain: interaction.FullID,
+			Subdomain: interaction.FullId,
 			Details:   details,
 		}
 		sess.events = append(sess.events, event)
