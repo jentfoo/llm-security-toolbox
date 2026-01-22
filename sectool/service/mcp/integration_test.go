@@ -12,13 +12,19 @@ import (
 )
 
 // Integration tests for Burp MCP client.
-// These tests will skip automatically if Burp is not available.
+// These tests validate low-level MCP protocol communication with Burp Suite.
+// For service-level integration tests, see sectool/service/integration_test.go.
+//
+// Skip automatically if Burp is not available or if running with -short flag.
 
 func connectOrSkip(t *testing.T) *BurpClient {
 	t.Helper()
 
-	// Acquire exclusive lock to prevent concurrent MCP connections across packages
-	_ = testutil.AcquireBurpLock(t)
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	testutil.AcquireBurpLock(t)
 
 	client := New(config.DefaultBurpMCPURL)
 	if err := client.Connect(t.Context()); err != nil {
@@ -254,7 +260,11 @@ func TestBurpSendHTTP1Request_POST(t *testing.T) {
 }
 
 func TestBurpCloseAndReconnect(t *testing.T) {
-	_ = testutil.AcquireBurpLock(t)
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	testutil.AcquireBurpLock(t)
 
 	client := New(config.DefaultBurpMCPURL)
 	if err := client.Connect(t.Context()); err != nil {
@@ -475,6 +485,8 @@ func TestBurpGetWSMatchReplaceRules(t *testing.T) {
 }
 
 func TestBurpSetMatchReplaceRules(t *testing.T) {
+	t.Skip("tests only work if burp allows config edits")
+
 	t.Run("add_remove", func(t *testing.T) {
 		ctx := t.Context()
 		client := connectOrSkip(t)

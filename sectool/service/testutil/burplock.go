@@ -9,17 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// BurpLock provides a file-based lock to serialize access to Burp MCP
-// across test packages. This prevents concurrent MCP connections which
-// can cause SSE response mix-ups.
-type BurpLock struct {
-	file *os.File
-}
-
 // AcquireBurpLock acquires an exclusive lock on Burp MCP.
 // The lock is automatically released when the test completes.
 // If the lock cannot be acquired within 60 seconds, the test fails.
-func AcquireBurpLock(t *testing.T) *BurpLock {
+func AcquireBurpLock(t *testing.T) {
 	t.Helper()
 
 	lockPath := filepath.Join(os.TempDir(), "sectool-burp-test.lock")
@@ -45,11 +38,8 @@ func AcquireBurpLock(t *testing.T) *BurpLock {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	lock := &BurpLock{file: file}
 	t.Cleanup(func() {
 		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
 		_ = file.Close()
 	})
-
-	return lock
 }
