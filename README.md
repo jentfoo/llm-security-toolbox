@@ -47,7 +47,9 @@ Run sectool as an MCP server for direct tool integration:
 sectool --mcp
 ```
 
-This starts an SSE server on port 9119.
+This starts an MCP server on port 9119 with two endpoints:
+- `/mcp` - Streamable HTTP transport (recommended)
+- `/sse` - SSE transport (legacy, for older clients)
 
 **Workflow modes:** Use `--workflow` to configure how the agent receives testing instructions:
 
@@ -71,14 +73,13 @@ Configure your agent:
 
 **Claude Code:**
 ```bash
-claude mcp add --transport sse sectool http://127.0.0.1:9119/sse
+claude mcp add --transport http sectool http://127.0.0.1:9119/mcp
 ```
 
-**Codex** (`.codex/config.yaml`):
-```yaml
-mcp_servers:
-  - name: sectool
-    url: http://127.0.0.1:9119/sse
+**Codex** (`~/.codex/config.toml`):
+```toml
+[mcp_servers.sectool]
+url = "http://127.0.0.1:9119/mcp"
 ```
 
 MCP mode is more token-efficient and works system-wide across agent sessions.

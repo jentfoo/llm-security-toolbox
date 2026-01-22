@@ -43,8 +43,8 @@ func ParseDaemonFlags(args []string) (DaemonFlags, error) {
 	_ = serviceFlag
 	fs.StringVar(&flags.WorkDir, "workdir", "", "working directory for service state")
 	fs.StringVar(&flags.BurpMCPURL, "burp-mcp-url", flags.BurpMCPURL, "Burp MCP SSE endpoint URL")
-	fs.BoolVar(&flags.MCP, "mcp", false, "enable MCP SSE server")
-	fs.IntVar(&flags.MCPPort, "mcp-port", flags.MCPPort, "MCP SSE server port")
+	fs.BoolVar(&flags.MCP, "mcp", false, "enable MCP server")
+	fs.IntVar(&flags.MCPPort, "mcp-port", flags.MCPPort, "MCP server port")
 	fs.StringVar(&flags.WorkflowMode, "workflow", "", "MCP workflow mode: none, explore, test-report")
 
 	if err := fs.Parse(args); err != nil {
@@ -115,11 +115,14 @@ To start the service with MCP support for Claude Code or Codex integration:
 
   sectool --mcp [--mcp-port PORT] [--workflow MODE]
 
-This starts both the CLI service and an MCP SSE server. Configuration
-instructions for Claude Code and Codex will be printed on startup.
+This starts an MCP server with two endpoints:
+  /mcp - Streamable HTTP transport (recommended)
+  /sse - SSE transport (legacy)
+
+Configuration instructions for Claude Code and Codex will be printed on startup.
 
 Options:
-  --mcp                  Enable MCP SSE server
+  --mcp                  Enable MCP server
   --mcp-port PORT        MCP server port (default: 9119)
   --workflow MODE        Set workflow mode (requires --mcp):
                            (default)     Require workflow tool call first

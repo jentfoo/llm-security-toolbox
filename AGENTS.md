@@ -38,7 +38,7 @@ make lint           # Run golangci-lint and go vet
 - `sectool/service/crawl_handler.go` - Handles /crawl/* endpoints
 - `sectool/service/flow_handler.go` - Handles unified /flow/get and /flow/export
 - `sectool/service/backend_crawler.go` - Colly-based crawler implementation
-- `sectool/service/mcp_server.go` - MCP SSE server exposing tools for agent integration
+- `sectool/service/mcp_server.go` - MCP server exposing tools for agent integration (Streamable HTTP + SSE)
 - `sectool/service/httputil.go` - HTTP parsing utilities
 - `sectool/service/bundle.go` - Request bundle file operations
 - `sectool/service/mcp/burp.go` - SSE-based Burp Suite MCP client
@@ -185,14 +185,16 @@ Sectool provides two integration modes for agents:
 - Best for: file-based workflows, large request editing, parallel human+agent testing
 
 **MCP Mode** (MCP API):
-- System-wide foreground service with SSE transport
+- System-wide foreground service with dual transport support
+- `/mcp` endpoint for Streamable HTTP (recommended)
+- `/sse` endpoint for legacy SSE clients
 - Direct tool calls, no file system interaction required
 - Shared proxy history across multiple agent sessions
 - Best for: token efficiency, common operations, multi-agent scenarios
 
 Start MCP mode:
 ```bash
-sectool --mcp                    # SSE server on port 9119
+sectool --mcp                    # MCP server on port 9119
 sectool --mcp --mcp-port 8080    # Custom port
 ```
 

@@ -26,10 +26,12 @@ import (
 
 // mcpServer wraps the MCP server and its dependencies.
 type mcpServer struct {
-	server    *server.MCPServer
-	sseServer *server.SSEServer
-	listener  net.Listener
-	service   *Server
+	server           *server.MCPServer
+	sseServer        *server.SSEServer
+	streamableServer *server.StreamableHTTPServer
+	httpServer       *http.Server
+	listener         net.Listener
+	service          *Server
 
 	// workflowMode controls workflow behavior:
 	// ""            - workflow tool required before other tools work
@@ -77,13 +79,26 @@ func (m *mcpServer) Start(port int) error {
 	}
 	m.listener = listener
 
+	// SSE server for legacy clients
 	m.sseServer = server.NewSSEServer(m.server,
 		server.WithBaseURL("http://"+addr),
 	)
 
+	// Streamable HTTP server for modern clients
+	m.streamableServer = server.NewStreamableHTTPServer(m.server,
+		server.WithStateLess(true),
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", m.streamableServer)
+	mux.Handle("/sse", m.sseServer)
+	mux.Handle("/sse/", m.sseServer)
+
+	m.httpServer = &http.Server{Handler: mux}
+
 	go func() {
-		if err := http.Serve(listener, m.sseServer); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("MCP SSE server error: %v", err)
+		if err := m.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("MCP server error: %v", err)
 		}
 	}()
 
@@ -99,10 +114,23 @@ func (m *mcpServer) Addr() string {
 
 // Close stops the MCP server.
 func (m *mcpServer) Close(ctx context.Context) error {
-	if m.sseServer != nil {
-		return m.sseServer.Shutdown(ctx)
+	var errs []error
+	if m.httpServer != nil {
+		if err := m.httpServer.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	if m.sseServer != nil {
+		if err := m.sseServer.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if m.streamableServer != nil {
+		if err := m.streamableServer.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // registerTools registers MCP tools based on workflow mode.

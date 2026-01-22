@@ -24,7 +24,6 @@ func setupMCPServer(t *testing.T) (*Server, *client.Client, func()) {
 	// Acquire exclusive lock to prevent concurrent MCP connections
 	_ = testutil.AcquireBurpLock(t)
 
-	// Verify Burp is available
 	burpClient := connectBurpOrSkipForMCP(t)
 	_ = burpClient.Close()
 
@@ -324,6 +323,8 @@ func TestMCP_ProxyGetValidation(t *testing.T) {
 // =============================================================================
 
 func TestMCP_ProxyRulesCRUD(t *testing.T) {
+	t.Skip("only functional with config edits enabled")
+
 	_, mcpClient, cleanup := setupMCPServer(t)
 	defer cleanup()
 
@@ -391,7 +392,7 @@ func TestMCP_ProxyRulesCRUD(t *testing.T) {
 		result := callTool(t, mcpClient, "proxy_rule_delete", map[string]interface{}{
 			"rule_id": createdRuleID,
 		})
-		assert.False(t, result.IsError, "delete should succeed")
+		assert.False(t, result.IsError)
 
 		// Verify deleted
 		listResult := callTool(t, mcpClient, "proxy_rule_list", nil)

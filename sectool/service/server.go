@@ -162,7 +162,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if err := s.mcpServer.Start(s.mcpPort); err != nil {
 			return fmt.Errorf("failed to start MCP server: %w", err)
 		}
-		log.Printf("MCP SSE server listening on http://%s/sse", s.mcpServer.Addr())
+		log.Printf("MCP server listening on http://%s/mcp", s.mcpServer.Addr())
 		s.printMCPConfig()
 	}
 
@@ -469,26 +469,22 @@ func (s *Server) connectBurpMCP(ctx context.Context) error {
 // printMCPConfig outputs MCP configuration instructions to stderr.
 func (s *Server) printMCPConfig() {
 	addr := s.mcpServer.Addr()
+	mcpURL := fmt.Sprintf("http://%s/mcp", addr)
 	sseURL := fmt.Sprintf("http://%s/sse", addr)
 
 	_, _ = fmt.Fprintln(os.Stderr, "")
 	_, _ = fmt.Fprintln(os.Stderr, "================================================================================")
-	_, _ = fmt.Fprintf(os.Stderr, "MCP SSE Endpoint: %s\n", sseURL)
+	_, _ = fmt.Fprintf(os.Stderr, "MCP Endpoint: %s\n", mcpURL)
+	_, _ = fmt.Fprintf(os.Stderr, "SSE Endpoint: %s (legacy)\n", sseURL)
 	_, _ = fmt.Fprintln(os.Stderr, "")
 	_, _ = fmt.Fprintln(os.Stderr, "Claude Code:")
 	_, _ = fmt.Fprintln(os.Stderr, "")
-	_, _ = fmt.Fprintf(os.Stderr, "  claude mcp add sectool --transport sse %s\n", sseURL)
+	_, _ = fmt.Fprintf(os.Stderr, "  claude mcp add --transport http sectool %s\n", mcpURL)
 	_, _ = fmt.Fprintln(os.Stderr, "")
-	_, _ = fmt.Fprintln(os.Stderr, "Add to your Codex MCP configuration:")
+	_, _ = fmt.Fprintln(os.Stderr, "Codex (~/.codex/config.toml):")
 	_, _ = fmt.Fprintln(os.Stderr, "")
-	_, _ = fmt.Fprintln(os.Stderr, "  {")
-	_, _ = fmt.Fprintln(os.Stderr, "    \"mcpServers\": {")
-	_, _ = fmt.Fprintln(os.Stderr, "      \"sectool\": {")
-	_, _ = fmt.Fprintln(os.Stderr, "        \"type\": \"sse\",")
-	_, _ = fmt.Fprintf(os.Stderr, "        \"url\": \"%s\"\n", sseURL)
-	_, _ = fmt.Fprintln(os.Stderr, "      }")
-	_, _ = fmt.Fprintln(os.Stderr, "    }")
-	_, _ = fmt.Fprintln(os.Stderr, "  }")
+	_, _ = fmt.Fprintln(os.Stderr, "  [mcp_servers.sectool]")
+	_, _ = fmt.Fprintf(os.Stderr, "  url = \"%s\"\n", mcpURL)
 	_, _ = fmt.Fprintln(os.Stderr, "")
 	_, _ = fmt.Fprintln(os.Stderr, "================================================================================")
 	_, _ = fmt.Fprintln(os.Stderr, "")
