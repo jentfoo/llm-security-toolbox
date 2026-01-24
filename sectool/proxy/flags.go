@@ -11,9 +11,9 @@ import (
 	"github.com/go-harden/llm-security-toolbox/sectool/cli"
 )
 
-var proxySubcommands = []string{"summary", "list", "export", "rule", "help"} // TODO - "intercept" planned
+var proxySubcommands = []string{"summary", "list", "export", "rule", "help"}
 
-func Parse(args []string) error {
+func Parse(args []string, mcpURL string) error {
 	if len(args) < 1 {
 		printUsage()
 		return errors.New("subcommand required")
@@ -21,15 +21,13 @@ func Parse(args []string) error {
 
 	switch args[0] {
 	case "summary":
-		return parseSummary(args[1:])
+		return parseSummary(args[1:], mcpURL)
 	case "list":
-		return parseList(args[1:])
+		return parseList(args[1:], mcpURL)
 	case "export":
-		return parseExport(args[1:])
-	// case "intercept": // TODO - planned
-	// 	return parseIntercept(args[1:])
+		return parseExport(args[1:], mcpURL)
 	case "rule":
-		return parseRule(args[1:])
+		return parseRule(args[1:], mcpURL)
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
@@ -41,21 +39,7 @@ func Parse(args []string) error {
 func printUsage() {
 	_, _ = fmt.Fprint(os.Stderr, `Usage: sectool proxy <command> [options]
 
-Query and manage proxy history from Burp Suite.
-
-Workflow:
-  1. Browse target with Burp proxy to capture traffic
-  2. Get summary to understand available traffic:
-       sectool proxy summary
-  3. List specific requests to find flow_ids:
-       sectool proxy list --host example.com --limit 20
-  4a. Replay with inline modifications (preferred for most testing):
-       sectool replay send --flow f7k2x --set-json "role=admin"
-       sectool replay send --flow f7k2x --set-header "X-Test: value"
-  4b. Export for complex edits (raw body manipulation, binary data):
-       sectool proxy export f7k2x
-       # edit .sectool/requests/f7k2x/body
-       sectool replay send --bundle .sectool/requests/f7k2x
+Query and manage proxy history.
 
 Run 'sectool replay --help' to see all replay options and modification support.
 
@@ -97,7 +81,7 @@ proxy list [options]
     --status <list>         comma-separated status codes (200,404)
     --contains <text>       search URL and headers
     --contains-body <text>  search request/response body
-    --since <id>            flows after flow_id, or 'last' for new flows
+    --since <id>            flows after flow_id
     --exclude-host <pat>    exclude matching hosts
     --exclude-path <pat>    exclude matching paths
     --limit <n>             maximum number of flows to return
@@ -107,7 +91,7 @@ proxy list [options]
     sectool proxy list --host api.example.com             # flows for host
     sectool proxy list --host "*.example.com" --method POST,PUT
     sectool proxy list --path "/api/*" --status 200,201
-    sectool proxy list --since last --limit 10            # new flows only, at most 10 results
+    sectool proxy list --since f7k2x --limit 10            # flows after specific ID
 
   Output: Markdown table with flow_id, method, host, path, status, size
 
@@ -122,16 +106,15 @@ proxy export <flow_id>
   The bundle_id matches the flow_id for simplicity. Re-exporting the same
   flow overwrites the bundle, restoring it to the original captured state.
 
-  Creates bundle in .sectool/requests/<flow_id>/:
+  Creates bundle in sectool-requests/<flow_id>/:
     request.http       HTTP headers with body placeholder
     body               request body (edit this for modifications)
     request.meta.json  metadata (method, URL, timestamps)
 
   Examples:
     sectool proxy list --host example.com     # find flow_id
-    sectool proxy export f7k2x                # exports to .sectool/requests/f7k2x/
+    sectool proxy export f7k2x                # exports to sectool-requests/f7k2x/
     sectool replay send --bundle f7k2x        # replay the exported bundle
-    sectool proxy export f7k2x                # re-export to restore original state
 
   Output: Bundle path and files created
 
@@ -203,7 +186,7 @@ proxy rule delete <rule_id>
 `)
 }
 
-func parseSummary(args []string) error {
+func parseSummary(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy summary", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -239,10 +222,10 @@ Options:
 		return err
 	}
 
-	return summary(timeout, host, path, method, status, contains, containsBody, excludeHost, excludePath)
+	return summary(mcpURL, timeout, host, path, method, status, contains, containsBody, excludeHost, excludePath)
 }
 
-func parseList(args []string) error {
+func parseList(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy list", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -296,10 +279,10 @@ Options:
 		return errors.New("at least one filter or --limit is required; use 'sectool proxy summary' first to see available traffic")
 	}
 
-	return list(timeout, host, path, method, status, contains, containsBody, since, excludeHost, excludePath, limit, offset)
+	return list(mcpURL, timeout, host, path, method, status, contains, containsBody, since, excludeHost, excludePath, limit, offset)
 }
 
-func parseExport(args []string) error {
+func parseExport(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy export", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -319,7 +302,7 @@ First, find the flow_id using 'sectool proxy list' with filters:
 The bundle_id matches the flow_id for simplicity. Re-exporting the same
 flow overwrites the bundle, restoring it to the original captured state.
 
-Creates a request bundle in .sectool/requests/<flow_id>/ containing:
+Creates a request bundle in sectool-requests/<flow_id>/ containing:
   request.http       HTTP headers (with body placeholder)
   body               Request body (edit directly for modifications)
   request.meta.json  Metadata (method, URL, timestamps)
@@ -342,47 +325,12 @@ Options:
 		return errors.New("flow_id required (get from 'sectool proxy list' with filters)")
 	}
 
-	return export(timeout, fs.Args()[0])
+	return export(mcpURL, timeout, fs.Args()[0])
 }
-
-// TODO - planned intercept feature
-/*
-func parseIntercept(args []string) error {
-	fs := pflag.NewFlagSet("proxy intercept", pflag.ContinueOnError)
-	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
-
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `Usage: sectool proxy intercept <on|off> [options]
-
-Enable/disable proxy intercept mode.
-
-Options:
-`)
-		fs.PrintDefaults()
-	}
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	} else if len(fs.Args()) < 1 {
-		fs.Usage()
-		return errors.New("state required: on or off")
-	}
-
-	state := fs.Args()[0]
-	if state != "on" && state != "off" {
-		return fmt.Errorf("invalid intercept state: %s (expected on or off)", state)
-	}
-
-	return intercept(timeout, state)
-}
-*/
 
 var ruleSubcommands = []string{"list", "add", "update", "delete", "help"}
 
-func parseRule(args []string) error {
+func parseRule(args []string, mcpURL string) error {
 	if len(args) < 1 {
 		printRuleUsage()
 		return errors.New("subcommand required")
@@ -390,13 +338,13 @@ func parseRule(args []string) error {
 
 	switch args[0] {
 	case "list":
-		return parseRuleList(args[1:])
+		return parseRuleList(args[1:], mcpURL)
 	case "add":
-		return parseRuleAdd(args[1:])
+		return parseRuleAdd(args[1:], mcpURL)
 	case "update":
-		return parseRuleUpdate(args[1:])
+		return parseRuleUpdate(args[1:], mcpURL)
 	case "delete":
-		return parseRuleDelete(args[1:])
+		return parseRuleDelete(args[1:], mcpURL)
 	case "help", "--help", "-h":
 		printRuleUsage()
 		return nil
@@ -420,7 +368,7 @@ Use "sectool proxy rule <command> --help" for more information.
 `)
 }
 
-func parseRuleList(args []string) error {
+func parseRuleList(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule list", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -445,10 +393,10 @@ Options:
 		return err
 	}
 
-	return ruleList(timeout, websocket, limit)
+	return ruleList(mcpURL, timeout, websocket, limit)
 }
 
-func parseRuleAdd(args []string) error {
+func parseRuleAdd(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule add", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -506,10 +454,10 @@ Options:
 		}
 	}
 
-	return ruleAdd(timeout, ruleType, match, replace, label, isRegex)
+	return ruleAdd(mcpURL, timeout, ruleType, match, replace, label, isRegex)
 }
 
-func parseRuleUpdate(args []string) error {
+func parseRuleUpdate(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule update", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -565,10 +513,16 @@ Options:
 		}
 	}
 
-	return ruleUpdate(timeout, ruleID, ruleType, match, replace, label, isRegex)
+	// Only pass isRegex if explicitly set by user
+	var isRegexPtr *bool
+	if fs.Changed("regex") {
+		isRegexPtr = &isRegex
+	}
+
+	return ruleUpdate(mcpURL, timeout, ruleID, ruleType, match, replace, label, isRegexPtr)
 }
 
-func parseRuleDelete(args []string) error {
+func parseRuleDelete(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule delete", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -596,5 +550,5 @@ Options:
 		return errors.New("rule_id required")
 	}
 
-	return ruleDelete(timeout, fs.Args()[0])
+	return ruleDelete(mcpURL, timeout, fs.Args()[0])
 }

@@ -67,6 +67,11 @@ func modifyJSONBodyMap(body []byte, setJSON map[string]interface{}, removeJSON [
 		if err != nil {
 			return nil, fmt.Errorf("set_json %q: %w", keyPath, err)
 		}
+		// If value is a string, run through type inference for CLI parity
+		// (e.g., "5" → 5, "true" → true, "{}" → object)
+		if strVal, ok := value.(string); ok {
+			value = inferJSONValue(strVal)
+		}
 		data, err = setValueAtPath(data, segments, value)
 		if err != nil {
 			return nil, fmt.Errorf("set_json %q: %w", keyPath, err)
@@ -74,6 +79,14 @@ func modifyJSONBodyMap(body []byte, setJSON map[string]interface{}, removeJSON [
 	}
 
 	return json.Marshal(data)
+}
+
+// ModifyJSONBodyMap applies JSON modifications to the body using map format.
+// This is the format used by MCP: {"key": value, "nested.key": value}.
+//
+// Exported for CLI parity when sending requests from bundles/files.
+func ModifyJSONBodyMap(body []byte, setJSON map[string]interface{}, removeJSON []string) ([]byte, error) {
+	return modifyJSONBodyMap(body, setJSON, removeJSON)
 }
 
 // inferJSONValue infers the JSON type from a string value.

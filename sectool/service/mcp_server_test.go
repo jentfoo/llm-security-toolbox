@@ -22,12 +22,9 @@ func setupMCPServerWithMock(t *testing.T) (*Server, *client.Client, *TestMCPServ
 	t.Helper()
 
 	mockMCP := NewTestMCPServer(t)
-	workDir := t.TempDir()
 
-	srv, err := NewServer(DaemonFlags{
-		WorkDir:      workDir,
+	srv, err := NewServer(MCPServerFlags{
 		BurpMCPURL:   mockMCP.URL(),
-		MCP:          true,
 		MCPPort:      0, // Let OS pick a port
 		WorkflowMode: WorkflowModeNone,
 	})
@@ -67,10 +64,6 @@ func setupMCPServerWithMock(t *testing.T) (*Server, *client.Client, *TestMCPServ
 
 	return srv, mcpClient, mockMCP
 }
-
-// =============================================================================
-// Tool List Tests
-// =============================================================================
 
 func TestMCP_ListTools(t *testing.T) {
 	t.Parallel()
@@ -112,10 +105,6 @@ func TestMCP_ListTools(t *testing.T) {
 		assert.Contains(t, toolNames, expected, "tool %s should be registered", expected)
 	}
 }
-
-// =============================================================================
-// Mock-Based Happy Path Tests
-// =============================================================================
 
 func TestMCP_ProxySummaryWithMock(t *testing.T) {
 	t.Parallel()
@@ -613,10 +602,6 @@ func TestMCP_OastValidation(t *testing.T) {
 		assert.Contains(t, testutil.ExtractMCPText(t, result), "not found")
 	})
 }
-
-// =============================================================================
-// Encode Tests
-// =============================================================================
 
 func TestMCP_EncodeURL(t *testing.T) {
 	t.Parallel()

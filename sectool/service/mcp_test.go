@@ -266,13 +266,3 @@ func (t *TestMCPServer) ClearProxyHistory() {
 	defer t.mu.Unlock()
 	t.proxyHistory = nil
 }
-
-// makeProxyEntry is a helper to create a testProxyEntry with standard format.
-func makeProxyEntry(method, path, host string, status int, respBody string) testProxyEntry {
-	request := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: %s\r\n\r\n", method, path, host)
-	response := fmt.Sprintf("HTTP/1.1 %d OK\r\nContent-Type: text/html\r\n\r\n%s", status, respBody)
-	return testProxyEntry{
-		Request:  request,
-		Response: response,
-	}
-}

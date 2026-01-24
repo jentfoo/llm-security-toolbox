@@ -507,7 +507,7 @@ func (b *BurpBackend) AddRule(ctx context.Context, input ProxyRuleInput) (*RuleE
 		StringMatch:   input.Match,
 		StringReplace: input.Replace,
 	}
-	if input.IsRegex {
+	if input.IsRegex != nil && *input.IsRegex {
 		newRule.Category = mcp.RuleCategoryRegex
 	}
 
@@ -520,7 +520,7 @@ func (b *BurpBackend) AddRule(ctx context.Context, input ProxyRuleInput) (*RuleE
 		RuleID:  id,
 		Label:   input.Label,
 		Type:    input.Type,
-		IsRegex: input.IsRegex,
+		IsRegex: newRule.Category == mcp.RuleCategoryRegex,
 		Match:   input.Match,
 		Replace: input.Replace,
 	}, nil
@@ -580,10 +580,13 @@ func (b *BurpBackend) updateRuleInSet(ctx context.Context, websocket bool, rules
 	rules[idx].RuleType = ruleType
 	rules[idx].StringMatch = input.Match
 	rules[idx].StringReplace = input.Replace
-	if input.IsRegex {
-		rules[idx].Category = mcp.RuleCategoryRegex
-	} else {
-		rules[idx].Category = mcp.RuleCategoryLiteral
+	// Only change category if IsRegex was explicitly provided
+	if input.IsRegex != nil {
+		if *input.IsRegex {
+			rules[idx].Category = mcp.RuleCategoryRegex
+		} else {
+			rules[idx].Category = mcp.RuleCategoryLiteral
+		}
 	}
 
 	if err := b.setAllRules(ctx, websocket, rules); err != nil {
@@ -594,7 +597,7 @@ func (b *BurpBackend) updateRuleInSet(ctx context.Context, websocket bool, rules
 		RuleID:  id,
 		Label:   label,
 		Type:    input.Type,
-		IsRegex: input.IsRegex,
+		IsRegex: rules[idx].Category == mcp.RuleCategoryRegex,
 		Match:   input.Match,
 		Replace: input.Replace,
 	}, nil

@@ -8,17 +8,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-harden/llm-security-toolbox/sectool/service"
+	"github.com/go-harden/llm-security-toolbox/sectool/bundle"
+	"github.com/go-harden/llm-security-toolbox/sectool/cliutil"
+	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
 )
 
-func create(timeout time.Duration, urls, flows, domains, headers []string, label string, maxDepth, maxRequests int, delay time.Duration, parallelism int, includeSubdomains, submitForms, ignoreRobots bool) error {
+func create(mcpURL string, timeout time.Duration, urls, flows, domains []string, label string, maxDepth, maxRequests int, delay time.Duration, parallelism int, includeSubdomains, submitForms, ignoreRobots bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
 	var includeSubdomainsPtr *bool
 	if !includeSubdomains {
@@ -30,25 +33,11 @@ func create(timeout time.Duration, urls, flows, domains, headers []string, label
 		delayStr = delay.String()
 	}
 
-	// Convert headers slice to map
-	var headersMap map[string]string
-	if len(headers) > 0 {
-		headersMap = make(map[string]string)
-		for _, h := range headers {
-			if idx := strings.Index(h, ":"); idx > 0 {
-				name := strings.TrimSpace(h[:idx])
-				value := strings.TrimSpace(h[idx+1:])
-				headersMap[name] = value
-			}
-		}
-	}
-
-	resp, err := client.CrawlCreate(ctx, &service.CrawlCreateRequest{
+	resp, err := client.CrawlCreate(ctx, mcpclient.CrawlCreateOpts{
 		Label:             label,
-		SeedURLs:          urls,
-		SeedFlows:         flows,
-		Domains:           domains,
-		Headers:           headersMap,
+		SeedURLs:          strings.Join(urls, ","),
+		SeedFlows:         strings.Join(flows, ","),
+		Domains:           strings.Join(domains, ","),
 		MaxDepth:          maxDepth,
 		MaxRequests:       maxRequests,
 		Delay:             delayStr,
@@ -83,20 +72,17 @@ func create(timeout time.Duration, urls, flows, domains, headers []string, label
 	return nil
 }
 
-func seed(timeout time.Duration, sessionID string, urls, flows []string) error {
+func seed(mcpURL string, timeout time.Duration, sessionID string, urls, flows []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.CrawlSeed(ctx, &service.CrawlSeedRequest{
-		SessionID: sessionID,
-		SeedURLs:  urls,
-		SeedFlows: flows,
-	})
+	resp, err := client.CrawlSeed(ctx, sessionID, strings.Join(urls, ","), strings.Join(flows, ","))
 	if err != nil {
 		return fmt.Errorf("crawl seed failed: %w", err)
 	}
@@ -106,18 +92,17 @@ func seed(timeout time.Duration, sessionID string, urls, flows []string) error {
 	return nil
 }
 
-func status(timeout time.Duration, sessionID string) error {
+func status(mcpURL string, timeout time.Duration, sessionID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.CrawlStatus(ctx, &service.CrawlStatusRequest{
-		SessionID: sessionID,
-	})
+	resp, err := client.CrawlStatus(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("crawl status failed: %w", err)
 	}
@@ -138,18 +123,17 @@ func status(timeout time.Duration, sessionID string) error {
 	return nil
 }
 
-func summary(timeout time.Duration, sessionID string) error {
+func summary(mcpURL string, timeout time.Duration, sessionID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.CrawlSummary(ctx, &service.CrawlSummaryRequest{
-		SessionID: sessionID,
-	})
+	resp, err := client.CrawlSummary(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("crawl summary failed: %w", err)
 	}
@@ -168,24 +152,24 @@ func summary(timeout time.Duration, sessionID string) error {
 	fmt.Println("|------|------|--------|--------|-------|")
 	for _, agg := range resp.Aggregates {
 		fmt.Printf("| %s | %s | %s | %d | %d |\n",
-			escapeMarkdown(agg.Host), escapeMarkdown(agg.Path), agg.Method, agg.Status, agg.Count)
+			cliutil.EscapeMarkdown(agg.Host), cliutil.EscapeMarkdown(agg.Path), agg.Method, agg.Status, agg.Count)
 	}
 	fmt.Printf("\n*%d unique request patterns*\n", len(resp.Aggregates))
 
 	return nil
 }
 
-func list(timeout time.Duration, sessionID, listType, host, path, method, status, contains, containsBody, excludeHost, excludePath, since string, limit, offset int) error {
+func list(mcpURL string, timeout time.Duration, sessionID, listType, host, path, method, status, contains, containsBody, excludeHost, excludePath, since string, limit, offset int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.CrawlList(ctx, &service.CrawlListRequest{
-		SessionID:    sessionID,
+	resp, err := client.CrawlList(ctx, sessionID, mcpclient.CrawlListOpts{
 		Type:         listType,
 		Host:         host,
 		Path:         path,
@@ -213,24 +197,23 @@ func list(timeout time.Duration, sessionID, listType, host, path, method, status
 			if i > 0 {
 				fmt.Println()
 			}
-			fmt.Printf("### Form `%s`\n\n", form.FormID)
-			fmt.Printf("- URL: %s\n", form.URL)
+			fmt.Printf("### Form `%s` on %s\n\n", form.FormID, form.URL)
 			fmt.Printf("- Action: %s\n", form.Action)
 			fmt.Printf("- Method: %s\n", form.Method)
 			if form.HasCSRF {
-				fmt.Println("- CSRF Token: **detected**")
+				fmt.Println("- CSRF Token: detected")
 			}
 			if len(form.Inputs) > 0 {
 				fmt.Println()
 				fmt.Println("| Name | Type | Value | Required |")
 				fmt.Println("|------|------|-------|----------|")
-				for _, inp := range form.Inputs {
+				for _, input := range form.Inputs {
 					required := ""
-					if inp.Required {
+					if input.Required {
 						required = "yes"
 					}
 					fmt.Printf("| %s | %s | %s | %s |\n",
-						escapeMarkdown(inp.Name), inp.Type, escapeMarkdown(inp.Value), required)
+						cliutil.EscapeMarkdown(input.Name), input.Type, cliutil.EscapeMarkdown(input.Value), required)
 				}
 			}
 		}
@@ -249,7 +232,7 @@ func list(timeout time.Duration, sessionID, listType, host, path, method, status
 				statusStr = strconv.Itoa(e.Status)
 			}
 			fmt.Printf("| %s | %s | %s |\n",
-				escapeMarkdown(e.URL), statusStr, escapeMarkdown(e.Error))
+				cliutil.EscapeMarkdown(e.URL), statusStr, cliutil.EscapeMarkdown(e.Error))
 		}
 		fmt.Printf("\n*%d error(s)*\n", len(resp.Errors))
 
@@ -262,31 +245,33 @@ func list(timeout time.Duration, sessionID, listType, host, path, method, status
 		fmt.Println("|---------|--------|------|------|--------|------|")
 		for _, flow := range resp.Flows {
 			fmt.Printf("| %s | %s | %s | %s | %d | %d |\n",
-				flow.FlowID, flow.Method, escapeMarkdown(flow.Host), escapeMarkdown(flow.Path), flow.Status, flow.ResponseLength)
+				flow.FlowID, flow.Method, cliutil.EscapeMarkdown(flow.Host), cliutil.EscapeMarkdown(flow.Path), flow.Status, flow.ResponseLength)
 		}
 		fmt.Printf("\n*%d flow(s)*\n", len(resp.Flows))
-		if len(resp.Flows) == limit {
+		if len(resp.Flows) == limit && limit > 0 {
 			fmt.Printf("\nMore results may be available. Use `--offset %d` to paginate.\n", offset+limit)
 		}
-		fmt.Printf("\nTo list new flows: `sectool crawl list %s --since last`\n", sessionID)
+		if len(resp.Flows) > 0 {
+			lastFlow := resp.Flows[len(resp.Flows)-1]
+			fmt.Printf("\nTo list flows after this: `sectool crawl list %s --since %s`\n", sessionID, lastFlow.FlowID)
+		}
 		fmt.Printf("To export for editing/replay: `sectool crawl export <flow_id>`\n")
 	}
 
 	return nil
 }
 
-func sessions(timeout time.Duration, limit int) error {
+func sessions(mcpURL string, timeout time.Duration, limit int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.CrawlSessions(ctx, &service.CrawlSessionsRequest{
-		Limit: limit,
-	})
+	resp, err := client.CrawlSessions(ctx, limit)
 	if err != nil {
 		return fmt.Errorf("crawl sessions failed: %w", err)
 	}
@@ -298,7 +283,7 @@ func sessions(timeout time.Duration, limit int) error {
 	}
 
 	// Check if any session has a label
-	hasLabels := slices.ContainsFunc(resp.Sessions, func(s service.CrawlSessionAPI) bool {
+	hasLabels := slices.ContainsFunc(resp.Sessions, func(s mcpclient.CrawlSessionEntry) bool {
 		return s.Label != ""
 	})
 
@@ -322,19 +307,17 @@ func sessions(timeout time.Duration, limit int) error {
 	return nil
 }
 
-func stop(timeout time.Duration, sessionID string) error {
+func stop(mcpURL string, timeout time.Duration, sessionID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	_, err = client.CrawlStop(ctx, &service.CrawlStopRequest{
-		SessionID: sessionID,
-	})
-	if err != nil {
+	if err := client.CrawlStop(ctx, sessionID); err != nil {
 		return fmt.Errorf("crawl stop failed: %w", err)
 	}
 
@@ -343,39 +326,50 @@ func stop(timeout time.Duration, sessionID string) error {
 	return nil
 }
 
-func escapeMarkdown(s string) string {
-	s = strings.ReplaceAll(s, "|", "\\|")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\r", "")
-	return s
-}
-
-func export(timeout time.Duration, flowID string) error {
+func export(mcpURL string, timeout time.Duration, flowID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.FlowExport(ctx, &service.FlowExportRequest{
-		FlowID: flowID,
-	})
+	resp, err := client.CrawlGet(ctx, flowID)
 	if err != nil {
-		return fmt.Errorf("export failed: %w", err)
+		return fmt.Errorf("get flow: %w", err)
 	}
 
-	fmt.Printf("## Exported Flow `%s`\n\n", resp.BundleID)
-	fmt.Printf("Bundle: `%s`\n\n", resp.BundlePath)
+	reqBody, err := bundle.DecodeBase64Body(resp.ReqBody)
+	if err != nil {
+		return fmt.Errorf("decode request body: %w", err)
+	}
+
+	respBody, err := bundle.DecodeBase64Body(resp.RespBody)
+	if err != nil {
+		return fmt.Errorf("decode response body: %w", err)
+	}
+
+	bundleDir, err := bundle.Write(flowID,
+		resp.URL, resp.Method, resp.ReqHeaders, reqBody,
+		resp.RespHeaders, respBody)
+	if err != nil {
+		return fmt.Errorf("write bundle: %w", err)
+	}
+
+	fmt.Printf("Exported flow `%s` to `%s/`\n", flowID, bundleDir)
+	fmt.Println()
 	fmt.Println("Files:")
-	for _, f := range resp.Files {
-		fmt.Printf("- %s\n", f)
+	fmt.Println("- request.http - HTTP request headers")
+	fmt.Println("- body - request body (edit this)")
+	fmt.Println("- request.meta.json - metadata")
+	if resp.RespHeaders != "" {
+		fmt.Println("- response.http - response headers")
+		fmt.Println("- response.body - response body")
 	}
 	fmt.Println()
-	fmt.Println("To edit and replay:")
-	fmt.Printf("  1. Edit `%s/request.http` and `%s/body`\n", resp.BundlePath, resp.BundlePath)
-	fmt.Printf("  2. Run: `sectool replay send --bundle %s`\n", resp.BundleID)
+	fmt.Printf("To replay: `sectool replay send --bundle %s`\n", flowID)
 
 	return nil
 }

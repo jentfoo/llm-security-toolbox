@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -136,7 +138,7 @@ func (m *mcpServer) Close(ctx context.Context) error {
 // registerTools registers MCP tools based on workflow mode.
 func (m *mcpServer) registerTools() {
 	switch m.workflowMode {
-	case WorkflowModeNone, WorkflowModeExplore: // workflow requirements disabled or pre-set, all tools available
+	case WorkflowModeNone, WorkflowModeExplore, WorkflowModeCLI: // workflow requirements disabled or pre-set, all tools available
 		m.addProxyTools()
 		m.addReplayTools()
 		m.addOastTools()
@@ -232,6 +234,9 @@ func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest)
 		content = workflowExploreContent
 	case WorkflowModeTestReport:
 		content = workflowTestReportContent
+	case WorkflowModeCLI:
+		m.workflowInitialized.Store(true)
+		return mcp.NewToolResultText("Tools enabled for CLI usage"), nil
 	default:
 		return errorResult("invalid task: use 'explore' or 'test-report'"), nil
 	}
@@ -536,6 +541,8 @@ func (m *mcpServer) handleProxySummary(ctx context.Context, req mcp.CallToolRequ
 		return err, nil
 	}
 
+	log.Printf("proxy/summary: fetching aggregated summary")
+
 	listReq := &ProxyListRequest{
 		Host:         req.GetString("host", ""),
 		Path:         req.GetString("path", ""),
@@ -547,12 +554,19 @@ func (m *mcpServer) handleProxySummary(ctx context.Context, req mcp.CallToolRequ
 		ExcludePath:  req.GetString("exclude_path", ""),
 	}
 
-	resp, err := m.service.processProxySummary(ctx, listReq)
+	allEntries, err := m.service.fetchAllProxyEntries(ctx)
 	if err != nil {
 		return errorResult("failed to fetch proxy summary: " + err.Error()), nil
 	}
 
-	return jsonResult(resp)
+	filtered := applyProxyFilters(allEntries, listReq, m.service.flowStore, m.service.proxyLastOffset.Load())
+
+	agg := aggregateByTuple(filtered, func(e flowEntry) (string, string, string, int) {
+		return e.host, e.path, e.method, e.status
+	})
+	log.Printf("proxy/summary: returning %d aggregates from %d entries", len(agg), len(filtered))
+
+	return jsonResult(&ProxySummaryResponse{Aggregates: agg})
 }
 
 func (m *mcpServer) handleProxyList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -578,12 +592,63 @@ func (m *mcpServer) handleProxyList(ctx context.Context, req mcp.CallToolRequest
 		return errorResult("at least one filter or limit is required; use proxy_summary first to see available traffic"), nil
 	}
 
-	resp, err := m.service.processProxyList(ctx, listReq)
+	log.Printf("proxy/list: fetching with filters (host=%q path=%q method=%q status=%q since=%q offset=%d)",
+		listReq.Host, listReq.Path, listReq.Method, listReq.Status, listReq.Since, listReq.Offset)
+
+	allEntries, err := m.service.fetchAllProxyEntries(ctx)
 	if err != nil {
 		return errorResult("failed to fetch proxy history: " + err.Error()), nil
 	}
 
-	return jsonResult(resp)
+	lastOffset := m.service.proxyLastOffset.Load()
+	filtered := applyProxyFilters(allEntries, listReq, m.service.flowStore, lastOffset)
+
+	// Apply offset after filtering
+	if listReq.Offset > 0 && listReq.Offset < len(filtered) {
+		filtered = filtered[listReq.Offset:]
+	} else if listReq.Offset >= len(filtered) {
+		filtered = nil
+	}
+
+	// Apply limit after offset
+	if listReq.Limit > 0 && len(filtered) > listReq.Limit {
+		filtered = filtered[:listReq.Limit]
+	}
+
+	var maxOffset uint32
+	for _, e := range filtered {
+		if e.offset > maxOffset {
+			maxOffset = e.offset
+		}
+	}
+
+	flows := make([]FlowSummary, 0, len(filtered))
+	for _, entry := range filtered {
+		headerLines := extractHeaderLines(entry.request)
+		_, reqBody := splitHeadersBody([]byte(entry.request))
+		hash := store.ComputeFlowHashSimple(entry.method, entry.host, entry.path, headerLines, reqBody)
+		flowID := m.service.flowStore.Register(entry.offset, hash)
+
+		scheme, port, _ := inferSchemeAndPort(entry.host)
+
+		flows = append(flows, FlowSummary{
+			FlowID:         flowID,
+			Method:         entry.method,
+			Scheme:         scheme,
+			Host:           entry.host,
+			Port:           port,
+			Path:           truncateString(entry.path, maxPathLength),
+			Status:         entry.status,
+			ResponseLength: entry.respLen,
+		})
+	}
+	log.Printf("proxy/list: returning %d flows (fetched %d, filtered %d)", len(flows), len(allEntries), len(allEntries)-len(filtered))
+
+	if maxOffset > lastOffset {
+		m.service.proxyLastOffset.Store(maxOffset)
+	}
+
+	return jsonResult(&ProxyListResponse{Flows: flows})
 }
 
 func (m *mcpServer) handleProxyGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -595,6 +660,9 @@ func (m *mcpServer) handleProxyGet(ctx context.Context, req mcp.CallToolRequest)
 	if flowID == "" {
 		return errorResult("flow_id is required"), nil
 	}
+
+	// Hidden parameter for CLI: returns full base64-encoded bodies instead of previews
+	fullBody := req.GetBool("full_body", false)
 
 	entry, ok := m.service.flowStore.Lookup(flowID)
 	if !ok {
@@ -630,6 +698,16 @@ func (m *mcpServer) handleProxyGet(ctx context.Context, req mcp.CallToolRequest)
 
 	log.Printf("mcp/proxy_get: flow=%s method=%s url=%s", flowID, method, fullURL)
 
+	// Format bodies based on full_body flag
+	var reqBodyStr, respBodyStr string
+	if fullBody {
+		reqBodyStr = base64.StdEncoding.EncodeToString(reqBody)
+		respBodyStr = base64.StdEncoding.EncodeToString(respBody)
+	} else {
+		reqBodyStr = previewBody(reqBody, fullBodyMaxSize)
+		respBodyStr = previewBody(respBody, fullBodyMaxSize)
+	}
+
 	return jsonResult(ProxyGetResponse{
 		FlowID:            flowID,
 		Method:            method,
@@ -637,34 +715,15 @@ func (m *mcpServer) handleProxyGet(ctx context.Context, req mcp.CallToolRequest)
 		ReqHeaders:        string(reqHeaders),
 		ReqHeadersParsed:  parseHeadersToMap(string(reqHeaders)),
 		ReqLine:           &RequestLine{Path: path, Version: version},
-		ReqBody:           previewBody(reqBody, fullBodyMaxSize),
+		ReqBody:           reqBodyStr,
 		ReqSize:           len(reqBody),
 		Status:            respCode,
 		StatusLine:        respStatusLine,
 		RespHeaders:       string(respHeaders),
 		RespHeadersParsed: parseHeadersToMap(string(respHeaders)),
-		RespBody:          previewBody(respBody, fullBodyMaxSize),
+		RespBody:          respBodyStr,
 		RespSize:          len(respBody),
 	})
-}
-
-// ProxyGetResponse is the response for the proxy_get MCP tool.
-// Returns full request and response data for a proxy history entry.
-type ProxyGetResponse struct {
-	FlowID            string              `json:"flow_id"`
-	Method            string              `json:"method"`
-	URL               string              `json:"url"`
-	ReqHeaders        string              `json:"request_headers"`
-	ReqHeadersParsed  map[string][]string `json:"request_headers_parsed,omitempty"`
-	ReqLine           *RequestLine        `json:"request_line,omitempty"`
-	ReqBody           string              `json:"request_body"`
-	ReqSize           int                 `json:"request_size"`
-	Status            int                 `json:"status"`
-	StatusLine        string              `json:"status_line"`
-	RespHeaders       string              `json:"response_headers"`
-	RespHeadersParsed map[string][]string `json:"response_headers_parsed,omitempty"`
-	RespBody          string              `json:"response_body"`
-	RespSize          int                 `json:"response_size"`
 }
 
 func (m *mcpServer) handleProxyRuleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -733,10 +792,11 @@ func (m *mcpServer) handleProxyRuleAdd(ctx context.Context, req mcp.CallToolRequ
 
 	log.Printf("mcp/proxy_rule_add: type=%s label=%q", ruleType, label)
 
+	isRegex := req.GetBool("is_regex", false)
 	rule, err := m.service.httpBackend.AddRule(ctx, ProxyRuleInput{
 		Label:   label,
 		Type:    ruleType,
-		IsRegex: req.GetBool("is_regex", false),
+		IsRegex: &isRegex,
 		Match:   match,
 		Replace: replace,
 	})
@@ -775,10 +835,19 @@ func (m *mcpServer) handleProxyRuleUpdate(ctx context.Context, req mcp.CallToolR
 		return errorResult("match or replace is required"), nil
 	}
 
+	// Only set IsRegex if explicitly provided in request
+	var isRegex *bool
+	if args := req.GetArguments(); args != nil {
+		if _, ok := args["is_regex"]; ok {
+			v := req.GetBool("is_regex", false)
+			isRegex = &v
+		}
+	}
+
 	rule, err := m.service.httpBackend.UpdateRule(ctx, ruleID, ProxyRuleInput{
 		Label:   req.GetString("label", ""),
 		Type:    ruleType,
-		IsRegex: req.GetBool("is_regex", false),
+		IsRegex: isRegex,
 		Match:   match,
 		Replace: replace,
 	})
@@ -962,6 +1031,9 @@ func (m *mcpServer) handleReplayGet(ctx context.Context, req mcp.CallToolRequest
 		return errorResult("replay_id is required"), nil
 	}
 
+	// Hidden parameter for CLI: returns full base64-encoded body instead of preview
+	fullBody := req.GetBool("full_body", false)
+
 	log.Printf("mcp/replay_get: retrieving %s", replayID)
 	result, ok := m.service.requestStore.Get(replayID)
 	if !ok {
@@ -970,6 +1042,14 @@ func (m *mcpServer) handleReplayGet(ctx context.Context, req mcp.CallToolRequest
 
 	respCode, respStatusLine := parseResponseStatus(result.Headers)
 
+	// Format body based on full_body flag
+	var respBodyStr string
+	if fullBody {
+		respBodyStr = base64.StdEncoding.EncodeToString(result.Body)
+	} else {
+		respBodyStr = previewBody(result.Body, fullBodyMaxSize)
+	}
+
 	return jsonResult(ReplayGetResponse{
 		ReplayID:          replayID,
 		Duration:          result.Duration.String(),
@@ -977,7 +1057,7 @@ func (m *mcpServer) handleReplayGet(ctx context.Context, req mcp.CallToolRequest
 		StatusLine:        respStatusLine,
 		RespHeaders:       string(result.Headers),
 		RespHeadersParsed: parseHeadersToMap(string(result.Headers)),
-		RespBody:          previewBody(result.Body, fullBodyMaxSize),
+		RespBody:          respBodyStr,
 		RespSize:          len(result.Body),
 	})
 }
@@ -1017,6 +1097,9 @@ func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolReque
 	}
 
 	rawRequest := buildRawRequest(method, parsedURL, headers, body)
+	if rawRequest == nil {
+		return errorResult("failed to build request: invalid method or URL"), nil
+	}
 	target := targetFromURL(parsedURL)
 	replayID := ids.Generate(ids.DefaultLength)
 
@@ -1180,12 +1263,32 @@ func (m *mcpServer) handleOastList(ctx context.Context, req mcp.CallToolRequest)
 
 	limit := req.GetInt("limit", 0)
 
-	resp, err := m.service.processOastList(ctx, limit)
+	sessions, err := m.service.oastBackend.ListSessions(ctx)
 	if err != nil {
 		return errorResult("failed to list OAST sessions: " + err.Error()), nil
 	}
 
-	return jsonResult(resp)
+	// Sort by creation time descending (most recent first)
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+	})
+
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+
+	apiSessions := make([]OastSession, len(sessions))
+	for i, sess := range sessions {
+		apiSessions[i] = OastSession{
+			OastID:    sess.ID,
+			Domain:    sess.Domain,
+			Label:     sess.Label,
+			CreatedAt: sess.CreatedAt.UTC().Format(time.RFC3339),
+		}
+	}
+
+	log.Printf("oast/list: returning %d active sessions", len(apiSessions))
+	return jsonResult(&OastListResponse{Sessions: apiSessions})
 }
 
 func (m *mcpServer) handleOastDelete(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1284,10 +1387,6 @@ func errorResult(message string) *mcp.CallToolResult {
 	return mcp.NewToolResultError(message)
 }
 
-// =============================================================================
-// Crawler Tools
-// =============================================================================
-
 func (m *mcpServer) crawlCreateTool() mcp.Tool {
 	return mcp.NewTool("crawl_create",
 		mcp.WithDescription(`Start a new web crawl session.
@@ -1308,6 +1407,7 @@ The crawler automatically:
 		mcp.WithString("seed_urls", mcp.Description("Comma-separated list of URLs to start crawling from")),
 		mcp.WithString("seed_flows", mcp.Description("Comma-separated list of proxy flow_ids to use as seeds")),
 		mcp.WithString("domains", mcp.Description("Comma-separated list of additional domains to allow")),
+		mcp.WithObject("headers", mcp.Description("Custom headers as object: {\"Name\": \"Value\"}")),
 		mcp.WithNumber("max_depth", mcp.Description("Maximum crawl depth (0 = unlimited)")),
 		mcp.WithNumber("max_requests", mcp.Description("Maximum total requests (0 = unlimited)")),
 		mcp.WithString("delay", mcp.Description("Delay between requests (e.g., '200ms', '1s')")),
@@ -1531,7 +1631,7 @@ Set type to control what is returned:
 - "forms": Returns discovered forms with field information
 - "errors": Returns errors encountered during crawling
 
-Incremental: since=flow_id or "last" for new entries only.`),
+Incremental: since=flow_id, timestamp (RFC3339 or date), or "last" for new entries only.`),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID or label")),
 		mcp.WithString("type", mcp.Description("What to list: 'urls' (default), 'forms', or 'errors'")),
 		mcp.WithString("host", mcp.Description("Filter by host glob pattern (e.g., '*.example.com')")),
@@ -1542,7 +1642,7 @@ Incremental: since=flow_id or "last" for new entries only.`),
 		mcp.WithString("contains_body", mcp.Description("Search in request/response body")),
 		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob pattern")),
 		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob pattern")),
-		mcp.WithString("since", mcp.Description("Only entries after this flow_id (exclusive), or 'last' for new entries")),
+		mcp.WithString("since", mcp.Description("Only entries after: flow_id, timestamp (2006-01-02T15:04:05Z or 2006-01-02), or 'last'")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of results (default: 100)")),
 		mcp.WithNumber("offset", mcp.Description("Skip first N results for pagination")),
 	)
@@ -1720,6 +1820,9 @@ func (m *mcpServer) handleCrawlGet(ctx context.Context, req mcp.CallToolRequest)
 		return errorResult("flow_id is required"), nil
 	}
 
+	// Hidden parameter for CLI: returns full base64-encoded bodies instead of previews
+	fullBody := req.GetBool("full_body", false)
+
 	log.Printf("mcp/crawl_get: getting flow %s", flowID)
 
 	flow, err := m.service.crawlerBackend.GetFlow(ctx, flowID)
@@ -1735,6 +1838,16 @@ func (m *mcpServer) handleCrawlGet(ctx context.Context, req mcp.CallToolRequest)
 	respHeaders, respBody := splitHeadersBody(flow.Response)
 	statusCode, statusLine := parseResponseStatus(respHeaders)
 
+	// Format bodies based on full_body flag
+	var reqBodyStr, respBodyStr string
+	if fullBody {
+		reqBodyStr = base64.StdEncoding.EncodeToString(reqBody)
+		respBodyStr = base64.StdEncoding.EncodeToString(respBody)
+	} else {
+		reqBodyStr = previewBody(reqBody, fullBodyMaxSize)
+		respBodyStr = previewBody(respBody, fullBodyMaxSize)
+	}
+
 	return jsonResult(CrawlGetResponse{
 		FlowID:            flow.ID,
 		Method:            flow.Method,
@@ -1743,13 +1856,13 @@ func (m *mcpServer) handleCrawlGet(ctx context.Context, req mcp.CallToolRequest)
 		Depth:             flow.Depth,
 		ReqHeaders:        string(reqHeaders),
 		ReqHeadersParsed:  parseHeadersToMap(string(reqHeaders)),
-		ReqBody:           previewBody(reqBody, fullBodyMaxSize),
+		ReqBody:           reqBodyStr,
 		ReqSize:           len(reqBody),
 		Status:            statusCode,
 		StatusLine:        statusLine,
 		RespHeaders:       string(respHeaders),
 		RespHeadersParsed: parseHeadersToMap(string(respHeaders)),
-		RespBody:          previewBody(respBody, fullBodyMaxSize),
+		RespBody:          respBodyStr,
 		RespSize:          len(respBody),
 		Truncated:         flow.Truncated,
 		Duration:          flow.Duration.Round(time.Millisecond).String(),
@@ -1775,4 +1888,132 @@ type CrawlGetResponse struct {
 	RespSize          int                 `json:"response_size"`
 	Truncated         bool                `json:"truncated,omitempty"`
 	Duration          string              `json:"duration"`
+}
+
+// flowEntry holds parsed metadata for a proxy history entry.
+type flowEntry struct {
+	offset   uint32
+	method   string
+	host     string
+	path     string
+	status   int
+	respLen  int
+	request  string
+	response string
+}
+
+// fetchAllProxyEntries retrieves all proxy history entries from the backend.
+func (s *Server) fetchAllProxyEntries(ctx context.Context) ([]flowEntry, error) {
+	var allEntries []flowEntry
+	var offset uint32
+	for {
+		proxyEntries, err := s.httpBackend.GetProxyHistory(ctx, fetchBatchSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		if len(proxyEntries) == 0 {
+			break
+		}
+
+		for i, entry := range proxyEntries {
+			method, host, path := extractRequestMeta(entry.Request)
+			status := readResponseStatusCode([]byte(entry.Response))
+			_, respBody := splitHeadersBody([]byte(entry.Response))
+
+			allEntries = append(allEntries, flowEntry{
+				offset:   offset + uint32(i),
+				method:   method,
+				host:     host,
+				path:     path,
+				status:   status,
+				respLen:  len(respBody),
+				request:  entry.Request,
+				response: entry.Response,
+			})
+		}
+
+		offset += uint32(len(proxyEntries))
+		if len(proxyEntries) < fetchBatchSize {
+			break
+		}
+	}
+	return allEntries, nil
+}
+
+// applyProxyFilters applies filters that can't be expressed in Burp regex.
+func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, flowStore *store.FlowStore, lastOffset uint32) []flowEntry {
+	if !req.HasFilters() {
+		return entries
+	}
+
+	methods := parseCommaSeparated(req.Method)
+	statuses := parseStatusCodes(req.Status)
+
+	var sinceOffset uint32
+	var hasSince bool
+	if req.Since != "" {
+		if req.Since == "last" {
+			sinceOffset = lastOffset
+			hasSince = true
+		} else if entry, ok := flowStore.Lookup(req.Since); ok {
+			sinceOffset = entry.Offset
+			hasSince = true
+		}
+	}
+
+	return bulk.SliceFilter(func(e flowEntry) bool {
+		if hasSince && e.offset <= sinceOffset {
+			return false // Since filter (exclusive - only entries after)
+		} else if len(methods) > 0 && !slices.Contains(methods, e.method) {
+			return false // Method filter
+		} else if len(statuses) > 0 && !slices.Contains(statuses, e.status) {
+			return false // Status filter
+		} else if req.Host != "" && !matchesGlob(e.host, req.Host) {
+			return false // Host filter (if using client-side filtering)
+		} else if req.Path != "" && !matchesGlob(e.path, req.Path) && !matchesGlob(pathWithoutQuery(e.path), req.Path) {
+			return false
+		} else if req.ExcludeHost != "" && matchesGlob(e.host, req.ExcludeHost) {
+			return false // Exclude host
+		} else if req.ExcludePath != "" && matchesGlob(e.path, req.ExcludePath) {
+			return false // Exclude path
+		}
+		if req.Contains != "" {
+			// Search URL and headers only (not body)
+			reqHeaders, _ := splitHeadersBody([]byte(e.request))
+			respHeaders, _ := splitHeadersBody([]byte(e.response))
+			combined := string(reqHeaders) + string(respHeaders)
+			if !strings.Contains(combined, req.Contains) {
+				return false
+			}
+		}
+		if req.ContainsBody != "" {
+			_, reqBody := splitHeadersBody([]byte(e.request))
+			_, respBody := splitHeadersBody([]byte(e.response))
+			combined := string(reqBody) + string(respBody)
+			if !strings.Contains(combined, req.ContainsBody) {
+				return false // Contains body filter
+			}
+		}
+
+		return true
+	}, entries)
+}
+
+var validRuleTypes = map[string]bool{
+	// HTTP types
+	RuleTypeRequestHeader:  true,
+	RuleTypeRequestBody:    true,
+	RuleTypeResponseHeader: true,
+	RuleTypeResponseBody:   true,
+	// WebSocket types
+	"ws:to-server": true,
+	"ws:to-client": true,
+	"ws:both":      true,
+}
+
+func validateRuleTypeAny(t string) error {
+	if !validRuleTypes[t] {
+		return fmt.Errorf("invalid rule type %q", t)
+	}
+	return nil
 }

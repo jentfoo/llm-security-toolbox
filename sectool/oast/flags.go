@@ -13,7 +13,7 @@ import (
 
 var oastSubcommands = []string{"create", "poll", "get", "list", "delete", "help"}
 
-func Parse(args []string) error {
+func Parse(args []string, mcpURL string) error {
 	if len(args) < 1 {
 		printUsage()
 		return errors.New("subcommand required")
@@ -21,15 +21,15 @@ func Parse(args []string) error {
 
 	switch args[0] {
 	case "create":
-		return parseCreate(args[1:])
+		return parseCreate(args[1:], mcpURL)
 	case "poll":
-		return parsePoll(args[1:])
+		return parsePoll(args[1:], mcpURL)
 	case "get":
-		return parseGet(args[1:])
+		return parseGet(args[1:], mcpURL)
 	case "list":
-		return parseList(args[1:])
+		return parseList(args[1:], mcpURL)
 	case "delete":
-		return parseDelete(args[1:])
+		return parseDelete(args[1:], mcpURL)
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
@@ -43,17 +43,6 @@ func printUsage() {
 
 Out-of-band Application Security Testing (OAST) for detecting blind
 vulnerabilities (SSRF, XXE, blind SQLi, command injection, etc).
-
-Workflow:
-  1. Create a session to get a unique domain:
-       sectool oast create
-  2. Use the domain in payloads with subdomains for tagging:
-       curl https://sqli-test.xyz123.oast.fun
-       nslookup xxe-probe.xyz123.oast.fun
-  3. Poll to see interactions:
-       sectool oast poll <oast_id>
-  4. Get full event details:
-       sectool oast get <oast_id> <event_id>
 
 ---
 
@@ -73,14 +62,13 @@ oast poll <oast_id|label|domain> [options]
   Poll for out-of-band interactions (DNS, HTTP, SMTP).
 
   Options:
-    --since <id>       events after event_id, or 'last' for new events
-    --wait <dur>       max wait time for events (default: 2m, max: 2m)
+    --since <id|time>  events after event_id or RFC3339 timestamp
+    --wait <dur>       max wait time for events (default: 2m, max: 20m)
     --limit <n>        maximum number of events to return
 
   Examples:
-    sectool oast poll abc123 --limit 10         # return at most 10 events
-    sectool oast poll abc123 --since last       # only new events
-    sectool oast poll abc123 --wait 30s         # all events, wait up to 30s for events (can be combined with restrictions above)
+    sectool oast poll abc123 --since evt_xyz         # events after specific ID
+    sectool oast poll abc123 --wait 30s              # wait up to 30s for events
 
   Output: Markdown table with event_id, time, type, source_ip, subdomain
 
@@ -117,7 +105,7 @@ oast delete <oast_id|label|domain>
 `)
 }
 
-func parseCreate(args []string) error {
+func parseCreate(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast create", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -145,10 +133,10 @@ Options:
 		label = name
 	}
 
-	return create(timeout, label)
+	return create(mcpURL, timeout, label)
 }
 
-func parsePoll(args []string) error {
+func parsePoll(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast poll", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout, wait time.Duration
@@ -156,7 +144,7 @@ func parsePoll(args []string) error {
 	var limit int
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
-	fs.StringVar(&since, "since", "", "filter events since event_id or 'last'")
+	fs.StringVar(&since, "since", "", "filter events since event_id or timestamp")
 	fs.DurationVar(&wait, "wait", 120*time.Second, "max wait time for events (max 120s)")
 	fs.IntVar(&limit, "limit", 0, "maximum number of events to return")
 	fs.IntVar(&limit, "count", 0, "alias for --limit")
@@ -184,10 +172,10 @@ Options:
 		return errors.New("oast_id required (get from 'sectool oast create' or 'sectool oast list')")
 	}
 
-	return poll(timeout, fs.Args()[0], since, wait, limit)
+	return poll(mcpURL, timeout, fs.Args()[0], since, wait, limit)
 }
 
-func parseGet(args []string) error {
+func parseGet(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast get", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -217,10 +205,10 @@ Options:
 		return errors.New("oast_id and event_id required (get event_id from 'sectool oast poll')")
 	}
 
-	return get(timeout, fs.Args()[0], fs.Args()[1])
+	return get(mcpURL, timeout, fs.Args()[0], fs.Args()[1])
 }
 
-func parseList(args []string) error {
+func parseList(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast list", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -245,10 +233,10 @@ Options:
 		return err
 	}
 
-	return list(timeout, limit)
+	return list(mcpURL, timeout, limit)
 }
 
-func parseDelete(args []string) error {
+func parseDelete(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast delete", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -272,5 +260,5 @@ Options:
 		return errors.New("oast_id required (get from 'sectool oast list')")
 	}
 
-	return del(timeout, fs.Args()[0])
+	return del(mcpURL, timeout, fs.Args()[0])
 }

@@ -18,15 +18,6 @@ func UnknownSubcommandError(prefix, unknown string, validCommands []string) erro
 	return fmt.Errorf("unknown %s subcommand: %s", prefix, unknown)
 }
 
-// UnknownModeError returns an error for an unknown mode with a
-// "did you mean" suggestion if a close match is found.
-func UnknownModeError(prefix, unknown string, validModes []string) error {
-	if best := findClosest(unknown, validModes); best != "" {
-		return fmt.Errorf("unknown %s mode: %s (did you mean %q?)", prefix, unknown, best)
-	}
-	return fmt.Errorf("unknown %s mode: %s", prefix, unknown)
-}
-
 // UnknownCommandError returns an error for an unknown command with a
 // "did you mean" suggestion if a close match is found.
 func UnknownCommandError(unknown string, validCommands []string) error {

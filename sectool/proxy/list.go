@@ -5,19 +5,21 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-harden/llm-security-toolbox/sectool/service"
+	"github.com/go-harden/llm-security-toolbox/sectool/cliutil"
+	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
 )
 
-func summary(timeout time.Duration, host, path, method, status, contains, containsBody, excludeHost, excludePath string) error {
+func summary(mcpURL string, timeout time.Duration, host, path, method, status, contains, containsBody, excludeHost, excludePath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.ProxySummary(ctx, &service.ProxyListRequest{
+	resp, err := client.ProxySummary(ctx, mcpclient.ProxySummaryOpts{
 		Host:         host,
 		Path:         path,
 		Method:       method,
@@ -31,8 +33,8 @@ func summary(timeout time.Duration, host, path, method, status, contains, contai
 		return fmt.Errorf("proxy summary failed: %w", err)
 	}
 
-	if len(resp.Aggregates) > 0 {
-		printAggregateTable(resp.Aggregates)
+	if len(resp.Summary) > 0 {
+		printAggregateTable(resp.Summary)
 	} else {
 		fmt.Println("No matching entries found.")
 	}
@@ -40,16 +42,17 @@ func summary(timeout time.Duration, host, path, method, status, contains, contai
 	return nil
 }
 
-func list(timeout time.Duration, host, path, method, status, contains, containsBody, since, excludeHost, excludePath string, limit, offset int) error {
+func list(mcpURL string, timeout time.Duration, host, path, method, status, contains, containsBody, since, excludeHost, excludePath string, limit, offset int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.ProxyList(ctx, &service.ProxyListRequest{
+	resp, err := client.ProxyList(ctx, mcpclient.ProxyListOpts{
 		Host:         host,
 		Path:         path,
 		Method:       method,
@@ -75,40 +78,31 @@ func list(timeout time.Duration, host, path, method, status, contains, containsB
 	return nil
 }
 
-func printAggregateTable(agg []service.AggregateEntry) {
+func printAggregateTable(agg []mcpclient.SummaryEntry) {
 	fmt.Println("| host | path | method | status | count |")
 	fmt.Println("|------|------|--------|--------|-------|")
 	for _, e := range agg {
 		fmt.Printf("| %s | %s | %s | %d | %d |\n",
-			escapeMarkdown(e.Host),
-			escapeMarkdown(e.Path),
-			e.Method,
-			e.Status,
-			e.Count,
-		)
+			cliutil.EscapeMarkdown(e.Host), cliutil.EscapeMarkdown(e.Path),
+			e.Method, e.Status, e.Count)
 	}
 	fmt.Printf("\n*%d unique request patterns*\n", len(agg))
 }
 
-func printFlowTable(flows []service.FlowSummary) {
+func printFlowTable(flows []mcpclient.FlowEntry) {
 	fmt.Println("| flow_id | method | host | path | status | size |")
 	fmt.Println("|---------|--------|------|------|--------|------|")
 	for _, f := range flows {
 		fmt.Printf("| %s | %s | %s | %s | %d | %d |\n",
-			f.FlowID,
-			f.Method,
-			escapeMarkdown(f.Host),
-			escapeMarkdown(f.Path),
-			f.Status,
-			f.ResponseLength,
-		)
+			f.FlowID, f.Method,
+			cliutil.EscapeMarkdown(f.Host),
+			cliutil.EscapeMarkdown(f.Path),
+			f.Status, f.RespSize)
 	}
 	fmt.Printf("\n*%d flows*\n", len(flows))
 
-	// Show hint for --since last
 	if len(flows) > 0 {
 		lastFlow := flows[len(flows)-1]
-		fmt.Printf("\nTo list new flows: `sectool proxy list --since last`\n")
-		fmt.Printf("Or after specific flow: `sectool proxy list --since %s`\n", lastFlow.FlowID)
+		fmt.Printf("\nTo list flows after this: `sectool proxy list --since %s`\n", lastFlow.FlowID)
 	}
 }

@@ -6,22 +6,26 @@ import (
 	"slices"
 	"time"
 
-	"github.com/go-harden/llm-security-toolbox/sectool/service"
+	"github.com/go-harden/llm-security-toolbox/sectool/cliutil"
+	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
 )
 
-func ruleList(timeout time.Duration, websocket bool, limit int) error {
+func ruleList(mcpURL string, timeout time.Duration, websocket bool, limit int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.RuleList(ctx, &service.RuleListRequest{
-		WebSocket: websocket,
-		Limit:     limit,
-	})
+	typeFilter := "http"
+	if websocket {
+		typeFilter = "websocket"
+	}
+
+	resp, err := client.ProxyRuleList(ctx, typeFilter, limit)
 	if err != nil {
 		return fmt.Errorf("rule list failed: %w", err)
 	}
@@ -39,9 +43,8 @@ func ruleList(timeout time.Duration, websocket bool, limit int) error {
 	return nil
 }
 
-func printRuleTable(rules []service.RuleEntry) {
-	// Check if any rules have labels
-	hasLabels := slices.ContainsFunc(rules, func(r service.RuleEntry) bool {
+func printRuleTable(rules []mcpclient.RuleEntry) {
+	hasLabels := slices.ContainsFunc(rules, func(r mcpclient.RuleEntry) bool {
 		return r.Label != ""
 	})
 
@@ -54,13 +57,9 @@ func printRuleTable(rules []service.RuleEntry) {
 				regex = "yes"
 			}
 			fmt.Printf("| %s | %s | %s | %s | %s | %s |\n",
-				r.RuleID,
-				escapeMarkdown(r.Label),
-				r.Type,
-				regex,
-				escapeMarkdown(truncate(r.Match, 30)),
-				escapeMarkdown(truncate(r.Replace, 30)),
-			)
+				r.RuleID, cliutil.EscapeMarkdown(r.Label), r.Type, regex,
+				cliutil.EscapeMarkdown(truncate(r.Match, 30)),
+				cliutil.EscapeMarkdown(truncate(r.Replace, 30)))
 		}
 	} else {
 		fmt.Println("| rule_id | type | regex | match | replace |")
@@ -71,12 +70,9 @@ func printRuleTable(rules []service.RuleEntry) {
 				regex = "yes"
 			}
 			fmt.Printf("| %s | %s | %s | %s | %s |\n",
-				r.RuleID,
-				r.Type,
-				regex,
-				escapeMarkdown(truncate(r.Match, 30)),
-				escapeMarkdown(truncate(r.Replace, 30)),
-			)
+				r.RuleID, r.Type, regex,
+				cliutil.EscapeMarkdown(truncate(r.Match, 30)),
+				cliutil.EscapeMarkdown(truncate(r.Replace, 30)))
 		}
 	}
 	fmt.Printf("\n*%d rules*\n", len(rules))
@@ -89,16 +85,17 @@ func truncate(s string, max int) string {
 	return s[:max-2] + ".."
 }
 
-func ruleAdd(timeout time.Duration, ruleType, match, replace, label string, isRegex bool) error {
+func ruleAdd(mcpURL string, timeout time.Duration, ruleType, match, replace, label string, isRegex bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.RuleAdd(ctx, &service.RuleAddRequest{
+	resp, err := client.ProxyRuleAdd(ctx, mcpclient.RuleAddOpts{
 		Label:   label,
 		Type:    ruleType,
 		IsRegex: isRegex,
@@ -126,17 +123,17 @@ func ruleAdd(timeout time.Duration, ruleType, match, replace, label string, isRe
 	return nil
 }
 
-func ruleUpdate(timeout time.Duration, ruleID, ruleType, match, replace, label string, isRegex bool) error {
+func ruleUpdate(mcpURL string, timeout time.Duration, ruleID, ruleType, match, replace, label string, isRegex *bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.RuleUpdate(ctx, &service.RuleUpdateRequest{
-		RuleID:  ruleID,
+	resp, err := client.ProxyRuleUpdate(ctx, ruleID, mcpclient.RuleUpdateOpts{
 		Label:   label,
 		Type:    ruleType,
 		IsRegex: isRegex,
@@ -164,18 +161,17 @@ func ruleUpdate(timeout time.Duration, ruleID, ruleType, match, replace, label s
 	return nil
 }
 
-func ruleDelete(timeout time.Duration, ruleID string) error {
+func ruleDelete(mcpURL string, timeout time.Duration, ruleID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	if _, err := client.RuleDelete(ctx, &service.RuleDeleteRequest{
-		RuleID: ruleID,
-	}); err != nil {
+	if err := client.ProxyRuleDelete(ctx, ruleID); err != nil {
 		return fmt.Errorf("rule delete failed: %w", err)
 	}
 

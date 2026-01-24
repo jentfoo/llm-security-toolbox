@@ -314,13 +314,9 @@ func (b *CollyBackend) CreateSession(ctx context.Context, opts CrawlOptions) (*C
 		// Check AllowedPaths filter first (before counting)
 		if len(sess.allowedRegexes) > 0 {
 			path := r.URL.Path
-			var allowed bool
-			for _, re := range sess.allowedRegexes {
-				if re.MatchString(path) {
-					allowed = true
-					break
-				}
-			}
+			allowed := slices.ContainsFunc(sess.allowedRegexes, func(re *regexp.Regexp) bool {
+				return re.MatchString(path)
+			})
 			if !allowed {
 				r.Abort()
 				return
@@ -684,12 +680,19 @@ func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts Cra
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 
-	// Determine start index based on "since" filter
+	// Determine start index and/or timestamp filter based on "since" value
 	var startIdx int
+	var sinceTime time.Time
+	var useSinceTime bool
+
 	if opts.Since != "" {
 		if opts.Since == "last" {
 			// Use the last returned index (exclusive - start after it)
 			startIdx = sess.lastReturnedIdx
+		} else if t, ok := parseSinceTimestamp(opts.Since); ok {
+			// Timestamp filter - will filter by DiscoveredAt
+			sinceTime = t
+			useSinceTime = true
 		} else {
 			// Find flow by ID and start after it
 			for i, flow := range sess.flowsOrdered {
@@ -709,6 +712,10 @@ func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts Cra
 	var filtered []indexedFlow
 	for i := startIdx; i < len(sess.flowsOrdered); i++ {
 		flow := sess.flowsOrdered[i]
+		// Apply timestamp filter if specified (exclusive - only flows after sinceTime)
+		if useSinceTime && !flow.DiscoveredAt.After(sinceTime) {
+			continue
+		}
 		if matchesFlowFilters(flow, opts) {
 			filtered = append(filtered, indexedFlow{flow: flow, idx: i})
 		}
@@ -799,58 +806,6 @@ func (b *CollyBackend) GetFlow(ctx context.Context, flowID string) (*CrawlFlow, 
 
 	flowCopy := *flow
 	return &flowCopy, nil
-}
-
-func (b *CollyBackend) ExportFlow(ctx context.Context, flowID string, bundleDir string) (*ExportResult, error) {
-	flow, err := b.GetFlow(ctx, flowID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse URL for metadata
-	u, err := url.Parse(flow.URL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid flow URL: %w", err)
-	}
-
-	// Split request into headers and body
-	reqHeaders, reqBody := splitHeadersBody(flow.Request)
-
-	// Write bundle
-	meta := &bundleMeta{
-		BundleID:     flowID,
-		SourceFlowID: flowID,
-		CapturedAt:   flow.DiscoveredAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		URL:          flow.URL,
-		Method:       flow.Method,
-		BodyIsUTF8:   true, // Crawler only stores text content types
-		BodySize:     len(reqBody),
-	}
-
-	dir := bundleDir + "/" + flowID
-	if err := writeBundle(dir, reqHeaders, reqBody, meta); err != nil {
-		return nil, fmt.Errorf("failed to write bundle: %w", err)
-	}
-
-	// Also write response
-	respHeaders, respBody := splitHeadersBody(flow.Response)
-	if err := writeResponseToBundle(dir, respHeaders, respBody); err != nil {
-		return nil, fmt.Errorf("failed to write response: %w", err)
-	}
-
-	log.Printf("crawler: exported flow %s to %s (url=%s)", flowID, dir, u.String())
-
-	return &ExportResult{
-		BundleID:   flowID,
-		BundlePath: dir,
-		Files: []string{
-			"request.http",
-			"body",
-			"request.meta.json",
-			"response.http",
-			"response.body",
-		},
-	}, nil
 }
 
 func (b *CollyBackend) StopSession(ctx context.Context, sessionID string) error {
@@ -1263,4 +1218,27 @@ func extractFormData(e *colly.HTMLElement) map[string]string {
 		data[name] = value
 	})
 	return data
+}
+
+// parseSinceTimestamp attempts to parse a string as a timestamp in multiple formats.
+// Returns the parsed time and true if successful, or zero time and false if not a timestamp.
+// Supported formats:
+//   - RFC3339 with timezone: 2006-01-02T15:04:05Z07:00
+//   - RFC3339 without timezone (assumes local): 2006-01-02T15:04:05
+//   - Date only (assumes midnight local): 2006-01-02
+func parseSinceTimestamp(s string) (time.Time, bool) {
+	loc := time.Now().Location()
+	// Try RFC3339 with timezone
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	// Try RFC3339 without timezone (assume local)
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, loc); err == nil {
+		return t, true
+	}
+	// Try date only (midnight local)
+	if t, err := time.ParseInLocation("2006-01-02", s, loc); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }

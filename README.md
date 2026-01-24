@@ -3,13 +3,13 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/go-harden/llm-security-toolbox/blob/main/LICENSE)
 [![Build Status](https://github.com/go-harden/llm-security-toolbox/actions/workflows/tests-main.yml/badge.svg)](https://github.com/go-harden/llm-security-toolbox/actions/workflows/tests-main.yml)
 
-An LLM-first security testing toolkit that enables coding agents to collaborate with you on security testing. Sectool provides two integration modes—MCP API for direct tool calls or CLI with system prompts—letting you brainstorm with an agent, validate security reports together, or have the agent probe vulnerabilities in parallel with your own testing.
+An LLM-first security testing toolkit that enables coding agents to collaborate with you on security testing. Sectool exposes security testing tools via MCP (Model Context Protocol), letting you brainstorm with an agent, validate security reports together, or have the agent probe vulnerabilities in parallel with your own testing.
 
 ## Project Status
 
 Early development, but usable! Current plans:
 
-1. **Evaluate CLI and MCP interfaces** — We suspect both will be retained long-term, but need more testing to confirm.
+1. **Stabilize the MCP interface** — Active iteration based on agent feedback.
 2. **Refactor once the agent interface is well-designed** — The current code design is an artifact of prototype iterations.
 3. **Pre-compiled binaries after stabilization** — Until then, `make build` is required to use this project.
 
@@ -37,14 +37,12 @@ Start Burp and ensure the MCP server is running on `http://127.0.0.1:9876/sse`. 
 
 > Note: Burp MCP is currently required. A built-in proxy is planned for future releases ([#3](https://github.com/go-harden/llm-security-toolbox/issues/3)).
 
-### 3. Choose your integration mode
+### 3. Start the MCP server
 
-#### Option A: MCP Mode (Recommended)
-
-Run sectool as an MCP server for direct tool integration:
+Run sectool as an MCP server:
 
 ```bash
-sectool --mcp
+sectool mcp
 ```
 
 This starts an MCP server on port 9119 with two endpoints:
@@ -54,10 +52,10 @@ This starts an MCP server on port 9119 with two endpoints:
 **Workflow modes:** Use `--workflow` to configure how the agent receives testing instructions:
 
 ```bash
-sectool --mcp                        # Default: agent selects task type via workflow tool
-sectool --mcp --workflow explore     # Pre-set exploration mode (token-optimized)
-sectool --mcp --workflow test-report # Pre-set validation mode (token-optimized)
-sectool --mcp --workflow none        # No workflow instructions
+sectool mcp                        # Default: agent selects task type via workflow tool
+sectool mcp --workflow explore     # Pre-set exploration mode (token-optimized)
+sectool mcp --workflow test-report # Pre-set validation mode (token-optimized)
+sectool mcp --workflow none        # No workflow instructions
 ```
 
 | Mode | Description |
@@ -69,7 +67,7 @@ sectool --mcp --workflow none        # No workflow instructions
 
 Agents generally want to do everything for you (sometimes poorly), or step you through a process without adding much value. Our workflow instructions guide a more collaborative approach that strikes a balance between these extremes, while focusing instruction tokens on specific task goals. If the default behavior doesn't work for you, try `--workflow none` and [open an issue](https://github.com/go-harden/llm-security-toolbox/issues) describing your experience or recommendations.
 
-Configure your agent:
+### 4. Configure your agent
 
 **Claude Code:**
 ```bash
@@ -82,37 +80,46 @@ claude mcp add --transport http sectool http://127.0.0.1:9119/mcp
 url = "http://127.0.0.1:9119/mcp"
 ```
 
-MCP mode is more token-efficient and works system-wide across agent sessions.
-
-#### Option B: CLI Mode with System Prompts
-
-Initialize a working directory with agent-specific system prompts:
-
-```bash
-sectool init test-report   # Validate a known security report
-sectool init explore       # Broader exploratory security testing
-```
-
-Start your agent with the generated prompt:
-
-```bash
-claude --system-prompt-file .sectool/AGENT-explore.md
-```
-
-CLI mode is useful when:
-- You want to invoke the CLI alongside the agent
-- Editing large requests or performing complex request modifications
-- Keeping the agent session isolated to a working directory
-
-### 4. Collaborate on testing
+### 5. Collaborate on testing
 
 Work with the agent to build a test plan and execute it together. The agent can query proxy history, replay modified requests, and test for out-of-band interactions while you handle browser-based actions like authentication.
+
+## CLI Usage
+
+The CLI provides a human-friendly interface to the same MCP tools that agents use. CLI commands require the MCP server to be running (`sectool mcp`).
+
+```bash
+# Proxy history
+sectool proxy summary              # Aggregated traffic summary
+sectool proxy list --host example  # List flows matching filter
+sectool proxy export <flow_id>     # Export flow to ./sectool-requests/<flow_id>/
+
+# Crawling
+sectool crawl create --url https://example.com
+sectool crawl status <session_id>
+sectool crawl list <session_id>
+
+# Replay requests
+sectool replay send --flow <flow_id> --add-header "X-Test: value"
+sectool replay get <replay_id>
+
+# Out-of-band testing
+sectool oast create
+sectool oast poll <oast_id>
+
+# Encoding utilities
+sectool encode url "hello world"
+sectool encode base64 "test"
+```
+
+Use `sectool <command> --help` for detailed options.
 
 ## Key Features
 
 - **Proxy history access** - Query and filter HTTP traffic captured through Burp Suite
 - **Proxy rules** - Add match/replace rules to modify requests and responses in transit
 - **Request export and replay** - Export requests to disk, edit them, and replay with modifications
+- **Web crawling** - Discover application structure, forms, and endpoints
 - **OAST testing** - Create out-of-band domains and poll for DNS/HTTP/SMTP interactions via Interactsh
 - **Encoding utilities** - URL, Base64, and HTML entity encoding/decoding
 - **LLM-optimized** - Interactions optimized for agent usage

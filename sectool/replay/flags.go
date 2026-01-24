@@ -13,7 +13,7 @@ import (
 
 var replaySubcommands = []string{"send", "get", "create", "help"}
 
-func Parse(args []string) error {
+func Parse(args []string, mcpURL string) error {
 	if len(args) < 1 {
 		printUsage()
 		return errors.New("subcommand required")
@@ -21,11 +21,11 @@ func Parse(args []string) error {
 
 	switch args[0] {
 	case "send":
-		return parseSend(args[1:])
+		return parseSend(args[1:], mcpURL)
 	case "get":
-		return parseGet(args[1:])
+		return parseGet(args[1:], mcpURL)
 	case "create":
-		return parseCreate(args[1:])
+		return parseCreate(args[1:], mcpURL)
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
@@ -37,17 +37,7 @@ func Parse(args []string) error {
 func printUsage() {
 	_, _ = fmt.Fprint(os.Stderr, `Usage: sectool replay <command> [options]
 
-Replay HTTP requests through Burp Suite proxy.
-
-Workflow:
-  1. Simple replay from proxy history:
-       sectool replay send --flow <flow_id>
-  2. Replay with inline modifications (no file editing):
-       sectool replay send --flow <flow_id> --set-header "X-Test: value"
-  3. Or export, edit files, then replay:
-       sectool proxy export <flow_id>
-       # edit .sectool/requests/<bundle_id>/body
-       sectool replay send --bundle <bundle_id>
+Replay or send HTTP requests through the http backend.
 
 ---
 
@@ -130,7 +120,7 @@ replay create <url> [options]
 `)
 }
 
-func parseSend(args []string) error {
+func parseSend(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("replay send", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout, requestTimeout time.Duration
@@ -249,13 +239,13 @@ Options:
 		return errors.New("only one of --flow, --bundle, or --file can be specified")
 	}
 
-	return send(timeout, flow, bundle, file, body, target, headers, removeHeaders,
+	return send(mcpURL, timeout, flow, bundle, file, body, target, headers, removeHeaders,
 		path, query, setQuery, removeQuery,
 		setJSON, removeJSON,
 		followRedirects, requestTimeout, force)
 }
 
-func parseGet(args []string) error {
+func parseGet(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("replay get", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
@@ -279,10 +269,10 @@ Options:
 		return errors.New("replay_id required (get from 'sectool replay send' output)")
 	}
 
-	return get(timeout, fs.Args()[0])
+	return get(mcpURL, timeout, fs.Args()[0])
 }
 
-func parseCreate(args []string) error {
+func parseCreate(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("replay create", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 
@@ -324,5 +314,5 @@ Output: Bundle path that can be used with 'sectool replay send --bundle'
 		return errors.New("url argument is required")
 	}
 
-	return create(timeout, fs.Args()[0], method, headers, bodyPath)
+	return create(mcpURL, timeout, fs.Args()[0], method, headers, bodyPath)
 }

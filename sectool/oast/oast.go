@@ -7,19 +7,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-harden/llm-security-toolbox/sectool/service"
+	"github.com/go-harden/llm-security-toolbox/sectool/cliutil"
+	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
 )
 
-func create(timeout time.Duration, label string) error {
+func create(mcpURL string, timeout time.Duration, label string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.OastCreate(ctx, &service.OastCreateRequest{Label: label})
+	resp, err := client.OastCreate(ctx, label)
 	if err != nil {
 		return fmt.Errorf("oast create failed: %w", err)
 	}
@@ -34,7 +36,6 @@ func create(timeout time.Duration, label string) error {
 	fmt.Println()
 	fmt.Println("Use any subdomain for tagging (e.g., `sqli-test." + resp.Domain + "`)")
 	fmt.Println()
-	// Prefer label for poll command hint if available
 	pollRef := resp.OastID
 	if resp.Label != "" {
 		pollRef = resp.Label
@@ -44,23 +45,18 @@ func create(timeout time.Duration, label string) error {
 	return nil
 }
 
-func poll(timeout time.Duration, oastID, since string, wait time.Duration, limit int) error {
-	// Extend timeout to include wait duration
+func poll(mcpURL string, timeout time.Duration, oastID, since string, wait time.Duration, limit int) error {
 	totalTimeout := timeout + wait
 	ctx, cancel := context.WithTimeout(context.Background(), totalTimeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, totalTimeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.OastPoll(ctx, &service.OastPollRequest{
-		OastID: oastID,
-		Since:  since,
-		Wait:   wait.String(),
-		Limit:  limit,
-	})
+	resp, err := client.OastPoll(ctx, oastID, since, wait, limit)
 	if err != nil {
 		return fmt.Errorf("oast poll failed: %w", err)
 	}
@@ -77,12 +73,8 @@ func poll(timeout time.Duration, oastID, since string, wait time.Duration, limit
 	fmt.Println("|----------|------|------|-----------|-----------|")
 	for _, event := range resp.Events {
 		fmt.Printf("| %s | %s | %s | %s | %s |\n",
-			event.EventID,
-			event.Time,
-			strings.ToUpper(event.Type),
-			event.SourceIP,
-			escapeMarkdown(event.Subdomain),
-		)
+			event.EventID, event.Time, strings.ToUpper(event.Type),
+			event.SourceIP, cliutil.EscapeMarkdown(event.Subdomain))
 	}
 	fmt.Printf("\n*%d event(s)*\n", len(resp.Events))
 
@@ -94,33 +86,23 @@ func poll(timeout time.Duration, oastID, since string, wait time.Duration, limit
 	fmt.Printf("\nTo view event details: `sectool oast get %s <event_id>`\n", oastID)
 	if len(resp.Events) > 0 {
 		lastEvent := resp.Events[len(resp.Events)-1]
-		fmt.Printf("To poll for new events: `sectool oast poll %s --since last`\n", oastID)
-		fmt.Printf("Or after specific event: `sectool oast poll %s --since %s`\n", oastID, lastEvent.EventID)
+		fmt.Printf("To poll for new events: `sectool oast poll %s --since %s`\n", oastID, lastEvent.EventID)
 	}
 
 	return nil
 }
 
-func escapeMarkdown(s string) string {
-	s = strings.ReplaceAll(s, "|", "\\|")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\r", "")
-	return s
-}
-
-func get(timeout time.Duration, oastID, eventID string) error {
+func get(mcpURL string, timeout time.Duration, oastID, eventID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.OastGet(ctx, &service.OastGetRequest{
-		OastID:  oastID,
-		EventID: eventID,
-	})
+	resp, err := client.OastGet(ctx, oastID, eventID)
 	if err != nil {
 		return fmt.Errorf("oast get failed: %w", err)
 	}
@@ -134,13 +116,23 @@ func get(timeout time.Duration, oastID, eventID string) error {
 	if len(resp.Details) > 0 {
 		fmt.Println()
 		for k, v := range resp.Details {
+			// Convert snake_case key to Title Case
+			title := strings.ReplaceAll(k, "_", " ")
+			words := strings.Fields(title)
+			for i, word := range words {
+				if len(word) > 0 {
+					words[i] = strings.ToUpper(word[:1]) + word[1:]
+				}
+			}
+			title = strings.Join(words, " ")
+
 			if s, ok := v.(string); ok && len(s) > 0 {
-				fmt.Printf("### %s\n\n", formatDetailKey(k))
+				fmt.Printf("### %s\n\n", title)
 				fmt.Println("```")
 				fmt.Println(s)
 				fmt.Println("```")
 			} else {
-				fmt.Printf("%s: %v\n", formatDetailKey(k), v)
+				fmt.Printf("%s: %v\n", title, v)
 			}
 		}
 	}
@@ -148,28 +140,17 @@ func get(timeout time.Duration, oastID, eventID string) error {
 	return nil
 }
 
-func formatDetailKey(key string) string {
-	// Convert snake_case to Title Case
-	key = strings.ReplaceAll(key, "_", " ")
-	words := strings.Fields(key)
-	for i, word := range words {
-		if len(word) > 0 {
-			words[i] = strings.ToUpper(word[:1]) + word[1:]
-		}
-	}
-	return strings.Join(words, " ")
-}
-
-func list(timeout time.Duration, limit int) error {
+func list(mcpURL string, timeout time.Duration, limit int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	resp, err := client.OastList(ctx, &service.OastListRequest{Limit: limit})
+	resp, err := client.OastList(ctx, limit)
 	if err != nil {
 		return fmt.Errorf("oast list failed: %w", err)
 	}
@@ -180,8 +161,7 @@ func list(timeout time.Duration, limit int) error {
 		return nil
 	}
 
-	// Check if any session has a label
-	hasLabels := slices.ContainsFunc(resp.Sessions, func(s service.OastSession) bool {
+	hasLabels := slices.ContainsFunc(resp.Sessions, func(s mcpclient.OastSession) bool {
 		return s.Label != ""
 	})
 
@@ -190,21 +170,14 @@ func list(timeout time.Duration, limit int) error {
 		fmt.Println("|---------|-------|--------|------------|")
 		for _, sess := range resp.Sessions {
 			fmt.Printf("| %s | %s | %s | %s |\n",
-				sess.OastID,
-				sess.Label,
-				sess.Domain,
-				sess.CreatedAt,
-			)
+				sess.OastID, sess.Label, sess.Domain, sess.CreatedAt)
 		}
 	} else {
 		fmt.Println("| oast_id | domain | created_at |")
 		fmt.Println("|---------|--------|------------|")
 		for _, sess := range resp.Sessions {
 			fmt.Printf("| %s | %s | %s |\n",
-				sess.OastID,
-				sess.Domain,
-				sess.CreatedAt,
-			)
+				sess.OastID, sess.Domain, sess.CreatedAt)
 		}
 	}
 	fmt.Printf("\n*%d active session(s)*\n", len(resp.Sessions))
@@ -212,19 +185,17 @@ func list(timeout time.Duration, limit int) error {
 	return nil
 }
 
-func del(timeout time.Duration, oastID string) error {
+func del(mcpURL string, timeout time.Duration, oastID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	client, err := service.ConnectedClient(ctx, timeout)
+	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = client.Close() }()
 
-	_, err = client.OastDelete(ctx, &service.OastDeleteRequest{
-		OastID: oastID,
-	})
-	if err != nil {
+	if err := client.OastDelete(ctx, oastID); err != nil {
 		return fmt.Errorf("oast delete failed: %w", err)
 	}
 

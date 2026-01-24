@@ -5,30 +5,35 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
+	"path/filepath"
 )
 
 const (
 	Version           = "0.0.1"
 	DefaultBurpMCPURL = "http://127.0.0.1:9876/sse"
+	DefaultMCPPort    = 9119
 )
 
-// RevNum is the git revision count, injected at build time via ldflags.
-// Falls back to "dev" when not set (e.g., go run without ldflags).
+// RevNum is injected at build time via ldflags; defaults to "dev".
 var RevNum = "dev"
 
-// UserAgent returns the standard user agent string for sectool requests.
 func UserAgent() string {
 	return "Mozilla/5.0 (compatible; go-harden/llm-security-toolbox sectool-v" + Version + "-" + RevNum + ")"
 }
 
+// DefaultPath returns ~/.sectool/config.json.
+func DefaultPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".sectool/config.json"
+	}
+	return filepath.Join(home, ".sectool", "config.json")
+}
+
 type Config struct {
-	Version        string        `json:"version"`
-	InitializedAt  time.Time     `json:"initialized_at"`
-	LastInitMode   string        `json:"last_init_mode,omitempty"`
-	BurpMCPURL     string        `json:"burp_mcp_url"`
-	PreserveGuides bool          `json:"preserve_guides,omitempty"`
-	Crawler        CrawlerConfig `json:"crawler,omitempty"`
+	Version string        `json:"version"`
+	MCPPort int           `json:"mcp_port,omitempty"`
+	Crawler CrawlerConfig `json:"crawler,omitempty"`
 }
 
 type CrawlerConfig struct {
@@ -44,14 +49,13 @@ type CrawlerConfig struct {
 	Recon                *bool    `json:"recon,omitempty"`
 }
 
-// DefaultConfig returns a new Config with default values.
+// DefaultConfig returns a Config with default values.
 func DefaultConfig() *Config {
 	t := true
 	f := false
 	return &Config{
-		Version:       Version,
-		InitializedAt: time.Now().UTC(),
-		BurpMCPURL:    DefaultBurpMCPURL,
+		Version: Version,
+		MCPPort: DefaultMCPPort,
 		Crawler: CrawlerConfig{
 			MaxResponseBodyBytes: 1048576, // 1MB
 			IncludeSubdomains:    &t,
@@ -73,8 +77,7 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load reads and parses config from the given path.
-// If the file doesn't exist, returns os.ErrNotExist.
+// Load reads config from path. Returns os.ErrNotExist if file is missing.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -86,15 +89,45 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// set required fields if cleared
+	// Apply defaults for missing fields
 	if cfg.Version == "" {
 		cfg.Version = Version
 	}
-	if cfg.InitializedAt.IsZero() {
-		cfg.InitializedAt = time.Now()
+	if cfg.MCPPort == 0 {
+		cfg.MCPPort = DefaultMCPPort
 	}
-	if cfg.BurpMCPURL == "" {
-		cfg.BurpMCPURL = DefaultBurpMCPURL
+
+	// Apply CrawlerConfig defaults for zero values
+	defaults := DefaultConfig()
+	if cfg.Crawler.MaxResponseBodyBytes == 0 {
+		cfg.Crawler.MaxResponseBodyBytes = defaults.Crawler.MaxResponseBodyBytes
+	}
+	if cfg.Crawler.IncludeSubdomains == nil {
+		cfg.Crawler.IncludeSubdomains = defaults.Crawler.IncludeSubdomains
+	}
+	if cfg.Crawler.DisallowedPaths == nil {
+		cfg.Crawler.DisallowedPaths = defaults.Crawler.DisallowedPaths
+	}
+	if cfg.Crawler.DelayMS == 0 {
+		cfg.Crawler.DelayMS = defaults.Crawler.DelayMS
+	}
+	if cfg.Crawler.Parallelism == 0 {
+		cfg.Crawler.Parallelism = defaults.Crawler.Parallelism
+	}
+	if cfg.Crawler.MaxDepth == 0 {
+		cfg.Crawler.MaxDepth = defaults.Crawler.MaxDepth
+	}
+	if cfg.Crawler.MaxRequests == 0 {
+		cfg.Crawler.MaxRequests = defaults.Crawler.MaxRequests
+	}
+	if cfg.Crawler.ExtractForms == nil {
+		cfg.Crawler.ExtractForms = defaults.Crawler.ExtractForms
+	}
+	if cfg.Crawler.SubmitForms == nil {
+		cfg.Crawler.SubmitForms = defaults.Crawler.SubmitForms
+	}
+	if cfg.Crawler.Recon == nil {
+		cfg.Crawler.Recon = defaults.Crawler.Recon
 	}
 
 	return &cfg, nil
@@ -112,10 +145,14 @@ func LoadOrDefaultConfig(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Save writes the config to the given path atomically.
+// Save writes config to path, creating parent directory if needed.
 func (c *Config) Save(path string) error {
 	if c == nil {
 		return errors.New("config is nil")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
 	}
 
 	data, err := json.MarshalIndent(c, "", "  ")
@@ -124,4 +161,25 @@ func (c *Config) Save(path string) error {
 	}
 
 	return os.WriteFile(path, data, 0600)
+}
+
+// LoadOrCreate loads config from default path, creating with defaults if missing.
+func LoadOrCreate() (*Config, error) {
+	return LoadOrCreatePath(DefaultPath())
+}
+
+// LoadOrCreatePath loads config from path, creating with defaults if missing.
+func LoadOrCreatePath(path string) (*Config, error) {
+	cfg, err := Load(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			cfg = DefaultConfig()
+			if err := cfg.Save(path); err != nil {
+				return nil, fmt.Errorf("create default config: %w", err)
+			}
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	return cfg, nil
 }

@@ -2,111 +2,15 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"os"
-	"path/filepath"
-	"strings"
 )
 
-// ServicePaths holds all the filesystem paths used by the service.
-// Consolidates path computation for both Client and Server.
-type ServicePaths struct {
-	WorkDir     string // Base working directory
-	SectoolDir  string // .sectool/
-	ConfigPath  string // .sectool/config.json
-	ServiceDir  string // .sectool/service/
-	SocketPath  string // .sectool/service/socket
-	PIDPath     string // .sectool/service/pid (also used for flock)
-	LogFile     string // .sectool/service/log.txt
-	RequestsDir string // .sectool/requests/
-}
+// HealthMetricProvider is a function that returns a metric value for a given key.
+type HealthMetricProvider func() string
 
-func NewServicePaths(workDir string) ServicePaths {
-	sectoolDir := filepath.Join(workDir, ".sectool")
-	serviceDir := filepath.Join(sectoolDir, "service")
-	return ServicePaths{
-		WorkDir:     workDir,
-		SectoolDir:  sectoolDir,
-		ConfigPath:  filepath.Join(sectoolDir, "config.json"),
-		ServiceDir:  serviceDir,
-		SocketPath:  filepath.Join(serviceDir, "socket"),
-		PIDPath:     filepath.Join(serviceDir, "pid"),
-		LogFile:     filepath.Join(serviceDir, "log.txt"),
-		RequestsDir: filepath.Join(sectoolDir, "requests"),
-	}
-}
-
-// ResolvePath resolves a path relative to WorkDir.
-// If the path is already absolute, it is returned unchanged.
-func (p *ServicePaths) ResolvePath(path string) string {
-	if filepath.IsAbs(path) {
-		return path
-	}
-	return filepath.Join(p.WorkDir, path)
-}
-
-// ErrPathTraversal is returned when a path would escape the working directory.
-var ErrPathTraversal = errors.New("path escapes working directory")
-
-// SafePath resolves a path and validates it stays within the working directory.
-// Returns ErrPathTraversal if the cleaned path would escape WorkDir.
-func (p *ServicePaths) SafePath(path string) (string, error) {
-	resolved := p.ResolvePath(path)     // absolute path
-	cleaned := filepath.Clean(resolved) // remove .. and other path tricks
-
-	cleanedWorkDir := filepath.Clean(p.WorkDir) // Clean workdir for consistent comparison
-
-	// Ensure the cleaned path is within WorkDir
-	if cleaned != cleanedWorkDir && !strings.HasPrefix(cleaned, cleanedWorkDir+string(filepath.Separator)) {
-		return "", ErrPathTraversal
-	}
-	return cleaned, nil
-}
-
-// RelPath returns the path relative to WorkDir for cleaner output.
-// If conversion fails, the original path is returned.
-func (p *ServicePaths) RelPath(path string) string {
-	if rel, err := filepath.Rel(p.WorkDir, path); err == nil {
-		return rel
-	}
-	return path
-}
-
-// APIResponse is the standard envelope for all API responses.
-type APIResponse struct {
-	OK    bool            `json:"ok"`
-	Data  json.RawMessage `json:"data,omitempty"`
-	Error *APIError       `json:"error,omitempty"`
-}
-
-// APIError represents a structured error response.
-type APIError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Hint    string `json:"hint,omitempty"`
-}
-
-func (e *APIError) Error() string {
-	if e.Hint != "" {
-		return fmt.Sprintf("%s: %s (hint: %s)", e.Code, e.Message, e.Hint)
-	}
-	return fmt.Sprintf("%s: %s", e.Code, e.Message)
-}
-
-const (
-	ErrCodeBackendError   = "BACKEND_ERROR"
-	ErrCodeInvalidRequest = "INVALID_REQUEST"
-	ErrCodeNotFound       = "NOT_FOUND"
-	ErrCodeInternal       = "INTERNAL_ERROR"
-	ErrCodeTimeout        = "TIMEOUT"
-	ErrCodeValidation     = "VALIDATION_ERROR"
-)
-
-// IsTimeoutError returns true if the error is a timeout (context deadline exceeded,
-// network timeout, etc.). Used to distinguish timeout errors from other backend errors.
+// IsTimeoutError returns true if the error is a timeout.
 func IsTimeoutError(err error) bool {
 	if err == nil {
 		return false
@@ -122,65 +26,11 @@ func IsTimeoutError(err error) bool {
 	return false
 }
 
-func NewAPIError(code, message, hint string) *APIError {
-	return &APIError{
-		Code:    code,
-		Message: message,
-		Hint:    hint,
-	}
-}
-
-// HealthResponse is returned by GET /health.
-type HealthResponse struct {
-	Version   string            `json:"version"`
-	StartedAt string            `json:"started_at"`
-	Metrics   map[string]string `json:"metrics,omitempty"`
-}
-
-// HealthMetricProvider is a function that returns a metric value for a given key.
-// Providers are registered with the server and called during health checks.
-type HealthMetricProvider func() string
-
-// ServiceStatus represents the service status for CLI display.
-type ServiceStatus struct {
-	Running    bool
-	PID        int
-	Health     *HealthResponse
-	SocketPath string
-}
-
-// StopResponse is returned by POST /srv/stop.
-type StopResponse struct {
-	Message string `json:"message"`
-}
-
-func SuccessResponse(data interface{}) (*APIResponse, error) {
-	var rawData json.RawMessage
-	if data != nil {
-		b, err := json.Marshal(data)
-		if err != nil {
-			return nil, err
-		}
-		rawData = b
-	}
-	return &APIResponse{
-		OK:   true,
-		Data: rawData,
-	}, nil
-}
-
-func ErrorResponse(code, message, hint string) *APIResponse {
-	return &APIResponse{
-		OK:    false,
-		Error: NewAPIError(code, message, hint),
-	}
-}
-
 // =============================================================================
 // Proxy Types
 // =============================================================================
 
-// ProxyListRequest is the request for POST /proxy/list.
+// ProxyListRequest contains filters for proxy list queries.
 type ProxyListRequest struct {
 	Host         string `json:"host,omitempty"`
 	Path         string `json:"path,omitempty"`
@@ -202,19 +52,18 @@ func (r *ProxyListRequest) HasFilters() bool {
 		r.ExcludeHost != "" || r.ExcludePath != "" || r.Limit > 0
 }
 
-// ProxySummaryResponse is the response for proxy_summary (aggregated view).
+// ProxySummaryResponse is the response for proxy_summary.
 type ProxySummaryResponse struct {
-	Aggregates []AggregateEntry `json:"aggregates"`
+	Aggregates []SummaryEntry `json:"aggregates"`
 }
 
-// ProxyListResponse is the response for POST /proxy/list.
-// Returns individual flows with flow_id for further operations.
+// ProxyListResponse is the response for proxy_list.
 type ProxyListResponse struct {
 	Flows []FlowSummary `json:"flows"`
 }
 
-// AggregateEntry represents a grouped count of traffic by (host, path, method, status).
-type AggregateEntry struct {
+// SummaryEntry represents grouped traffic by (host, path, method, status).
+type SummaryEntry struct {
 	Host   string `json:"host"`
 	Path   string `json:"path"`
 	Method string `json:"method"`
@@ -235,18 +84,35 @@ type FlowSummary struct {
 }
 
 // RequestLine contains path and version from the HTTP request line.
-// Method is omitted as it's already a top-level field.
 type RequestLine struct {
-	Path    string `json:"path"`    // request target including query string
-	Version string `json:"version"` // e.g., "HTTP/1.1", "HTTP/2"
+	Path    string `json:"path"`
+	Version string `json:"version"`
+}
+
+// ProxyGetResponse is the response for the proxy_get MCP tool.
+// Returns full request and response data for a proxy history entry.
+type ProxyGetResponse struct {
+	FlowID            string              `json:"flow_id"`
+	Method            string              `json:"method"`
+	URL               string              `json:"url"`
+	ReqHeaders        string              `json:"request_headers"`
+	ReqHeadersParsed  map[string][]string `json:"request_headers_parsed,omitempty"`
+	ReqLine           *RequestLine        `json:"request_line,omitempty"`
+	ReqBody           string              `json:"request_body"`
+	ReqSize           int                 `json:"request_size"`
+	Status            int                 `json:"status"`
+	StatusLine        string              `json:"status_line"`
+	RespHeaders       string              `json:"response_headers"`
+	RespHeadersParsed map[string][]string `json:"response_headers_parsed,omitempty"`
+	RespBody          string              `json:"response_body"`
+	RespSize          int                 `json:"response_size"`
 }
 
 // =============================================================================
-// Common Response Types
+// Response Types
 // =============================================================================
 
 // ResponseDetails contains HTTP response summary fields.
-// Embedded in responses that include response data.
 type ResponseDetails struct {
 	Status      int    `json:"status"`
 	StatusLine  string `json:"status_line"`
@@ -259,13 +125,9 @@ type ResponseDetails struct {
 // Replay Types
 // =============================================================================
 
-// ReplaySendRequest is the request for POST /replay/send.
-// Exactly one of FlowID, BundleID, or FilePath must be set.
+// ReplaySendRequest contains options for replay_send.
 type ReplaySendRequest struct {
 	FlowID          string   `json:"flow_id,omitempty"`
-	BundleID        string   `json:"bundle_id,omitempty"`
-	FilePath        string   `json:"file_path,omitempty"`
-	BodyPath        string   `json:"body_path,omitempty"`
 	Target          string   `json:"target,omitempty"`
 	AddHeaders      []string `json:"add_headers,omitempty"`
 	RemoveHeaders   []string `json:"remove_headers,omitempty"`
@@ -280,21 +142,14 @@ type ReplaySendRequest struct {
 	Force           bool     `json:"force,omitempty"`
 }
 
-// ReplaySendResponse is the response for POST /replay/send.
+// ReplaySendResponse is the response for replay_send.
 type ReplaySendResponse struct {
 	ReplayID string `json:"replay_id"`
 	Duration string `json:"duration"`
 	ResponseDetails
 }
 
-// ReplayGetRequest is the request for POST /replay/get.
-type ReplayGetRequest struct {
-	ReplayID string `json:"replay_id"`
-}
-
-// ReplayGetResponse is the response for POST /replay/get.
-// Unlike ReplaySendResponse which returns a preview, this returns the full response.
-// Body is returned as text if UTF-8, or "<BINARY:N Bytes>" placeholder if binary.
+// ReplayGetResponse is the response for replay_get.
 type ReplayGetResponse struct {
 	ReplayID          string              `json:"replay_id"`
 	Duration          string              `json:"duration"`
@@ -306,45 +161,18 @@ type ReplayGetResponse struct {
 	RespSize          int                 `json:"response_size"`
 }
 
-// ReplayCreateRequest is the request for POST /replay/create.
-type ReplayCreateRequest struct {
-	URL     string            `json:"url"`
-	Method  string            `json:"method,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Body    string            `json:"body,omitempty"`
-}
-
-// ReplayCreateResponse is the response for POST /replay/create.
-type ReplayCreateResponse struct {
-	BundleID   string `json:"bundle_id"`
-	BundlePath string `json:"bundle_path"`
-}
-
 // =============================================================================
 // OAST Types
 // =============================================================================
 
-// OastCreateRequest is the request for POST /oast/create.
-type OastCreateRequest struct {
-	Label string `json:"label,omitempty"`
-}
-
-// OastCreateResponse is the response for POST /oast/create.
+// OastCreateResponse is the response for oast_create.
 type OastCreateResponse struct {
 	OastID string `json:"oast_id"`
 	Domain string `json:"domain"`
 	Label  string `json:"label,omitempty"`
 }
 
-// OastPollRequest is the request for POST /oast/poll.
-type OastPollRequest struct {
-	OastID string `json:"oast_id"`
-	Since  string `json:"since,omitempty"`
-	Wait   string `json:"wait,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
-}
-
-// OastPollResponse is the response for POST /oast/poll.
+// OastPollResponse is the response for oast_poll.
 type OastPollResponse struct {
 	Events       []OastEvent `json:"events"`
 	DroppedCount int         `json:"dropped_count,omitempty"`
@@ -354,18 +182,13 @@ type OastPollResponse struct {
 type OastEvent struct {
 	EventID   string                 `json:"event_id"`
 	Time      string                 `json:"time"`
-	Type      string                 `json:"type"` // dns, http, smtp
+	Type      string                 `json:"type"`
 	SourceIP  string                 `json:"source_ip"`
 	Subdomain string                 `json:"subdomain"`
 	Details   map[string]interface{} `json:"details,omitempty"`
 }
 
-// OastListRequest is the request for POST /oast/list.
-type OastListRequest struct {
-	Limit int `json:"limit,omitempty"`
-}
-
-// OastListResponse is the response for POST /oast/list.
+// OastListResponse is the response for oast_list.
 type OastListResponse struct {
 	Sessions []OastSession `json:"sessions"`
 }
@@ -378,14 +201,7 @@ type OastSession struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// OastGetRequest is the request for POST /oast/get.
-type OastGetRequest struct {
-	OastID  string `json:"oast_id"`
-	EventID string `json:"event_id"`
-}
-
-// OastGetResponse is the response for POST /oast/get.
-// Returns full event details without truncation.
+// OastGetResponse is the response for oast_get.
 type OastGetResponse struct {
 	EventID   string                 `json:"event_id"`
 	Time      string                 `json:"time"`
@@ -395,30 +211,19 @@ type OastGetResponse struct {
 	Details   map[string]interface{} `json:"details,omitempty"`
 }
 
-// OastDeleteRequest is the request for POST /oast/delete.
-type OastDeleteRequest struct {
-	OastID string `json:"oast_id"`
-}
-
-// OastDeleteResponse is the response for POST /oast/delete.
+// OastDeleteResponse is the response for oast_delete.
 type OastDeleteResponse struct{}
 
 // =============================================================================
 // Rule Types
 // =============================================================================
 
-// RuleListRequest is the request for POST /proxy/rule/list.
-type RuleListRequest struct {
-	WebSocket bool `json:"websocket,omitempty"`
-	Limit     int  `json:"limit,omitempty"`
-}
-
-// RuleListResponse is the response for POST /proxy/rule/list.
+// RuleListResponse is the response for proxy_rule_list.
 type RuleListResponse struct {
 	Rules []RuleEntry `json:"rules"`
 }
 
-// RuleEntry represents a match/replace rule in API responses.
+// RuleEntry represents a match/replace rule.
 type RuleEntry struct {
 	RuleID  string `json:"rule_id"`
 	Label   string `json:"label,omitempty"`
@@ -428,32 +233,124 @@ type RuleEntry struct {
 	Replace string `json:"replace,omitempty"`
 }
 
-// RuleAddRequest is the request for POST /proxy/rule/add.
-// WebSocket vs HTTP is inferred from Type (ws:* types are WebSocket).
-type RuleAddRequest struct {
-	Label   string `json:"label,omitempty"`
-	Type    string `json:"type"`
-	IsRegex bool   `json:"is_regex,omitempty"`
-	Match   string `json:"match,omitempty"`
-	Replace string `json:"replace,omitempty"`
-}
-
-// RuleUpdateRequest is the request for POST /proxy/rule/update.
-// Searches both HTTP and WebSocket rules automatically.
-type RuleUpdateRequest struct {
-	RuleID  string `json:"rule_id"`
-	Label   string `json:"label,omitempty"`
-	Type    string `json:"type"`
-	IsRegex bool   `json:"is_regex,omitempty"`
-	Match   string `json:"match,omitempty"`
-	Replace string `json:"replace,omitempty"`
-}
-
-// RuleDeleteRequest is the request for POST /proxy/rule/delete.
-// Searches both HTTP and WebSocket rules automatically.
-type RuleDeleteRequest struct {
-	RuleID string `json:"rule_id"`
-}
-
-// RuleDeleteResponse is the response for POST /proxy/rule/delete.
+// RuleDeleteResponse is the response for proxy_rule_delete.
 type RuleDeleteResponse struct{}
+
+// =============================================================================
+// Crawler Types
+// =============================================================================
+
+// CrawlCreateResponse is the response for crawl_create.
+type CrawlCreateResponse struct {
+	SessionID string `json:"session_id"`
+	Label     string `json:"label,omitempty"`
+	State     string `json:"state"`
+	CreatedAt string `json:"created_at"`
+}
+
+// CrawlSeedResponse is the response for crawl_seed.
+type CrawlSeedResponse struct {
+	AddedCount int `json:"added_count"`
+}
+
+// CrawlStatusResponse is the response for crawl_status.
+type CrawlStatusResponse struct {
+	State           string `json:"state"`
+	URLsQueued      int    `json:"urls_queued"`
+	URLsVisited     int    `json:"urls_visited"`
+	URLsErrored     int    `json:"urls_errored"`
+	FormsDiscovered int    `json:"forms_discovered"`
+	Duration        string `json:"duration"`
+	LastActivity    string `json:"last_activity"`
+	ErrorMessage    string `json:"error_message,omitempty"`
+}
+
+// CrawlSummaryResponse is the response for crawl_summary.
+type CrawlSummaryResponse struct {
+	SessionID  string         `json:"session_id"`
+	State      string         `json:"state"`
+	Duration   string         `json:"duration"`
+	Aggregates []SummaryEntry `json:"aggregates"`
+}
+
+// CrawlListResponse is the response for crawl_list.
+type CrawlListResponse struct {
+	Flows  []CrawlFlowAPI  `json:"flows,omitempty"`
+	Forms  []CrawlFormAPI  `json:"forms,omitempty"`
+	Errors []CrawlErrorAPI `json:"errors,omitempty"`
+}
+
+// CrawlFlowAPI is the API representation of CrawlFlow (summary).
+type CrawlFlowAPI struct {
+	FlowID         string `json:"flow_id"`
+	Method         string `json:"method"`
+	Host           string `json:"host"`
+	Path           string `json:"path"`
+	Status         int    `json:"status"`
+	ResponseLength int    `json:"response_length"`
+	Duration       string `json:"duration"`
+	FoundOn        string `json:"found_on,omitempty"`
+}
+
+// CrawlFormAPI is the API representation of DiscoveredForm.
+type CrawlFormAPI struct {
+	FormID  string         `json:"form_id"`
+	URL     string         `json:"url"`
+	Action  string         `json:"action"`
+	Method  string         `json:"method"`
+	HasCSRF bool           `json:"has_csrf"`
+	Inputs  []FormInputAPI `json:"inputs"`
+}
+
+// FormInputAPI is the API representation of FormInput.
+type FormInputAPI struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Value    string `json:"value,omitempty"`
+	Required bool   `json:"required,omitempty"`
+}
+
+// CrawlErrorAPI is the API representation of CrawlError.
+type CrawlErrorAPI struct {
+	URL    string `json:"url"`
+	Status int    `json:"status,omitempty"`
+	Error  string `json:"error"`
+}
+
+// formsToAPI converts DiscoveredForm slice to API format.
+func formsToAPI(forms []DiscoveredForm) []CrawlFormAPI {
+	result := make([]CrawlFormAPI, 0, len(forms))
+	for _, f := range forms {
+		inputs := make([]FormInputAPI, 0, len(f.Inputs))
+		for _, inp := range f.Inputs {
+			inputs = append(inputs, FormInputAPI(inp))
+		}
+		result = append(result, CrawlFormAPI{
+			FormID:  f.ID,
+			URL:     f.URL,
+			Action:  f.Action,
+			Method:  f.Method,
+			HasCSRF: f.HasCSRF,
+			Inputs:  inputs,
+		})
+	}
+	return result
+}
+
+// CrawlSessionsResponse is the response for crawl_sessions.
+type CrawlSessionsResponse struct {
+	Sessions []CrawlSessionAPI `json:"sessions"`
+}
+
+// CrawlSessionAPI is the API representation of CrawlSessionInfo.
+type CrawlSessionAPI struct {
+	SessionID string `json:"session_id"`
+	Label     string `json:"label,omitempty"`
+	State     string `json:"state"`
+	CreatedAt string `json:"created_at"`
+}
+
+// CrawlStopResponse is the response for crawl_stop.
+type CrawlStopResponse struct {
+	Stopped bool `json:"stopped"`
+}

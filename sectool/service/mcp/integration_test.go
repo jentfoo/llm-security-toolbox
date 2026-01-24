@@ -13,7 +13,7 @@ import (
 
 // Integration tests for Burp MCP client.
 // These tests validate low-level MCP protocol communication with Burp Suite.
-// For service-level integration tests, see sectool/service/integration_test.go.
+// For sectool MCP server tests with mock backends, see sectool/service/mcp_server_test.go.
 //
 // Skip automatically if Burp is not available or if running with -short flag.
 
@@ -452,10 +452,6 @@ func TestBurpSetActiveEditorContents(t *testing.T) {
 
 	t.Log("SetActiveEditorContents succeeded")
 }
-
-// =============================================================================
-// Match/Replace Rules Integration Tests
-// =============================================================================
 
 func TestBurpGetMatchReplaceRules(t *testing.T) {
 	client := connectOrSkip(t)

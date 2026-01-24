@@ -3,11 +3,11 @@
 **llm-security-toolbox (sectool)** is an LLM-first CLI toolkit for application security testing. It enables humans and agentic coding tools to collaborate on security testing, backed by Burp Suite Pro via PortSwigger MCP (Model Context Protocol).
 
 Key characteristics:
-- Client-server architecture with automatic background service management
-- Unix socket-based IPC (HTTP/JSON protocol)
-- Per-working-directory service instances (state in `.sectool/`)
+- MCP-primary architecture: single API serves both agents and CLI
+- CLI is a thin client over MCP for human interaction
+- Global config at `~/.sectool/config.json` (auto-created on first run)
 - All output in markdown format for LLM consumption
-- Pluggable backend architecture (Burp MCP for HTTP, Interactsh for OAST)
+- Pluggable backend architecture (Burp MCP for HTTP, Interactsh for OAST, Colly for crawling)
 
 ## Build Commands
 
@@ -21,38 +21,53 @@ make lint           # Run golangci-lint and go vet
 
 ## Architecture
 
-- `sectool/main.go` - Entry point; routes --service flag to daemon mode, else CLI command parsing and dispatch
-- `sectool/config/config.go` - Config loading/saving, defaults
-- `sectool/config/config_test.go` - Config tests
-- `sectool/service/server.go` - HTTP server over Unix socket
-- `sectool/service/client.go` - Auto-starts service if needed
-- `sectool/service/types.go` - Shared API types (ServicePaths, APIResponse, APIError)
-- `sectool/service/flags.go` - Service subcommand parsing
-- `sectool/service/commands.go` - Service CLI implementations (status/stop/logs)
-- `sectool/service/backend.go` - HttpBackend and OastBackend interface definitions
+```
+CLI Command → MCP Client → MCP Server → Backends (Burp MCP, OAST, Crawler)
+MCP Agent  → MCP Server → Backends (Burp MCP, OAST, Crawler)
+```
+
+### Core Files
+
+- `sectool/main.go` - Entry point; routes `mcp` subcommand to server mode, else CLI command dispatch
+- `sectool/config/config.go` - Config loading/saving, defaults, auto-creation
+- `sectool/mcpclient/client.go` - MCP client wrapper for CLI usage
+- `sectool/mcpclient/tools.go` - Typed methods for each MCP tool
+- `sectool/mcpclient/types.go` - Request/response type definitions
+- `sectool/bundle/bundle.go` - Client-side bundle file operations for export
+
+### Service Layer
+
+- `sectool/service/server.go` - MCP server lifecycle and backend coordination
+- `sectool/service/mcp_server.go` - MCP server exposing tools (Streamable HTTP + SSE)
+- `sectool/service/flags.go` - MCP server flag parsing (`--port`, `--workflow`, `--config`)
+- `sectool/service/backend.go` - HttpBackend, OastBackend, CrawlerBackend interfaces
 - `sectool/service/backend_http_burp.go` - Burp MCP implementation of HttpBackend
 - `sectool/service/backend_oast_interactsh.go` - Interactsh implementation of OastBackend
-- `sectool/service/proxy_handler.go` - Handles /proxy/summary, /proxy/list, /proxy/rule/*
-- `sectool/service/replay_handler.go` - Handles /replay/send, /replay/get
-- `sectool/service/oast_handler.go` - Handles /oast/* endpoints
-- `sectool/service/crawl_handler.go` - Handles /crawl/* endpoints
-- `sectool/service/flow_handler.go` - Handles unified /flow/get and /flow/export
-- `sectool/service/backend_crawler.go` - Colly-based crawler implementation
-- `sectool/service/mcp_server.go` - MCP server exposing tools for agent integration (Streamable HTTP + SSE)
+- `sectool/service/backend_crawler_colly.go` - Colly-based crawler implementation
+- `sectool/service/proxy_handler.go` - Proxy tool implementations (summary, list, get, rules)
+- `sectool/service/replay_handler.go` - Replay tool implementations (send, get)
+- `sectool/service/oast_handler.go` - OAST tool implementations
+- `sectool/service/crawl_handler.go` - Crawl tool implementations
 - `sectool/service/httputil.go` - HTTP parsing utilities
-- `sectool/service/bundle.go` - Request bundle file operations
+- `sectool/service/types.go` - Shared MCP response types
+
+### Burp MCP Client
+
 - `sectool/service/mcp/burp.go` - SSE-based Burp Suite MCP client
 - `sectool/service/mcp/types.go` - MCP-specific types
-- `sectool/service/store/flow.go` - Flow ID → Burp offset mapping (thread-safe)
-- `sectool/service/store/crawl_flow.go` - Crawler flow storage (thread-safe)
+
+### State Management
+
+- `sectool/service/store/flow.go` - Flow ID → Burp offset mapping (ephemeral)
+- `sectool/service/store/crawl_flow.go` - Crawler flow storage (ephemeral)
 - `sectool/service/store/hash.go` - Content hashing for flow identity
 - `sectool/service/store/request.go` - Replay result storage with TTL cleanup
 - `sectool/service/ids/ids.go` - Base62 random IDs using crypto/rand
-- `sectool/service/socket_security.go` - Secure listener wrapper, socket path validation
-- `sectool/service/socket_security_{linux,darwin,other}.go` - Peer credential verification (SO_PEERCRED/LOCAL_PEERCRED)
-- `sectool/proxy/flags.go` - Subcommand parsing (list/export/intercept/rule)
-- `sectool/proxy/proxy.go` - Shared client proxy utilities
-- `sectool/proxy/list.go` - List command implementation
+
+### CLI Commands
+
+- `sectool/proxy/flags.go` - Subcommand parsing (summary/list/export/rule)
+- `sectool/proxy/list.go` - List/summary command implementation
 - `sectool/proxy/export.go` - Export command implementation
 - `sectool/proxy/rule.go` - Rule CRUD command implementations
 - `sectool/crawl/flags.go` - Crawl subcommand parsing
@@ -63,55 +78,44 @@ make lint           # Run golangci-lint and go vet
 - `sectool/oast/oast.go` - Command implementations
 - `sectool/encode/flags.go` - Subcommand parsing (url/base64/html)
 - `sectool/encode/encode.go` - Encoding/decoding implementations
-- `sectool/initialize/flags.go` - Subcommand parsing (explore/test-report)
-- `sectool/initialize/init.go` - Initialization logic
-- `sectool/initialize/templates/AGENT-explore.md` - Embedded exploration guide
-- `sectool/initialize/templates/AGENT-test-report.md` - Embedded test-report guide
 
-**Service lifecycle:**
-1. CLI command runs → client checks for existing service via socket
-2. If no service, client spawns `sectool --service` as background daemon
-3. Daemon acquires file lock on `.sectool/service/pid` (prevents duplicates)
-4. Daemon connects to Burp MCP and starts OAST backend
-5. All CLI commands communicate with daemon via Unix socket at `.sectool/service/socket`
+### Config
 
-**State directory layout (0700 permissions, peer UID validation on socket):**
+Global config at `~/.sectool/config.json` (auto-created with defaults):
+
+```json
+{
+  "version": "0.0.1",
+  "mcp_port": 9119,
+  "crawler": {
+    "max_response_body_bytes": 1048576,
+    "include_subdomains": true,
+    "disallowed_paths": ["*logout*", "*signout*", "*sign-out*", "*delete*", "*remove*"],
+    "delay_ms": 200,
+    "parallelism": 2,
+    "max_depth": 10,
+    "max_requests": 1000,
+    "extract_forms": true,
+    "submit_forms": false,
+    "recon": false
+  }
+}
 ```
-.sectool/
-├── config.json           # Version, BurpMCPURL, preserve_guides flag
-├── AGENT-explore.md      # Generated guide (if init explore)
-├── AGENT-test-report.md  # Generated guide (if init test-report)
-├── service/
-│   ├── pid               # PID file with exclusive flock
-│   ├── socket            # Unix domain socket; validates peer UID on accept
-│   └── log.txt           # Service logs (0600, append-only)
-└── requests/             # Exported request bundles
-    └── <bundle_id>/
-        ├── request.http       # HTTP headers with body placeholder
-        ├── body               # Raw request body
-        ├── request.meta.json  # Metadata (method, URL, timestamps)
-        ├── response.http      # Response headers (after replay)
-        └── response.body      # Response body (after replay)
+
+### Export Bundle Layout
+
+Bundles exported to `./sectool-requests/<flow_id>/`:
+
+```
+./sectool-requests/<flow_id>/
+├── request.http       # HTTP headers with body placeholder
+├── body               # Raw request body (binary-safe)
+├── request.meta.json  # Metadata (method, URL, timestamps)
+├── response.http      # Response headers (if available)
+└── response.body      # Response body (if available)
 ```
 
 ## Key Types
-
-```go
-// Service discovery paths (service/types.go)
-type ServicePaths struct {
-    WorkDir, ServiceDir, SocketPath, PIDPath, LogFile, RequestsDir string
-}
-
-// API response envelope
-type APIResponse struct {
-    OK    bool            `json:"ok"`
-    Data  json.RawMessage `json:"data,omitempty"`
-    Error *APIError       `json:"error,omitempty"`
-}
-
-// Error codes: SERVICE_UNAVAILABLE, BACKEND_ERROR, INVALID_REQUEST,
-//              NOT_FOUND, INTERNAL_ERROR, TIMEOUT, VALIDATION_ERROR
-```
 
 **Backend Interfaces (service/backend.go):**
 ```go
@@ -135,67 +139,45 @@ type OastBackend interface {
 
 **Store Types (service/store/):**
 - `FlowStore`: Maps short flow_id → Burp offset with hash-based re-identification
-- `RequestStore`: Stores replay results
+- `CrawlFlowStore`: Stores crawler flow data
+- `RequestStore`: Stores replay results with TTL cleanup
 
 ## CLI Commands
 
-Use `sectool <command> --help` for detailed options.
-
-sectool init explore        # Generate exploration guide
-sectool init test-report    # Generate test-report guide
-
-sectool service status      # Service health and backend status
-sectool service logs        # View service logs
-sectool service stop        # Graceful shutdown
-
-sectool proxy summary        # Aggregated traffic summary by host/path/method
-sectool proxy list          # List individual flows (requires filters)
-sectool proxy export        # Export flow to editable bundle on disk
-
-sectool crawl create        # Start new crawl session from URLs or proxy flows
-sectool crawl status        # Check crawl session progress
-sectool crawl summary       # Aggregated crawl results by host/path
-sectool crawl list          # List crawled flows, forms, or errors
-sectool crawl export        # Export crawled flow to editable bundle
-sectool crawl sessions      # List all crawl sessions
-sectool crawl stop          # Stop running crawl session
-
-sectool replay send         # Send request (from flow, bundle, or file)
-sectool replay get          # Retrieve replay result by ID
-
-sectool oast create         # Create OAST session, returns domain
-sectool oast poll           # Poll for out-of-band interactions
-sectool oast list           # List active OAST sessions
-sectool oast delete         # Delete OAST session
-
-sectool encode url          # URL encode/decode
-sectool encode base64       # Base64 encode/decode
-sectool encode html         # HTML entity encode/decode
-
-sectool version             # Show version
-
-## Usage Modes
-
-Sectool provides two integration modes for agents:
-
-**CLI Mode** (System Prompt + CLI):
-- Working directory scoped with state in `.sectool/`
-- Background service auto-starts, communicates via Unix socket
-- Agent operates on exported request bundles as files
-- Best for: file-based workflows, large request editing, parallel human+agent testing
-
-**MCP Mode** (MCP API):
-- System-wide foreground service with dual transport support
-- `/mcp` endpoint for Streamable HTTP (recommended)
-- `/sse` endpoint for legacy SSE clients
-- Direct tool calls, no file system interaction required
-- Shared proxy history across multiple agent sessions
-- Best for: token efficiency, common operations, multi-agent scenarios
-
-Start MCP mode:
+Start MCP server:
 ```bash
-sectool --mcp                    # MCP server on port 9119
-sectool --mcp --mcp-port 8080    # Custom port
+sectool mcp                    # MCP server on port 9119
+sectool mcp --port 8080        # Custom port
+sectool mcp --workflow explore # Pre-set workflow mode
+```
+
+CLI commands (requires running MCP server):
+```bash
+sectool proxy summary        # Aggregated traffic summary by host/path/method
+sectool proxy list           # List individual flows (requires filters)
+sectool proxy export         # Export flow to editable bundle on disk
+
+sectool crawl create         # Start new crawl session from URLs or proxy flows
+sectool crawl status         # Check crawl session progress
+sectool crawl summary        # Aggregated crawl results by host/path
+sectool crawl list           # List crawled flows, forms, or errors
+sectool crawl export         # Export crawled flow to editable bundle
+sectool crawl sessions       # List all crawl sessions
+sectool crawl stop           # Stop running crawl session
+
+sectool replay send          # Send request (from flow, bundle, or file)
+sectool replay get           # Retrieve replay result by ID
+
+sectool oast create          # Create OAST session, returns domain
+sectool oast poll            # Poll for out-of-band interactions
+sectool oast list            # List active OAST sessions
+sectool oast delete          # Delete OAST session
+
+sectool encode url           # URL encode/decode
+sectool encode base64        # Base64 encode/decode
+sectool encode html          # HTML entity encode/decode
+
+sectool version              # Show version
 ```
 
 ## MCP Tools
@@ -204,14 +186,16 @@ When running in MCP mode, the following tools are exposed:
 
 | Tool | Description |
 |------|-------------|
+| `workflow` | Select workflow mode (explore/test-report) to receive task-specific instructions |
 | `proxy_summary` | Aggregated traffic summary grouped by host/path/method/status |
 | `proxy_list` | Query individual flows with filters (requires at least one filter) |
-| `proxy_get` | Get full request/response for a flow (MCP alternative to CLI export, no disk I/O) |
+| `proxy_get` | Get full request/response for a flow |
 | `proxy_rule_list` | List proxy match/replace rules |
 | `proxy_rule_add` | Add proxy match/replace rule |
 | `proxy_rule_update` | Update existing proxy rule |
 | `proxy_rule_delete` | Delete proxy rule |
 | `crawl_create` | Start crawl session from URLs or proxy flow seeds |
+| `crawl_seed` | Add additional seed URLs or proxy flows to a running crawl session |
 | `crawl_status` | Get crawl session progress metrics |
 | `crawl_summary` | Get aggregated crawl results by host/path |
 | `crawl_list` | List crawled flows, forms, or errors |
@@ -220,6 +204,7 @@ When running in MCP mode, the following tools are exposed:
 | `crawl_stop` | Stop a running crawl session |
 | `replay_send` | Send request with modifications (headers, body, JSON fields, query params) |
 | `replay_get` | Retrieve full response from previous replay |
+| `request_send` | Send a new HTTP request from scratch |
 | `oast_create` | Create OAST session for out-of-band testing |
 | `oast_poll` | Poll for OAST interaction events |
 | `oast_get` | Get full details of specific OAST event |
@@ -229,69 +214,44 @@ When running in MCP mode, the following tools are exposed:
 | `encode_base64` | Base64 encode/decode |
 | `encode_html` | HTML entity encode/decode |
 
-## Service HTTP API
-
-All endpoints over Unix socket at `.sectool/service/socket`:
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Service health, version, backend status |
-| `POST /srv/stop` | Graceful shutdown |
-| `POST /proxy/summary` | Aggregated traffic summary |
-| `POST /proxy/list` | Query individual flows (requires filters) |
-| `POST /crawl/create` | Start crawl session |
-| `POST /crawl/status` | Get crawl session progress |
-| `POST /crawl/summary` | Aggregated crawl results |
-| `POST /crawl/list` | List crawled flows/forms/errors |
-| `POST /crawl/sessions` | List all crawl sessions |
-| `POST /crawl/stop` | Stop crawl session |
-| `POST /flow/get` | Get flow by ID (proxy or crawler) |
-| `POST /flow/export` | Export flow to disk bundle |
-| `POST /replay/send` | Send request, returns replay_id |
-| `POST /replay/get` | Retrieve replay result by ID |
-| `POST /oast/create` | Create OAST session |
-| `POST /oast/poll` | Poll for OAST events |
-| `POST /oast/list` | List active OAST sessions |
-| `POST /oast/delete` | Delete OAST session |
-
 ## Development Guidelines
 
-### API Parity
+### CLI and MCP Parity
 
-- New features must be implemented in both CLI and MCP interfaces
-- Functionality should remain 1:1 between APIs; exceptions require justification
-- CLI commands map to MCP tools (e.g., `proxy list` → `proxy_list`, `replay send` → `replay_send`)
-- Shared logic belongs in handler/processing functions called by both interfaces
+- CLI commands map to MCP tools (e.g., `proxy list` → `proxy_list`)
+- CLI is a thin client - all logic lives in MCP tool handlers
+- New features should be implemented in MCP handlers first, CLI wraps them
 
 ### CLI Conventions
 
-- All list operations (`proxy list`, `oast list`, `oast poll`) must support `--limit` flag
-- Flatten --help details at the first subcommand level (e.g., `sectool proxy --help` shows full docs for list/export)
-- Second tier subcommand help flags also exist and must be kept in sync
+- All list operations must support `--limit` flag
+- Flatten `--help` details at the first subcommand level
+- CLI requires running MCP server; error message guides user to start it
 
 ### Code Style
 
 - Use `var` style for zero-value initialization: `var foo bool` not `foo := false`
 - Comments should be concise simple and short phrases rather than full sentences when possible
-- Comments should only be added when they describe non-obvious context (skip comments when the code or line is very obvious)
+- Comments should only be added when they describe non-obvious context
 - Follow existing naming conventions and neighboring code style
 
 ### Testing
 
 Structure and conventions:
 - One `_test.go` file per implementation file that requires testing
-- One `func Test<FunctionName>` per target function, using table-driven tests for consistent validation or `t.Run` test cases when assertions vary
+- One `func Test<FunctionName>` per target function, using table-driven tests or `t.Run` cases
 - Test case names should be at most 3 to 5 words and in lower case with underscores
-- Use `t.Parallel()` at test function start, but not within test cases
+- Use `t.Parallel()` at test function start when no shared state
 - Isolated temp directories via `t.TempDir()` when needed
 - Context timeouts via `t.Context()` for tests with I/O
 
 Assertions and validation:
 - Assertions rely on `testify` (`require` for setup, `assert` for assertions)
-- Don't include messages unless the message provides context outside of the test point or the two variables being evaluated
+- Don't include messages unless the message provides context outside of the test point
 
 Test helpers:
-- Mock MCP server available via `service/mcp.NewTestMCPServer()`
+- Mock MCP server available via `service.NewTestMCPServer()`
+- Test utilities in `sectool/service/testutil/`
 
 Verification:
 - Always verify with `make test-all` and `make lint` before considering changes complete

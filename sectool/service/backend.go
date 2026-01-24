@@ -56,7 +56,7 @@ type HttpBackend interface {
 type ProxyRuleInput struct {
 	Label   string // Optional label for easier reference
 	Type    string // Required: rule type
-	IsRegex bool
+	IsRegex *bool  // nil = preserve existing, non-nil = set to value
 	Match   string
 	Replace string
 }
@@ -183,10 +183,6 @@ type CrawlerBackend interface {
 	// Searches CrawlFlowStore (not session-scoped).
 	GetFlow(ctx context.Context, flowID string) (*CrawlFlow, error)
 
-	// ExportFlow exports a flow to a bundle on disk.
-	// Returns ExportResult with bundle path and files created.
-	ExportFlow(ctx context.Context, flowID string, bundleDir string) (*ExportResult, error)
-
 	// StopSession immediately stops a running crawl. In-flight requests are abandoned.
 	// sessionID can be the ID or label.
 	StopSession(ctx context.Context, sessionID string) error
@@ -261,12 +257,12 @@ type CrawlStatus struct {
 }
 
 // CrawlSummary contains aggregated crawl results.
-// Uses same AggregateEntry format as proxy for consistency.
+// Uses same SummaryEntry format as proxy for consistency.
 type CrawlSummary struct {
-	SessionID  string           // Session identifier
-	State      string           // Current session state
-	Duration   time.Duration    // Total crawl duration
-	Aggregates []AggregateEntry // Traffic grouped by (host, path, method, status)
+	SessionID  string         // Session identifier
+	State      string         // Current session state
+	Duration   time.Duration  // Total crawl duration
+	Aggregates []SummaryEntry // Traffic grouped by (host, path, method, status)
 }
 
 // CrawlFlow represents a single captured request/response from crawling.

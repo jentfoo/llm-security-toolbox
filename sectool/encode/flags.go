@@ -50,7 +50,6 @@ encode url [options] <string>
   Examples:
     sectool encode url "hello world"           # hello%20world
     sectool encode url -d "hello%20world"      # hello world
-    sectool encode url "<script>alert(1)</script>"
 
 ---
 

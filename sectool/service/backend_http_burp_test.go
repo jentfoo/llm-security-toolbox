@@ -9,6 +9,8 @@ import (
 	"github.com/go-harden/llm-security-toolbox/sectool/service/mcp"
 )
 
+func boolPtr(b bool) *bool { return &b }
+
 func TestFormatSectoolComment(t *testing.T) {
 	t.Parallel()
 
@@ -116,7 +118,7 @@ func TestBurpBackendRules(t *testing.T) {
 				rule, err := backend.AddRule(t.Context(), ProxyRuleInput{
 					Label:   "test-add",
 					Type:    tc.ruleType1,
-					IsRegex: false,
+					IsRegex: boolPtr(false),
 					Match:   "",
 					Replace: "X-Test: value",
 				})
@@ -140,7 +142,7 @@ func TestBurpBackendRules(t *testing.T) {
 				rule, err := backend.AddRule(t.Context(), ProxyRuleInput{
 					Label:   "test-regex",
 					Type:    tc.ruleType2,
-					IsRegex: true,
+					IsRegex: boolPtr(true),
 					Match:   "^X-Remove.*$",
 					Replace: "",
 				})
@@ -174,7 +176,7 @@ func TestBurpBackendRules(t *testing.T) {
 				updated, err := backend.UpdateRule(t.Context(), createdRuleIDs[0], ProxyRuleInput{
 					Label:   "test-updated",
 					Type:    tc.updateType,
-					IsRegex: true,
+					IsRegex: boolPtr(true),
 					Match:   "old",
 					Replace: "new",
 				})
@@ -190,7 +192,7 @@ func TestBurpBackendRules(t *testing.T) {
 				updated, err := backend.UpdateRule(t.Context(), "test-regex", ProxyRuleInput{
 					Label:   "test-regex-updated",
 					Type:    tc.ruleType2,
-					IsRegex: false,
+					IsRegex: boolPtr(false),
 					Match:   "find",
 					Replace: "replace",
 				})

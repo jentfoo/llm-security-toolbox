@@ -949,3 +949,258 @@ func TestBuildRawRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestGlobToRegex(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		glob     string
+		expected string
+	}{
+		{"*.example.com", `.*\.example\.com`},
+		{"api.example.com", `api\.example\.com`},
+		{"test?", `test.`},
+		{"*.*.com", `.*\..*\.com`},
+		{"plain", `plain`},
+		{"path/to/*", `path/to/.*`},
+		{"[bracket]", `\[bracket\]`},
+		{"(paren)", `\(paren\)`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.glob, func(t *testing.T) {
+			assert.Equal(t, tt.expected, globToRegex(tt.glob))
+		})
+	}
+}
+
+func TestMatchesGlob(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		s       string
+		pattern string
+		match   bool
+	}{
+		{"api.example.com", "*.example.com", true},
+		{"example.com", "*.example.com", false},
+		{"api.example.com", "api.example.com", true},
+		{"api.example.com", "api.*.com", true},
+		{"test1", "test?", true},
+		{"test12", "test?", false},
+		{"anything", "", true}, // empty pattern matches all
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.s+"_"+tt.pattern, func(t *testing.T) {
+			assert.Equal(t, tt.match, matchesGlob(tt.s, tt.pattern))
+		})
+	}
+}
+
+func TestParseCommaSeparated(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"GET,POST,PUT", []string{"GET", "POST", "PUT"}},
+		{"GET, POST, PUT", []string{"GET", "POST", "PUT"}},
+		{"GET", []string{"GET"}},
+		{"", nil},
+		{" , , ", []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			assert.Equal(t, tt.expected, parseCommaSeparated(tt.input))
+		})
+	}
+}
+
+func TestParseStatusCodes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input    string
+		expected []int
+	}{
+		{"200,302,404", []int{200, 302, 404}},
+		{"200, 404", []int{200, 404}},
+		{"500", []int{500}},
+		{"", nil},
+		{"invalid", []int{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			assert.Equal(t, tt.expected, parseStatusCodes(tt.input))
+		})
+	}
+}
+
+func TestPathWithoutQuery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/api/users", "/api/users"},
+		{"/search?q=test", "/search"},
+		{"/api?a=1&b=2", "/api"},
+		{"?query=only", ""},
+		{"/path/with/multiple?a=1?b=2", "/path/with/multiple"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			assert.Equal(t, tt.want, pathWithoutQuery(tt.path))
+		})
+	}
+}
+
+func TestUpdateContentLength(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers string
+		length  int
+		want    string
+	}{
+		{
+			name:    "update_existing",
+			headers: "GET / HTTP/1.1\r\nContent-Length: 10\r\n\r\n",
+			length:  42,
+			want:    "GET / HTTP/1.1\r\nContent-Length: 42\r\n\r\n",
+		},
+		{
+			name:    "add_missing",
+			headers: "POST / HTTP/1.1\r\nHost: x\r\n\r\n",
+			length:  100,
+			want:    "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n",
+		},
+		{
+			name:    "zero_length_no_add",
+			headers: "GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+			length:  0,
+			want:    "GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+		},
+		{
+			name:    "case_insensitive",
+			headers: "POST / HTTP/1.1\r\ncontent-length: 5\r\n\r\n",
+			length:  20,
+			want:    "POST / HTTP/1.1\r\nContent-Length: 20\r\n\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, string(updateContentLength([]byte(tt.headers), tt.length)))
+		})
+	}
+}
+
+func TestSetHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers string
+		hName   string
+		hValue  string
+		want    string
+	}{
+		{
+			name:    "add_new_header",
+			headers: "GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+			hName:   "Authorization",
+			hValue:  "Bearer token",
+			want:    "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer token\r\n\r\n",
+		},
+		{
+			name:    "replace_existing",
+			headers: "GET / HTTP/1.1\r\nHost: old.com\r\n\r\n",
+			hName:   "Host",
+			hValue:  "new.com",
+			want:    "GET / HTTP/1.1\r\nHost: new.com\r\n\r\n",
+		},
+		{
+			name:    "case_insensitive_replace",
+			headers: "GET / HTTP/1.1\r\nhost: old.com\r\n\r\n",
+			hName:   "Host",
+			hValue:  "new.com",
+			want:    "GET / HTTP/1.1\r\nHost: new.com\r\n\r\n",
+		},
+		{
+			name:    "replace_first_header",
+			headers: "GET / HTTP/1.1\r\nHost: old.com\r\nCookie: abc\r\nAccept: */*\r\n\r\n",
+			hName:   "Host",
+			hValue:  "new.com",
+			want:    "GET / HTTP/1.1\r\nHost: new.com\r\nCookie: abc\r\nAccept: */*\r\n\r\n",
+		},
+		{
+			name:    "replace_middle_header",
+			headers: "GET / HTTP/1.1\r\nHost: x\r\nCookie: old\r\nAccept: */*\r\n\r\n",
+			hName:   "Cookie",
+			hValue:  "new",
+			want:    "GET / HTTP/1.1\r\nHost: x\r\nCookie: new\r\nAccept: */*\r\n\r\n",
+		},
+		{
+			name:    "replace_last_header",
+			headers: "GET / HTTP/1.1\r\nHost: x\r\nCookie: abc\r\nAccept: old\r\n\r\n",
+			hName:   "Accept",
+			hValue:  "application/json",
+			want:    "GET / HTTP/1.1\r\nHost: x\r\nCookie: abc\r\nAccept: application/json\r\n\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, string(setHeader([]byte(tt.headers), tt.hName, tt.hValue)))
+		})
+	}
+}
+
+func TestSetHeaderIfMissing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers string
+		hName   string
+		hValue  string
+		want    string
+	}{
+		{
+			name:    "add_when_missing",
+			headers: "GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+			hName:   "User-Agent",
+			hValue:  "sectool/1.0",
+			want:    "GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: sectool/1.0\r\n\r\n",
+		},
+		{
+			name:    "skip_when_present",
+			headers: "GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: existing\r\n\r\n",
+			hName:   "User-Agent",
+			hValue:  "sectool/1.0",
+			want:    "GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: existing\r\n\r\n",
+		},
+		{
+			name:    "case_insensitive_check",
+			headers: "GET / HTTP/1.1\r\nHost: x\r\nuser-agent: existing\r\n\r\n",
+			hName:   "User-Agent",
+			hValue:  "sectool/1.0",
+			want:    "GET / HTTP/1.1\r\nHost: x\r\nuser-agent: existing\r\n\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, string(setHeaderIfMissing([]byte(tt.headers), tt.hName, tt.hValue)))
+		})
+	}
+}
