@@ -6,16 +6,17 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/config"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 const DefaultMCPPort = 9119
 
 // Workflow mode constants
 const (
-	WorkflowModeNone       = "none"
-	WorkflowModeExplore    = "explore"
-	WorkflowModeTestReport = "test-report"
-	WorkflowModeCLI        = "cli" // undocumented, for CLI client use only
+	WorkflowModeNone       = protocol.WorkflowModeNone
+	WorkflowModeExplore    = protocol.WorkflowModeExplore
+	WorkflowModeTestReport = protocol.WorkflowModeTestReport
+	WorkflowModeCLI        = protocol.WorkflowModeCLI // undocumented, for CLI client use only
 )
 
 // MCPServerFlags holds flags for MCP server mode.

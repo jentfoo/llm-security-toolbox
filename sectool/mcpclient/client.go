@@ -15,7 +15,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/config"
-	"github.com/go-harden/llm-security-toolbox/sectool/service"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 const (
@@ -85,7 +85,7 @@ func New(ctx context.Context, mcpURL string) (*Client, error) {
 				Params: mcp.CallToolParams{
 					Name: "workflow",
 					Arguments: map[string]interface{}{
-						"task": service.WorkflowModeCLI,
+						"task": protocol.WorkflowModeCLI,
 					},
 				},
 			})

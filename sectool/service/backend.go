@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 // ErrLabelExists is returned when label conflicts with an existing entry (rule or OAST).
@@ -36,16 +38,16 @@ type HttpBackend interface {
 
 	// ListRules returns all enabled match/replace rules managed by sectool.
 	// websocket=true returns WebSocket rules, false returns HTTP rules.
-	ListRules(ctx context.Context, websocket bool) ([]RuleEntry, error)
+	ListRules(ctx context.Context, websocket bool) ([]protocol.RuleEntry, error)
 
 	// AddRule creates a new match/replace rule.
 	// WebSocket vs HTTP is inferred from rule.Type (ws:* types are WebSocket).
 	// Returns the created rule with assigned ID.
-	AddRule(ctx context.Context, rule ProxyRuleInput) (*RuleEntry, error)
+	AddRule(ctx context.Context, rule ProxyRuleInput) (*protocol.RuleEntry, error)
 
 	// UpdateRule modifies an existing rule by ID or label.
 	// Searches both HTTP and WebSocket rules automatically.
-	UpdateRule(ctx context.Context, idOrLabel string, rule ProxyRuleInput) (*RuleEntry, error)
+	UpdateRule(ctx context.Context, idOrLabel string, rule ProxyRuleInput) (*protocol.RuleEntry, error)
 
 	// DeleteRule removes a rule by ID or label.
 	// Searches both HTTP and WebSocket rules automatically.
@@ -260,10 +262,10 @@ type CrawlStatus struct {
 // CrawlSummary contains aggregated crawl results.
 // Uses same SummaryEntry format as proxy for consistency.
 type CrawlSummary struct {
-	SessionID  string         // Session identifier
-	State      string         // Current session state
-	Duration   time.Duration  // Total crawl duration
-	Aggregates []SummaryEntry // Traffic grouped by (host, path, method, status)
+	SessionID  string                  // Session identifier
+	State      string                  // Current session state
+	Duration   time.Duration           // Total crawl duration
+	Aggregates []protocol.SummaryEntry // Traffic grouped by (host, path, method, status)
 }
 
 // CrawlFlow represents a single captured request/response from crawling.

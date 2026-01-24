@@ -59,8 +59,9 @@ type Server struct {
 	wg         sync.WaitGroup
 }
 
-// NewServer creates a new MCP server instance.
-func NewServer(flags MCPServerFlags) (*Server, error) {
+// NewServer creates a new MCP server instance with optional backends.
+// If a backend is nil, Run initializes the default implementation.
+func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerBackend) (*Server, error) {
 	s := &Server{
 		flagBurpMCPURL:  flags.BurpMCPURL,
 		flagConfigPath:  flags.ConfigPath,
@@ -72,6 +73,9 @@ func NewServer(flags MCPServerFlags) (*Server, error) {
 		flowStore:       store.NewFlowStore(),
 		crawlFlowStore:  store.NewCrawlFlowStore(),
 		requestStore:    store.NewRequestStore(),
+		httpBackend:     hb,
+		oastBackend:     ob,
+		crawlerBackend:  cb,
 	}
 
 	// Register health metrics for store counts
@@ -107,15 +111,21 @@ func (s *Server) Run(ctx context.Context) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// Connect to Burp MCP
-	if err := s.connectBurpMCP(ctx); err != nil {
-		return fmt.Errorf("failed to connect to Burp MCP: %w", err)
+	if s.httpBackend == nil {
+		if err := s.connectBurpMCP(ctx); err != nil {
+			return fmt.Errorf("failed to connect to Burp MCP: %w", err)
+		}
 	}
 
 	// Setup OAST backend
-	s.oastBackend = NewInteractshBackend()
+	if s.oastBackend == nil {
+		s.oastBackend = NewInteractshBackend()
+	}
 
 	// Setup Crawler backend
-	s.crawlerBackend = NewCollyBackend(s.cfg.Crawler, s.crawlFlowStore, s.flowStore, s.httpBackend)
+	if s.crawlerBackend == nil {
+		s.crawlerBackend = NewCollyBackend(s.cfg.Crawler, s.crawlFlowStore, s.flowStore, s.httpBackend)
+	}
 
 	// Start MCP server
 	s.mcpServer = newMCPServer(s, s.mcpWorkflowMode)

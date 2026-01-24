@@ -3,10 +3,12 @@ package mcpclient
 import (
 	"context"
 	"time"
+
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 // ProxySummary calls proxy_summary and returns aggregated traffic summary.
-func (c *Client) ProxySummary(ctx context.Context, opts ProxySummaryOpts) (*ProxySummaryResponse, error) {
+func (c *Client) ProxySummary(ctx context.Context, opts ProxySummaryOpts) (*protocol.ProxySummaryResponse, error) {
 	args := make(map[string]interface{})
 	if opts.Host != "" {
 		args["host"] = opts.Host
@@ -33,7 +35,7 @@ func (c *Client) ProxySummary(ctx context.Context, opts ProxySummaryOpts) (*Prox
 		args["exclude_path"] = opts.ExcludePath
 	}
 
-	var resp ProxySummaryResponse
+	var resp protocol.ProxySummaryResponse
 	if err := c.CallToolJSON(ctx, "proxy_summary", args, &resp); err != nil {
 		return nil, err
 	}
@@ -41,7 +43,7 @@ func (c *Client) ProxySummary(ctx context.Context, opts ProxySummaryOpts) (*Prox
 }
 
 // ProxyList calls proxy_list and returns individual flows.
-func (c *Client) ProxyList(ctx context.Context, opts ProxyListOpts) (*ProxyListResponse, error) {
+func (c *Client) ProxyList(ctx context.Context, opts ProxyListOpts) (*protocol.ProxyListResponse, error) {
 	args := make(map[string]interface{})
 	if opts.Host != "" {
 		args["host"] = opts.Host
@@ -77,7 +79,7 @@ func (c *Client) ProxyList(ctx context.Context, opts ProxyListOpts) (*ProxyListR
 		args["offset"] = opts.Offset
 	}
 
-	var resp ProxyListResponse
+	var resp protocol.ProxyListResponse
 	if err := c.CallToolJSON(ctx, "proxy_list", args, &resp); err != nil {
 		return nil, err
 	}
@@ -85,9 +87,9 @@ func (c *Client) ProxyList(ctx context.Context, opts ProxyListOpts) (*ProxyListR
 }
 
 // ProxyGet calls proxy_get and returns full request/response data.
-func (c *Client) ProxyGet(ctx context.Context, flowID string) (*ProxyGetResponse, error) {
+func (c *Client) ProxyGet(ctx context.Context, flowID string) (*protocol.ProxyGetResponse, error) {
 	args := map[string]interface{}{"flow_id": flowID, "full_body": true}
-	var resp ProxyGetResponse
+	var resp protocol.ProxyGetResponse
 	if err := c.CallToolJSON(ctx, "proxy_get", args, &resp); err != nil {
 		return nil, err
 	}
@@ -95,7 +97,7 @@ func (c *Client) ProxyGet(ctx context.Context, flowID string) (*ProxyGetResponse
 }
 
 // ProxyRuleList calls proxy_rule_list and returns rules.
-func (c *Client) ProxyRuleList(ctx context.Context, typeFilter string, limit int) (*RuleListResponse, error) {
+func (c *Client) ProxyRuleList(ctx context.Context, typeFilter string, limit int) (*protocol.RuleListResponse, error) {
 	args := make(map[string]interface{})
 	if typeFilter != "" {
 		args["type_filter"] = typeFilter
@@ -104,7 +106,7 @@ func (c *Client) ProxyRuleList(ctx context.Context, typeFilter string, limit int
 		args["limit"] = limit
 	}
 
-	var resp RuleListResponse
+	var resp protocol.RuleListResponse
 	if err := c.CallToolJSON(ctx, "proxy_rule_list", args, &resp); err != nil {
 		return nil, err
 	}
@@ -112,7 +114,7 @@ func (c *Client) ProxyRuleList(ctx context.Context, typeFilter string, limit int
 }
 
 // ProxyRuleAdd calls proxy_rule_add and returns the created rule.
-func (c *Client) ProxyRuleAdd(ctx context.Context, opts RuleAddOpts) (*RuleEntry, error) {
+func (c *Client) ProxyRuleAdd(ctx context.Context, opts RuleAddOpts) (*protocol.RuleEntry, error) {
 	args := map[string]interface{}{
 		"type": opts.Type,
 	}
@@ -129,7 +131,7 @@ func (c *Client) ProxyRuleAdd(ctx context.Context, opts RuleAddOpts) (*RuleEntry
 		args["is_regex"] = opts.IsRegex
 	}
 
-	var resp RuleEntry
+	var resp protocol.RuleEntry
 	if err := c.CallToolJSON(ctx, "proxy_rule_add", args, &resp); err != nil {
 		return nil, err
 	}
@@ -137,7 +139,7 @@ func (c *Client) ProxyRuleAdd(ctx context.Context, opts RuleAddOpts) (*RuleEntry
 }
 
 // ProxyRuleUpdate calls proxy_rule_update and returns the updated rule.
-func (c *Client) ProxyRuleUpdate(ctx context.Context, ruleID string, opts RuleUpdateOpts) (*RuleEntry, error) {
+func (c *Client) ProxyRuleUpdate(ctx context.Context, ruleID string, opts RuleUpdateOpts) (*protocol.RuleEntry, error) {
 	args := map[string]interface{}{
 		"rule_id": ruleID,
 		"type":    opts.Type,
@@ -155,7 +157,7 @@ func (c *Client) ProxyRuleUpdate(ctx context.Context, ruleID string, opts RuleUp
 		args["is_regex"] = *opts.IsRegex
 	}
 
-	var resp RuleEntry
+	var resp protocol.RuleEntry
 	if err := c.CallToolJSON(ctx, "proxy_rule_update", args, &resp); err != nil {
 		return nil, err
 	}
@@ -169,7 +171,7 @@ func (c *Client) ProxyRuleDelete(ctx context.Context, ruleID string) error {
 }
 
 // ReplaySend calls replay_send and returns the result.
-func (c *Client) ReplaySend(ctx context.Context, opts ReplaySendOpts) (*ReplaySendResponse, error) {
+func (c *Client) ReplaySend(ctx context.Context, opts ReplaySendOpts) (*protocol.ReplaySendResponse, error) {
 	args := map[string]interface{}{
 		"flow_id": opts.FlowID,
 	}
@@ -213,7 +215,7 @@ func (c *Client) ReplaySend(ctx context.Context, opts ReplaySendOpts) (*ReplaySe
 		args["force"] = opts.Force
 	}
 
-	var resp ReplaySendResponse
+	var resp protocol.ReplaySendResponse
 	if err := c.CallToolJSON(ctx, "replay_send", args, &resp); err != nil {
 		return nil, err
 	}
@@ -221,9 +223,9 @@ func (c *Client) ReplaySend(ctx context.Context, opts ReplaySendOpts) (*ReplaySe
 }
 
 // ReplayGet calls replay_get and returns full response data.
-func (c *Client) ReplayGet(ctx context.Context, replayID string) (*ReplayGetResponse, error) {
+func (c *Client) ReplayGet(ctx context.Context, replayID string) (*protocol.ReplayGetResponse, error) {
 	args := map[string]interface{}{"replay_id": replayID, "full_body": true}
-	var resp ReplayGetResponse
+	var resp protocol.ReplayGetResponse
 	if err := c.CallToolJSON(ctx, "replay_get", args, &resp); err != nil {
 		return nil, err
 	}
@@ -231,7 +233,7 @@ func (c *Client) ReplayGet(ctx context.Context, replayID string) (*ReplayGetResp
 }
 
 // RequestSend calls request_send and returns the result.
-func (c *Client) RequestSend(ctx context.Context, opts RequestSendOpts) (*ReplaySendResponse, error) {
+func (c *Client) RequestSend(ctx context.Context, opts RequestSendOpts) (*protocol.ReplaySendResponse, error) {
 	args := map[string]interface{}{
 		"url": opts.URL,
 	}
@@ -251,7 +253,7 @@ func (c *Client) RequestSend(ctx context.Context, opts RequestSendOpts) (*Replay
 		args["timeout"] = opts.Timeout
 	}
 
-	var resp ReplaySendResponse
+	var resp protocol.ReplaySendResponse
 	if err := c.CallToolJSON(ctx, "request_send", args, &resp); err != nil {
 		return nil, err
 	}
@@ -259,13 +261,13 @@ func (c *Client) RequestSend(ctx context.Context, opts RequestSendOpts) (*Replay
 }
 
 // OastCreate calls oast_create and returns the session.
-func (c *Client) OastCreate(ctx context.Context, label string) (*OastCreateResponse, error) {
+func (c *Client) OastCreate(ctx context.Context, label string) (*protocol.OastCreateResponse, error) {
 	args := make(map[string]interface{})
 	if label != "" {
 		args["label"] = label
 	}
 
-	var resp OastCreateResponse
+	var resp protocol.OastCreateResponse
 	if err := c.CallToolJSON(ctx, "oast_create", args, &resp); err != nil {
 		return nil, err
 	}
@@ -277,7 +279,7 @@ func (c *Client) OastCreate(ctx context.Context, label string) (*OastCreateRespo
 // eventType: filter by type (dns, http, smtp, ftp, ldap, smb, responder), empty returns all
 // wait: how long to block waiting for events (0 = return immediately)
 // limit: max events to return (0 = no limit)
-func (c *Client) OastPoll(ctx context.Context, oastID, since, eventType string, wait time.Duration, limit int) (*OastPollResponse, error) {
+func (c *Client) OastPoll(ctx context.Context, oastID, since, eventType string, wait time.Duration, limit int) (*protocol.OastPollResponse, error) {
 	args := map[string]interface{}{
 		"oast_id": oastID,
 	}
@@ -294,7 +296,7 @@ func (c *Client) OastPoll(ctx context.Context, oastID, since, eventType string, 
 		args["limit"] = limit
 	}
 
-	var resp OastPollResponse
+	var resp protocol.OastPollResponse
 	if err := c.CallToolJSON(ctx, "oast_poll", args, &resp); err != nil {
 		return nil, err
 	}
@@ -302,13 +304,13 @@ func (c *Client) OastPoll(ctx context.Context, oastID, since, eventType string, 
 }
 
 // OastGet calls oast_get and returns full event data.
-func (c *Client) OastGet(ctx context.Context, oastID, eventID string) (*OastGetResponse, error) {
+func (c *Client) OastGet(ctx context.Context, oastID, eventID string) (*protocol.OastGetResponse, error) {
 	args := map[string]interface{}{
 		"oast_id":  oastID,
 		"event_id": eventID,
 	}
 
-	var resp OastGetResponse
+	var resp protocol.OastGetResponse
 	if err := c.CallToolJSON(ctx, "oast_get", args, &resp); err != nil {
 		return nil, err
 	}
@@ -316,13 +318,13 @@ func (c *Client) OastGet(ctx context.Context, oastID, eventID string) (*OastGetR
 }
 
 // OastList calls oast_list and returns sessions.
-func (c *Client) OastList(ctx context.Context, limit int) (*OastListResponse, error) {
+func (c *Client) OastList(ctx context.Context, limit int) (*protocol.OastListResponse, error) {
 	args := make(map[string]interface{})
 	if limit > 0 {
 		args["limit"] = limit
 	}
 
-	var resp OastListResponse
+	var resp protocol.OastListResponse
 	if err := c.CallToolJSON(ctx, "oast_list", args, &resp); err != nil {
 		return nil, err
 	}
@@ -336,7 +338,7 @@ func (c *Client) OastDelete(ctx context.Context, oastID string) error {
 }
 
 // CrawlCreate calls crawl_create and returns the session.
-func (c *Client) CrawlCreate(ctx context.Context, opts CrawlCreateOpts) (*CrawlCreateResponse, error) {
+func (c *Client) CrawlCreate(ctx context.Context, opts CrawlCreateOpts) (*protocol.CrawlCreateResponse, error) {
 	args := make(map[string]interface{})
 	if opts.Label != "" {
 		args["label"] = opts.Label
@@ -375,7 +377,7 @@ func (c *Client) CrawlCreate(ctx context.Context, opts CrawlCreateOpts) (*CrawlC
 		args["ignore_robots"] = opts.IgnoreRobots
 	}
 
-	var resp CrawlCreateResponse
+	var resp protocol.CrawlCreateResponse
 	if err := c.CallToolJSON(ctx, "crawl_create", args, &resp); err != nil {
 		return nil, err
 	}
@@ -383,7 +385,7 @@ func (c *Client) CrawlCreate(ctx context.Context, opts CrawlCreateOpts) (*CrawlC
 }
 
 // CrawlSeed calls crawl_seed to add seeds to a session.
-func (c *Client) CrawlSeed(ctx context.Context, sessionID string, seedURLs, seedFlows string) (*CrawlSeedResponse, error) {
+func (c *Client) CrawlSeed(ctx context.Context, sessionID string, seedURLs, seedFlows string) (*protocol.CrawlSeedResponse, error) {
 	args := map[string]interface{}{
 		"session_id": sessionID,
 	}
@@ -394,7 +396,7 @@ func (c *Client) CrawlSeed(ctx context.Context, sessionID string, seedURLs, seed
 		args["seed_flows"] = seedFlows
 	}
 
-	var resp CrawlSeedResponse
+	var resp protocol.CrawlSeedResponse
 	if err := c.CallToolJSON(ctx, "crawl_seed", args, &resp); err != nil {
 		return nil, err
 	}
@@ -402,8 +404,8 @@ func (c *Client) CrawlSeed(ctx context.Context, sessionID string, seedURLs, seed
 }
 
 // CrawlStatus calls crawl_status and returns session status.
-func (c *Client) CrawlStatus(ctx context.Context, sessionID string) (*CrawlStatusResponse, error) {
-	var resp CrawlStatusResponse
+func (c *Client) CrawlStatus(ctx context.Context, sessionID string) (*protocol.CrawlStatusResponse, error) {
+	var resp protocol.CrawlStatusResponse
 	if err := c.CallToolJSON(ctx, "crawl_status", map[string]interface{}{"session_id": sessionID}, &resp); err != nil {
 		return nil, err
 	}
@@ -411,8 +413,8 @@ func (c *Client) CrawlStatus(ctx context.Context, sessionID string) (*CrawlStatu
 }
 
 // CrawlSummary calls crawl_summary and returns aggregated results.
-func (c *Client) CrawlSummary(ctx context.Context, sessionID string) (*CrawlSummaryResponse, error) {
-	var resp CrawlSummaryResponse
+func (c *Client) CrawlSummary(ctx context.Context, sessionID string) (*protocol.CrawlSummaryResponse, error) {
+	var resp protocol.CrawlSummaryResponse
 	if err := c.CallToolJSON(ctx, "crawl_summary", map[string]interface{}{"session_id": sessionID}, &resp); err != nil {
 		return nil, err
 	}
@@ -420,7 +422,7 @@ func (c *Client) CrawlSummary(ctx context.Context, sessionID string) (*CrawlSumm
 }
 
 // CrawlList calls crawl_list and returns flows, forms, or errors.
-func (c *Client) CrawlList(ctx context.Context, sessionID string, opts CrawlListOpts) (*CrawlListResponse, error) {
+func (c *Client) CrawlList(ctx context.Context, sessionID string, opts CrawlListOpts) (*protocol.CrawlListResponse, error) {
 	args := map[string]interface{}{
 		"session_id": sessionID,
 	}
@@ -461,7 +463,7 @@ func (c *Client) CrawlList(ctx context.Context, sessionID string, opts CrawlList
 		args["offset"] = opts.Offset
 	}
 
-	var resp CrawlListResponse
+	var resp protocol.CrawlListResponse
 	if err := c.CallToolJSON(ctx, "crawl_list", args, &resp); err != nil {
 		return nil, err
 	}
@@ -469,13 +471,13 @@ func (c *Client) CrawlList(ctx context.Context, sessionID string, opts CrawlList
 }
 
 // CrawlSessions calls crawl_sessions and returns all sessions.
-func (c *Client) CrawlSessions(ctx context.Context, limit int) (*CrawlSessionsResponse, error) {
+func (c *Client) CrawlSessions(ctx context.Context, limit int) (*protocol.CrawlSessionsResponse, error) {
 	args := make(map[string]interface{})
 	if limit > 0 {
 		args["limit"] = limit
 	}
 
-	var resp CrawlSessionsResponse
+	var resp protocol.CrawlSessionsResponse
 	if err := c.CallToolJSON(ctx, "crawl_sessions", args, &resp); err != nil {
 		return nil, err
 	}
@@ -489,9 +491,9 @@ func (c *Client) CrawlStop(ctx context.Context, sessionID string) error {
 }
 
 // CrawlGet calls crawl_get and returns full flow data.
-func (c *Client) CrawlGet(ctx context.Context, flowID string) (*CrawlGetResponse, error) {
+func (c *Client) CrawlGet(ctx context.Context, flowID string) (*protocol.CrawlGetResponse, error) {
 	args := map[string]interface{}{"flow_id": flowID, "full_body": true}
-	var resp CrawlGetResponse
+	var resp protocol.CrawlGetResponse
 	if err := c.CallToolJSON(ctx, "crawl_get", args, &resp); err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-harden/llm-security-toolbox/sectool/cliutil"
 	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 func create(mcpURL string, timeout time.Duration, label string) error {
@@ -161,7 +162,7 @@ func list(mcpURL string, timeout time.Duration, limit int) error {
 		return nil
 	}
 
-	hasLabels := slices.ContainsFunc(resp.Sessions, func(s mcpclient.OastSession) bool {
+	hasLabels := slices.ContainsFunc(resp.Sessions, func(s protocol.OastSession) bool {
 		return s.Label != ""
 	})
 

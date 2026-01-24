@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-harden/llm-security-toolbox/sectool/bundle"
 	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 	"github.com/go-harden/llm-security-toolbox/sectool/service"
 )
 
@@ -119,13 +120,13 @@ func send(mcpURL string, timeout time.Duration, flow, bundleArg, file, body, tar
 	fmt.Printf("Duration: %s\n\n", resp.Duration)
 
 	fmt.Printf("### Response\n\n")
-	fmt.Printf("Status: %d %s\n", resp.Response.Status, resp.Response.StatusLine)
-	fmt.Printf("Size: %d bytes\n\n", resp.Response.RespSize)
-	if resp.Response.RespHeaders != "" {
-		fmt.Printf("Headers:\n```\n%s```\n\n", resp.Response.RespHeaders)
+	fmt.Printf("Status: %d %s\n", resp.Status, resp.StatusLine)
+	fmt.Printf("Size: %d bytes\n\n", resp.RespSize)
+	if resp.RespHeaders != "" {
+		fmt.Printf("Headers:\n```\n%s```\n\n", resp.RespHeaders)
 	}
-	if resp.Response.RespPreview != "" {
-		fmt.Printf("Body Preview:\n```\n%s\n```\n", resp.Response.RespPreview)
+	if resp.RespPreview != "" {
+		fmt.Printf("Body Preview:\n```\n%s\n```\n", resp.RespPreview)
 	}
 
 	return nil
@@ -542,18 +543,18 @@ func parseHeaders(raw []byte) (map[string]string, error) {
 	return headerMap, nil
 }
 
-func printReplayResult(resp *mcpclient.ReplaySendResponse) {
+func printReplayResult(resp *protocol.ReplaySendResponse) {
 	fmt.Printf("## Replay Result\n\n")
 	fmt.Printf("Replay ID: `%s`\n", resp.ReplayID)
 	fmt.Printf("Duration: %s\n\n", resp.Duration)
 
 	fmt.Printf("### Response\n\n")
-	fmt.Printf("Status: %d %s\n", resp.Response.Status, resp.Response.StatusLine)
-	fmt.Printf("Size: %d bytes\n\n", resp.Response.RespSize)
-	if resp.Response.RespHeaders != "" {
-		fmt.Printf("Headers:\n```\n%s```\n\n", resp.Response.RespHeaders)
+	fmt.Printf("Status: %d %s\n", resp.Status, resp.StatusLine)
+	fmt.Printf("Size: %d bytes\n\n", resp.RespSize)
+	if resp.RespHeaders != "" {
+		fmt.Printf("Headers:\n```\n%s```\n\n", resp.RespHeaders)
 	}
-	if resp.Response.RespPreview != "" {
-		fmt.Printf("Body Preview:\n```\n%s\n```\n", resp.Response.RespPreview)
+	if resp.RespPreview != "" {
+		fmt.Printf("Body Preview:\n```\n%s\n```\n", resp.RespPreview)
 	}
 }

@@ -7,7 +7,6 @@ import (
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/stretchr/testify/require"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/config"
 )
@@ -48,35 +47,4 @@ func ConnectBurpSSEOrSkip(t *testing.T) *mcpclient.Client {
 
 	t.Cleanup(func() { _ = burpClient.Close() })
 	return burpClient
-}
-
-// CallMCPTool calls an MCP tool and returns the result.
-func CallMCPTool(t *testing.T, client *mcpclient.Client, name string, args map[string]interface{}) *mcp.CallToolResult {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-
-	result, err := client.CallTool(ctx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name:      name,
-			Arguments: args,
-		},
-	})
-	require.NoError(t, err)
-	return result
-}
-
-// ExtractMCPText extracts text content from an MCP tool result.
-func ExtractMCPText(t *testing.T, result *mcp.CallToolResult) string {
-	t.Helper()
-
-	require.NotEmpty(t, result.Content, "result should have content")
-	for _, c := range result.Content {
-		if tc, ok := c.(mcp.TextContent); ok {
-			return tc.Text
-		}
-	}
-	t.Fatal("no text content found in result")
-	return ""
 }

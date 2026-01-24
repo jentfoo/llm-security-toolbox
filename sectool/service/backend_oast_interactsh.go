@@ -254,7 +254,7 @@ func (s *oastSession) filterEvents(since, eventType string) []OastEventInfo {
 		}
 	default:
 		// Find event by ID and return everything after it
-		found := false
+		var found bool
 		for i, e := range s.events {
 			if e.ID == since {
 				if i+1 >= len(s.events) {
@@ -276,14 +276,9 @@ func (s *oastSession) filterEvents(since, eventType string) []OastEventInfo {
 		return events
 	}
 
-	// Filter by event type
-	filtered := make([]OastEventInfo, 0, len(events))
-	for _, e := range events {
-		if e.Type == eventType {
-			filtered = append(filtered, e)
-		}
-	}
-	return filtered
+	return bulk.SliceFilter(func(e OastEventInfo) bool {
+		return e.Type == eventType
+	}, events)
 }
 
 // updateLastPollIdx updates lastPollIdx based on returned events (for --since last tracking).

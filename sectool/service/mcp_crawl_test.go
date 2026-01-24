@@ -1,0 +1,392 @@
+package service
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
+)
+
+func TestMCP_CrawlLifecycleWithMock(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, _, _, mockCrawler := setupMCPServerWithMock(t)
+
+	createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
+		"seed_urls": "https://example.com",
+		"label":     "mock-crawl",
+	})
+	require.False(t, createResult.IsError,
+		"crawl_create failed: %s", ExtractMCPText(t, createResult))
+
+	var createResp protocol.CrawlCreateResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, createResult)), &createResp))
+	require.NotEmpty(t, createResp.SessionID)
+
+	flowID := "flow-1"
+	req := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok")
+	err := mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
+		ID:             flowID,
+		SessionID:      createResp.SessionID,
+		URL:            "https://example.com/",
+		Host:           "example.com",
+		Path:           "/",
+		Method:         "GET",
+		StatusCode:     200,
+		ResponseLength: 2,
+		Request:        req,
+		Response:       resp,
+		Duration:       10 * time.Millisecond,
+		DiscoveredAt:   time.Now(),
+	})
+	require.NoError(t, err)
+
+	form := DiscoveredForm{
+		ID:        "form-1",
+		SessionID: createResp.SessionID,
+		URL:       "https://example.com/login",
+		Action:    "https://example.com/login",
+		Method:    "POST",
+		Inputs: []FormInput{
+			{Name: "username", Type: "text"},
+		},
+		HasCSRF: true,
+	}
+	require.NoError(t, mockCrawler.AddForm(createResp.SessionID, form))
+
+	crawlErr := CrawlError{
+		FlowID: flowID,
+		URL:    "https://example.com/bad",
+		Error:  "boom",
+		Status: 500,
+	}
+	require.NoError(t, mockCrawler.AddError(createResp.SessionID, crawlErr))
+
+	statusResult := CallMCPTool(t, mcpClient, "crawl_status", map[string]interface{}{
+		"session_id": createResp.SessionID,
+	})
+	require.False(t, statusResult.IsError,
+		"crawl_status failed: %s", ExtractMCPText(t, statusResult))
+	var statusResp protocol.CrawlStatusResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, statusResult)), &statusResp))
+	assert.Equal(t, "running", statusResp.State)
+
+	summaryResult := CallMCPTool(t, mcpClient, "crawl_summary", map[string]interface{}{
+		"session_id": createResp.SessionID,
+	})
+	require.False(t, summaryResult.IsError,
+		"crawl_summary failed: %s", ExtractMCPText(t, summaryResult))
+	var summaryResp protocol.CrawlSummaryResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, summaryResult)), &summaryResp))
+	require.NotEmpty(t, summaryResp.Aggregates)
+	assert.Equal(t, "example.com", summaryResp.Aggregates[0].Host)
+	assert.Equal(t, "/", summaryResp.Aggregates[0].Path)
+	assert.Equal(t, "GET", summaryResp.Aggregates[0].Method)
+	assert.Equal(t, 200, summaryResp.Aggregates[0].Status)
+
+	listResult := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+		"session_id": createResp.SessionID,
+		"type":       "urls",
+	})
+	require.False(t, listResult.IsError,
+		"crawl_list failed: %s", ExtractMCPText(t, listResult))
+	var listResp protocol.CrawlListResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, listResult)), &listResp))
+	require.NotEmpty(t, listResp.Flows)
+	assert.Equal(t, flowID, listResp.Flows[0].FlowID)
+
+	getResult := CallMCPTool(t, mcpClient, "crawl_get", map[string]interface{}{
+		"flow_id": flowID,
+	})
+	require.False(t, getResult.IsError,
+		"crawl_get failed: %s", ExtractMCPText(t, getResult))
+	var getResp protocol.CrawlGetResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, getResult)), &getResp))
+	assert.Equal(t, flowID, getResp.FlowID)
+	assert.Equal(t, 200, getResp.Status)
+
+	formsResult := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+		"session_id": createResp.SessionID,
+		"type":       "forms",
+	})
+	require.False(t, formsResult.IsError,
+		"crawl_list failed: %s", ExtractMCPText(t, formsResult))
+	var formsResp protocol.CrawlListResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, formsResult)), &formsResp))
+	require.NotEmpty(t, formsResp.Forms)
+
+	errorsResult := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+		"session_id": createResp.SessionID,
+		"type":       "errors",
+	})
+	require.False(t, errorsResult.IsError,
+		"crawl_list failed: %s", ExtractMCPText(t, errorsResult))
+	var errorsResp protocol.CrawlListResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, errorsResult)), &errorsResp))
+	require.NotEmpty(t, errorsResp.Errors)
+
+	sessionsResult := CallMCPTool(t, mcpClient, "crawl_sessions", nil)
+	require.False(t, sessionsResult.IsError,
+		"crawl_sessions failed: %s", ExtractMCPText(t, sessionsResult))
+	var sessionsResp protocol.CrawlSessionsResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, sessionsResult)), &sessionsResp))
+	require.NotEmpty(t, sessionsResp.Sessions)
+
+	// Test crawl_list with filters
+	listWithHostResult := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+		"session_id": createResp.SessionID,
+		"type":       "urls",
+		"host":       "example.com",
+	})
+	require.False(t, listWithHostResult.IsError,
+		"crawl_list failed: %s", ExtractMCPText(t, listWithHostResult))
+	var hostResp protocol.CrawlListResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, listWithHostResult)), &hostResp))
+	for _, flow := range hostResp.Flows {
+		assert.Equal(t, "example.com", flow.Host)
+	}
+
+	listWithPathResult := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+		"session_id": createResp.SessionID,
+		"type":       "urls",
+		"path":       "/*",
+	})
+	require.False(t, listWithPathResult.IsError,
+		"crawl_list failed: %s", ExtractMCPText(t, listWithPathResult))
+
+	listWithMethodResult := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+		"session_id": createResp.SessionID,
+		"type":       "urls",
+		"method":     "GET",
+	})
+	require.False(t, listWithMethodResult.IsError,
+		"crawl_list failed: %s", ExtractMCPText(t, listWithMethodResult))
+	var methodResp protocol.CrawlListResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, listWithMethodResult)), &methodResp))
+	for _, flow := range methodResp.Flows {
+		assert.Equal(t, "GET", flow.Method)
+	}
+
+	listWithStatusResult := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+		"session_id": createResp.SessionID,
+		"type":       "urls",
+		"status":     "200",
+	})
+	require.False(t, listWithStatusResult.IsError,
+		"crawl_list failed: %s", ExtractMCPText(t, listWithStatusResult))
+	var statusFilterResp protocol.CrawlListResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, listWithStatusResult)), &statusFilterResp))
+	for _, flow := range statusFilterResp.Flows {
+		assert.Equal(t, 200, flow.Status)
+	}
+
+	listWithExcludeResult := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+		"session_id":   createResp.SessionID,
+		"type":         "urls",
+		"exclude_host": "other.com",
+	})
+	require.False(t, listWithExcludeResult.IsError,
+		"crawl_list failed: %s", ExtractMCPText(t, listWithExcludeResult))
+	var excludeResp protocol.CrawlListResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, listWithExcludeResult)), &excludeResp))
+	for _, flow := range excludeResp.Flows {
+		assert.NotEqual(t, "other.com", flow.Host)
+	}
+
+	stopResult := CallMCPTool(t, mcpClient, "crawl_stop", map[string]interface{}{
+		"session_id": createResp.SessionID,
+	})
+	require.False(t, stopResult.IsError,
+		"crawl_stop failed: %s", ExtractMCPText(t, stopResult))
+	var stopResp CrawlStopResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, stopResult)), &stopResp))
+	assert.True(t, stopResp.Stopped)
+}
+
+func TestMCP_CrawlSeedWithMock(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, _, _, mockCrawler := setupMCPServerWithMock(t)
+
+	createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
+		"seed_urls": "https://example.com",
+	})
+	require.False(t, createResult.IsError,
+		"crawl_create failed: %s", ExtractMCPText(t, createResult))
+
+	var createResp protocol.CrawlCreateResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, createResult)), &createResp))
+
+	statusBefore, err := mockCrawler.GetStatus(t.Context(), createResp.SessionID)
+	require.NoError(t, err)
+	queuedBefore := statusBefore.URLsQueued
+
+	seedResult := CallMCPTool(t, mcpClient, "crawl_seed", map[string]interface{}{
+		"session_id": createResp.SessionID,
+		"seed_urls":  "https://example.com/page1,https://example.com/page2",
+	})
+	require.False(t, seedResult.IsError,
+		"crawl_seed failed: %s", ExtractMCPText(t, seedResult))
+
+	statusAfter, err := mockCrawler.GetStatus(t.Context(), createResp.SessionID)
+	require.NoError(t, err)
+	assert.Equal(t, queuedBefore+2, statusAfter.URLsQueued)
+}
+
+func TestMCP_CrawlValidation(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, _, _, mockCrawler := setupMCPServerWithMock(t)
+
+	t.Run("create_missing_seeds", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "seed")
+	})
+
+	t.Run("create_duplicate_label", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://example.com",
+			"label":     "dupe-label",
+		})
+		require.False(t, result.IsError,
+			"crawl_create failed: %s", ExtractMCPText(t, result))
+
+		result = CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://example.com",
+			"label":     "dupe-label",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "label")
+	})
+
+	t.Run("status_missing_session_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_status", map[string]interface{}{})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "session_id is required")
+	})
+
+	t.Run("status_invalid_session_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_status", map[string]interface{}{
+			"session_id": "nonexistent",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "not found")
+	})
+
+	t.Run("summary_missing_session_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_summary", map[string]interface{}{})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "session_id is required")
+	})
+
+	t.Run("list_missing_session_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+			"type": "urls",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "session_id is required")
+	})
+
+	t.Run("list_defaults_to_urls", func(t *testing.T) {
+		createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://example.com",
+		})
+		require.False(t, createResult.IsError,
+			"crawl_create failed: %s", ExtractMCPText(t, createResult))
+		var createResp protocol.CrawlCreateResponse
+		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, createResult)), &createResp))
+
+		result := CallMCPTool(t, mcpClient, "crawl_list", map[string]interface{}{
+			"session_id": createResp.SessionID,
+		})
+		require.False(t, result.IsError,
+			"crawl_list failed: %s", ExtractMCPText(t, result))
+
+		var listResp protocol.CrawlListResponse
+		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, result)), &listResp))
+		// Should return flows (urls) by default, even if empty
+		assert.Nil(t, listResp.Forms)
+		assert.Nil(t, listResp.Errors)
+	})
+
+	t.Run("summary_invalid_session_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_summary", map[string]interface{}{
+			"session_id": "nonexistent",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "not found")
+	})
+
+	t.Run("sessions_with_limit", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_sessions", map[string]interface{}{
+			"limit": 1,
+		})
+		require.False(t, result.IsError,
+			"crawl_sessions failed: %s", ExtractMCPText(t, result))
+
+		var resp protocol.CrawlSessionsResponse
+		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, result)), &resp))
+		assert.LessOrEqual(t, len(resp.Sessions), 1)
+	})
+
+	t.Run("get_missing_flow_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_get", map[string]interface{}{})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "flow_id is required")
+	})
+
+	t.Run("get_invalid_flow_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_get", map[string]interface{}{
+			"flow_id": "nonexistent",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "not found")
+	})
+
+	t.Run("stop_missing_session_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_stop", map[string]interface{}{})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "session_id is required")
+	})
+
+	t.Run("stop_invalid_session_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_stop", map[string]interface{}{
+			"session_id": "nonexistent",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "not found")
+	})
+
+	t.Run("seed_missing_session_id", func(t *testing.T) {
+		result := CallMCPTool(t, mcpClient, "crawl_seed", map[string]interface{}{
+			"seed_urls": "https://example.com/new",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "session_id is required")
+	})
+
+	t.Run("seed_stopped_session", func(t *testing.T) {
+		createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://example.com",
+		})
+		require.False(t, createResult.IsError,
+			"crawl_create failed: %s", ExtractMCPText(t, createResult))
+		var createResp protocol.CrawlCreateResponse
+		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, createResult)), &createResp))
+
+		require.NoError(t, mockCrawler.StopSession(t.Context(), createResp.SessionID))
+
+		result := CallMCPTool(t, mcpClient, "crawl_seed", map[string]interface{}{
+			"session_id": createResp.SessionID,
+			"seed_urls":  "https://example.com/new",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "not running")
+	})
+}

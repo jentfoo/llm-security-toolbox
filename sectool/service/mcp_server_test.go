@@ -2,32 +2,36 @@ package service
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
-	"github.com/mark3labs/mcp-go/client"
+	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-harden/llm-security-toolbox/sectool/service/testutil"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 // Unit tests for MCP server functionality using mock backends.
 // Integration tests that require Burp Suite are in integration_test.go.
 
 // setupMCPServerWithMock creates an MCP server with mock backends for unit testing.
-func setupMCPServerWithMock(t *testing.T) (*Server, *client.Client, *TestMCPServer) {
+func setupMCPServerWithMock(t *testing.T) (*Server, *mcpclient.Client, *TestMCPServer, *mockOastBackend, *mockCrawlerBackend) {
 	t.Helper()
 
 	mockMCP := NewTestMCPServer(t)
+	mockOast := newMockOastBackend()
+	mockCrawler := newMockCrawlerBackend()
 
 	srv, err := NewServer(MCPServerFlags{
 		BurpMCPURL:   mockMCP.URL(),
 		MCPPort:      0, // Let OS pick a port
 		WorkflowMode: WorkflowModeNone,
-	})
+	}, nil, mockOast, mockCrawler)
 	require.NoError(t, err)
 
 	serverErr := make(chan error, 1)
@@ -39,7 +43,7 @@ func setupMCPServerWithMock(t *testing.T) (*Server, *client.Client, *TestMCPServ
 	require.NotNil(t, srv.mcpServer, "MCP server should be started")
 
 	// Use in-process client for reliable testing
-	mcpClient, err := client.NewInProcessClient(srv.mcpServer.server)
+	mcpClient, err := mcpclient.NewInProcessClient(srv.mcpServer.server)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -62,13 +66,13 @@ func setupMCPServerWithMock(t *testing.T) (*Server, *client.Client, *TestMCPServ
 		<-serverErr
 	})
 
-	return srv, mcpClient, mockMCP
+	return srv, mcpClient, mockMCP, mockOast, mockCrawler
 }
 
 func TestMCP_ListTools(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _ := setupMCPServerWithMock(t)
+	_, mcpClient, _, _, _ := setupMCPServerWithMock(t)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -86,6 +90,7 @@ func TestMCP_ListTools(t *testing.T) {
 		"proxy_rule_delete",
 		"replay_send",
 		"replay_get",
+		"request_send",
 		"oast_create",
 		"oast_poll",
 		"oast_get",
@@ -94,6 +99,14 @@ func TestMCP_ListTools(t *testing.T) {
 		"encode_url",
 		"encode_base64",
 		"encode_html",
+		"crawl_create",
+		"crawl_seed",
+		"crawl_status",
+		"crawl_summary",
+		"crawl_list",
+		"crawl_get",
+		"crawl_sessions",
+		"crawl_stop",
 	}
 
 	toolNames := make([]string, len(result.Tools))
@@ -102,599 +115,394 @@ func TestMCP_ListTools(t *testing.T) {
 	}
 
 	for _, expected := range expectedTools {
-		assert.Contains(t, toolNames, expected, "tool %s should be registered", expected)
+		assert.Contains(t, toolNames, expected)
 	}
 }
 
-func TestMCP_ProxySummaryWithMock(t *testing.T) {
-	t.Parallel()
+const sinceLast = "last"
 
-	_, mcpClient, mockMCP := setupMCPServerWithMock(t)
-
-	// Add mock proxy history
-	mockMCP.AddProxyEntry(
-		"GET /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n",
-		"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"users\":[]}",
-		"",
-	)
-	mockMCP.AddProxyEntry(
-		"POST /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n{\"name\":\"test\"}",
-		"HTTP/1.1 201 Created\r\n\r\n",
-		"",
-	)
-
-	result := testutil.CallMCPTool(t, mcpClient, "proxy_summary", nil)
-	assert.False(t, result.IsError, "proxy_summary should succeed")
-
-	text := testutil.ExtractMCPText(t, result)
-	var resp ProxySummaryResponse
-	require.NoError(t, json.Unmarshal([]byte(text), &resp))
-	assert.NotEmpty(t, resp.Aggregates)
+type mockOastBackend struct {
+	sessions map[string]*OastSessionInfo
+	byLabel  map[string]string
+	events   map[string][]OastEventInfo
 }
 
-func TestMCP_ProxyListWithMock(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, mockMCP := setupMCPServerWithMock(t)
-
-	// Add mock entries
-	mockMCP.AddProxyEntry(
-		"GET /api/data HTTP/1.1\r\nHost: test.com\r\n\r\n",
-		"HTTP/1.1 200 OK\r\n\r\nok",
-		"",
-	)
-
-	result := testutil.CallMCPTool(t, mcpClient, "proxy_list", map[string]interface{}{
-		"method": "GET",
-	})
-	assert.False(t, result.IsError, "proxy_list with filter should succeed")
-
-	text := testutil.ExtractMCPText(t, result)
-	var resp ProxyListResponse
-	require.NoError(t, json.Unmarshal([]byte(text), &resp))
-	assert.NotEmpty(t, resp.Flows)
-	assert.Equal(t, "GET", resp.Flows[0].Method)
+func newMockOastBackend() *mockOastBackend {
+	return &mockOastBackend{
+		sessions: make(map[string]*OastSessionInfo),
+		byLabel:  make(map[string]string),
+		events:   make(map[string][]OastEventInfo),
+	}
 }
 
-func TestMCP_ProxyListWithLimit(t *testing.T) {
-	t.Parallel()
+func (b *mockOastBackend) CreateSession(ctx context.Context, label string) (*OastSessionInfo, error) {
+	if label != "" {
+		if _, ok := b.byLabel[label]; ok {
+			return nil, ErrLabelExists
+		}
+	}
+	id := "oast-test-" + time.Now().UTC().Format("150405.000000000")
+	info := &OastSessionInfo{
+		ID:        id,
+		Domain:    id + ".test.invalid",
+		Label:     label,
+		CreatedAt: time.Now(),
+	}
+	b.sessions[id] = info
+	if label != "" {
+		b.byLabel[label] = id
+	}
+	return info, nil
+}
 
-	_, mcpClient, mockMCP := setupMCPServerWithMock(t)
-
-	// Add multiple entries
-	for i := 0; i < 5; i++ {
-		mockMCP.AddProxyEntry(
-			"GET /page HTTP/1.1\r\nHost: test.com\r\n\r\n",
-			"HTTP/1.1 200 OK\r\n\r\n",
-			"",
-		)
+func (b *mockOastBackend) PollSession(ctx context.Context, idOrDomain string, since string, eventType string, wait time.Duration, limit int) (*OastPollResultInfo, error) {
+	id, err := b.resolveID(idOrDomain)
+	if err != nil {
+		return nil, err
+	}
+	events := b.events[id]
+	if len(events) == 0 {
+		return &OastPollResultInfo{Events: nil}, nil
 	}
 
-	result := testutil.CallMCPTool(t, mcpClient, "proxy_list", map[string]interface{}{
-		"method": "GET",
-		"limit":  2,
-	})
-	assert.False(t, result.IsError)
-
-	text := testutil.ExtractMCPText(t, result)
-	var resp ProxyListResponse
-	require.NoError(t, json.Unmarshal([]byte(text), &resp))
-	assert.LessOrEqual(t, len(resp.Flows), 2)
-}
-
-func TestMCP_ProxyGetWithMock(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, mockMCP := setupMCPServerWithMock(t)
-
-	mockMCP.AddProxyEntry(
-		"GET /api/test HTTP/1.1\r\nHost: mock.example.com\r\n\r\n",
-		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\ntest response body",
-		"",
-	)
-
-	// First get a flow ID
-	listResult := testutil.CallMCPTool(t, mcpClient, "proxy_list", map[string]interface{}{
-		"method": "GET",
-	})
-	require.False(t, listResult.IsError)
-
-	text := testutil.ExtractMCPText(t, listResult)
-	var listResp ProxyListResponse
-	require.NoError(t, json.Unmarshal([]byte(text), &listResp))
-	require.NotEmpty(t, listResp.Flows)
-
-	flowID := listResp.Flows[0].FlowID
-
-	// Get full flow data
-	getResult := testutil.CallMCPTool(t, mcpClient, "proxy_get", map[string]interface{}{
-		"flow_id": flowID,
-	})
-	assert.False(t, getResult.IsError)
-
-	text = testutil.ExtractMCPText(t, getResult)
-	var getResp ProxyGetResponse
-	require.NoError(t, json.Unmarshal([]byte(text), &getResp))
-
-	assert.Equal(t, flowID, getResp.FlowID)
-	assert.Equal(t, "GET", getResp.Method)
-	assert.NotEmpty(t, getResp.ReqHeaders)
-	assert.NotEmpty(t, getResp.RespHeaders)
-}
-
-func TestMCP_ProxyRulesCRUDWithMock(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, _ := setupMCPServerWithMock(t)
-
-	var ruleID string
-
-	t.Run("add_rule", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_add", map[string]interface{}{
-			"type":    RuleTypeRequestHeader,
-			"label":   "mock-test-rule",
-			"replace": "X-Mock-Test: value",
-		})
-		require.False(t, result.IsError, "add should succeed: %s", testutil.ExtractMCPText(t, result))
-
-		text := testutil.ExtractMCPText(t, result)
-		var rule RuleEntry
-		require.NoError(t, json.Unmarshal([]byte(text), &rule))
-		assert.NotEmpty(t, rule.RuleID)
-		assert.Equal(t, "mock-test-rule", rule.Label)
-		ruleID = rule.RuleID
-	})
-
-	t.Run("list_rules", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_list", nil)
-		assert.False(t, result.IsError)
-
-		text := testutil.ExtractMCPText(t, result)
-		var resp RuleListResponse
-		require.NoError(t, json.Unmarshal([]byte(text), &resp))
-
-		var found bool
-		for _, r := range resp.Rules {
-			if r.RuleID == ruleID {
-				found = true
+	start := 0
+	if since != "" && since != sinceLast {
+		for i, e := range events {
+			if e.ID == since {
+				start = i + 1
 				break
 			}
 		}
-		assert.True(t, found)
-	})
+	}
 
-	t.Run("update_rule", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
-			"rule_id": ruleID,
-			"type":    RuleTypeRequestBody,
-			"label":   "mock-test-updated",
-			"match":   "old",
-			"replace": "new",
-		})
-		assert.False(t, result.IsError)
-
-		text := testutil.ExtractMCPText(t, result)
-		var rule RuleEntry
-		require.NoError(t, json.Unmarshal([]byte(text), &rule))
-		assert.Equal(t, "mock-test-updated", rule.Label)
-		assert.Equal(t, RuleTypeRequestBody, rule.Type)
-	})
-
-	t.Run("delete_rule", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_delete", map[string]interface{}{
-			"rule_id": ruleID,
-		})
-		assert.False(t, result.IsError)
-
-		// Verify deleted
-		listResult := testutil.CallMCPTool(t, mcpClient, "proxy_rule_list", nil)
-		text := testutil.ExtractMCPText(t, listResult)
-		var resp RuleListResponse
-		require.NoError(t, json.Unmarshal([]byte(text), &resp))
-
-		for _, r := range resp.Rules {
-			assert.NotEqual(t, ruleID, r.RuleID)
+	filtered := make([]OastEventInfo, 0, len(events))
+	for i := start; i < len(events); i++ {
+		ev := events[i]
+		if eventType != "" && ev.Type != eventType {
+			continue
 		}
-	})
+		filtered = append(filtered, ev)
+	}
+
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+
+	return &OastPollResultInfo{Events: filtered}, nil
 }
 
-func TestMCP_ReplayWithMock(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, mockMCP := setupMCPServerWithMock(t)
-
-	// Add mock entry and set response
-	mockMCP.AddProxyEntry(
-		"GET /replay-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
-		"HTTP/1.1 200 OK\r\n\r\noriginal",
-		"",
-	)
-	mockMCP.SetSendResponse(
-		"HttpRequestResponse{httpRequest=GET /replay-test HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nreplayed response}",
-	)
-
-	// Get flow ID
-	listResult := testutil.CallMCPTool(t, mcpClient, "proxy_list", map[string]interface{}{
-		"method": "GET",
-	})
-	require.False(t, listResult.IsError)
-
-	text := testutil.ExtractMCPText(t, listResult)
-	var listResp ProxyListResponse
-	require.NoError(t, json.Unmarshal([]byte(text), &listResp))
-	require.NotEmpty(t, listResp.Flows)
-
-	flowID := listResp.Flows[0].FlowID
-
-	// Send replay
-	sendResult := testutil.CallMCPTool(t, mcpClient, "replay_send", map[string]interface{}{
-		"flow_id": flowID,
-	})
-	require.False(t, sendResult.IsError, "replay_send should succeed: %s", testutil.ExtractMCPText(t, sendResult))
-
-	text = testutil.ExtractMCPText(t, sendResult)
-	var sendResp ReplaySendResponse
-	require.NoError(t, json.Unmarshal([]byte(text), &sendResp))
-	assert.NotEmpty(t, sendResp.ReplayID)
-
-	// Get replay result
-	getResult := testutil.CallMCPTool(t, mcpClient, "replay_get", map[string]interface{}{
-		"replay_id": sendResp.ReplayID,
-	})
-	assert.False(t, getResult.IsError)
-
-	text = testutil.ExtractMCPText(t, getResult)
-	var getResp ReplayGetResponse
-	require.NoError(t, json.Unmarshal([]byte(text), &getResp))
-	assert.Equal(t, sendResp.ReplayID, getResp.ReplayID)
-	assert.NotEmpty(t, getResp.RespHeaders)
-}
-
-func TestMCP_OastLifecycleWithMock(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, _ := setupMCPServerWithMock(t)
-
-	var oastID string
-
-	t.Run("create", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_create", map[string]interface{}{
-			"label": "mock-oast-test",
-		})
-		require.False(t, result.IsError, "oast_create should succeed: %s", testutil.ExtractMCPText(t, result))
-
-		text := testutil.ExtractMCPText(t, result)
-		var resp OastCreateResponse
-		require.NoError(t, json.Unmarshal([]byte(text), &resp))
-
-		assert.NotEmpty(t, resp.OastID)
-		assert.NotEmpty(t, resp.Domain)
-		assert.Equal(t, "mock-oast-test", resp.Label)
-		oastID = resp.OastID
-	})
-
-	t.Run("list", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_list", nil)
-		assert.False(t, result.IsError)
-
-		text := testutil.ExtractMCPText(t, result)
-		var resp OastListResponse
-		require.NoError(t, json.Unmarshal([]byte(text), &resp))
-
-		var found bool
-		for _, s := range resp.Sessions {
-			if s.OastID == oastID {
-				found = true
-				break
-			}
+func (b *mockOastBackend) GetEvent(ctx context.Context, idOrDomain string, eventID string) (*OastEventInfo, error) {
+	id, err := b.resolveID(idOrDomain)
+	if err != nil {
+		return nil, err
+	}
+	for _, ev := range b.events[id] {
+		if ev.ID == eventID {
+			e := ev
+			return &e, nil
 		}
-		assert.True(t, found)
-	})
+	}
+	return nil, ErrNotFound
+}
 
-	t.Run("poll", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_poll", map[string]interface{}{
-			"oast_id": oastID,
-		})
-		assert.False(t, result.IsError)
+func (b *mockOastBackend) ListSessions(ctx context.Context) ([]OastSessionInfo, error) {
+	sessions := make([]OastSessionInfo, 0, len(b.sessions))
+	for _, sess := range b.sessions {
+		sessions = append(sessions, *sess)
+	}
+	return sessions, nil
+}
 
-		text := testutil.ExtractMCPText(t, result)
-		var resp OastPollResponse
-		require.NoError(t, json.Unmarshal([]byte(text), &resp))
-		// Events may be empty
-	})
+func (b *mockOastBackend) DeleteSession(ctx context.Context, idOrDomain string) error {
+	id, err := b.resolveID(idOrDomain)
+	if err != nil {
+		return err
+	}
+	sess := b.sessions[id]
+	if sess.Label != "" {
+		delete(b.byLabel, sess.Label)
+	}
+	delete(b.sessions, id)
+	delete(b.events, id)
+	return nil
+}
 
-	t.Run("delete", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_delete", map[string]interface{}{
-			"oast_id": oastID,
-		})
-		assert.False(t, result.IsError)
+func (b *mockOastBackend) Close() error {
+	b.sessions = make(map[string]*OastSessionInfo)
+	b.byLabel = make(map[string]string)
+	b.events = make(map[string][]OastEventInfo)
+	return nil
+}
 
-		// Verify deleted
-		listResult := testutil.CallMCPTool(t, mcpClient, "oast_list", nil)
-		text := testutil.ExtractMCPText(t, listResult)
-		var resp OastListResponse
-		require.NoError(t, json.Unmarshal([]byte(text), &resp))
-
-		for _, s := range resp.Sessions {
-			assert.NotEqual(t, oastID, s.OastID)
+func (b *mockOastBackend) resolveID(idOrDomain string) (string, error) {
+	if idOrDomain == "" {
+		return "", ErrNotFound
+	}
+	if _, ok := b.sessions[idOrDomain]; ok {
+		return idOrDomain, nil
+	}
+	for id, sess := range b.sessions {
+		if sess.Domain == idOrDomain {
+			return id, nil
 		}
-	})
+	}
+	if id, ok := b.byLabel[idOrDomain]; ok {
+		return id, nil
+	}
+	return "", ErrNotFound
 }
 
-func TestMCP_ProxyListRequiresFilters(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, _ := setupMCPServerWithMock(t)
-
-	result := testutil.CallMCPTool(t, mcpClient, "proxy_list", nil)
-	assert.True(t, result.IsError, "proxy_list without filters should fail")
+type mockCrawlerBackend struct {
+	sessions map[string]*CrawlSessionInfo
+	byLabel  map[string]string
+	status   map[string]*CrawlStatus
+	flows    map[string]*CrawlFlow
+	forms    map[string][]DiscoveredForm
+	errors   map[string][]CrawlError
 }
 
-func TestMCP_ProxyGetValidation(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, _ := setupMCPServerWithMock(t)
-
-	t.Run("missing_flow_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_get", map[string]interface{}{})
-		assert.True(t, result.IsError, "should fail without flow_id")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "flow_id is required")
-	})
-
-	t.Run("invalid_flow_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_get", map[string]interface{}{
-			"flow_id": "nonexistent",
-		})
-		assert.True(t, result.IsError, "should fail with invalid flow_id")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "not found")
-	})
+func newMockCrawlerBackend() *mockCrawlerBackend {
+	return &mockCrawlerBackend{
+		sessions: make(map[string]*CrawlSessionInfo),
+		byLabel:  make(map[string]string),
+		status:   make(map[string]*CrawlStatus),
+		flows:    make(map[string]*CrawlFlow),
+		forms:    make(map[string][]DiscoveredForm),
+		errors:   make(map[string][]CrawlError),
+	}
 }
 
-func TestMCP_ProxyRuleValidation(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, _ := setupMCPServerWithMock(t)
-
-	t.Run("add_missing_type", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_add", map[string]interface{}{
-			"replace": "X-Test: value",
-		})
-		assert.True(t, result.IsError, "should fail without type")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "type is required")
-	})
-
-	t.Run("add_invalid_type", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_add", map[string]interface{}{
-			"type": "invalid_type",
-		})
-		assert.True(t, result.IsError, "should fail with invalid type")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "invalid rule type")
-	})
-
-	t.Run("update_missing_rule_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
-			"type": RuleTypeRequestHeader,
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "rule_id is required")
-	})
-
-	t.Run("update_missing_type", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
-			"rule_id": "some-id",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "type is required")
-	})
-
-	t.Run("update_invalid_type", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
-			"rule_id": "some-id",
-			"type":    "invalid_type",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "invalid rule type")
-	})
-
-	t.Run("update_invalid_rule_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
-			"rule_id": "nonexistent",
-			"type":    RuleTypeRequestHeader,
-			"replace": "X-Test: value",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "not found")
-	})
-
-	t.Run("delete_missing_rule_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_delete", map[string]interface{}{})
-		assert.True(t, result.IsError, "should fail without rule_id")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "rule_id is required")
-	})
-
-	t.Run("delete_invalid_rule_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "proxy_rule_delete", map[string]interface{}{
-			"rule_id": "nonexistent",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "not found")
-	})
+func (b *mockCrawlerBackend) CreateSession(ctx context.Context, opts CrawlOptions) (*CrawlSessionInfo, error) {
+	if len(opts.Seeds) == 0 {
+		return nil, errors.New("no valid seeds")
+	}
+	if opts.Label != "" {
+		if _, ok := b.byLabel[opts.Label]; ok {
+			return nil, ErrLabelExists
+		}
+	}
+	id := "crawl-test-" + time.Now().UTC().Format("150405.000000000")
+	info := &CrawlSessionInfo{
+		ID:        id,
+		Label:     opts.Label,
+		State:     "running",
+		CreatedAt: time.Now(),
+	}
+	b.sessions[id] = info
+	if opts.Label != "" {
+		b.byLabel[opts.Label] = id
+	}
+	b.status[id] = &CrawlStatus{
+		State:        "running",
+		URLsQueued:   len(opts.Seeds),
+		LastActivity: time.Now(),
+	}
+	return info, nil
 }
 
-func TestMCP_ReplayValidation(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, _ := setupMCPServerWithMock(t)
-
-	t.Run("missing_flow_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "replay_send", map[string]interface{}{})
-		assert.True(t, result.IsError, "should fail without flow_id")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "flow_id")
-	})
-
-	t.Run("invalid_flow_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id": "nonexistent",
-		})
-		assert.True(t, result.IsError, "should fail with invalid flow_id")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "not found")
-	})
-
-	t.Run("missing_replay_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "replay_get", map[string]interface{}{})
-		assert.True(t, result.IsError, "should fail without replay_id")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "replay_id is required")
-	})
-
-	t.Run("invalid_replay_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "replay_get", map[string]interface{}{
-			"replay_id": "nonexistent",
-		})
-		assert.True(t, result.IsError, "should fail with invalid replay_id")
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "not found")
-	})
+func (b *mockCrawlerBackend) AddSeeds(ctx context.Context, sessionID string, seeds []CrawlSeed) error {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return err
+	}
+	if sess.State != "running" {
+		return fmt.Errorf("session %s is not running (state: %s)", sessionID, sess.State)
+	}
+	if status := b.status[sess.ID]; status != nil {
+		status.URLsQueued += len(seeds)
+		status.LastActivity = time.Now()
+	}
+	return nil
 }
 
-func TestMCP_OastValidation(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, _ := setupMCPServerWithMock(t)
-
-	t.Run("poll_missing_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_poll", map[string]interface{}{})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "oast_id is required")
-	})
-
-	t.Run("poll_invalid_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_poll", map[string]interface{}{
-			"oast_id": "nonexistent",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "not found")
-	})
-
-	t.Run("get_missing_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_get", map[string]interface{}{})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "oast_id is required")
-	})
-
-	t.Run("get_missing_event_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_get", map[string]interface{}{
-			"oast_id": "test",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "event_id is required")
-	})
-
-	t.Run("delete_missing_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_delete", map[string]interface{}{})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "oast_id is required")
-	})
-
-	t.Run("delete_invalid_id", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "oast_delete", map[string]interface{}{
-			"oast_id": "nonexistent",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "not found")
-	})
+func (b *mockCrawlerBackend) GetStatus(ctx context.Context, sessionID string) (*CrawlStatus, error) {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	status := b.status[sess.ID]
+	if status == nil {
+		return nil, ErrNotFound
+	}
+	copy := *status
+	copy.Duration = time.Since(sess.CreatedAt)
+	return &copy, nil
 }
 
-func TestMCP_EncodeURL(t *testing.T) {
-	t.Parallel()
+func (b *mockCrawlerBackend) GetSummary(ctx context.Context, sessionID string) (*CrawlSummary, error) {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
 
-	_, mcpClient, _ := setupMCPServerWithMock(t)
+	agg := make(map[string]protocol.SummaryEntry)
+	for _, flow := range b.flows {
+		if flow.SessionID != sess.ID {
+			continue
+		}
+		key := flow.Host + "|" + flow.Path + "|" + flow.Method + "|" + strconv.Itoa(flow.StatusCode)
+		entry := agg[key]
+		entry.Host = flow.Host
+		entry.Path = flow.Path
+		entry.Method = flow.Method
+		entry.Status = flow.StatusCode
+		entry.Count++
+		agg[key] = entry
+	}
+	aggregates := make([]protocol.SummaryEntry, 0, len(agg))
+	for _, entry := range agg {
+		aggregates = append(aggregates, entry)
+	}
 
-	t.Run("encode", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "encode_url", map[string]interface{}{
-			"input": "hello world&test=<value>",
-		})
-		assert.False(t, result.IsError)
-
-		text := testutil.ExtractMCPText(t, result)
-		assert.Equal(t, "hello+world%26test%3D%3Cvalue%3E", text)
-	})
-
-	t.Run("decode", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "encode_url", map[string]interface{}{
-			"input":  "hello+world%26test%3D%3Cvalue%3E",
-			"decode": true,
-		})
-		assert.False(t, result.IsError)
-
-		text := testutil.ExtractMCPText(t, result)
-		assert.Equal(t, "hello world&test=<value>", text)
-	})
-
-	t.Run("missing_input", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "encode_url", map[string]interface{}{})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "input is required")
-	})
+	return &CrawlSummary{
+		SessionID:  sess.ID,
+		State:      sess.State,
+		Duration:   time.Since(sess.CreatedAt),
+		Aggregates: aggregates,
+	}, nil
 }
 
-func TestMCP_EncodeBase64(t *testing.T) {
-	t.Parallel()
+func (b *mockCrawlerBackend) ListFlows(ctx context.Context, sessionID string, opts CrawlListOptions) ([]CrawlFlow, error) {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
 
-	_, mcpClient, _ := setupMCPServerWithMock(t)
+	flows := make([]CrawlFlow, 0, len(b.flows))
+	for _, flow := range b.flows {
+		if flow.SessionID != sess.ID {
+			continue
+		}
+		flows = append(flows, *flow)
+	}
 
-	t.Run("encode", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "encode_base64", map[string]interface{}{
-			"input": "hello world",
-		})
-		assert.False(t, result.IsError)
+	if opts.Offset > 0 && opts.Offset < len(flows) {
+		flows = flows[opts.Offset:]
+	} else if opts.Offset >= len(flows) {
+		flows = nil
+	}
 
-		text := testutil.ExtractMCPText(t, result)
-		assert.Equal(t, "aGVsbG8gd29ybGQ=", text)
-	})
+	if opts.Limit > 0 && len(flows) > opts.Limit {
+		flows = flows[:opts.Limit]
+	}
 
-	t.Run("decode", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "encode_base64", map[string]interface{}{
-			"input":  "aGVsbG8gd29ybGQ=",
-			"decode": true,
-		})
-		assert.False(t, result.IsError)
-
-		text := testutil.ExtractMCPText(t, result)
-		assert.Equal(t, "hello world", text)
-	})
-
-	t.Run("invalid_base64", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "encode_base64", map[string]interface{}{
-			"input":  "not valid base64!!!",
-			"decode": true,
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, testutil.ExtractMCPText(t, result), "base64 decode error")
-	})
+	return flows, nil
 }
 
-func TestMCP_EncodeHTML(t *testing.T) {
-	t.Parallel()
+func (b *mockCrawlerBackend) ListForms(ctx context.Context, sessionID string, limit int) ([]DiscoveredForm, error) {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	forms := b.forms[sess.ID]
+	if limit > 0 && len(forms) > limit {
+		forms = forms[:limit]
+	}
+	return forms, nil
+}
 
-	_, mcpClient, _ := setupMCPServerWithMock(t)
+func (b *mockCrawlerBackend) ListErrors(ctx context.Context, sessionID string, limit int) ([]CrawlError, error) {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	errs := b.errors[sess.ID]
+	if limit > 0 && len(errs) > limit {
+		errs = errs[:limit]
+	}
+	return errs, nil
+}
 
-	t.Run("encode", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "encode_html", map[string]interface{}{
-			"input": "<script>alert('xss')</script>",
-		})
-		assert.False(t, result.IsError)
+func (b *mockCrawlerBackend) GetFlow(ctx context.Context, flowID string) (*CrawlFlow, error) {
+	flow, ok := b.flows[flowID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return flow, nil
+}
 
-		text := testutil.ExtractMCPText(t, result)
-		assert.Equal(t, "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;", text)
-	})
+func (b *mockCrawlerBackend) StopSession(ctx context.Context, sessionID string) error {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return err
+	}
+	sess.State = "stopped"
+	if status := b.status[sess.ID]; status != nil {
+		status.State = "stopped"
+		status.LastActivity = time.Now()
+	}
+	return nil
+}
 
-	t.Run("decode", func(t *testing.T) {
-		result := testutil.CallMCPTool(t, mcpClient, "encode_html", map[string]interface{}{
-			"input":  "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;",
-			"decode": true,
-		})
-		assert.False(t, result.IsError)
+func (b *mockCrawlerBackend) ListSessions(ctx context.Context, limit int) ([]CrawlSessionInfo, error) {
+	sessions := make([]CrawlSessionInfo, 0, len(b.sessions))
+	for _, sess := range b.sessions {
+		sessions = append(sessions, *sess)
+	}
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	return sessions, nil
+}
 
-		text := testutil.ExtractMCPText(t, result)
-		assert.Equal(t, "<script>alert('xss')</script>", text)
-	})
+func (b *mockCrawlerBackend) Close() error {
+	b.sessions = make(map[string]*CrawlSessionInfo)
+	b.byLabel = make(map[string]string)
+	b.status = make(map[string]*CrawlStatus)
+	b.flows = make(map[string]*CrawlFlow)
+	b.forms = make(map[string][]DiscoveredForm)
+	b.errors = make(map[string][]CrawlError)
+	return nil
+}
+
+func (b *mockCrawlerBackend) AddFlow(sessionID string, flow CrawlFlow) error {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return err
+	}
+	flow.SessionID = sess.ID
+	b.flows[flow.ID] = &flow
+	if status := b.status[sess.ID]; status != nil {
+		status.URLsVisited++
+		status.LastActivity = time.Now()
+	}
+	return nil
+}
+
+func (b *mockCrawlerBackend) AddForm(sessionID string, form DiscoveredForm) error {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return err
+	}
+	b.forms[sess.ID] = append(b.forms[sess.ID], form)
+	if status := b.status[sess.ID]; status != nil {
+		status.FormsDiscovered++
+		status.LastActivity = time.Now()
+	}
+	return nil
+}
+
+func (b *mockCrawlerBackend) AddError(sessionID string, crawlErr CrawlError) error {
+	sess, err := b.resolveSession(sessionID)
+	if err != nil {
+		return err
+	}
+	b.errors[sess.ID] = append(b.errors[sess.ID], crawlErr)
+	if status := b.status[sess.ID]; status != nil {
+		status.URLsErrored++
+		status.LastActivity = time.Now()
+	}
+	return nil
+}
+
+func (b *mockCrawlerBackend) resolveSession(idOrLabel string) (*CrawlSessionInfo, error) {
+	id := idOrLabel
+	if mapped, ok := b.byLabel[idOrLabel]; ok {
+		id = mapped
+	}
+	sess, ok := b.sessions[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return sess, nil
 }

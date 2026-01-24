@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 	"github.com/go-harden/llm-security-toolbox/sectool/service/ids"
 	"github.com/go-harden/llm-security-toolbox/sectool/service/mcp"
 )
@@ -436,13 +437,13 @@ func (b *BurpBackend) SetInterceptState(ctx context.Context, intercepting bool) 
 // sectool comment prefix identifies rules managed by sectool
 const sectoolRulePrefix = "sectool:"
 
-func (b *BurpBackend) ListRules(ctx context.Context, websocket bool) ([]RuleEntry, error) {
+func (b *BurpBackend) ListRules(ctx context.Context, websocket bool) ([]protocol.RuleEntry, error) {
 	burpRules, err := b.getAllRules(ctx, websocket)
 	if err != nil {
 		return nil, fmt.Errorf("list rules: %w", err)
 	}
 
-	rules := make([]RuleEntry, 0, len(burpRules))
+	rules := make([]protocol.RuleEntry, 0, len(burpRules))
 	for _, r := range burpRules {
 		if !r.Enabled {
 			continue
@@ -458,7 +459,7 @@ func (b *BurpBackend) ListRules(ctx context.Context, websocket bool) ([]RuleEntr
 			ruleType = burpToWSType(r.RuleType)
 		}
 
-		rules = append(rules, RuleEntry{
+		rules = append(rules, protocol.RuleEntry{
 			RuleID:  id,
 			Label:   label,
 			Type:    ruleType,
@@ -470,7 +471,7 @@ func (b *BurpBackend) ListRules(ctx context.Context, websocket bool) ([]RuleEntr
 	return rules, nil
 }
 
-func (b *BurpBackend) AddRule(ctx context.Context, input ProxyRuleInput) (*RuleEntry, error) {
+func (b *BurpBackend) AddRule(ctx context.Context, input ProxyRuleInput) (*protocol.RuleEntry, error) {
 	httpRules, err := b.getAllRules(ctx, false)
 	if err != nil {
 		return nil, fmt.Errorf("add rule: %w", err)
@@ -516,7 +517,7 @@ func (b *BurpBackend) AddRule(ctx context.Context, input ProxyRuleInput) (*RuleE
 		return nil, fmt.Errorf("add rule: %w", err)
 	}
 
-	return &RuleEntry{
+	return &protocol.RuleEntry{
 		RuleID:  id,
 		Label:   input.Label,
 		Type:    input.Type,
@@ -526,7 +527,7 @@ func (b *BurpBackend) AddRule(ctx context.Context, input ProxyRuleInput) (*RuleE
 	}, nil
 }
 
-func (b *BurpBackend) UpdateRule(ctx context.Context, idOrLabel string, input ProxyRuleInput) (*RuleEntry, error) {
+func (b *BurpBackend) UpdateRule(ctx context.Context, idOrLabel string, input ProxyRuleInput) (*protocol.RuleEntry, error) {
 	httpRules, err := b.getAllRules(ctx, false)
 	if err != nil {
 		return nil, fmt.Errorf("update rule: %w", err)
@@ -548,7 +549,7 @@ func (b *BurpBackend) UpdateRule(ctx context.Context, idOrLabel string, input Pr
 	return nil, ErrNotFound
 }
 
-func (b *BurpBackend) updateRuleInSet(ctx context.Context, websocket bool, rules []mcp.MatchReplaceRule, idx int, input ProxyRuleInput, httpRules, wsRules []mcp.MatchReplaceRule) (*RuleEntry, error) {
+func (b *BurpBackend) updateRuleInSet(ctx context.Context, websocket bool, rules []mcp.MatchReplaceRule, idx int, input ProxyRuleInput, httpRules, wsRules []mcp.MatchReplaceRule) (*protocol.RuleEntry, error) {
 	id, existingLabel, _ := parseSectoolComment(rules[idx].Comment)
 
 	// Preserve existing label if none provided
@@ -593,7 +594,7 @@ func (b *BurpBackend) updateRuleInSet(ctx context.Context, websocket bool, rules
 		return nil, fmt.Errorf("update rule: %w", err)
 	}
 
-	return &RuleEntry{
+	return &protocol.RuleEntry{
 		RuleID:  id,
 		Label:   label,
 		Type:    input.Type,

@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/config"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 const (
@@ -65,7 +66,7 @@ const maxPathLength = 80
 
 // aggregateByTuple groups entries by (host, path, method, status).
 // The extract function maps each entry to its aggregate key components.
-func aggregateByTuple[T any](entries []T, extract func(T) (host, path, method string, status int)) []SummaryEntry {
+func aggregateByTuple[T any](entries []T, extract func(T) (host, path, method string, status int)) []protocol.SummaryEntry {
 	type aggregateKey struct {
 		Host   string
 		Path   string
@@ -84,9 +85,9 @@ func aggregateByTuple[T any](entries []T, extract func(T) (host, path, method st
 		counts[key]++
 	}
 
-	result := make([]SummaryEntry, 0, len(counts))
+	result := make([]protocol.SummaryEntry, 0, len(counts))
 	for key, count := range counts {
-		result = append(result, SummaryEntry{
+		result = append(result, protocol.SummaryEntry{
 			Host:   key.Host,
 			Path:   truncateString(key.Path, maxPathLength),
 			Method: key.Method,

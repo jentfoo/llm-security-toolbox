@@ -8,15 +8,65 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// TestMCPServer wraps an MCP test server for use in tests.
+func CallMCPTool(t *testing.T, client *mcpclient.Client, name string, args map[string]interface{}) *mcp.CallToolResult {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	result, err := client.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      name,
+			Arguments: args,
+		},
+	})
+	require.NoError(t, err)
+	return result
+}
+
+func ExtractMCPText(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+
+	assert.NotEmpty(t, result.Content, "result should have content")
+	for _, c := range result.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			return tc.Text
+		}
+	}
+	assert.Fail(t, "text content not found in result")
+	return ""
+}
+
+func CallMCPToolTextOK(t *testing.T, client *mcpclient.Client, name string, args map[string]interface{}) string {
+	t.Helper()
+
+	result := CallMCPTool(t, client, name, args)
+	require.False(t, result.IsError,
+		"%s failed: %s", name, ExtractMCPText(t, result))
+	return ExtractMCPText(t, result)
+}
+
+func CallMCPToolJSONOK[T any](t *testing.T, client *mcpclient.Client, name string, args map[string]interface{}) T {
+	t.Helper()
+
+	text := CallMCPToolTextOK(t, client, name, args)
+	var v T
+	require.NoError(t, json.Unmarshal([]byte(text), &v))
+	return v
+}
+
 type TestMCPServer struct {
 	HTTPServer *httptest.Server
-	MCPServer  *server.MCPServer
+	MCPServer  *mcpserver.MCPServer
 
 	mu               sync.Mutex
 	proxyHistory     []testProxyEntry
@@ -47,8 +97,8 @@ func NewTestMCPServer(t *testing.T) *TestMCPServer {
 
 	ts := &TestMCPServer{}
 
-	mcpServer := server.NewMCPServer("test-burp-mcp", "1.0.0",
-		server.WithToolCapabilities(false),
+	mcpServer := mcpserver.NewMCPServer("test-burp-mcp", "1.0.0",
+		mcpserver.WithToolCapabilities(false),
 	)
 
 	mcpServer.AddTool(
@@ -222,7 +272,7 @@ func NewTestMCPServer(t *testing.T) *TestMCPServer {
 		},
 	)
 
-	httpServer := server.NewTestServer(mcpServer)
+	httpServer := mcpserver.NewTestServer(mcpServer)
 
 	ts.HTTPServer = httpServer
 	ts.MCPServer = mcpServer

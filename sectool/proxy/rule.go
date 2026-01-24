@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-harden/llm-security-toolbox/sectool/cliutil"
 	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 func ruleList(mcpURL string, timeout time.Duration, websocket bool, limit int) error {
@@ -43,8 +44,8 @@ func ruleList(mcpURL string, timeout time.Duration, websocket bool, limit int) e
 	return nil
 }
 
-func printRuleTable(rules []mcpclient.RuleEntry) {
-	hasLabels := slices.ContainsFunc(rules, func(r mcpclient.RuleEntry) bool {
+func printRuleTable(rules []protocol.RuleEntry) {
+	hasLabels := slices.ContainsFunc(rules, func(r protocol.RuleEntry) bool {
 		return r.Label != ""
 	})
 

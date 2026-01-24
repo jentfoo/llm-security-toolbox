@@ -45,7 +45,7 @@ func setupIntegrationEnv(t *testing.T) *mcpclient.Client {
 		BurpMCPURL:   config.DefaultBurpMCPURL,
 		MCPPort:      port,
 		WorkflowMode: service.WorkflowModeNone,
-	})
+	}, nil, nil, nil)
 	require.NoError(t, err)
 
 	serverErr := make(chan error, 1)
@@ -87,10 +87,10 @@ func TestIntegration_ProxySummary(t *testing.T) {
 	resp, err := client.ProxySummary(t.Context(), mcpclient.ProxySummaryOpts{})
 	require.NoError(t, err)
 
-	t.Logf("proxy_summary: %d aggregates", len(resp.Summary))
-	for i, agg := range resp.Summary {
+	t.Logf("proxy_summary: %d aggregates", len(resp.Aggregates))
+	for i, agg := range resp.Aggregates {
 		if i >= 5 {
-			t.Logf("  ... and %d more", len(resp.Summary)-5)
+			t.Logf("  ... and %d more", len(resp.Aggregates)-5)
 			break
 		}
 		t.Logf("  [%d] %s %s%s → %d (%d reqs)", i, agg.Method, agg.Host, agg.Path, agg.Status, agg.Count)
@@ -104,10 +104,10 @@ func TestIntegration_ProxySummaryWithFilters(t *testing.T) {
 		resp, err := client.ProxySummary(t.Context(), mcpclient.ProxySummaryOpts{Method: "GET"})
 		require.NoError(t, err)
 
-		for _, agg := range resp.Summary {
+		for _, agg := range resp.Aggregates {
 			assert.Equal(t, "GET", agg.Method)
 		}
-		t.Logf("GET-only summary: %d aggregates", len(resp.Summary))
+		t.Logf("GET-only summary: %d aggregates", len(resp.Aggregates))
 	})
 
 	t.Run("filter_by_status", func(t *testing.T) {
@@ -115,10 +115,10 @@ func TestIntegration_ProxySummaryWithFilters(t *testing.T) {
 		resp, err := client.ProxySummary(t.Context(), mcpclient.ProxySummaryOpts{Status: "200"})
 		require.NoError(t, err)
 
-		for _, agg := range resp.Summary {
+		for _, agg := range resp.Aggregates {
 			assert.Equal(t, 200, agg.Status)
 		}
-		t.Logf("status=200 summary: %d aggregates", len(resp.Summary))
+		t.Logf("status=200 summary: %d aggregates", len(resp.Aggregates))
 	})
 }
 
@@ -151,11 +151,11 @@ func TestIntegration_ProxyList(t *testing.T) {
 		summary, err := client.ProxySummary(t.Context(), mcpclient.ProxySummaryOpts{})
 		require.NoError(t, err)
 
-		if len(summary.Summary) == 0 {
+		if len(summary.Aggregates) == 0 {
 			t.Skip("no proxy history")
 		}
 
-		testHost := summary.Summary[0].Host
+		testHost := summary.Aggregates[0].Host
 		resp, err := client.ProxyList(t.Context(), mcpclient.ProxyListOpts{Host: testHost, Limit: 5})
 		require.NoError(t, err)
 
@@ -344,7 +344,7 @@ func TestIntegration_Replay(t *testing.T) {
 		assert.NotEmpty(t, resp.Duration)
 		replayID = resp.ReplayID
 
-		t.Logf("replay %s: status=%d duration=%s", resp.ReplayID, resp.Response.Status, resp.Duration)
+		t.Logf("replay %s: status=%d duration=%s", resp.ReplayID, resp.Status, resp.Duration)
 	})
 
 	t.Run("get_replay_result", func(t *testing.T) {
@@ -370,7 +370,7 @@ func TestIntegration_Replay(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.NotEmpty(t, resp.ReplayID)
-		t.Logf("replay with mods: status=%d", resp.Response.Status)
+		t.Logf("replay with mods: status=%d", resp.Status)
 	})
 
 	t.Run("send_invalid_flow", func(t *testing.T) {
@@ -435,8 +435,8 @@ func TestIntegration_RequestSend(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.NotEmpty(t, resp.ReplayID)
-		assert.Equal(t, 200, resp.Response.Status)
-		t.Logf("request_send GET: status=%d duration=%s", resp.Response.Status, resp.Duration)
+		assert.Equal(t, 200, resp.Status)
+		t.Logf("request_send GET: status=%d duration=%s", resp.Status, resp.Duration)
 	})
 
 	t.Run("with_headers", func(t *testing.T) {
@@ -449,7 +449,7 @@ func TestIntegration_RequestSend(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		assert.Equal(t, 200, resp.Response.Status)
+		assert.Equal(t, 200, resp.Status)
 	})
 
 	t.Run("post_with_body", func(t *testing.T) {
@@ -462,8 +462,8 @@ func TestIntegration_RequestSend(t *testing.T) {
 			Body: `{"test": "data", "integration": true}`,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, 200, resp.Response.Status)
-		t.Logf("request_send POST: status=%d", resp.Response.Status)
+		assert.Equal(t, 200, resp.Status)
+		t.Logf("request_send POST: status=%d", resp.Status)
 	})
 }
 

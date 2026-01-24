@@ -11,6 +11,7 @@ import (
 	"github.com/go-harden/llm-security-toolbox/sectool/bundle"
 	"github.com/go-harden/llm-security-toolbox/sectool/cliutil"
 	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 func create(mcpURL string, timeout time.Duration, urls, flows, domains []string, label string, maxDepth, maxRequests int, delay time.Duration, parallelism int, includeSubdomains, submitForms, ignoreRobots bool) error {
@@ -283,7 +284,7 @@ func sessions(mcpURL string, timeout time.Duration, limit int) error {
 	}
 
 	// Check if any session has a label
-	hasLabels := slices.ContainsFunc(resp.Sessions, func(s mcpclient.CrawlSessionEntry) bool {
+	hasLabels := slices.ContainsFunc(resp.Sessions, func(s protocol.CrawlSession) bool {
 		return s.Label != ""
 	})
 

@@ -81,7 +81,7 @@ func runServiceMode(args []string) int {
 		return 1
 	}
 
-	if srv, err := service.NewServer(flags); err != nil {
+	if srv, err := service.NewServer(flags, nil, nil, nil); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Error creating service: %v\n", err)
 		return 1
 	} else if err := srv.Run(context.Background()); err != nil {

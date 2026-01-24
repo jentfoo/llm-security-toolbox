@@ -32,13 +32,23 @@ MCP Agent  → MCP Server → Backends (Burp MCP, OAST, Crawler)
 - `sectool/config/config.go` - Config loading/saving, defaults, auto-creation
 - `sectool/mcpclient/client.go` - MCP client wrapper for CLI usage
 - `sectool/mcpclient/tools.go` - Typed methods for each MCP tool
-- `sectool/mcpclient/types.go` - Request/response type definitions
+- `sectool/mcpclient/types.go` - Client-specific option types (*Opts structs)
 - `sectool/bundle/bundle.go` - Client-side bundle file operations for export
+
+### Protocol
+
+- `sectool/protocol/workflow.go` - Workflow mode constants shared between service and mcpclient
+- `sectool/protocol/types.go` - Shared MCP response types (used by both service and mcpclient)
 
 ### Service Layer
 
 - `sectool/service/server.go` - MCP server lifecycle and backend coordination
-- `sectool/service/mcp_server.go` - MCP server exposing tools; contains all tool handlers (proxy, crawl, replay, oast, encode)
+- `sectool/service/mcp_server.go` - MCP server setup, tool registration, workflow handling
+- `sectool/service/mcp_proxy.go` - Proxy tool handlers (summary, list, get, rules)
+- `sectool/service/mcp_replay.go` - Replay tool handlers (send, get, request_send)
+- `sectool/service/mcp_crawl.go` - Crawl tool handlers (create, status, list, get, etc.)
+- `sectool/service/mcp_oast.go` - OAST tool handlers (create, poll, get, list, delete)
+- `sectool/service/mcp_encode.go` - Encode tool handlers (url, base64, html)
 - `sectool/service/flags.go` - MCP server flag parsing (`--port`, `--workflow`, `--config`)
 - `sectool/service/backend.go` - HttpBackend, OastBackend, CrawlerBackend interfaces
 - `sectool/service/backend_http_burp.go` - Burp MCP implementation of HttpBackend
@@ -46,7 +56,7 @@ MCP Agent  → MCP Server → Backends (Burp MCP, OAST, Crawler)
 - `sectool/service/backend_crawler_colly.go` - Colly-based crawler implementation
 - `sectool/service/httputil.go` - HTTP request/response parsing utilities
 - `sectool/service/jsonutil.go` - JSON field modification utilities
-- `sectool/service/types.go` - Shared MCP response types
+- `sectool/service/types.go` - Service-specific request and internal types
 
 ### Burp MCP Client
 

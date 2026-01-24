@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-harden/llm-security-toolbox/sectool/cliutil"
 	"github.com/go-harden/llm-security-toolbox/sectool/mcpclient"
+	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
 )
 
 func summary(mcpURL string, timeout time.Duration, host, path, method, status, contains, containsBody, excludeHost, excludePath string) error {
@@ -33,8 +34,8 @@ func summary(mcpURL string, timeout time.Duration, host, path, method, status, c
 		return fmt.Errorf("proxy summary failed: %w", err)
 	}
 
-	if len(resp.Summary) > 0 {
-		printAggregateTable(resp.Summary)
+	if len(resp.Aggregates) > 0 {
+		printAggregateTable(resp.Aggregates)
 	} else {
 		fmt.Println("No matching entries found.")
 	}
@@ -78,7 +79,7 @@ func list(mcpURL string, timeout time.Duration, host, path, method, status, cont
 	return nil
 }
 
-func printAggregateTable(agg []mcpclient.SummaryEntry) {
+func printAggregateTable(agg []protocol.SummaryEntry) {
 	fmt.Println("| host | path | method | status | count |")
 	fmt.Println("|------|------|--------|--------|-------|")
 	for _, e := range agg {
@@ -89,7 +90,7 @@ func printAggregateTable(agg []mcpclient.SummaryEntry) {
 	fmt.Printf("\n*%d unique request patterns*\n", len(agg))
 }
 
-func printFlowTable(flows []mcpclient.FlowEntry) {
+func printFlowTable(flows []protocol.FlowEntry) {
 	fmt.Println("| flow_id | method | host | path | status | size |")
 	fmt.Println("|---------|--------|------|------|--------|------|")
 	for _, f := range flows {
@@ -97,7 +98,7 @@ func printFlowTable(flows []mcpclient.FlowEntry) {
 			f.FlowID, f.Method,
 			cliutil.EscapeMarkdown(f.Host),
 			cliutil.EscapeMarkdown(f.Path),
-			f.Status, f.RespSize)
+			f.Status, f.ResponseLength)
 	}
 	fmt.Printf("\n*%d flows*\n", len(flows))
 
