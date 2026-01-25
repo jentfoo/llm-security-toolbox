@@ -117,7 +117,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]inte
 		},
 	})
 	if err != nil {
-		return nil, translateError(err)
+		return nil, translateTimeoutError(err)
 	} else if result.IsError {
 		return nil, errors.New(extractTextContent(result.Content))
 	}
@@ -157,8 +157,23 @@ func extractTextContent(content []mcp.Content) string {
 	return strings.Join(parts, "\n")
 }
 
+// isContextStopError returns a user-friendly message for context errors, or empty string.
+func isContextStopError(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timed out"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	return ""
+}
+
 // formatConnectionError formats connection errors with actionable messages.
 func formatConnectionError(mcpURL string, err error) error {
+	if msg := isContextStopError(err); msg != "" {
+		return fmt.Errorf("connection to MCP server at %s %s", mcpURL, msg)
+	}
+
 	errStr := err.Error()
 
 	if strings.Contains(errStr, "connection refused") ||
@@ -169,10 +184,14 @@ func formatConnectionError(mcpURL string, err error) error {
 	return fmt.Errorf("MCP connection failed: %w", err)
 }
 
-// translateError translates MCP errors to user-friendly messages.
-func translateError(err error) error {
+// translateTimeoutError translates MCP errors to user-friendly messages.
+func translateTimeoutError(err error) error {
 	if err == nil {
 		return nil
+	}
+
+	if msg := isContextStopError(err); msg != "" {
+		return fmt.Errorf("request %s", msg)
 	}
 
 	errStr := err.Error()

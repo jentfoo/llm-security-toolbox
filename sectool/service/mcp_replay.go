@@ -92,7 +92,7 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	if entry, ok := m.service.flowStore.Lookup(flowID); ok {
 		proxyEntries, err := m.service.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)
 		if err != nil {
-			return errorResult("failed to fetch flow: " + err.Error()), nil
+			return errorResultFromErr("failed to fetch flow: ", err), nil
 		}
 		if len(proxyEntries) == 0 {
 			return errorResult("flow not found in proxy history"), nil
@@ -186,7 +186,7 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 
 	result, err := m.service.httpBackend.SendRequest(ctx, "sectool-"+replayID, sendInput)
 	if err != nil {
-		return errorResult("request failed: " + err.Error()), nil
+		return errorResultFromErr("request failed: ", err), nil
 	}
 
 	respHeaders := result.Headers
@@ -315,7 +315,7 @@ func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolReque
 
 	result, err := m.service.httpBackend.SendRequest(ctx, "sectool-"+replayID, sendInput)
 	if err != nil {
-		return errorResult("request failed: " + err.Error()), nil
+		return errorResultFromErr("request failed: ", err), nil
 	}
 
 	respCode, respStatusLine := parseResponseStatus(result.Headers)

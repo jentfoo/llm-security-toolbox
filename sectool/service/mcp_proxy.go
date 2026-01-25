@@ -127,7 +127,7 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 
 	allEntries, err := m.service.fetchAllProxyEntries(ctx)
 	if err != nil {
-		return errorResult("failed to fetch proxy history: " + err.Error()), nil
+		return errorResultFromErr("failed to fetch proxy history: ", err), nil
 	}
 
 	lastOffset := m.service.proxyLastOffset.Load()
@@ -212,7 +212,7 @@ func (m *mcpServer) handleProxyGet(ctx context.Context, req mcp.CallToolRequest)
 
 	proxyEntries, err := m.service.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)
 	if err != nil {
-		return errorResult("failed to fetch flow: " + err.Error()), nil
+		return errorResultFromErr("failed to fetch flow: ", err), nil
 	}
 	if len(proxyEntries) == 0 {
 		return errorResult("flow not found in proxy history"), nil
@@ -280,23 +280,23 @@ func (m *mcpServer) handleProxyRuleList(ctx context.Context, req mcp.CallToolReq
 	case "http":
 		httpRules, err := m.service.httpBackend.ListRules(ctx, false)
 		if err != nil {
-			return errorResult("failed to list HTTP rules: " + err.Error()), nil
+			return errorResultFromErr("failed to list HTTP rules: ", err), nil
 		}
 		rules = httpRules
 	case "websocket":
 		wsRules, err := m.service.httpBackend.ListRules(ctx, true)
 		if err != nil {
-			return errorResult("failed to list WebSocket rules: " + err.Error()), nil
+			return errorResultFromErr("failed to list WebSocket rules: ", err), nil
 		}
 		rules = wsRules
 	case "all", "":
 		httpRules, err := m.service.httpBackend.ListRules(ctx, false)
 		if err != nil {
-			return errorResult("failed to list HTTP rules: " + err.Error()), nil
+			return errorResultFromErr("failed to list HTTP rules: ", err), nil
 		}
 		wsRules, err := m.service.httpBackend.ListRules(ctx, true)
 		if err != nil {
-			return errorResult("failed to list WebSocket rules: " + err.Error()), nil
+			return errorResultFromErr("failed to list WebSocket rules: ", err), nil
 		}
 		rules = append(httpRules, wsRules...)
 	default:
@@ -345,7 +345,7 @@ func (m *mcpServer) handleProxyRuleAdd(ctx context.Context, req mcp.CallToolRequ
 		if errors.Is(err, ErrLabelExists) {
 			return errorResult("label already exists: " + err.Error()), nil
 		}
-		return errorResult("failed to add rule: " + err.Error()), nil
+		return errorResultFromErr("failed to add rule: ", err), nil
 	}
 
 	log.Printf("mcp/proxy_rule_add: created rule %s", rule.RuleID)
@@ -399,7 +399,7 @@ func (m *mcpServer) handleProxyRuleUpdate(ctx context.Context, req mcp.CallToolR
 		if errors.Is(err, ErrLabelExists) {
 			return errorResult("label already exists: " + err.Error()), nil
 		}
-		return errorResult("failed to update rule: " + err.Error()), nil
+		return errorResultFromErr("failed to update rule: ", err), nil
 	}
 
 	log.Printf("mcp/proxy_rule_update: updated rule %s", rule.RuleID)
@@ -420,7 +420,7 @@ func (m *mcpServer) handleProxyRuleDelete(ctx context.Context, req mcp.CallToolR
 		if errors.Is(err, ErrNotFound) {
 			return errorResult("rule not found"), nil
 		}
-		return errorResult("failed to delete rule: " + err.Error()), nil
+		return errorResultFromErr("failed to delete rule: ", err), nil
 	}
 
 	log.Printf("mcp/proxy_rule_delete: deleted rule %s", ruleID)

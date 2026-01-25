@@ -106,7 +106,7 @@ func (m *mcpServer) handleCrawlCreate(ctx context.Context, req mcp.CallToolReque
 		if errors.Is(err, ErrLabelExists) {
 			return errorResult("label already exists: " + err.Error()), nil
 		}
-		return errorResult("failed to create crawl session: " + err.Error()), nil
+		return errorResultFromErr("failed to create crawl session: ", err), nil
 	}
 
 	return jsonResult(protocol.CrawlCreateResponse{
@@ -160,7 +160,7 @@ func (m *mcpServer) handleCrawlSeed(ctx context.Context, req mcp.CallToolRequest
 		if errors.Is(err, ErrNotFound) {
 			return errorResult("session not found"), nil
 		}
-		return errorResult("failed to add seeds: " + err.Error()), nil
+		return errorResultFromErr("failed to add seeds: ", err), nil
 	}
 
 	return jsonResult(protocol.CrawlSeedResponse{AddedCount: len(seeds)})
@@ -192,7 +192,7 @@ func (m *mcpServer) handleCrawlStatus(ctx context.Context, req mcp.CallToolReque
 		if errors.Is(err, ErrNotFound) {
 			return errorResult("session not found"), nil
 		}
-		return errorResult("failed to get status: " + err.Error()), nil
+		return errorResultFromErr("failed to get status: ", err), nil
 	}
 
 	return jsonResult(protocol.CrawlStatusResponse{
@@ -257,7 +257,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 			if errors.Is(err, ErrNotFound) {
 				return errorResult("session not found"), nil
 			}
-			return errorResult("failed to list forms: " + err.Error()), nil
+			return errorResultFromErr("failed to list forms: ", err), nil
 		}
 
 		return jsonResult(protocol.CrawlPollResponse{SessionID: sessionID, Forms: formsToAPI(forms)})
@@ -268,7 +268,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 			if errors.Is(err, ErrNotFound) {
 				return errorResult("session not found"), nil
 			}
-			return errorResult("failed to list errors: " + err.Error()), nil
+			return errorResultFromErr("failed to list errors: ", err), nil
 		}
 
 		var apiErrors []protocol.CrawlError
@@ -301,7 +301,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 			if errors.Is(err, ErrNotFound) {
 				return errorResult("session not found"), nil
 			}
-			return errorResult("failed to list flows: " + err.Error()), nil
+			return errorResultFromErr("failed to list flows: ", err), nil
 		}
 
 		var apiFlows []protocol.CrawlFlow
@@ -326,7 +326,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 			if errors.Is(err, ErrNotFound) {
 				return errorResult("session not found"), nil
 			}
-			return errorResult("failed to get status: " + err.Error()), nil
+			return errorResultFromErr("failed to get status: ", err), nil
 		}
 
 		// Use ListFlows with filters (no limit) to get filtered flows, then aggregate
@@ -345,7 +345,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 
 		flows, err := m.service.crawlerBackend.ListFlows(ctx, sessionID, opts)
 		if err != nil {
-			return errorResult("failed to get flows: " + err.Error()), nil
+			return errorResultFromErr("failed to get flows: ", err), nil
 		}
 
 		aggregates := aggregateByTuple(flows, func(f CrawlFlow) (string, string, string, int) {
@@ -381,7 +381,7 @@ func (m *mcpServer) handleCrawlSessions(ctx context.Context, req mcp.CallToolReq
 
 	sessions, err := m.service.crawlerBackend.ListSessions(ctx, limit)
 	if err != nil {
-		return errorResult("failed to list sessions: " + err.Error()), nil
+		return errorResultFromErr("failed to list sessions: ", err), nil
 	}
 
 	apiSessions := make([]protocol.CrawlSession, 0, len(sessions))
@@ -422,7 +422,7 @@ func (m *mcpServer) handleCrawlStop(ctx context.Context, req mcp.CallToolRequest
 		if errors.Is(err, ErrNotFound) {
 			return errorResult("session not found"), nil
 		}
-		return errorResult("failed to stop session: " + err.Error()), nil
+		return errorResultFromErr("failed to stop session: ", err), nil
 	}
 
 	return jsonResult(CrawlStopResponse{Stopped: true})
@@ -454,7 +454,7 @@ func (m *mcpServer) handleCrawlGet(ctx context.Context, req mcp.CallToolRequest)
 
 	flow, err := m.service.crawlerBackend.GetFlow(ctx, flowID)
 	if err != nil {
-		return errorResult("failed to get flow: " + err.Error()), nil
+		return errorResultFromErr("failed to get flow: ", err), nil
 	}
 
 	if flow == nil {

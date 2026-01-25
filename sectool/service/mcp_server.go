@@ -299,3 +299,19 @@ func jsonResult(data interface{}) (*mcp.CallToolResult, error) {
 func errorResult(message string) *mcp.CallToolResult {
 	return mcp.NewToolResultError(message)
 }
+
+// errorResultFromErr creates an error result with user-friendly timeout messages.
+func errorResultFromErr(prefix string, err error) *mcp.CallToolResult {
+	return mcp.NewToolResultError(prefix + translateTimeoutError(err))
+}
+
+// translateTimeoutError converts context errors to user-friendly messages.
+func translateTimeoutError(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request timed out"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "request canceled"
+	}
+	return err.Error()
+}

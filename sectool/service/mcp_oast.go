@@ -78,7 +78,7 @@ func (m *mcpServer) handleOastCreate(ctx context.Context, req mcp.CallToolReques
 
 	sess, err := m.service.oastBackend.CreateSession(ctx, label)
 	if err != nil {
-		return errorResult("failed to create OAST session: " + err.Error()), nil
+		return errorResultFromErr("failed to create OAST session: ", err), nil
 	}
 
 	log.Printf("mcp/oast_create: created session %s with domain %s (label=%q)", sess.ID, sess.Domain, sess.Label)
@@ -124,7 +124,7 @@ func (m *mcpServer) handleOastPoll(ctx context.Context, req mcp.CallToolRequest)
 		if errors.Is(err, ErrNotFound) {
 			return errorResult("session not found"), nil
 		}
-		return errorResult("failed to poll session: " + err.Error()), nil
+		return errorResultFromErr("failed to poll session: ", err), nil
 	}
 
 	switch outputMode {
@@ -210,7 +210,7 @@ func (m *mcpServer) handleOastGet(ctx context.Context, req mcp.CallToolRequest) 
 		if errors.Is(err, ErrNotFound) {
 			return errorResult("session or event not found"), nil
 		}
-		return errorResult("failed to get event: " + err.Error()), nil
+		return errorResultFromErr("failed to get event: ", err), nil
 	}
 
 	return jsonResult(protocol.OastGetResponse{
@@ -232,7 +232,7 @@ func (m *mcpServer) handleOastList(ctx context.Context, req mcp.CallToolRequest)
 
 	sessions, err := m.service.oastBackend.ListSessions(ctx)
 	if err != nil {
-		return errorResult("failed to list OAST sessions: " + err.Error()), nil
+		return errorResultFromErr("failed to list OAST sessions: ", err), nil
 	}
 
 	// Sort by creation time descending (most recent first)
@@ -274,7 +274,7 @@ func (m *mcpServer) handleOastDelete(ctx context.Context, req mcp.CallToolReques
 		if errors.Is(err, ErrNotFound) {
 			return errorResult("session not found"), nil
 		}
-		return errorResult("failed to delete session: " + err.Error()), nil
+		return errorResultFromErr("failed to delete session: ", err), nil
 	}
 
 	return jsonResult(OastDeleteResponse{})
