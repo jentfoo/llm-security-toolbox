@@ -39,12 +39,13 @@ var _ CrawlerBackend = (*CollyBackend)(nil)
 
 // CollyBackend implements CrawlerBackend using the Colly library.
 type CollyBackend struct {
-	mu        sync.RWMutex
-	sessions  map[string]*crawlSession // by ID
-	byLabel   map[string]string        // label -> session ID
-	flowStore *store.CrawlFlowStore
-	config    config.CrawlerConfig
-	closed    bool
+	mu           sync.RWMutex
+	sessions     map[string]*crawlSession // by ID
+	byLabel      map[string]string        // label -> session ID
+	flowStore    *store.CrawlFlowStore
+	config       config.CrawlerConfig
+	maxBodyBytes int
+	closed       bool
 
 	// For resolving seed flows from proxy history
 	proxyFlowStore *store.FlowStore
@@ -193,12 +194,13 @@ func readBodyLimited(r io.Reader, limit int) ([]byte, int, bool) {
 }
 
 // NewCollyBackend creates a new Colly-backed CrawlerBackend.
-func NewCollyBackend(cfg config.CrawlerConfig, flowStore *store.CrawlFlowStore, proxyFlowStore *store.FlowStore, httpBackend HttpBackend) *CollyBackend {
+func NewCollyBackend(cfg config.CrawlerConfig, maxBodyBytes int, flowStore *store.CrawlFlowStore, proxyFlowStore *store.FlowStore, httpBackend HttpBackend) *CollyBackend {
 	return &CollyBackend{
 		sessions:       make(map[string]*crawlSession),
 		byLabel:        make(map[string]string),
 		flowStore:      flowStore,
 		config:         cfg,
+		maxBodyBytes:   maxBodyBytes,
 		proxyFlowStore: proxyFlowStore,
 		httpBackend:    httpBackend,
 	}
@@ -305,7 +307,7 @@ func (b *CollyBackend) CreateSession(ctx context.Context, opts CrawlOptions) (*C
 	transport := &capturingTransport{
 		base:         http.DefaultTransport,
 		session:      sess,
-		maxBodyBytes: b.config.MaxResponseBodyBytes,
+		maxBodyBytes: b.maxBodyBytes,
 	}
 	c.WithTransport(transport)
 

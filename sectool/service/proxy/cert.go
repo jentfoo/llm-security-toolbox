@@ -1,0 +1,276 @@
+package proxy
+
+import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"log"
+	"math/big"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+const (
+	caCertFile = "ca.pem"
+	caKeyFile  = "ca-key.pem"
+)
+
+// CertManager handles CA certificate loading/generation and on-demand
+// certificate generation for HTTPS MITM interception.
+type CertManager struct {
+	mu     sync.RWMutex
+	caCert *x509.Certificate
+	caKey  *rsa.PrivateKey
+
+	// cache stores generated certificates by hostname
+	cache map[string]*tls.Certificate // TODO - Consider adding a size limit or LRU eviction
+}
+
+// NewCertManager loads or generates a CA certificate.
+// configDir is the directory for CA files (typically ~/.sectool).
+func NewCertManager(configDir string) (*CertManager, error) {
+	m := &CertManager{
+		cache: make(map[string]*tls.Certificate),
+	}
+
+	if err := m.loadOrGenerateCA(configDir); err != nil {
+		return nil, err
+	}
+
+	return m, nil
+}
+
+// GetCertificate returns a certificate for the hostname.
+// Generates and caches if not already cached.
+func (m *CertManager) GetCertificate(hostname string) (*tls.Certificate, error) {
+	// Fast path: check cache under read lock
+	m.mu.RLock()
+	if cert, ok := m.cache[hostname]; ok {
+		m.mu.RUnlock()
+		return cert, nil
+	}
+	m.mu.RUnlock()
+
+	// Slow path: generate under write lock
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if cert, ok := m.cache[hostname]; ok {
+		return cert, nil
+	}
+
+	cert, err := m.generateCertificate(hostname)
+	if err != nil {
+		return nil, fmt.Errorf("generate certificate for %s: %w", hostname, err)
+	}
+
+	m.cache[hostname] = cert
+	return cert, nil
+}
+
+// CACert returns the CA certificate for clients to trust.
+func (m *CertManager) CACert() *x509.Certificate {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.caCert
+}
+
+// loadOrGenerateCA loads existing CA or generates a new one.
+func (m *CertManager) loadOrGenerateCA(configDir string) error {
+	certPath := filepath.Join(configDir, caCertFile)
+	keyPath := filepath.Join(configDir, caKeyFile)
+
+	// Check file existence
+	_, certErr := os.Stat(certPath)
+	_, keyErr := os.Stat(keyPath)
+	certExists := certErr == nil
+	keyExists := keyErr == nil
+
+	// Error if only one file exists (orphaned state)
+	if certExists != keyExists {
+		if certExists {
+			return fmt.Errorf("CA certificate exists at %s but key is missing at %s; delete both to regenerate", certPath, keyPath)
+		}
+		return fmt.Errorf("CA key exists at %s but certificate is missing at %s; delete both to regenerate", keyPath, certPath)
+	}
+
+	// Both missing - generate new CA
+	if !certExists {
+		log.Printf("proxy: generating new CA certificate")
+		return m.generateCA(configDir)
+	}
+
+	// Both exist - load them
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return fmt.Errorf("read CA certificate: %w", err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return fmt.Errorf("read CA key: %w", err)
+	}
+
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		return errors.New("failed to parse CA certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse CA certificate: %w", err)
+	}
+
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return errors.New("failed to parse CA key PEM")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse CA key: %w", err)
+	}
+
+	// Validate certificate properties
+	if !cert.IsCA {
+		return fmt.Errorf("certificate at %s is not a CA certificate; delete both files to regenerate", certPath)
+	} else if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return fmt.Errorf("certificate at %s lacks KeyUsageCertSign; delete both files to regenerate", certPath)
+	} else if time.Now().After(cert.NotAfter) {
+		return fmt.Errorf("certificate at %s has expired; delete both files to regenerate", certPath)
+	}
+
+	m.caCert = cert
+	m.caKey = key
+	log.Printf("proxy: loaded CA certificate from %s", certPath)
+	return nil
+}
+
+// generateCA creates a new self-signed CA certificate.
+func (m *CertManager) generateCA(configDir string) error {
+	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+
+	// Generate serial number
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("generate serial: %w", err)
+	}
+
+	// Create CA certificate template
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"sectool"},
+			CommonName:   "sectool CA",
+		},
+		NotBefore:             now.Add(-time.Hour), // clock skew tolerance
+		NotAfter:              now.AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
+	}
+
+	// Self-sign the certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return fmt.Errorf("create certificate: %w", err)
+	}
+
+	// Parse back the certificate
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return fmt.Errorf("parse certificate: %w", err)
+	}
+
+	// Ensure config directory exists
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	// Write certificate
+	certPath := filepath.Join(configDir, caCertFile)
+	certFile, err := os.OpenFile(certPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("create cert file: %w", err)
+	}
+	defer func() { _ = certFile.Close() }()
+	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return fmt.Errorf("write cert: %w", err)
+	}
+
+	// Write key (restricted permissions)
+	keyPath := filepath.Join(configDir, caKeyFile)
+	keyFile, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("create key file: %w", err)
+	}
+	defer func() { _ = keyFile.Close() }()
+	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
+		return fmt.Errorf("write key: %w", err)
+	}
+
+	m.caCert = cert
+	m.caKey = key
+	log.Printf("proxy: generated CA certificate at %s", certPath)
+	return nil
+}
+
+// generateCertificate creates a certificate for the given hostname, signed by the CA.
+func (m *CertManager) generateCertificate(hostname string) (*tls.Certificate, error) {
+	// Generate RSA key (2048-bit for speed)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("generate key: %w", err)
+	}
+
+	// Generate serial number
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("generate serial: %w", err)
+	}
+
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: hostname,
+		},
+		NotBefore:   now.Add(-time.Hour), // clock skew tolerance
+		NotAfter:    now.AddDate(1, 0, 0),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	// Set SAN - hostname or IP address
+	if ip := net.ParseIP(hostname); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{hostname}
+	}
+
+	// Sign with CA
+	certDER, err := x509.CreateCertificate(rand.Reader, template, m.caCert, &key.PublicKey, m.caKey)
+	if err != nil {
+		return nil, fmt.Errorf("create certificate: %w", err)
+	}
+
+	cert := &tls.Certificate{
+		Certificate: [][]byte{certDER, m.caCert.Raw},
+		PrivateKey:  key,
+	}
+
+	return cert, nil
+}

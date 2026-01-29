@@ -93,6 +93,9 @@ const (
 // that working around goproxy (WebSocket handling alone is ~180 lines).
 
 // GoProxyBackend implements HttpBackend using elazarl/goproxy.
+//
+// Deprecated: This backend is being replaced by CustomProxyBackend.
+// It remains the default until feature parity.
 type GoProxyBackend struct {
 	proxy    *goproxy.ProxyHttpServer
 	server   *http.Server

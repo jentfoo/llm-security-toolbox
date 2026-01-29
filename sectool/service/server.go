@@ -132,7 +132,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Setup Crawler backend
 	if s.crawlerBackend == nil {
-		s.crawlerBackend = NewCollyBackend(s.cfg.Crawler, s.crawlFlowStore, s.flowStore, s.httpBackend)
+		s.crawlerBackend = NewCollyBackend(s.cfg.Crawler, s.cfg.MaxBodyBytes, s.crawlFlowStore, s.flowStore, s.httpBackend)
 	}
 
 	// Start MCP server

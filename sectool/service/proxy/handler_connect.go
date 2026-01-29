@@ -1,0 +1,279 @@
+package proxy
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// ConnectHandler handles CONNECT requests for HTTPS MITM interception.
+type ConnectHandler struct {
+	certManager  *CertManager
+	http1Handler *HTTP1Handler
+	history      *HistoryStore
+	maxBodyBytes int
+
+	// Server capability cache: host:port -> negotiated protocol ("h2" or "http/1.1")
+	// Avoids repeated probe latency for the same server
+	// TODO - Consider adding a 30-minute TTL on cache entries for long-running sessions
+	capsMu     sync.RWMutex
+	serverCaps map[string]string
+}
+
+// NewConnectHandler creates a new CONNECT handler.
+func NewConnectHandler(certManager *CertManager, http1Handler *HTTP1Handler, history *HistoryStore, maxBodyBytes int) *ConnectHandler {
+	return &ConnectHandler{
+		certManager:  certManager,
+		http1Handler: http1Handler,
+		history:      history,
+		maxBodyBytes: maxBodyBytes,
+		serverCaps:   make(map[string]string),
+	}
+}
+
+// Handle processes a CONNECT request for HTTPS tunneling with MITM.
+func (h *ConnectHandler) Handle(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader) {
+	// Parse CONNECT request
+	target, err := h.parseConnectRequest(clientReader)
+	if err != nil {
+		log.Printf("proxy: failed to parse CONNECT request: %v", err)
+		h.sendConnectError(clientConn, 400, "Bad Request")
+		return
+	}
+
+	// Send 200 Connection Established
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		log.Printf("proxy: failed to send CONNECT response: %v", err)
+		return
+	}
+
+	// Perform TLS handshake with delayed protocol probing
+	h.handleTLS(ctx, clientConn, target)
+}
+
+// parseConnectRequest parses "CONNECT host:port HTTP/1.1" and reads remaining headers.
+func (h *ConnectHandler) parseConnectRequest(reader *bufio.Reader) (*Target, error) {
+	// Read request line
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("read request line: %w", err)
+	}
+	line = strings.TrimSpace(line)
+
+	// Parse "CONNECT host:port HTTP/1.1"
+	parts := strings.SplitN(line, " ", 3)
+	if len(parts) < 2 || parts[0] != "CONNECT" {
+		return nil, errors.New("invalid CONNECT request line")
+	}
+
+	hostPort := parts[1]
+
+	// Parse host:port (default port 443)
+	host, portStr, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		// No port specified, use default 443
+		host = hostPort
+		portStr = "443"
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port: %s", portStr)
+	}
+
+	// Read and discard remaining headers until empty line
+	for {
+		headerLine, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("read headers: %w", readErr)
+		}
+		if strings.TrimSpace(headerLine) == "" {
+			break
+		}
+	}
+
+	return &Target{
+		Hostname:  host,
+		Port:      port,
+		UsesHTTPS: true,
+	}, nil
+}
+
+// handleTLS performs TLS handshake with delayed protocol probing.
+// The probe happens inside GetConfigForClient to ensure protocol matching.
+func (h *ConnectHandler) handleTLS(ctx context.Context, clientConn net.Conn, target *Target) {
+	targetAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
+
+	// Variables to capture from GetConfigForClient callback
+	var upstreamConn net.Conn
+	var negotiatedProto string
+	var probeErr error
+
+	// Create TLS config with GetConfigForClient for delayed protocol probing
+	tlsConfig := &tls.Config{
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			// Capture SNI
+			sni := hello.ServerName
+			if sni == "" {
+				sni = target.Hostname
+			}
+
+			// Log potential domain fronting
+			if sni != target.Hostname {
+				log.Printf("proxy: SNI mismatch - CONNECT target=%s, SNI=%s (possible domain fronting)", target.Hostname, sni)
+			}
+
+			// Probe or use cached protocol
+			upstreamConn, negotiatedProto, probeErr = h.probeOrConnect(ctx, targetAddr, sni, hello.SupportedProtos)
+			if probeErr != nil {
+				return nil, probeErr
+			}
+
+			// Get certificate for SNI
+			cert, certErr := h.certManager.GetCertificate(sni)
+			if certErr != nil {
+				if upstreamConn != nil {
+					_ = upstreamConn.Close()
+				}
+				return nil, certErr
+			}
+
+			// Return config with only the negotiated protocol
+			var nextProtos []string
+			if negotiatedProto != "" {
+				nextProtos = []string{negotiatedProto}
+			}
+
+			return &tls.Config{
+				Certificates: []tls.Certificate{*cert},
+				NextProtos:   nextProtos,
+			}, nil
+		},
+	}
+
+	// Wrap client connection in TLS
+	clientTLS := tls.Server(clientConn, tlsConfig)
+
+	// Perform handshake (this triggers GetConfigForClient)
+	if err := clientTLS.HandshakeContext(ctx); err != nil {
+		log.Printf("proxy: TLS handshake failed: %v", err)
+		if upstreamConn != nil {
+			_ = upstreamConn.Close()
+		}
+		return
+	}
+
+	if probeErr != nil || upstreamConn == nil {
+		log.Printf("proxy: upstream probe failed: %v", probeErr)
+		_ = clientTLS.Close()
+		return
+	}
+
+	// Route based on negotiated protocol
+	h.routeByProtocol(ctx, clientTLS, upstreamConn, negotiatedProto)
+}
+
+// probeOrConnect returns an open upstream connection with the appropriate protocol.
+// Uses cached protocol if available, otherwise probes the server.
+func (h *ConnectHandler) probeOrConnect(ctx context.Context, targetAddr, sni string, clientALPN []string) (net.Conn, string, error) {
+	// Check cache
+	h.capsMu.RLock()
+	cachedProto, cached := h.serverCaps[targetAddr]
+	h.capsMu.RUnlock()
+
+	if cached {
+		// Connect with cached protocol preference
+		conn, err := h.dialUpstream(ctx, targetAddr, sni, []string{cachedProto})
+		if err != nil {
+			// Cache might be stale, invalidate and retry with full probe
+			h.capsMu.Lock()
+			delete(h.serverCaps, targetAddr)
+			h.capsMu.Unlock()
+		} else {
+			return conn, cachedProto, nil
+		}
+	}
+
+	return h.probeUpstream(ctx, targetAddr, sni, clientALPN)
+}
+
+// probeUpstream connects to the server and discovers its protocol capabilities.
+func (h *ConnectHandler) probeUpstream(ctx context.Context, targetAddr, sni string, clientALPN []string) (net.Conn, string, error) {
+	conn, err := h.dialUpstream(ctx, targetAddr, sni, clientALPN)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Determine negotiated protocol
+	var negotiatedProto string
+	if tlsConn, ok := conn.(*tls.Conn); ok {
+		negotiatedProto = tlsConn.ConnectionState().NegotiatedProtocol
+	}
+
+	// Default to HTTP/1.1 if no ALPN negotiated
+	if negotiatedProto == "" {
+		negotiatedProto = "http/1.1"
+	}
+
+	// Cache the result
+	h.capsMu.Lock()
+	h.serverCaps[targetAddr] = negotiatedProto
+	h.capsMu.Unlock()
+
+	return conn, negotiatedProto, nil
+}
+
+// dialUpstream establishes a TLS connection to the upstream server.
+func (h *ConnectHandler) dialUpstream(ctx context.Context, targetAddr, sni string, alpn []string) (net.Conn, error) {
+	tlsDialer := &tls.Dialer{
+		NetDialer: &net.Dialer{
+			Timeout: dialTimeout,
+		},
+		Config: &tls.Config{
+			ServerName:         sni,
+			InsecureSkipVerify: true, // Required for security testing
+			MinVersion:         tls.VersionTLS10,
+			NextProtos:         alpn,
+		},
+	}
+
+	return tlsDialer.DialContext(ctx, "tcp", targetAddr)
+}
+
+// routeByProtocol routes the connection to the appropriate protocol handler.
+func (h *ConnectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, protocol string) {
+	defer func() {
+		_ = clientTLS.Close()
+		_ = upstreamConn.Close()
+	}()
+
+	switch protocol {
+	case "h2":
+		// TODO - Implement HTTP/2 handler in Phase 5
+		panic("HTTP/2 MITM not yet implemented - coming in Phase 5")
+
+	default:
+		// HTTP/1.1 or no ALPN
+		clientReader := bufio.NewReader(clientTLS)
+		upstreamReader := bufio.NewReader(upstreamConn)
+		h.http1Handler.HandleTLS(ctx, clientTLS, upstreamConn, clientReader, upstreamReader)
+	}
+}
+
+// sendConnectError writes an HTTP error response for CONNECT failures.
+func (h *ConnectHandler) sendConnectError(conn net.Conn, code int, message string) {
+	resp := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s\n",
+		code, message, message)
+	_, _ = conn.Write([]byte(resp))
+}
