@@ -39,6 +39,11 @@ func NewConnectHandler(certManager *CertManager, http1Handler *HTTP1Handler, his
 	}
 }
 
+// SetRuleApplier propagates the rule applier to child handlers.
+func (h *ConnectHandler) SetRuleApplier(applier RuleApplier) {
+	h.http1Handler.ruleApplier = applier
+}
+
 // Handle processes a CONNECT request for HTTPS tunneling with MITM.
 func (h *ConnectHandler) Handle(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader) {
 	// Parse CONNECT request
@@ -181,7 +186,7 @@ func (h *ConnectHandler) handleTLS(ctx context.Context, clientConn net.Conn, tar
 	}
 
 	// Route based on negotiated protocol
-	h.routeByProtocol(ctx, clientTLS, upstreamConn, negotiatedProto)
+	h.routeByProtocol(ctx, clientTLS, upstreamConn, negotiatedProto, target)
 }
 
 // probeOrConnect returns an open upstream connection with the appropriate protocol.
@@ -252,7 +257,7 @@ func (h *ConnectHandler) dialUpstream(ctx context.Context, targetAddr, sni strin
 }
 
 // routeByProtocol routes the connection to the appropriate protocol handler.
-func (h *ConnectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, protocol string) {
+func (h *ConnectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, protocol string, target *Target) {
 	defer func() {
 		_ = clientTLS.Close()
 		_ = upstreamConn.Close()
@@ -267,7 +272,7 @@ func (h *ConnectHandler) routeByProtocol(ctx context.Context, clientTLS, upstrea
 		// HTTP/1.1 or no ALPN
 		clientReader := bufio.NewReader(clientTLS)
 		upstreamReader := bufio.NewReader(upstreamConn)
-		h.http1Handler.HandleTLS(ctx, clientTLS, upstreamConn, clientReader, upstreamReader)
+		h.http1Handler.HandleTLS(ctx, clientTLS, upstreamConn, clientReader, upstreamReader, target)
 	}
 }
 

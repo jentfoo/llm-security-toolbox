@@ -921,6 +921,10 @@ type RequestSender func(ctx context.Context, req SendRequestInput, start time.Ti
 
 // FollowRedirects sends a request and follows redirects up to maxRedirects times.
 // Uses sender to perform individual requests, allowing different backend implementations.
+//
+// TODO: Remove this function once GoProxyBackend is removed.
+// The wire-fidelity sender in proxy/sender.go has its own SendWithRedirects that
+// should be used instead (it has identical redirect behavior but preserves header order).
 func FollowRedirects(ctx context.Context, req SendRequestInput, start time.Time, maxRedirects int, sender RequestSender) (*SendRequestResult, error) {
 	currentReq := req
 	currentPath := extractRequestPath(currentReq.RawRequest)

@@ -917,6 +917,94 @@ func TestParseStatusLine(t *testing.T) {
 	}
 }
 
+func TestRawHTTP1Response_SerializeHeaders(t *testing.T) {
+	t.Parallel()
+
+	t.Run("excludes_body", func(t *testing.T) {
+		resp := &RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []Header{
+				{Name: "Content-Type", Value: "text/plain"},
+			},
+			Body: []byte("This is the response body"),
+		}
+
+		buf := bytes.NewBuffer(nil)
+		headers := resp.SerializeHeaders(buf)
+
+		// Headers should contain status line and headers
+		assert.Contains(t, string(headers), "HTTP/1.1 200 OK")
+		assert.Contains(t, string(headers), "Content-Type: text/plain")
+		assert.Contains(t, string(headers), "Content-Length: 25")
+
+		// Headers should NOT contain the body
+		assert.NotContains(t, string(headers), "This is the response body")
+
+		// Should end with \r\n\r\n (header terminator)
+		assert.True(t, bytes.HasSuffix(headers, []byte("\r\n\r\n")))
+	})
+
+	t.Run("updates_content_length", func(t *testing.T) {
+		resp := &RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []Header{
+				{Name: "Content-Length", Value: "999"},
+			},
+			Body: []byte("short"),
+		}
+
+		buf := bytes.NewBuffer(nil)
+		headers := resp.SerializeHeaders(buf)
+
+		// Content-Length should be updated to actual body size
+		assert.Contains(t, string(headers), "Content-Length: 5")
+		assert.NotContains(t, string(headers), "Content-Length: 999")
+	})
+
+	t.Run("strips_chunked_encoding", func(t *testing.T) {
+		resp := &RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []Header{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+			},
+			Body: []byte("decoded body"),
+		}
+
+		buf := bytes.NewBuffer(nil)
+		headers := resp.SerializeHeaders(buf)
+
+		// Transfer-Encoding: chunked should be stripped
+		assert.NotContains(t, string(headers), "Transfer-Encoding")
+		// Content-Length should be added
+		assert.Contains(t, string(headers), "Content-Length: 12")
+	})
+
+	t.Run("empty_body", func(t *testing.T) {
+		resp := &RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 204,
+			StatusText: "No Content",
+			Headers: []Header{
+				{Name: "X-Custom", Value: "value"},
+			},
+		}
+
+		buf := bytes.NewBuffer(nil)
+		headers := resp.SerializeHeaders(buf)
+
+		assert.Contains(t, string(headers), "HTTP/1.1 204 No Content")
+		assert.Contains(t, string(headers), "X-Custom: value")
+		// No Content-Length for empty body
+		assert.NotContains(t, string(headers), "Content-Length")
+	})
+}
+
 func TestReadChunkedBody(t *testing.T) {
 	t.Parallel()
 

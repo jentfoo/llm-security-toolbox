@@ -22,11 +22,16 @@ const (
 	writeTimeout = 10 * time.Minute
 
 	protocolHTTP11 = "http/1.1"
+
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
 )
 
 type HTTP1Handler struct {
 	history      *HistoryStore
 	maxBodyBytes int
+	ruleApplier  RuleApplier       // optional, nil means no rules applied
+	wsHandler    *WebSocketHandler // optional, for WebSocket upgrade handling
 }
 
 // Handle processes a single HTTP/1.1 request.
@@ -43,6 +48,12 @@ func (h *HTTP1Handler) Handle(ctx context.Context, clientConn net.Conn, clientRe
 		return
 	}
 
+	// Apply request rules BEFORE routing decisions (target extraction, WebSocket detection)
+	// This allows rules to affect Host header, Upgrade header, etc.
+	if h.ruleApplier != nil {
+		req = h.ruleApplier.ApplyRequestRules(req)
+	}
+
 	// Extract target from request
 	target, err := h.extractTarget(req)
 	if err != nil {
@@ -54,6 +65,12 @@ func (h *HTTP1Handler) Handle(ctx context.Context, clientConn net.Conn, clientRe
 	// Rewrite proxy-form to origin-form
 	h.rewriteToOriginForm(req, target)
 	req.Protocol = protocolHTTP11
+
+	// Check for WebSocket upgrade
+	if h.wsHandler != nil && IsWebSocketUpgrade(req) {
+		h.wsHandler.Handle(ctx, clientConn, clientReader, req, target)
+		return
+	}
 
 	// Connect to upstream
 	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
@@ -91,6 +108,11 @@ func (h *HTTP1Handler) Handle(ctx context.Context, clientConn net.Conn, clientRe
 		return
 	}
 
+	// Apply response rules (header + body)
+	if h.ruleApplier != nil {
+		resp = h.ruleApplier.ApplyResponseRules(resp)
+	}
+
 	// Forward response to client
 	_ = clientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if _, err := clientConn.Write(resp.Serialize(&buf)); err != nil {
@@ -112,7 +134,7 @@ func (h *HTTP1Handler) Handle(ctx context.Context, clientConn net.Conn, clientRe
 // extractTarget determines the upstream server from the request.
 func (h *HTTP1Handler) extractTarget(req *RawHTTP1Request) (*Target, error) {
 	// Check for proxy-form URL (absolute URI)
-	if strings.HasPrefix(req.Path, "http://") || strings.HasPrefix(req.Path, "https://") {
+	if strings.HasPrefix(req.Path, schemeHTTP+"://") || strings.HasPrefix(req.Path, schemeHTTPS+"://") {
 		return h.parseProxyFormURL(req.Path)
 	}
 
@@ -132,7 +154,7 @@ func (h *HTTP1Handler) parseProxyFormURL(rawURL string) (*Target, error) {
 		return nil, fmt.Errorf("invalid proxy-form URL: %w", err)
 	}
 
-	usesHTTPS := u.Scheme == "https"
+	usesHTTPS := u.Scheme == schemeHTTPS
 	return h.parseHostPort(u.Host, usesHTTPS)
 }
 
@@ -166,7 +188,7 @@ func (h *HTTP1Handler) parseHostPort(hostPort string, usesHTTPS bool) (*Target, 
 // rewriteToOriginForm converts proxy-form requests to origin-form.
 func (h *HTTP1Handler) rewriteToOriginForm(req *RawHTTP1Request, target *Target) {
 	// If path is an absolute URI, extract just the path component
-	if strings.HasPrefix(req.Path, "http://") || strings.HasPrefix(req.Path, "https://") {
+	if strings.HasPrefix(req.Path, schemeHTTP+"://") || strings.HasPrefix(req.Path, schemeHTTPS+"://") {
 		u, err := url.Parse(req.Path)
 		if err != nil {
 			return
@@ -216,7 +238,8 @@ func (h *HTTP1Handler) storeEntry(req *RawHTTP1Request, resp *RawHTTP1Response, 
 // HandleTLS handles HTTP/1.1 traffic over already-established TLS connections.
 // Used by CONNECT handler after TLS handshake is complete.
 // Loops handling request/response pairs until connection closes.
-func (h *HTTP1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader *bufio.Reader, upstreamReader *bufio.Reader) {
+// target is needed for WebSocket upgrade detection (wss://).
+func (h *HTTP1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader *bufio.Reader, upstreamReader *bufio.Reader, target *Target) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -224,7 +247,7 @@ func (h *HTTP1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn n
 		default:
 		}
 
-		if !h.handleSingleTLS(ctx, clientConn, upstreamConn, clientReader, upstreamReader) {
+		if !h.handleSingleTLS(ctx, clientConn, upstreamConn, clientReader, upstreamReader, target) {
 			return
 		}
 	}
@@ -232,7 +255,7 @@ func (h *HTTP1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn n
 
 // handleSingleTLS handles a single HTTP/1.1 request/response exchange over TLS.
 // Returns true to continue processing more requests, false to close connection.
-func (h *HTTP1Handler) handleSingleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader, upstreamReader *bufio.Reader) bool {
+func (h *HTTP1Handler) handleSingleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader, upstreamReader *bufio.Reader, target *Target) bool {
 	startTime := time.Now()
 	var buf bytes.Buffer
 
@@ -247,6 +270,19 @@ func (h *HTTP1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 	}
 
 	req.Protocol = protocolHTTP11
+
+	// Apply request rules BEFORE WebSocket detection
+	// This allows rules to affect Upgrade header, etc.
+	if h.ruleApplier != nil {
+		req = h.ruleApplier.ApplyRequestRules(req)
+	}
+
+	// Check for WebSocket upgrade (wss://)
+	if h.wsHandler != nil && IsWebSocketUpgrade(req) {
+		// Reuse existing upstream connection to avoid race window
+		h.wsHandler.HandleTLSWithUpstream(ctx, clientConn, clientReader, upstreamConn, upstreamReader, req)
+		return false // WebSocket takes over, don't continue loop
+	}
 
 	// Set write deadline on upstream
 	_ = upstreamConn.SetWriteDeadline(time.Now().Add(writeTimeout))
@@ -269,6 +305,11 @@ func (h *HTTP1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		h.sendError(clientConn, 502, "Bad Gateway: malformed response")
 		h.storeEntry(req, nil, startTime)
 		return false
+	}
+
+	// Apply response rules (header + body)
+	if h.ruleApplier != nil {
+		resp = h.ruleApplier.ApplyResponseRules(resp)
 	}
 
 	// Forward response to client

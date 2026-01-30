@@ -98,6 +98,29 @@ func (h *HistoryStore) Count() int {
 	return int(h.nextOffset)
 }
 
+// Update persists changes to an existing entry.
+// The entry must have been previously stored (Offset must be valid).
+func (h *HistoryStore) Update(entry *HistoryEntry) {
+	h.mu.RLock()
+	key, exists := h.offsetKeys[entry.Offset]
+	h.mu.RUnlock()
+
+	if !exists {
+		log.Printf("proxy: cannot update non-existent history entry %d", entry.Offset)
+		return
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		log.Printf("proxy: failed to marshal history entry %d for update: %v", entry.Offset, err)
+		return
+	}
+
+	if err := h.storage.Save(key, data); err != nil {
+		log.Printf("proxy: failed to update history entry %d: %v", entry.Offset, err)
+	}
+}
+
 // Close closes the underlying storage.
 func (h *HistoryStore) Close() {
 	h.storage.Close()

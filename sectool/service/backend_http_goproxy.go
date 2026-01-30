@@ -1195,7 +1195,7 @@ func (b *GoProxyBackend) applyWSRules(payload []byte, direction string) []byte {
 	defer b.rulesMu.RUnlock()
 
 	for _, rule := range b.wsRules {
-		if rule.Type != "ws:both" && rule.Type != direction {
+		if rule.Type != RuleTypeWSBoth && rule.Type != direction {
 			continue
 		}
 		payload = applyMatchReplace(payload, rule)

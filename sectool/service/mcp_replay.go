@@ -180,6 +180,7 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		},
 		FollowRedirects: req.GetBool("follow_redirects", false),
 		Timeout:         timeout,
+		Force:           req.GetBool("force", false),
 	}
 
 	result, err := m.service.httpBackend.SendRequest(ctx, "sectool-"+replayID, sendInput)

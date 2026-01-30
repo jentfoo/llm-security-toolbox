@@ -1,15 +1,19 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/go-harden/llm-security-toolbox/sectool/service/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -247,6 +251,13 @@ func TestCustomProxyBackend_SendRequest(t *testing.T) {
 	assert.Contains(t, string(result.Headers), "200")
 	assert.Contains(t, string(result.Headers), "X-Test: response")
 	assert.Equal(t, "Hello from server", string(result.Body))
+
+	// Verify Headers does NOT contain the body (regression test)
+	assert.NotContains(t, string(result.Headers), "Hello from server",
+		"Headers field should not contain response body")
+	// Headers should end with header terminator
+	assert.True(t, bytes.HasSuffix(result.Headers, []byte("\r\n\r\n")),
+		"Headers should end with CRLF CRLF")
 }
 
 func TestCustomProxyBackend_Close(t *testing.T) {
@@ -332,4 +343,683 @@ func mustParsePort(t *testing.T, portStr string) int {
 	_, err := fmt.Sscanf(portStr, "%d", &port)
 	require.NoError(t, err)
 	return port
+}
+
+// =============================================================================
+// Rule Application Tests
+// =============================================================================
+
+func TestApplyRequestRules_header_literal(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add header rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "header-rule",
+		Type:    RuleTypeRequestHeader,
+		IsRegex: &isRegex,
+		Match:   "old-value",
+		Replace: "new-value",
+	})
+	require.NoError(t, err)
+
+	// Create request with header containing "old-value"
+	req := &proxy.RawHTTP1Request{
+		Method:  "GET",
+		Path:    "/test",
+		Version: "HTTP/1.1",
+		Headers: []proxy.Header{
+			{Name: "Host", Value: "example.com"},
+			{Name: "X-Test", Value: "old-value"},
+		},
+	}
+
+	// Apply rules
+	modified := backend.ApplyRequestRules(req)
+
+	assert.Equal(t, "new-value", modified.GetHeader("X-Test"))
+}
+
+func TestApplyRequestRules_header_regex(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := true
+
+	// Add regex header rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "regex-header-rule",
+		Type:    RuleTypeRequestHeader,
+		IsRegex: &isRegex,
+		Match:   `\d+`,
+		Replace: "NUMBER",
+	})
+	require.NoError(t, err)
+
+	req := &proxy.RawHTTP1Request{
+		Method:  "GET",
+		Path:    "/test",
+		Version: "HTTP/1.1",
+		Headers: []proxy.Header{
+			{Name: "Host", Value: "example.com"},
+			{Name: "X-ID", Value: "user-12345-session"},
+		},
+	}
+
+	modified := backend.ApplyRequestRules(req)
+
+	assert.Equal(t, "user-NUMBER-session", modified.GetHeader("X-ID"))
+}
+
+func TestApplyRequestRules_body_literal(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add body rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "body-rule",
+		Type:    RuleTypeRequestBody,
+		IsRegex: &isRegex,
+		Match:   "secret",
+		Replace: "REDACTED",
+	})
+	require.NoError(t, err)
+
+	req := &proxy.RawHTTP1Request{
+		Method:  "POST",
+		Path:    "/api",
+		Version: "HTTP/1.1",
+		Headers: []proxy.Header{
+			{Name: "Host", Value: "example.com"},
+			{Name: "Content-Length", Value: "27"},
+		},
+		Body: []byte(`{"password":"secret123"}`),
+	}
+
+	modified := backend.ApplyRequestRules(req)
+
+	assert.Contains(t, string(modified.Body), "REDACTED123")
+	// Content-Length should be updated
+	assert.Equal(t, "26", modified.GetHeader("Content-Length"))
+}
+
+func TestApplyRequestRules_no_matching_rules(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add rule that won't match
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "no-match-rule",
+		Type:    RuleTypeRequestHeader,
+		IsRegex: &isRegex,
+		Match:   "nonexistent",
+		Replace: "replacement",
+	})
+	require.NoError(t, err)
+
+	req := &proxy.RawHTTP1Request{
+		Method:  "GET",
+		Path:    "/test",
+		Version: "HTTP/1.1",
+		Headers: []proxy.Header{
+			{Name: "Host", Value: "example.com"},
+			{Name: "X-Test", Value: "unchanged"},
+		},
+	}
+
+	modified := backend.ApplyRequestRules(req)
+
+	assert.Equal(t, "unchanged", modified.GetHeader("X-Test"))
+}
+
+func TestApplyResponseRules_header_literal(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add response header rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "resp-header-rule",
+		Type:    RuleTypeResponseHeader,
+		IsRegex: &isRegex,
+		Match:   "Apache/2.4",
+		Replace: "Hidden",
+	})
+	require.NoError(t, err)
+
+	resp := &proxy.RawHTTP1Response{
+		Version:    "HTTP/1.1",
+		StatusCode: 200,
+		StatusText: "OK",
+		Headers: []proxy.Header{
+			{Name: "Server", Value: "Apache/2.4"},
+			{Name: "Content-Type", Value: "text/html"},
+		},
+	}
+
+	modified := backend.ApplyResponseRules(resp)
+
+	assert.Equal(t, "Hidden", modified.GetHeader("Server"))
+}
+
+func TestApplyResponseRules_body_literal(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add response body rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "resp-body-rule",
+		Type:    RuleTypeResponseBody,
+		IsRegex: &isRegex,
+		Match:   "internal-error-code-123",
+		Replace: "error",
+	})
+	require.NoError(t, err)
+
+	resp := &proxy.RawHTTP1Response{
+		Version:    "HTTP/1.1",
+		StatusCode: 500,
+		StatusText: "Internal Server Error",
+		Headers: []proxy.Header{
+			{Name: "Content-Type", Value: "text/plain"},
+			{Name: "Content-Length", Value: "35"},
+		},
+		Body: []byte("Error: internal-error-code-123 here"),
+	}
+
+	modified := backend.ApplyResponseRules(resp)
+
+	assert.Equal(t, "Error: error here", string(modified.Body))
+	assert.Equal(t, "17", modified.GetHeader("Content-Length"))
+}
+
+func TestApplyResponseRules_compressed_body(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add response body rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "compressed-body-rule",
+		Type:    RuleTypeResponseBody,
+		IsRegex: &isRegex,
+		Match:   "secret",
+		Replace: "HIDDEN",
+	})
+	require.NoError(t, err)
+
+	// Create gzip-compressed body
+	originalBody := []byte("The secret data is here")
+	compressedBody, err := proxy.Compress(originalBody, "gzip")
+	require.NoError(t, err)
+
+	resp := &proxy.RawHTTP1Response{
+		Version:    "HTTP/1.1",
+		StatusCode: 200,
+		StatusText: "OK",
+		Headers: []proxy.Header{
+			{Name: "Content-Encoding", Value: "gzip"},
+			{Name: "Content-Length", Value: strconv.Itoa(len(compressedBody))},
+		},
+		Body: compressedBody,
+	}
+
+	modified := backend.ApplyResponseRules(resp)
+
+	// Decompress the result to verify
+	decompressed, wasCompressed := proxy.Decompress(modified.Body, "gzip")
+	assert.True(t, wasCompressed)
+	assert.Equal(t, "The HIDDEN data is here", string(decompressed))
+}
+
+func TestApplyResponseRules_unsupported_encoding_skips_rules(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add response body rule that would corrupt brotli if applied
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "body-rule",
+		Type:    RuleTypeResponseBody,
+		IsRegex: &isRegex,
+		Match:   "test",
+		Replace: "MODIFIED",
+	})
+	require.NoError(t, err)
+
+	// Simulate brotli-compressed body (unsupported encoding)
+	fakeCompressed := []byte{0x1b, 0x03, 0x00, 0xf8, 0xff} // invalid brotli
+	originalBody := make([]byte, len(fakeCompressed))
+	copy(originalBody, fakeCompressed)
+
+	resp := &proxy.RawHTTP1Response{
+		Version:    "HTTP/1.1",
+		StatusCode: 200,
+		StatusText: "OK",
+		Headers: []proxy.Header{
+			{Name: "Content-Encoding", Value: "br"},
+			{Name: "Content-Length", Value: strconv.Itoa(len(fakeCompressed))},
+		},
+		Body: fakeCompressed,
+	}
+
+	modified := backend.ApplyResponseRules(resp)
+
+	// Body should be unchanged since br is unsupported
+	assert.Equal(t, originalBody, modified.Body)
+	// Content-Encoding should still be present
+	assert.Equal(t, "br", modified.GetHeader("Content-Encoding"))
+}
+
+func TestApplyResponseRules_multiple_encoding_skips_rules(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add response body rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "body-rule",
+		Type:    RuleTypeResponseBody,
+		IsRegex: &isRegex,
+		Match:   "test",
+		Replace: "MODIFIED",
+	})
+	require.NoError(t, err)
+
+	// Multiple encodings should be skipped
+	fakeBody := []byte("some test data")
+	originalBody := make([]byte, len(fakeBody))
+	copy(originalBody, fakeBody)
+
+	resp := &proxy.RawHTTP1Response{
+		Version:    "HTTP/1.1",
+		StatusCode: 200,
+		StatusText: "OK",
+		Headers: []proxy.Header{
+			{Name: "Content-Encoding", Value: "gzip, br"},
+			{Name: "Content-Length", Value: strconv.Itoa(len(fakeBody))},
+		},
+		Body: fakeBody,
+	}
+
+	modified := backend.ApplyResponseRules(resp)
+
+	// Body should be unchanged since multiple encodings are unsupported
+	assert.Equal(t, originalBody, modified.Body)
+}
+
+func TestApplyWSRules_to_server(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add WebSocket rule for to-server direction
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "ws-to-server-rule",
+		Type:    "ws:to-server",
+		IsRegex: &isRegex,
+		Match:   "client-secret",
+		Replace: "REDACTED",
+	})
+	require.NoError(t, err)
+
+	payload := []byte(`{"message":"client-secret"}`)
+
+	// Should apply to ws:to-server
+	modified := backend.ApplyWSRules(payload, "ws:to-server")
+	assert.Contains(t, string(modified), "REDACTED")
+
+	// Should not apply to ws:to-client
+	unmodified := backend.ApplyWSRules(payload, "ws:to-client")
+	assert.Equal(t, string(payload), string(unmodified))
+}
+
+func TestApplyWSRules_to_client(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add WebSocket rule for to-client direction
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "ws-to-client-rule",
+		Type:    "ws:to-client",
+		IsRegex: &isRegex,
+		Match:   "server-internal",
+		Replace: "public",
+	})
+	require.NoError(t, err)
+
+	payload := []byte(`{"data":"server-internal-info"}`)
+
+	// Should apply to ws:to-client
+	modified := backend.ApplyWSRules(payload, "ws:to-client")
+	assert.Contains(t, string(modified), "public-info")
+
+	// Should not apply to ws:to-server
+	unmodified := backend.ApplyWSRules(payload, "ws:to-server")
+	assert.Equal(t, string(payload), string(unmodified))
+}
+
+func TestApplyWSRules_both_directions(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add WebSocket rule for both directions
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "ws-both-rule",
+		Type:    "ws:both",
+		IsRegex: &isRegex,
+		Match:   "timestamp",
+		Replace: "TS",
+	})
+	require.NoError(t, err)
+
+	payload := []byte(`{"timestamp":"123456"}`)
+
+	// Should apply to both directions
+	toServer := backend.ApplyWSRules(payload, "ws:to-server")
+	assert.Contains(t, string(toServer), "TS")
+
+	toClient := backend.ApplyWSRules(payload, "ws:to-client")
+	assert.Contains(t, string(toClient), "TS")
+}
+
+func TestApplyWSRules_regex(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := true
+
+	// Add regex WebSocket rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "ws-regex-rule",
+		Type:    "ws:both",
+		IsRegex: &isRegex,
+		Match:   `"id":\s*\d+`,
+		Replace: `"id": 0`,
+	})
+	require.NoError(t, err)
+
+	payload := []byte(`{"id": 12345, "data": "test"}`)
+
+	modified := backend.ApplyWSRules(payload, "ws:to-server")
+	assert.Contains(t, string(modified), `"id": 0`)
+}
+
+func TestApplyMatchReplaceRule_literal(t *testing.T) {
+	t.Parallel()
+
+	rule := customStoredRule{
+		ID:      "test",
+		Type:    RuleTypeRequestBody,
+		IsRegex: false,
+		Match:   "old",
+		Replace: "new",
+	}
+
+	input := []byte("This old text has old values")
+	result := applyMatchReplaceRule(input, rule)
+
+	assert.Equal(t, "This new text has new values", string(result))
+}
+
+func TestApplyMatchReplaceRule_regex(t *testing.T) {
+	t.Parallel()
+
+	compiled, err := regexp.Compile(`\b\d{4}\b`)
+	require.NoError(t, err)
+
+	rule := customStoredRule{
+		ID:       "test",
+		Type:     RuleTypeRequestBody,
+		IsRegex:  true,
+		Match:    `\b\d{4}\b`,
+		Replace:  "YEAR",
+		compiled: compiled,
+	}
+
+	input := []byte("Year 2024 and 1999 are mentioned")
+	result := applyMatchReplaceRule(input, rule)
+
+	assert.Equal(t, "Year YEAR and YEAR are mentioned", string(result))
+}
+
+func TestApplyMatchReplaceRule_no_match(t *testing.T) {
+	t.Parallel()
+
+	rule := customStoredRule{
+		ID:      "test",
+		Type:    RuleTypeRequestBody,
+		IsRegex: false,
+		Match:   "nonexistent",
+		Replace: "replacement",
+	}
+
+	input := []byte("This text has no matches")
+	result := applyMatchReplaceRule(input, rule)
+
+	assert.Equal(t, string(input), string(result))
+}
+
+func TestParseHeadersFromText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  []proxy.Header
+	}{
+		{
+			name:  "single_header",
+			input: "Content-Type: text/plain\r\n",
+			want: []proxy.Header{
+				{Name: "Content-Type", Value: "text/plain"},
+			},
+		},
+		{
+			name:  "multiple_headers",
+			input: "Host: example.com\r\nContent-Type: application/json\r\nX-Custom: value\r\n",
+			want: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Content-Type", Value: "application/json"},
+				{Name: "X-Custom", Value: "value"},
+			},
+		},
+		{
+			name:  "header_with_spaces",
+			input: "X-Test:   value with spaces   \r\n",
+			want: []proxy.Header{
+				{Name: "X-Test", Value: "value with spaces"},
+			},
+		},
+		{
+			name:  "empty_value",
+			input: "X-Empty:\r\n",
+			want: []proxy.Header{
+				{Name: "X-Empty", Value: ""},
+			},
+		},
+		{
+			name:  "malformed_no_colon",
+			input: "MalformedHeader\r\nValid: value\r\n",
+			want: []proxy.Header{
+				{Name: "Valid", Value: "value"},
+			},
+		},
+		{
+			name:  "empty_input",
+			input: "",
+			want:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseHeadersFromText([]byte(tt.input))
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+func TestApplyRequestRules_multiple_rules(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add multiple rules - they should apply in order
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "rule1",
+		Type:    RuleTypeRequestHeader,
+		IsRegex: &isRegex,
+		Match:   "AAA",
+		Replace: "BBB",
+	})
+	require.NoError(t, err)
+
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "rule2",
+		Type:    RuleTypeRequestHeader,
+		IsRegex: &isRegex,
+		Match:   "BBB",
+		Replace: "CCC",
+	})
+	require.NoError(t, err)
+
+	req := &proxy.RawHTTP1Request{
+		Method:  "GET",
+		Path:    "/test",
+		Version: "HTTP/1.1",
+		Headers: []proxy.Header{
+			{Name: "X-Test", Value: "AAA"},
+		},
+	}
+
+	modified := backend.ApplyRequestRules(req)
+
+	// AAA -> BBB -> CCC (both rules should apply in sequence)
+	assert.Equal(t, "CCC", modified.GetHeader("X-Test"))
+}
+
+func TestApplyRequestRules_empty_body(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add body rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "body-rule",
+		Type:    RuleTypeRequestBody,
+		IsRegex: &isRegex,
+		Match:   "test",
+		Replace: "replaced",
+	})
+	require.NoError(t, err)
+
+	// Request with no body
+	req := &proxy.RawHTTP1Request{
+		Method:  "GET",
+		Path:    "/test",
+		Version: "HTTP/1.1",
+		Headers: []proxy.Header{
+			{Name: "Host", Value: "example.com"},
+		},
+	}
+
+	// Should not panic or error with empty body
+	modified := backend.ApplyRequestRules(req)
+
+	assert.Empty(t, modified.Body)
 }

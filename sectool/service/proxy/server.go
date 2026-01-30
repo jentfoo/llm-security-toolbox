@@ -30,6 +30,7 @@ type ProxyServer struct {
 	// Handlers for different protocols
 	http1Handler   *HTTP1Handler
 	connectHandler *ConnectHandler
+	wsHandler      *WebSocketHandler
 
 	// Shutdown coordination
 	ctx    context.Context
@@ -59,9 +60,12 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int) (*ProxyServer,
 	storage := store.NewMemStorage()
 	history := NewHistoryStore(storage)
 
+	wsHandler := NewWebSocketHandler(history, certManager)
+
 	http1Handler := &HTTP1Handler{
 		history:      history,
 		maxBodyBytes: maxBodyBytes,
+		wsHandler:    wsHandler,
 	}
 
 	connectHandler := NewConnectHandler(certManager, http1Handler, history, maxBodyBytes)
@@ -74,6 +78,7 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int) (*ProxyServer,
 		history:        history,
 		http1Handler:   http1Handler,
 		connectHandler: connectHandler,
+		wsHandler:      wsHandler,
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -94,6 +99,14 @@ func (s *ProxyServer) History() *HistoryStore {
 // CertManager returns the certificate manager for external access.
 func (s *ProxyServer) CertManager() *CertManager {
 	return s.certManager
+}
+
+// SetRuleApplier sets the rule applier for all handlers.
+// Call after construction but before Serve().
+func (s *ProxyServer) SetRuleApplier(applier RuleApplier) {
+	s.http1Handler.ruleApplier = applier
+	s.connectHandler.SetRuleApplier(applier)
+	s.wsHandler.SetRuleApplier(applier)
 }
 
 // Serve starts accepting connections. Blocks until shutdown.

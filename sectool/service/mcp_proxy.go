@@ -543,9 +543,9 @@ var validRuleTypes = map[string]bool{
 	RuleTypeResponseHeader: true,
 	RuleTypeResponseBody:   true,
 	// WebSocket types
-	"ws:to-server": true,
-	"ws:to-client": true,
-	"ws:both":      true,
+	RuleTypeWSToServer: true,
+	RuleTypeWSToClient: true,
+	RuleTypeWSBoth:     true,
 }
 
 func validateRuleTypeAny(t string) error {

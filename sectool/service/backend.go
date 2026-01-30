@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
+	"github.com/go-harden/llm-security-toolbox/sectool/service/proxy"
 )
 
 // ErrLabelExists is returned when label conflicts with an existing entry (rule or OAST).
@@ -21,6 +22,10 @@ const (
 	RuleTypeRequestBody    = "request_body"
 	RuleTypeResponseHeader = "response_header"
 	RuleTypeResponseBody   = "response_body"
+
+	RuleTypeWSToServer = "ws:to-server"
+	RuleTypeWSToClient = "ws:to-client"
+	RuleTypeWSBoth     = "ws:both"
 )
 
 // isWSType returns true if the type is a WebSocket type (ws: prefix).
@@ -77,11 +82,8 @@ type ProxyEntry struct {
 }
 
 // Target specifies the destination for a request.
-type Target struct {
-	Hostname  string
-	Port      int
-	UsesHTTPS bool
-}
+// Type alias for proxy.Target to enable unified target handling across packages.
+type Target = proxy.Target
 
 // SendRequestInput contains all parameters for sending a request.
 type SendRequestInput struct {
@@ -89,6 +91,7 @@ type SendRequestInput struct {
 	Target          Target
 	FollowRedirects bool
 	Timeout         time.Duration
+	Force           bool // Skip validation for protocol-level tests
 }
 
 // SendRequestResult contains the response from a sent request.

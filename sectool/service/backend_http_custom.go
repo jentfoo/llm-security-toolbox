@@ -1,16 +1,13 @@
 package service
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,8 +46,9 @@ type customStoredRule struct {
 	compiled *regexp.Regexp
 }
 
-// Compile-time check that CustomProxyBackend implements HttpBackend.
+// Compile-time checks that CustomProxyBackend implements interfaces.
 var _ HttpBackend = (*CustomProxyBackend)(nil)
+var _ proxy.RuleApplier = (*CustomProxyBackend)(nil)
 
 // NewCustomProxyBackend creates a new custom proxy backend.
 // Does NOT start serving - call Serve() separately (typically in a goroutine).
@@ -63,6 +61,9 @@ func NewCustomProxyBackend(port int, configDir string, maxBodyBytes int) (*Custo
 	b := &CustomProxyBackend{
 		server: server,
 	}
+
+	// Wire backend as rule applier for the proxy handlers
+	server.SetRuleApplier(b)
 
 	return b, nil
 }
@@ -118,90 +119,41 @@ func (b *CustomProxyBackend) SendRequest(ctx context.Context, name string, req S
 	log.Printf("custom: sending request %s to %s://%s:%d (follow_redirects=%v)",
 		name, scheme, req.Target.Hostname, req.Target.Port, req.FollowRedirects)
 
-	if req.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
-		defer cancel()
+	// Build send options
+	opts := proxy.SendOptions{
+		RawRequest: req.RawRequest,
+		Target: proxy.Target{
+			Hostname:  req.Target.Hostname,
+			Port:      req.Target.Port,
+			UsesHTTPS: req.Target.UsesHTTPS,
+		},
+		Force:   req.Force,
+		Timeout: req.Timeout,
 	}
 
+	// Create sender with JSON modifier
+	sender := &proxy.Sender{
+		JSONModifier: ModifyJSONBodyMap,
+	}
+
+	// Send request
+	var result *proxy.SendResult
+	var err error
 	if req.FollowRedirects {
-		return FollowRedirects(ctx, req, time.Now(), 10, b.sendSingle)
+		result, err = sender.SendWithRedirects(ctx, opts)
+	} else {
+		result, err = sender.Send(ctx, opts)
 	}
-	return b.sendSingle(ctx, req, time.Now())
-}
-
-// sendSingle sends a single HTTP request and returns the response.
-// This is copied from goproxy backend - it uses net/http which normalizes headers.
-// TODO: Replace with wire-fidelity sender using custom parser/serializer in future phase.
-func (b *CustomProxyBackend) sendSingle(ctx context.Context, req SendRequestInput, start time.Time) (*SendRequestResult, error) {
-	// Parse raw request
-	httpReq, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(req.RawRequest)))
 	if err != nil {
-		return nil, fmt.Errorf("parse request: %w", err)
+		return nil, err
 	}
 
-	// Set the URL
-	scheme := schemeHTTP
-	if req.Target.UsesHTTPS {
-		scheme = schemeHTTPS
-	}
-	httpReq.URL.Scheme = scheme
-	httpReq.URL.Host = fmt.Sprintf("%s:%d", req.Target.Hostname, req.Target.Port)
-	httpReq.RequestURI = "" // Must clear for client requests
-
-	body, err := io.ReadAll(httpReq.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
-	}
-	_ = httpReq.Body.Close()
-	httpReq.Body = io.NopCloser(bytes.NewReader(body))
-
-	// Create HTTP client with settings to preserve wire format as closely as possible
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-		DisableKeepAlives:   true,
-		ForceAttemptHTTP2:   false, // Prevent HTTP/2 upgrade to match HTTP/1.1 request format
-		DisableCompression:  true,  // Prevent Accept-Encoding injection
-		Proxy:               nil,   // Ignore environment proxy settings
-		MaxIdleConnsPerHost: -1,    // Disable connection pooling
-	}
-	client := &http.Client{
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	defer transport.CloseIdleConnections()
-
-	httpReq = httpReq.WithContext(ctx)
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// Read response headers
-	var headerBuf bytes.Buffer
-	headerBuf.WriteString(fmt.Sprintf("%s %d %s\r\n", resp.Proto, resp.StatusCode, resp.Status[4:]))
-	for name, values := range resp.Header {
-		for _, v := range values {
-			headerBuf.WriteString(fmt.Sprintf("%s: %s\r\n", name, v))
-		}
-	}
-	headerBuf.WriteString("\r\n")
-
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-
+	// Convert response to SendRequestResult format
+	var buf bytes.Buffer
 	return &SendRequestResult{
-		Headers:  headerBuf.Bytes(),
-		Body:     respBody,
-		Duration: time.Since(start),
+		Headers:  result.Response.SerializeHeaders(&buf),
+		Body:     result.Response.Body,
+		Duration: result.Duration,
 	}, nil
 }
 
@@ -407,4 +359,272 @@ func (b *CustomProxyBackend) labelExistsExcluding(label, excludeID string) bool 
 		}
 	}
 	return false
+}
+
+// =============================================================================
+// RuleApplier Implementation
+// =============================================================================
+
+// ApplyRequestRules applies request header and body rules.
+// Rules are applied in the order they were added.
+func (b *CustomProxyBackend) ApplyRequestRules(req *proxy.RawHTTP1Request) *proxy.RawHTTP1Request {
+	b.rulesMu.RLock()
+	defer b.rulesMu.RUnlock()
+
+	var headerRules, bodyRules []customStoredRule
+	for _, rule := range b.httpRules {
+		switch rule.Type {
+		case RuleTypeRequestHeader:
+			headerRules = append(headerRules, rule)
+		case RuleTypeRequestBody:
+			bodyRules = append(bodyRules, rule)
+		}
+	}
+
+	// Apply header rules
+	if len(headerRules) > 0 {
+		req = b.applyRequestHeaderRules(req, headerRules)
+	}
+
+	// Apply body rules
+	if len(bodyRules) > 0 && len(req.Body) > 0 {
+		req = b.applyRequestBodyRules(req, bodyRules)
+	}
+
+	return req
+}
+
+// ApplyResponseRules applies response header and body rules.
+// Handles decompression/recompression for body rules.
+func (b *CustomProxyBackend) ApplyResponseRules(resp *proxy.RawHTTP1Response) *proxy.RawHTTP1Response {
+	b.rulesMu.RLock()
+	defer b.rulesMu.RUnlock()
+
+	var headerRules, bodyRules []customStoredRule
+	for _, rule := range b.httpRules {
+		switch rule.Type {
+		case RuleTypeResponseHeader:
+			headerRules = append(headerRules, rule)
+		case RuleTypeResponseBody:
+			bodyRules = append(bodyRules, rule)
+		}
+	}
+
+	// Apply header rules
+	if len(headerRules) > 0 {
+		resp = b.applyResponseHeaderRules(resp, headerRules)
+	}
+
+	// Apply body rules with compression handling
+	if len(bodyRules) > 0 && len(resp.Body) > 0 {
+		resp = b.applyResponseBodyRules(resp, bodyRules)
+	}
+
+	return resp
+}
+
+// ApplyWSRules applies WebSocket rules to frame payload.
+func (b *CustomProxyBackend) ApplyWSRules(payload []byte, direction string) []byte {
+	b.rulesMu.RLock()
+	defer b.rulesMu.RUnlock()
+
+	for _, rule := range b.wsRules {
+		if rule.Type != RuleTypeWSBoth && rule.Type != direction {
+			continue
+		}
+		payload = applyMatchReplaceRule(payload, rule)
+	}
+	return payload
+}
+
+// HasBodyRules returns true if there are body rules for request or response.
+// Used by HTTP/2 handler to decide whether to buffer full bodies.
+func (b *CustomProxyBackend) HasBodyRules(isRequest bool) bool {
+	b.rulesMu.RLock()
+	defer b.rulesMu.RUnlock()
+
+	targetType := RuleTypeResponseBody
+	if isRequest {
+		targetType = RuleTypeRequestBody
+	}
+
+	for _, rule := range b.httpRules {
+		if rule.Type == targetType {
+			return true
+		}
+	}
+	return false
+}
+
+// applyRequestHeaderRules applies header rules to request.
+func (b *CustomProxyBackend) applyRequestHeaderRules(req *proxy.RawHTTP1Request, rules []customStoredRule) *proxy.RawHTTP1Request {
+	// Serialize headers to text format
+	var headerBuf bytes.Buffer
+	for _, h := range req.Headers {
+		headerBuf.WriteString(h.Name)
+		headerBuf.WriteString(": ")
+		headerBuf.WriteString(h.Value)
+		headerBuf.WriteString("\r\n")
+	}
+
+	original := headerBuf.Bytes()
+	modified := original
+
+	// Apply each rule in order
+	for _, rule := range rules {
+		modified = applyMatchReplaceRule(modified, rule)
+	}
+
+	// If no changes, return original
+	if bytes.Equal(modified, original) {
+		return req
+	}
+
+	// Parse modified headers back
+	req.Headers = parseHeadersFromText(modified)
+	return req
+}
+
+// applyRequestBodyRules applies body rules to request.
+func (b *CustomProxyBackend) applyRequestBodyRules(req *proxy.RawHTTP1Request, rules []customStoredRule) *proxy.RawHTTP1Request {
+	original := req.Body
+	modified := original
+
+	// Apply each rule in order
+	for _, rule := range rules {
+		modified = applyMatchReplaceRule(modified, rule)
+	}
+
+	// If no changes, return original
+	if bytes.Equal(modified, original) {
+		return req
+	}
+
+	// Update body and Content-Length
+	req.Body = modified
+	req.SetHeader("Content-Length", strconv.Itoa(len(modified)))
+	return req
+}
+
+// applyResponseHeaderRules applies header rules to response.
+func (b *CustomProxyBackend) applyResponseHeaderRules(resp *proxy.RawHTTP1Response, rules []customStoredRule) *proxy.RawHTTP1Response {
+	// Serialize headers to text format
+	var headerBuf bytes.Buffer
+	for _, h := range resp.Headers {
+		headerBuf.WriteString(h.Name)
+		headerBuf.WriteString(": ")
+		headerBuf.WriteString(h.Value)
+		headerBuf.WriteString("\r\n")
+	}
+
+	original := headerBuf.Bytes()
+	modified := original
+
+	// Apply each rule in order
+	for _, rule := range rules {
+		modified = applyMatchReplaceRule(modified, rule)
+	}
+
+	// If no changes, return original
+	if bytes.Equal(modified, original) {
+		return resp
+	}
+
+	// Parse modified headers back
+	resp.Headers = parseHeadersFromText(modified)
+	return resp
+}
+
+// applyResponseBodyRules applies body rules to response with compression handling.
+func (b *CustomProxyBackend) applyResponseBodyRules(resp *proxy.RawHTTP1Response, rules []customStoredRule) *proxy.RawHTTP1Response {
+	encoding := resp.GetHeader("Content-Encoding")
+
+	// Check if encoding is present but not supported (e.g., br, zstd, or multiple encodings)
+	// Skip body rules entirely to avoid corrupting compressed content
+	if encoding != "" {
+		_, supported := proxy.NormalizeEncoding(encoding)
+		if !supported {
+			log.Printf("proxy: unsupported Content-Encoding %q, skipping body rules", encoding)
+			return resp
+		}
+	}
+
+	// Decompress if needed
+	body := resp.Body
+	decompressed, wasCompressed := proxy.Decompress(body, encoding)
+	if wasCompressed && decompressed == nil {
+		// Decompression failed - skip body rules
+		log.Printf("proxy: Content-Encoding %s but decompression failed, skipping body rules", encoding)
+		return resp
+	}
+	if wasCompressed {
+		body = decompressed
+	}
+
+	original := body
+	modified := body
+
+	// Apply each rule in order
+	for _, rule := range rules {
+		modified = applyMatchReplaceRule(modified, rule)
+	}
+
+	// If no changes, return original
+	if bytes.Equal(modified, original) {
+		return resp
+	}
+
+	// Recompress if originally compressed
+	if wasCompressed {
+		compressed, err := proxy.Compress(modified, encoding)
+		if err != nil {
+			// Recompression failed - send uncompressed
+			log.Printf("proxy: recompression failed, sending uncompressed: %v", err)
+			resp.RemoveHeader("Content-Encoding")
+		} else {
+			modified = compressed
+		}
+	}
+
+	// Update body and Content-Length
+	resp.Body = modified
+	resp.SetHeader("Content-Length", strconv.Itoa(len(modified)))
+	return resp
+}
+
+// applyMatchReplaceRule applies a single match/replace rule to data.
+func applyMatchReplaceRule(input []byte, rule customStoredRule) []byte {
+	if !rule.IsRegex {
+		return bytes.ReplaceAll(input, []byte(rule.Match), []byte(rule.Replace))
+	}
+
+	re := rule.compiled
+	if re == nil {
+		var err error
+		re, err = regexp.Compile(rule.Match)
+		if err != nil {
+			return input
+		}
+	}
+	return re.ReplaceAll(input, []byte(rule.Replace))
+}
+
+// parseHeadersFromText parses "Name: Value\r\n" lines into Header slice.
+func parseHeadersFromText(text []byte) []proxy.Header {
+	var headers []proxy.Header
+	lines := bytes.Split(text, []byte("\r\n"))
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		idx := bytes.IndexByte(line, ':')
+		if idx < 0 {
+			// No colon - skip malformed line
+			continue
+		}
+		name := string(line[:idx])
+		value := string(bytes.TrimSpace(line[idx+1:]))
+		headers = append(headers, proxy.Header{Name: name, Value: value})
+	}
+	return headers
 }

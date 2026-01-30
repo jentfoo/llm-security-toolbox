@@ -97,6 +97,29 @@ func (r *RawHTTP1Request) RemoveHeader(name string) {
 	r.Headers = filtered
 }
 
+// SetHeader sets or replaces the first header with the given name (case-insensitive).
+// If not found, appends a new header.
+func (r *RawHTTP1Response) SetHeader(name, value string) {
+	for i, h := range r.Headers {
+		if equalFoldASCII(h.Name, name) {
+			r.Headers[i].Value = value
+			return
+		}
+	}
+	r.Headers = append(r.Headers, Header{Name: name, Value: value})
+}
+
+// RemoveHeader removes all headers with the given name (case-insensitive).
+func (r *RawHTTP1Response) RemoveHeader(name string) {
+	filtered := r.Headers[:0]
+	for _, h := range r.Headers {
+		if !equalFoldASCII(h.Name, name) {
+			filtered = append(filtered, h)
+		}
+	}
+	r.Headers = filtered
+}
+
 // equalFoldASCII compares two ASCII strings case-insensitively.
 func equalFoldASCII(a, b string) bool {
 	if len(a) != len(b) {
@@ -124,16 +147,35 @@ type HistoryEntry struct {
 	// Offset is the monotonic history index
 	Offset uint32 `json:"offset"`
 
-	// Protocol identifies the HTTP version: "http/1.1" or "h2"
+	// Protocol identifies the HTTP version: "http/1.1", "h2", or "websocket"
 	Protocol string `json:"protocol"`
 
 	// HTTP/1.1 request/response (nil for HTTP/2)
 	Request  *RawHTTP1Request  `json:"request,omitempty"`
 	Response *RawHTTP1Response `json:"response,omitempty"`
 
+	// WSFrames contains WebSocket frames for Protocol="websocket" entries.
+	// The handshake is stored in Request/Response; frames are appended here.
+	WSFrames []WSFrame `json:"ws_frames,omitempty"`
+
 	// Timing metadata
 	Timestamp time.Time     `json:"timestamp"`
 	Duration  time.Duration `json:"duration"`
+}
+
+// WSFrame represents a single WebSocket frame stored in history.
+type WSFrame struct {
+	// Direction is "to-server" or "to-client"
+	Direction string `json:"direction"`
+
+	// Opcode is the WebSocket opcode (1=text, 2=binary, 8=close, 9=ping, 10=pong)
+	Opcode byte `json:"opcode"`
+
+	// Payload is the frame payload (unmasked)
+	Payload []byte `json:"payload,omitempty"`
+
+	// Timestamp when the frame was captured
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // Target specifies where to send a request.
@@ -141,4 +183,26 @@ type Target struct {
 	Hostname  string
 	Port      int
 	UsesHTTPS bool
+}
+
+// RuleApplier applies match/replace rules to requests and responses.
+// Implemented by the service layer (CustomProxyBackend).
+// Rules are applied in the order they were added (list order).
+type RuleApplier interface {
+	// ApplyRequestRules applies request header and body rules.
+	// Returns the modified request (may be same instance if no changes).
+	ApplyRequestRules(req *RawHTTP1Request) *RawHTTP1Request
+
+	// ApplyResponseRules applies response header and body rules.
+	// Handles decompression/recompression for body rules.
+	ApplyResponseRules(resp *RawHTTP1Response) *RawHTTP1Response
+
+	// ApplyWSRules applies WebSocket rules to frame payload.
+	// direction is "ws:to-server" or "ws:to-client".
+	ApplyWSRules(payload []byte, direction string) []byte
+
+	// HasBodyRules returns true if there are body rules for request or response.
+	// Used by HTTP/2 handler to decide whether to buffer full bodies.
+	// isRequest=true checks for request_body rules, false checks for response_body rules.
+	HasBodyRules(isRequest bool) bool
 }

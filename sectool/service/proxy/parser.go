@@ -366,6 +366,10 @@ func getHeaderValue(headers []Header, name string) string {
 // Serialize reconstructs wire bytes from the request components.
 // Uses Content-Length framing (not chunked) for the body.
 // This method does not modify the receiver.
+//
+// TODO - Add chunked encoding support for wire-fidelity replay. Currently all
+// requests are normalized to Content-Length framing, which prevents replaying
+// chunked requests "as-captured" for protocol-level testing (e.g., HTTP smuggling).
 func (r *RawHTTP1Request) Serialize(buf *bytes.Buffer) []byte {
 	buf.Reset()
 	// Request line
@@ -426,6 +430,14 @@ func (r *RawHTTP1Request) Serialize(buf *bytes.Buffer) []byte {
 // Serialize reconstructs wire bytes from the response components.
 // This method does not modify the receiver.
 func (r *RawHTTP1Response) Serialize(buf *bytes.Buffer) []byte {
+	r.SerializeHeaders(buf)
+	buf.Write(r.Body)
+	return buf.Bytes()
+}
+
+// SerializeHeaders reconstructs the status line and headers only (no body).
+// Useful for SendRequestResult where headers and body are returned separately.
+func (r *RawHTTP1Response) SerializeHeaders(buf *bytes.Buffer) []byte {
 	buf.Reset()
 	// Status line
 	buf.WriteString(r.Version)
@@ -438,9 +450,7 @@ func (r *RawHTTP1Response) Serialize(buf *bytes.Buffer) []byte {
 	buf.WriteString("\r\n")
 
 	// Build headers list, filtering chunked TE and updating Content-Length
-	headers := make([]Header, 0, len(r.Headers)+1)
 	var hasContentLength bool
-
 	for _, h := range r.Headers {
 		// Skip Transfer-Encoding: chunked (we use Content-Length instead)
 		if equalFoldASCII(h.Name, "Transfer-Encoding") &&
@@ -449,32 +459,26 @@ func (r *RawHTTP1Response) Serialize(buf *bytes.Buffer) []byte {
 		}
 		// Update Content-Length to match actual body size
 		if equalFoldASCII(h.Name, "Content-Length") {
-			headers = append(headers, Header{Name: h.Name, Value: strconv.Itoa(len(r.Body))})
+			buf.WriteString(h.Name)
+			buf.WriteString(": ")
+			buf.WriteString(strconv.Itoa(len(r.Body)))
+			buf.WriteString("\r\n")
 			hasContentLength = true
 		} else {
-			headers = append(headers, h)
+			buf.WriteString(h.Name)
+			buf.WriteString(": ")
+			buf.WriteString(h.Value)
+			buf.WriteString("\r\n")
 		}
 	}
 
 	// Add Content-Length if body present and not already set
 	if len(r.Body) > 0 && !hasContentLength {
-		headers = append(headers, Header{
-			Name:  "Content-Length",
-			Value: strconv.Itoa(len(r.Body)),
-		})
-	}
-
-	// Write headers
-	for _, h := range headers {
-		buf.WriteString(h.Name)
-		buf.WriteString(": ")
-		buf.WriteString(h.Value)
+		buf.WriteString("Content-Length: ")
+		buf.WriteString(strconv.Itoa(len(r.Body)))
 		buf.WriteString("\r\n")
 	}
 
 	buf.WriteString("\r\n") // Header terminator
-
-	buf.Write(r.Body)
-
 	return buf.Bytes()
 }

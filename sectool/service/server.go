@@ -296,14 +296,21 @@ func (s *Server) connectBurpMCP(ctx context.Context) error {
 	return nil
 }
 
-// startBuiltinProxy starts the goproxy-based built-in proxy.
+// startBuiltinProxy starts the custom built-in proxy.
 func (s *Server) startBuiltinProxy() error {
 	configDir := filepath.Dir(s.configPath)
 
-	backend, err := NewGoProxyBackend(s.proxyPort, configDir)
+	backend, err := NewCustomProxyBackend(s.proxyPort, configDir, s.cfg.MaxBodyBytes)
 	if err != nil {
 		return fmt.Errorf("start built-in proxy: %w", err)
 	}
+
+	// Start proxy server in background
+	go func() {
+		if err := backend.Serve(); err != nil {
+			log.Printf("proxy: server error: %v", err)
+		}
+	}()
 
 	s.httpBackend = backend
 	s.usingBuiltinProxy = true
@@ -319,8 +326,15 @@ func (s *Server) printMCPConfig() {
 	_, _ = fmt.Fprintln(os.Stderr, "")
 	_, _ = fmt.Fprintln(os.Stderr, "================================================================================")
 	if s.usingBuiltinProxy {
-		if goproxyBackend, ok := s.httpBackend.(*GoProxyBackend); ok {
-			s.printBuiltinProxyConfig(goproxyBackend)
+		var proxyAddr string
+		switch backend := s.httpBackend.(type) {
+		case *CustomProxyBackend:
+			proxyAddr = backend.Addr()
+		case *GoProxyBackend:
+			proxyAddr = backend.Addr()
+		}
+		if proxyAddr != "" {
+			s.printBuiltinProxyConfigAddr(proxyAddr)
 			_, _ = fmt.Fprintln(os.Stderr, "")
 			_, _ = fmt.Fprintln(os.Stderr, "----------------------------------------------------------------")
 			_, _ = fmt.Fprintln(os.Stderr, "")
@@ -339,12 +353,12 @@ func (s *Server) printMCPConfig() {
 	_, _ = fmt.Fprintln(os.Stderr, "")
 }
 
-// printBuiltinProxyConfig outputs browser proxy configuration instructions.
-func (s *Server) printBuiltinProxyConfig(backend *GoProxyBackend) {
+// printBuiltinProxyConfigAddr outputs browser proxy configuration instructions.
+func (s *Server) printBuiltinProxyConfigAddr(proxyAddr string) {
 	configDir := filepath.Dir(s.configPath)
 	caCertPath := filepath.Join(configDir, caCertFile)
 
 	_, _ = fmt.Fprintln(os.Stderr, "Built-in Proxy Configuration:")
-	_, _ = fmt.Fprintf(os.Stderr, "Proxy Address: %s\n", backend.Addr())
+	_, _ = fmt.Fprintf(os.Stderr, "Proxy Address: %s\n", proxyAddr)
 	_, _ = fmt.Fprintf(os.Stderr, "CA Certificate: %s\n", caCertPath)
 }

@@ -104,6 +104,8 @@ func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.C
 }
 
 // seedProxyHistory populates the goproxy backend with test traffic.
+//
+//nolint:staticcheck // GoProxyBackend is deprecated but still needs testing
 func seedProxyHistory(t *testing.T, backend *service.GoProxyBackend) {
 	t.Helper()
 
