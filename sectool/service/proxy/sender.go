@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"golang.org/x/net/http2"
 )
 
@@ -303,10 +304,7 @@ func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications) e
 	// 3. Header modifications (sets, then removes)
 	// Sort keys for deterministic order (map iteration is random)
 	if len(mods.SetHeaders) > 0 {
-		headerNames := make([]string, 0, len(mods.SetHeaders))
-		for name := range mods.SetHeaders {
-			headerNames = append(headerNames, name)
-		}
+		headerNames := bulk.MapKeysSlice(mods.SetHeaders)
 		slices.Sort(headerNames)
 		for _, name := range headerNames {
 			req.SetHeader(name, mods.SetHeaders[name])

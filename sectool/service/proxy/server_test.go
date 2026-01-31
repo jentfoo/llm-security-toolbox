@@ -43,7 +43,7 @@ func TestServe(t *testing.T) {
 		assert.Equal(t, "success", resp.Header.Get("X-Test-Response"))
 		assert.Equal(t, "Hello from server", string(body))
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
 		assert.Equal(t, 1, proxy.History().Count())
 
 		entry, ok := proxy.History().Get(0)
@@ -97,7 +97,7 @@ func TestServe(t *testing.T) {
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 
-		time.Sleep(100 * time.Millisecond) // TODO - avoid the time.Sleep with push notification
+		time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
 		assert.GreaterOrEqual(t, proxy.History().Count(), 1)
 	})
 
@@ -206,7 +206,7 @@ func TestServeEdgeCases(t *testing.T) {
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
 		countBefore := proxy.History().Count()
 
 		_ = proxy.Shutdown(context.Background())
@@ -324,7 +324,7 @@ func TestConcurrentConnections(t *testing.T) {
 	assert.Empty(t, errors)
 
 	// Wait for history to be recorded
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond) // TODO - avoid the sleep with push / notify
 	assert.GreaterOrEqual(t, proxy.History().Count(), numRequests)
 }
 
@@ -381,7 +381,7 @@ func TestLargeRequestBody(t *testing.T) {
 	assert.Equal(t, len(largeBody), receivedBodySize)
 
 	// Verify history records the request (body may be truncated based on maxBodyBytes)
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
 	assert.GreaterOrEqual(t, proxy.History().Count(), 1)
 }
 
@@ -416,7 +416,7 @@ func TestProxyServerRuleApplier(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	time.Sleep(100 * time.Millisecond) // wait for async history write
+	time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
 	assert.True(t, applier.requestCalled.Load(), "ApplyRequestRules should be invoked")
 	assert.True(t, applier.responseCalled.Load(), "ApplyResponseRules should be invoked")
 }

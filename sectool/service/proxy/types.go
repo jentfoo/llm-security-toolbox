@@ -93,13 +93,7 @@ func (r *RawHTTP1Request) SetHeader(name, value string) {
 
 // RemoveHeader removes all headers with the given name (case-insensitive).
 func (r *RawHTTP1Request) RemoveHeader(name string) {
-	filtered := r.Headers[:0]
-	for _, h := range r.Headers {
-		if !strings.EqualFold(h.Name, name) {
-			filtered = append(filtered, h)
-		}
-	}
-	r.Headers = filtered
+	r.Headers = filterOutHeader(r.Headers, name)
 }
 
 // SetHeader sets or replaces the first header with the given name (case-insensitive).
@@ -116,13 +110,7 @@ func (r *RawHTTP1Response) SetHeader(name, value string) {
 
 // RemoveHeader removes all headers with the given name (case-insensitive).
 func (r *RawHTTP1Response) RemoveHeader(name string) {
-	filtered := r.Headers[:0]
-	for _, h := range r.Headers {
-		if !strings.EqualFold(h.Name, name) {
-			filtered = append(filtered, h)
-		}
-	}
-	r.Headers = filtered
+	r.Headers = filterOutHeader(r.Headers, name)
 }
 
 // HistoryEntry represents a stored request/response pair.

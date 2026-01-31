@@ -615,9 +615,9 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 		if hasBodyRules {
 			var bufferedBody []byte
 			if fromClient && stream.reqBodyFull.Len() > 0 && !stream.reqBodyOverflow {
-				bufferedBody = append([]byte(nil), stream.reqBodyFull.Bytes()...)
+				bufferedBody = stream.reqBodyFull.Bytes()
 			} else if !fromClient && stream.respBodyFull.Len() > 0 && !stream.respBodyOverflow {
-				bufferedBody = append([]byte(nil), stream.respBodyFull.Bytes()...)
+				bufferedBody = stream.respBodyFull.Bytes()
 			}
 
 			if len(bufferedBody) > 0 {
@@ -743,12 +743,12 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 			// Flush what we have buffered and forward this frame.
 			if fromClient {
 				if stream.reqBodyFull.Len() > 0 {
-					flushBuffered = append([]byte(nil), stream.reqBodyFull.Bytes()...)
+					flushBuffered = stream.reqBodyFull.Bytes()
 					stream.reqBodyFull.Reset()
 				}
 			} else {
 				if stream.respBodyFull.Len() > 0 {
-					flushBuffered = append([]byte(nil), stream.respBodyFull.Bytes()...)
+					flushBuffered = stream.respBodyFull.Bytes()
 					stream.respBodyFull.Reset()
 				}
 			}
@@ -757,9 +757,9 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 		} else if endStream {
 			// Complete body received - apply rules and forward
 			if fromClient {
-				bodyForRules = append([]byte(nil), stream.reqBodyFull.Bytes()...)
+				bodyForRules = stream.reqBodyFull.Bytes()
 			} else {
-				bodyForRules = append([]byte(nil), stream.respBodyFull.Bytes()...)
+				bodyForRules = stream.respBodyFull.Bytes()
 			}
 			applyRules = true
 		}
@@ -1310,14 +1310,11 @@ func (p *h2Proxy) sendGoAway(dst *h2Conn, lastStreamID uint32, code http2.ErrCod
 }
 
 // filterOutHeader removes all headers with the given name (case-insensitive).
+// Passed in headers are mutated in place, slice must be discarded after use.
 func filterOutHeader(headers []Header, name string) []Header {
-	result := headers[:0]
-	for _, h := range headers {
-		if !strings.EqualFold(h.Name, name) {
-			result = append(result, h)
-		}
-	}
-	return result
+	return bulk.SliceFilterInPlace(func(h Header) bool {
+		return !strings.EqualFold(h.Name, name)
+	}, headers)
 }
 
 // storeStreamInHistory stores a completed stream in history.

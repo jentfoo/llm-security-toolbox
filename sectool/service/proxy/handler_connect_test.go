@@ -238,7 +238,7 @@ func TestHandle(t *testing.T) {
 		assert.Equal(t, "success", resp.Header.Get("X-Test-Response"))
 		assert.Equal(t, "Hello from HTTPS server", string(body))
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond) // TODO - replace with notify
 		assert.GreaterOrEqual(t, proxy.History().Count(), 1)
 
 		entry, ok := proxy.History().Get(0)

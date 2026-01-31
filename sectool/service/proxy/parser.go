@@ -371,27 +371,21 @@ func (r *RawHTTP1Request) Serialize(buf *bytes.Buffer) []byte {
 	buf.WriteString(r.Version)
 	buf.WriteString("\r\n")
 
-	// Build headers list, filtering chunked TE and updating Content-Length
+	// Build headers list, filtering chunked TE and Content-Length
 	headers := make([]Header, 0, len(r.Headers)+1)
-	var hasContentLength bool
-
 	for _, h := range r.Headers {
-		// Skip Transfer-Encoding: chunked (we use Content-Length instead)
 		if strings.EqualFold(h.Name, "Transfer-Encoding") &&
 			strings.Contains(strings.ToLower(h.Value), "chunked") {
-			continue
+			continue // Skip Transfer-Encoding: chunked (we use Content-Length instead)
+		} else if strings.EqualFold(h.Name, "Content-Length") {
+			continue // skip content length, added below with an updated value
 		}
-		// Update Content-Length to match actual body size
-		if strings.EqualFold(h.Name, "Content-Length") {
-			headers = append(headers, Header{Name: h.Name, Value: strconv.Itoa(len(r.Body))})
-			hasContentLength = true
-		} else {
-			headers = append(headers, h)
-		}
+
+		headers = append(headers, h)
 	}
 
 	// Add Content-Length if body present and not already set
-	if len(r.Body) > 0 && !hasContentLength {
+	if len(r.Body) > 0 {
 		headers = append(headers, Header{
 			Name:  "Content-Length",
 			Value: strconv.Itoa(len(r.Body)),
@@ -436,31 +430,21 @@ func (r *RawHTTP1Response) SerializeHeaders(buf *bytes.Buffer) []byte {
 	}
 	buf.WriteString("\r\n")
 
-	// Build headers list, filtering chunked TE and updating Content-Length
-	var hasContentLength bool
+	// Build headers list, filtering chunked TE and Content-Length
 	for _, h := range r.Headers {
-		// Skip Transfer-Encoding: chunked (we use Content-Length instead)
 		if strings.EqualFold(h.Name, "Transfer-Encoding") &&
 			strings.Contains(strings.ToLower(h.Value), "chunked") {
-			continue
+			continue // Skip Transfer-Encoding: chunked (we use Content-Length instead)
+		} else if strings.EqualFold(h.Name, "Content-Length") {
+			continue // skip Content-Length, added below
 		}
-		// Update Content-Length to match actual body size
-		if strings.EqualFold(h.Name, "Content-Length") {
-			buf.WriteString(h.Name)
-			buf.WriteString(": ")
-			buf.WriteString(strconv.Itoa(len(r.Body)))
-			buf.WriteString("\r\n")
-			hasContentLength = true
-		} else {
-			buf.WriteString(h.Name)
-			buf.WriteString(": ")
-			buf.WriteString(h.Value)
-			buf.WriteString("\r\n")
-		}
-	}
 
-	// Add Content-Length if body present and not already set
-	if len(r.Body) > 0 && !hasContentLength {
+		buf.WriteString(h.Name)
+		buf.WriteString(": ")
+		buf.WriteString(h.Value)
+		buf.WriteString("\r\n")
+	}
+	if len(r.Body) > 0 {
 		buf.WriteString("Content-Length: ")
 		buf.WriteString(strconv.Itoa(len(r.Body)))
 		buf.WriteString("\r\n")
