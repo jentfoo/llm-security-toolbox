@@ -594,3 +594,11 @@ func (m *mockRuleApplier) ApplyWSRules(payload []byte, direction string) []byte 
 func (m *mockRuleApplier) HasBodyRules(isRequest bool) bool {
 	return false
 }
+
+func (m *mockRuleApplier) ApplyRequestBodyOnlyRules(body []byte) []byte {
+	return body
+}
+
+func (m *mockRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers []Header) []byte {
+	return body
+}

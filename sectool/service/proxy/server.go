@@ -29,6 +29,7 @@ type ProxyServer struct {
 
 	// Handlers for different protocols
 	http1Handler   *HTTP1Handler
+	http2Handler   *HTTP2Handler
 	connectHandler *ConnectHandler
 	wsHandler      *WebSocketHandler
 
@@ -68,7 +69,9 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int) (*ProxyServer,
 		wsHandler:    wsHandler,
 	}
 
-	connectHandler := NewConnectHandler(certManager, http1Handler, history, maxBodyBytes)
+	http2Handler := NewHTTP2Handler(history, maxBodyBytes)
+
+	connectHandler := NewConnectHandler(certManager, http1Handler, http2Handler, history, maxBodyBytes)
 
 	s := &ProxyServer{
 		listener:       listener,
@@ -77,6 +80,7 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int) (*ProxyServer,
 		certManager:    certManager,
 		history:        history,
 		http1Handler:   http1Handler,
+		http2Handler:   http2Handler,
 		connectHandler: connectHandler,
 		wsHandler:      wsHandler,
 		ctx:            ctx,
@@ -105,6 +109,7 @@ func (s *ProxyServer) CertManager() *CertManager {
 // Call after construction but before Serve().
 func (s *ProxyServer) SetRuleApplier(applier RuleApplier) {
 	s.http1Handler.ruleApplier = applier
+	s.http2Handler.SetRuleApplier(applier)
 	s.connectHandler.SetRuleApplier(applier)
 	s.wsHandler.SetRuleApplier(applier)
 }

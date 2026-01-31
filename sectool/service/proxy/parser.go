@@ -356,7 +356,7 @@ func readTrailers(br *bufio.Reader) ([]byte, error) {
 // getHeaderValue returns the first value for a header name (case-insensitive).
 func getHeaderValue(headers []Header, name string) string {
 	for _, h := range headers {
-		if equalFoldASCII(h.Name, name) {
+		if strings.EqualFold(h.Name, name) {
 			return h.Value
 		}
 	}
@@ -390,12 +390,12 @@ func (r *RawHTTP1Request) Serialize(buf *bytes.Buffer) []byte {
 
 	for _, h := range r.Headers {
 		// Skip Transfer-Encoding: chunked (we use Content-Length instead)
-		if equalFoldASCII(h.Name, "Transfer-Encoding") &&
+		if strings.EqualFold(h.Name, "Transfer-Encoding") &&
 			strings.Contains(strings.ToLower(h.Value), "chunked") {
 			continue
 		}
 		// Update Content-Length to match actual body size
-		if equalFoldASCII(h.Name, "Content-Length") {
+		if strings.EqualFold(h.Name, "Content-Length") {
 			headers = append(headers, Header{Name: h.Name, Value: strconv.Itoa(len(r.Body))})
 			hasContentLength = true
 		} else {
@@ -453,12 +453,12 @@ func (r *RawHTTP1Response) SerializeHeaders(buf *bytes.Buffer) []byte {
 	var hasContentLength bool
 	for _, h := range r.Headers {
 		// Skip Transfer-Encoding: chunked (we use Content-Length instead)
-		if equalFoldASCII(h.Name, "Transfer-Encoding") &&
+		if strings.EqualFold(h.Name, "Transfer-Encoding") &&
 			strings.Contains(strings.ToLower(h.Value), "chunked") {
 			continue
 		}
 		// Update Content-Length to match actual body size
-		if equalFoldASCII(h.Name, "Content-Length") {
+		if strings.EqualFold(h.Name, "Content-Length") {
 			buf.WriteString(h.Name)
 			buf.WriteString(": ")
 			buf.WriteString(strconv.Itoa(len(r.Body)))

@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"strconv"
 	"sync"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
@@ -124,4 +127,191 @@ func (h *HistoryStore) Update(entry *HistoryEntry) {
 // Close closes the underlying storage.
 func (h *HistoryStore) Close() {
 	h.storage.Close()
+}
+
+// FormatRequest returns a human-readable representation of the request.
+// For HTTP/1.1, uses Serialize(). For HTTP/2, builds a similar text format.
+func (e *HistoryEntry) FormatRequest() []byte {
+	switch e.Protocol {
+	case "h2":
+		if e.H2Request == nil {
+			return nil
+		}
+		return formatH2Request(e.H2Request)
+
+	default:
+		// HTTP/1.1 or websocket
+		if e.Request == nil {
+			return nil
+		}
+		var buf bytes.Buffer
+		return e.Request.Serialize(&buf)
+	}
+}
+
+// FormatResponse returns a human-readable representation of the response.
+// For HTTP/1.1, uses Serialize(). For HTTP/2, builds a similar text format.
+func (e *HistoryEntry) FormatResponse() []byte {
+	switch e.Protocol {
+	case "h2":
+		if e.H2Response == nil {
+			return nil
+		}
+		return formatH2Response(e.H2Response)
+
+	default:
+		// HTTP/1.1 or websocket
+		if e.Response == nil {
+			return nil
+		}
+		var buf bytes.Buffer
+		return e.Response.Serialize(&buf)
+	}
+}
+
+// GetMethod returns the request method for any protocol.
+func (e *HistoryEntry) GetMethod() string {
+	switch e.Protocol {
+	case "h2":
+		if e.H2Request != nil {
+			return e.H2Request.Method
+		}
+	default:
+		if e.Request != nil {
+			return e.Request.Method
+		}
+	}
+	return ""
+}
+
+// GetPath returns the request path for any protocol.
+func (e *HistoryEntry) GetPath() string {
+	switch e.Protocol {
+	case "h2":
+		if e.H2Request != nil {
+			return e.H2Request.Path
+		}
+	default:
+		if e.Request != nil {
+			return e.Request.Path
+		}
+	}
+	return ""
+}
+
+// GetHost returns the host for any protocol.
+func (e *HistoryEntry) GetHost() string {
+	switch e.Protocol {
+	case "h2":
+		if e.H2Request != nil {
+			return e.H2Request.Authority
+		}
+	default:
+		if e.Request != nil {
+			return e.Request.GetHeader("Host")
+		}
+	}
+	return ""
+}
+
+// GetStatusCode returns the response status code for any protocol.
+func (e *HistoryEntry) GetStatusCode() int {
+	switch e.Protocol {
+	case "h2":
+		if e.H2Response != nil {
+			return e.H2Response.StatusCode
+		}
+	default:
+		if e.Response != nil {
+			return e.Response.StatusCode
+		}
+	}
+	return 0
+}
+
+// GetRequestHeader returns a request header value (case-insensitive).
+func (e *HistoryEntry) GetRequestHeader(name string) string {
+	switch e.Protocol {
+	case "h2":
+		if e.H2Request != nil {
+			return e.H2Request.GetHeader(name)
+		}
+	default:
+		if e.Request != nil {
+			return e.Request.GetHeader(name)
+		}
+	}
+	return ""
+}
+
+// GetResponseHeader returns a response header value (case-insensitive).
+func (e *HistoryEntry) GetResponseHeader(name string) string {
+	switch e.Protocol {
+	case "h2":
+		if e.H2Response != nil {
+			return e.H2Response.GetHeader(name)
+		}
+	default:
+		if e.Response != nil {
+			return e.Response.GetHeader(name)
+		}
+	}
+	return ""
+}
+
+// formatH2Request formats an H2 request for display.
+func formatH2Request(req *H2RequestData) []byte {
+	var buf bytes.Buffer
+
+	// Request line
+	buf.WriteString(req.Method)
+	buf.WriteByte(' ')
+	buf.WriteString(req.Path)
+	buf.WriteString(" HTTP/2\r\n")
+
+	// Host from authority
+	buf.WriteString("host: ")
+	buf.WriteString(req.Authority)
+	buf.WriteString("\r\n")
+
+	// Headers
+	for _, h := range req.Headers {
+		buf.WriteString(h.Name)
+		buf.WriteString(": ")
+		buf.WriteString(h.Value)
+		buf.WriteString("\r\n")
+	}
+
+	buf.WriteString("\r\n")
+	buf.Write(req.Body)
+
+	return buf.Bytes()
+}
+
+// formatH2Response formats an H2 response for display.
+func formatH2Response(resp *H2ResponseData) []byte {
+	var buf bytes.Buffer
+
+	// Status line
+	buf.WriteString("HTTP/2 ")
+	buf.WriteString(strconv.Itoa(resp.StatusCode))
+	text := http.StatusText(resp.StatusCode)
+	if text != "" {
+		buf.WriteByte(' ')
+		buf.WriteString(text)
+	}
+	buf.WriteString("\r\n")
+
+	// Headers
+	for _, h := range resp.Headers {
+		buf.WriteString(h.Name)
+		buf.WriteString(": ")
+		buf.WriteString(h.Value)
+		buf.WriteString("\r\n")
+	}
+
+	buf.WriteString("\r\n")
+	buf.Write(resp.Body)
+
+	return buf.Bytes()
 }

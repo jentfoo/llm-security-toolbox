@@ -18,6 +18,7 @@ import (
 type ConnectHandler struct {
 	certManager  *CertManager
 	http1Handler *HTTP1Handler
+	http2Handler *HTTP2Handler
 	history      *HistoryStore
 	maxBodyBytes int
 
@@ -29,10 +30,11 @@ type ConnectHandler struct {
 }
 
 // NewConnectHandler creates a new CONNECT handler.
-func NewConnectHandler(certManager *CertManager, http1Handler *HTTP1Handler, history *HistoryStore, maxBodyBytes int) *ConnectHandler {
+func NewConnectHandler(certManager *CertManager, http1Handler *HTTP1Handler, http2Handler *HTTP2Handler, history *HistoryStore, maxBodyBytes int) *ConnectHandler {
 	return &ConnectHandler{
 		certManager:  certManager,
 		http1Handler: http1Handler,
+		http2Handler: http2Handler,
 		history:      history,
 		maxBodyBytes: maxBodyBytes,
 		serverCaps:   make(map[string]string),
@@ -42,6 +44,9 @@ func NewConnectHandler(certManager *CertManager, http1Handler *HTTP1Handler, his
 // SetRuleApplier propagates the rule applier to child handlers.
 func (h *ConnectHandler) SetRuleApplier(applier RuleApplier) {
 	h.http1Handler.ruleApplier = applier
+	if h.http2Handler != nil {
+		h.http2Handler.SetRuleApplier(applier)
+	}
 }
 
 // Handle processes a CONNECT request for HTTPS tunneling with MITM.
@@ -265,8 +270,14 @@ func (h *ConnectHandler) routeByProtocol(ctx context.Context, clientTLS, upstrea
 
 	switch protocol {
 	case "h2":
-		// TODO - Implement HTTP/2 handler in Phase 5
-		panic("HTTP/2 MITM not yet implemented - coming in Phase 5")
+		// HTTP/2 MITM
+		clientTLSConn, ok1 := clientTLS.(*tls.Conn)
+		upstreamTLSConn, ok2 := upstreamConn.(*tls.Conn)
+		if ok1 && ok2 && h.http2Handler != nil {
+			h.http2Handler.Handle(ctx, clientTLSConn, upstreamTLSConn)
+		} else {
+			log.Printf("proxy: HTTP/2 handler not available or invalid connection types")
+		}
 
 	default:
 		// HTTP/1.1 or no ALPN

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,15 +94,10 @@ func (b *CustomProxyBackend) GetProxyHistory(ctx context.Context, count int, off
 	entries := b.server.History().List(count, offset)
 
 	result := make([]ProxyEntry, 0, len(entries))
-	var buf bytes.Buffer
 	for _, entry := range entries {
-		var reqStr, respStr string
-		if entry.Request != nil {
-			reqStr = string(entry.Request.Serialize(&buf))
-		}
-		if entry.Response != nil {
-			respStr = string(entry.Response.Serialize(&buf))
-		}
+		// Use FormatRequest/FormatResponse which handles both HTTP/1.1 and HTTP/2
+		reqStr := string(entry.FormatRequest())
+		respStr := string(entry.FormatResponse())
 		result = append(result, ProxyEntry{
 			Request:  reqStr,
 			Response: respStr,
@@ -454,6 +450,112 @@ func (b *CustomProxyBackend) HasBodyRules(isRequest bool) bool {
 		}
 	}
 	return false
+}
+
+// ApplyRequestBodyOnlyRules applies only body rules to a request body.
+// Used by HTTP/2 where headers are sent separately before body.
+func (b *CustomProxyBackend) ApplyRequestBodyOnlyRules(body []byte) []byte {
+	b.rulesMu.RLock()
+	defer b.rulesMu.RUnlock()
+
+	var bodyRules []customStoredRule
+	for _, rule := range b.httpRules {
+		if rule.Type == RuleTypeRequestBody {
+			bodyRules = append(bodyRules, rule)
+		}
+	}
+
+	if len(bodyRules) == 0 || len(body) == 0 {
+		return body
+	}
+
+	modified := body
+	for _, rule := range bodyRules {
+		modified = applyMatchReplaceRule(modified, rule)
+	}
+	return modified
+}
+
+// ApplyResponseBodyOnlyRules applies only body rules to a response body.
+// Used by HTTP/2 where headers are sent separately before body.
+// Requires headers for Content-Encoding detection (compression-aware).
+// IMPORTANT: In HTTP/2, headers are already sent before body arrives.
+// If recompression fails, we must return the original body to avoid
+// sending uncompressed data with Content-Encoding header still set.
+func (b *CustomProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers []proxy.Header) []byte {
+	b.rulesMu.RLock()
+	defer b.rulesMu.RUnlock()
+
+	var bodyRules []customStoredRule
+	for _, rule := range b.httpRules {
+		if rule.Type == RuleTypeResponseBody {
+			bodyRules = append(bodyRules, rule)
+		}
+	}
+
+	if len(bodyRules) == 0 || len(body) == 0 {
+		return body
+	}
+
+	// Get Content-Encoding from headers for compression handling
+	var encoding string
+	for _, h := range headers {
+		if strings.EqualFold(h.Name, "content-encoding") {
+			encoding = h.Value
+			break
+		}
+	}
+
+	// Check if encoding is present but not supported
+	if encoding != "" {
+		_, supported := proxy.NormalizeEncoding(encoding)
+		if !supported {
+			log.Printf("proxy: unsupported Content-Encoding %q, skipping body rules", encoding)
+			return body
+		}
+	}
+
+	// Keep reference to original body for fallback cases
+	originalBody := body
+
+	// Decompress if needed
+	decompressed, wasCompressed := proxy.Decompress(body, encoding)
+	if wasCompressed && decompressed == nil {
+		log.Printf("proxy: Content-Encoding %s but decompression failed, skipping body rules", encoding)
+		return body
+	}
+
+	workingBody := body
+	if wasCompressed {
+		workingBody = decompressed
+	}
+
+	modified := workingBody
+
+	// Apply each rule in order
+	for _, rule := range bodyRules {
+		modified = applyMatchReplaceRule(modified, rule)
+	}
+
+	// If no changes, return original body (still compressed if it was)
+	if bytes.Equal(modified, workingBody) {
+		return originalBody
+	}
+
+	// Recompress if originally compressed
+	if wasCompressed {
+		compressed, err := proxy.Compress(modified, encoding)
+		if err != nil {
+			// Recompression failed - return ORIGINAL body (skip rule application).
+			// In HTTP/2, headers are already sent with Content-Encoding, so we cannot
+			// return uncompressed data without corrupting the response.
+			log.Printf("proxy: recompression failed, returning original body: %v", err)
+			return originalBody
+		}
+		return compressed
+	}
+
+	return modified
 }
 
 // applyRequestHeaderRules applies header rules to request.

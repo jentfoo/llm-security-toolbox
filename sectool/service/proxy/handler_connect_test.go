@@ -220,8 +220,9 @@ func TestServerCapabilityCaching(t *testing.T) {
 
 	history := NewHistoryStore(store.NewMemStorage())
 	http1Handler := &HTTP1Handler{history: history, maxBodyBytes: 1024 * 1024}
+	http2Handler := NewHTTP2Handler(history, 1024*1024)
 
-	handler := NewConnectHandler(certManager, http1Handler, history, 1024*1024)
+	handler := NewConnectHandler(certManager, http1Handler, http2Handler, history, 1024*1024)
 
 	// Initially empty cache
 	handler.capsMu.RLock()

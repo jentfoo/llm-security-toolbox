@@ -1,6 +1,9 @@
 package proxy
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Header represents a single HTTP header preserving original formatting.
 type Header struct {
@@ -56,7 +59,7 @@ type RawHTTP1Response struct {
 // Returns empty string if not found.
 func (r *RawHTTP1Request) GetHeader(name string) string {
 	for _, h := range r.Headers {
-		if equalFoldASCII(h.Name, name) {
+		if strings.EqualFold(h.Name, name) {
 			return h.Value
 		}
 	}
@@ -67,7 +70,7 @@ func (r *RawHTTP1Request) GetHeader(name string) string {
 // Returns empty string if not found.
 func (r *RawHTTP1Response) GetHeader(name string) string {
 	for _, h := range r.Headers {
-		if equalFoldASCII(h.Name, name) {
+		if strings.EqualFold(h.Name, name) {
 			return h.Value
 		}
 	}
@@ -78,7 +81,7 @@ func (r *RawHTTP1Response) GetHeader(name string) string {
 // If not found, appends a new header.
 func (r *RawHTTP1Request) SetHeader(name, value string) {
 	for i, h := range r.Headers {
-		if equalFoldASCII(h.Name, name) {
+		if strings.EqualFold(h.Name, name) {
 			r.Headers[i].Value = value
 			return
 		}
@@ -90,7 +93,7 @@ func (r *RawHTTP1Request) SetHeader(name, value string) {
 func (r *RawHTTP1Request) RemoveHeader(name string) {
 	filtered := r.Headers[:0]
 	for _, h := range r.Headers {
-		if !equalFoldASCII(h.Name, name) {
+		if !strings.EqualFold(h.Name, name) {
 			filtered = append(filtered, h)
 		}
 	}
@@ -101,7 +104,7 @@ func (r *RawHTTP1Request) RemoveHeader(name string) {
 // If not found, appends a new header.
 func (r *RawHTTP1Response) SetHeader(name, value string) {
 	for i, h := range r.Headers {
-		if equalFoldASCII(h.Name, name) {
+		if strings.EqualFold(h.Name, name) {
 			r.Headers[i].Value = value
 			return
 		}
@@ -113,31 +116,11 @@ func (r *RawHTTP1Response) SetHeader(name, value string) {
 func (r *RawHTTP1Response) RemoveHeader(name string) {
 	filtered := r.Headers[:0]
 	for _, h := range r.Headers {
-		if !equalFoldASCII(h.Name, name) {
+		if !strings.EqualFold(h.Name, name) {
 			filtered = append(filtered, h)
 		}
 	}
 	r.Headers = filtered
-}
-
-// equalFoldASCII compares two ASCII strings case-insensitively.
-func equalFoldASCII(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
 }
 
 // HistoryEntry represents a stored request/response pair.
@@ -153,6 +136,11 @@ type HistoryEntry struct {
 	// HTTP/1.1 request/response (nil for HTTP/2)
 	Request  *RawHTTP1Request  `json:"request,omitempty"`
 	Response *RawHTTP1Response `json:"response,omitempty"`
+
+	// HTTP/2 request/response (nil for HTTP/1.1)
+	H2Request  *H2RequestData  `json:"h2_request,omitempty"`
+	H2Response *H2ResponseData `json:"h2_response,omitempty"`
+	H2StreamID uint32          `json:"h2_stream_id,omitempty"` // for debugging/correlation
 
 	// WSFrames contains WebSocket frames for Protocol="websocket" entries.
 	// The handshake is stored in Request/Response; frames are appended here.
@@ -178,6 +166,75 @@ type WSFrame struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// H2RequestData represents an HTTP/2 request for history storage.
+type H2RequestData struct {
+	// Pseudo-headers
+	Method    string `json:"method"`    // from :method
+	Scheme    string `json:"scheme"`    // from :scheme
+	Authority string `json:"authority"` // from :authority
+	Path      string `json:"path"`      // from :path
+
+	// Regular headers (not pseudo-headers)
+	Headers []Header `json:"headers"`
+
+	// Body is the request body
+	Body []byte `json:"body,omitempty"`
+}
+
+// H2ResponseData represents an HTTP/2 response for history storage.
+type H2ResponseData struct {
+	// StatusCode from :status pseudo-header
+	StatusCode int `json:"status_code"`
+
+	// Regular headers (not pseudo-headers)
+	Headers []Header `json:"headers"`
+
+	// Body is the response body
+	Body []byte `json:"body,omitempty"`
+}
+
+// GetHeader returns the first header value with the given name (case-insensitive).
+func (r *H2RequestData) GetHeader(name string) string {
+	for _, h := range r.Headers {
+		if strings.EqualFold(h.Name, name) {
+			return h.Value
+		}
+	}
+	return ""
+}
+
+// SetHeader sets or replaces the first header with the given name (case-insensitive).
+func (r *H2RequestData) SetHeader(name, value string) {
+	for i, h := range r.Headers {
+		if strings.EqualFold(h.Name, name) {
+			r.Headers[i].Value = value
+			return
+		}
+	}
+	r.Headers = append(r.Headers, Header{Name: name, Value: value})
+}
+
+// GetHeader returns the first header value with the given name (case-insensitive).
+func (r *H2ResponseData) GetHeader(name string) string {
+	for _, h := range r.Headers {
+		if strings.EqualFold(h.Name, name) {
+			return h.Value
+		}
+	}
+	return ""
+}
+
+// SetHeader sets or replaces the first header with the given name (case-insensitive).
+func (r *H2ResponseData) SetHeader(name, value string) {
+	for i, h := range r.Headers {
+		if strings.EqualFold(h.Name, name) {
+			r.Headers[i].Value = value
+			return
+		}
+	}
+	r.Headers = append(r.Headers, Header{Name: name, Value: value})
+}
+
 // Target specifies where to send a request.
 type Target struct {
 	Hostname  string
@@ -196,6 +253,17 @@ type RuleApplier interface {
 	// ApplyResponseRules applies response header and body rules.
 	// Handles decompression/recompression for body rules.
 	ApplyResponseRules(resp *RawHTTP1Response) *RawHTTP1Response
+
+	// ApplyRequestBodyOnlyRules applies only body rules to a request body.
+	// Used by HTTP/2 where headers are sent separately before body.
+	// Does not apply header rules.
+	ApplyRequestBodyOnlyRules(body []byte) []byte
+
+	// ApplyResponseBodyOnlyRules applies only body rules to a response body.
+	// Used by HTTP/2 where headers are sent separately before body.
+	// Requires headers for Content-Encoding detection (compression-aware).
+	// Does not apply header rules.
+	ApplyResponseBodyOnlyRules(body []byte, headers []Header) []byte
 
 	// ApplyWSRules applies WebSocket rules to frame payload.
 	// direction is "ws:to-server" or "ws:to-client".
