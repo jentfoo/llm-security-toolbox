@@ -66,6 +66,31 @@ func TestStreamTracker(t *testing.T) {
 		_, exists = tracker.get(3)
 		assert.True(t, exists)
 	})
+
+	t.Run("remove_nonexistent", func(t *testing.T) {
+		tracker := newStreamTracker()
+		tracker.remove(999) // should not panic
+		assert.Empty(t, tracker.all())
+	})
+
+	t.Run("concurrent_access", func(t *testing.T) {
+		tracker := newStreamTracker()
+		done := make(chan bool)
+
+		// Concurrent getOrCreate
+		for i := 0; i < 10; i++ {
+			go func(id uint32) {
+				_ = tracker.getOrCreate(id)
+				done <- true
+			}(uint32(i))
+		}
+
+		for i := 0; i < 10; i++ {
+			<-done
+		}
+
+		assert.Len(t, tracker.all(), 10)
+	})
 }
 
 func TestH2StreamInitialState(t *testing.T) {
@@ -149,6 +174,21 @@ func TestHistoryEntryFormatResponse(t *testing.T) {
 		entry := &HistoryEntry{Protocol: "http/1.1"}
 		assert.Nil(t, entry.FormatResponse())
 	})
+
+	t.Run("h2_unknown_status_code", func(t *testing.T) {
+		entry := &HistoryEntry{
+			Protocol: "h2",
+			H2Response: &H2ResponseData{
+				StatusCode: 599, // non-standard status code
+				Headers:    []Header{},
+				Body:       []byte("error"),
+			},
+		}
+
+		formatted := entry.FormatResponse()
+		assert.Contains(t, string(formatted), "HTTP/2 599")
+		assert.Contains(t, string(formatted), "error")
+	})
 }
 
 func TestHistoryEntryGetMethods(t *testing.T) {
@@ -206,6 +246,34 @@ func TestHistoryEntryGetMethods(t *testing.T) {
 		assert.Equal(t, 200, entry.GetStatusCode())
 		assert.Equal(t, "text/html", entry.GetRequestHeader("accept"))
 		assert.Equal(t, "text/html", entry.GetResponseHeader("content-type"))
+	})
+
+	t.Run("h2_nil_request_response", func(t *testing.T) {
+		entry := &HistoryEntry{Protocol: "h2"}
+
+		assert.Empty(t, entry.GetMethod())
+		assert.Empty(t, entry.GetPath())
+		assert.Empty(t, entry.GetHost())
+		assert.Equal(t, 0, entry.GetStatusCode())
+		assert.Empty(t, entry.GetRequestHeader("any"))
+		assert.Empty(t, entry.GetResponseHeader("any"))
+	})
+
+	t.Run("header_case_insensitive", func(t *testing.T) {
+		entry := &HistoryEntry{
+			Protocol: "h2",
+			H2Request: &H2RequestData{
+				Headers: []Header{{Name: "Content-Type", Value: "application/json"}},
+			},
+			H2Response: &H2ResponseData{
+				Headers: []Header{{Name: "X-Custom-Header", Value: "value"}},
+			},
+		}
+
+		assert.Equal(t, "application/json", entry.GetRequestHeader("content-type"))
+		assert.Equal(t, "application/json", entry.GetRequestHeader("CONTENT-TYPE"))
+		assert.Equal(t, "value", entry.GetResponseHeader("x-custom-header"))
+		assert.Equal(t, "value", entry.GetResponseHeader("X-CUSTOM-HEADER"))
 	})
 }
 
@@ -750,4 +818,202 @@ func newHTTP2TestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server
 	server.StartTLS()
 
 	return server
+}
+
+func TestStreamStateTransitions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("initial_state_open", func(t *testing.T) {
+		tracker := newStreamTracker()
+		stream := tracker.getOrCreate(1)
+
+		assert.Equal(t, streamOpen, stream.state)
+	})
+
+	t.Run("state_to_half_closed_local", func(t *testing.T) {
+		tracker := newStreamTracker()
+		stream := tracker.getOrCreate(1)
+
+		stream.mu.Lock()
+		stream.state = streamHalfClosedLocal
+		stream.mu.Unlock()
+
+		assert.Equal(t, streamHalfClosedLocal, stream.state)
+	})
+
+	t.Run("state_to_half_closed_remote", func(t *testing.T) {
+		tracker := newStreamTracker()
+		stream := tracker.getOrCreate(1)
+
+		stream.mu.Lock()
+		stream.state = streamHalfClosedRemote
+		stream.mu.Unlock()
+
+		assert.Equal(t, streamHalfClosedRemote, stream.state)
+	})
+
+	t.Run("state_to_closed", func(t *testing.T) {
+		tracker := newStreamTracker()
+		stream := tracker.getOrCreate(1)
+
+		stream.mu.Lock()
+		stream.state = streamClosed
+		stream.mu.Unlock()
+
+		assert.Equal(t, streamClosed, stream.state)
+	})
+}
+
+func TestStreamBodyBuffering(t *testing.T) {
+	t.Parallel()
+
+	t.Run("request_body_accumulation", func(t *testing.T) {
+		stream := &h2Stream{id: 1}
+
+		stream.reqBody.WriteString("part1")
+		stream.reqBody.WriteString("part2")
+		stream.reqBody.WriteString("part3")
+
+		assert.Equal(t, "part1part2part3", stream.reqBody.String())
+	})
+
+	t.Run("response_body_accumulation", func(t *testing.T) {
+		stream := &h2Stream{id: 1}
+
+		stream.respBody.WriteString("chunk1")
+		stream.respBody.WriteString("chunk2")
+
+		assert.Equal(t, "chunk1chunk2", stream.respBody.String())
+	})
+
+	t.Run("full_body_buffer_for_rules", func(t *testing.T) {
+		stream := &h2Stream{id: 1}
+
+		stream.reqBodyFull.WriteString("full request body")
+		stream.respBodyFull.WriteString("full response body")
+
+		assert.Equal(t, "full request body", stream.reqBodyFull.String())
+		assert.Equal(t, "full response body", stream.respBodyFull.String())
+	})
+}
+
+func TestH2StreamTimestamps(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStreamTracker()
+
+	now := time.Now()
+	stream := tracker.getOrCreate(1)
+
+	assert.WithinDuration(t, now, stream.startTime, 100*time.Millisecond)
+	assert.WithinDuration(t, now, stream.lastActivity, 100*time.Millisecond)
+
+	// Update last activity
+	time.Sleep(10 * time.Millisecond)
+	stream.mu.Lock()
+	stream.lastActivity = time.Now()
+	stream.mu.Unlock()
+
+	assert.True(t, stream.lastActivity.After(stream.startTime))
+}
+
+func TestFlowControlError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("connection_level_error", func(t *testing.T) {
+		err := &flowControlError{StreamID: 0, Message: "flow control violation"}
+		assert.Equal(t, uint32(0), err.StreamID)
+		assert.Contains(t, err.Error(), "flow control")
+	})
+
+	t.Run("stream_level_error", func(t *testing.T) {
+		err := &flowControlError{StreamID: 5, Message: "stream flow control exceeded"}
+		assert.Equal(t, uint32(5), err.StreamID)
+		assert.Contains(t, err.Error(), "flow control")
+	})
+}
+
+func TestStreamStateTransitionsAll(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStreamTracker()
+	stream := tracker.getOrCreate(1)
+
+	// Initial state should be open
+	assert.Equal(t, streamOpen, stream.state)
+
+	// Transition to half-closed (local)
+	stream.mu.Lock()
+	stream.state = streamHalfClosedLocal
+	stream.mu.Unlock()
+	assert.Equal(t, streamHalfClosedLocal, stream.state)
+
+	// Transition to half-closed (remote)
+	stream2 := tracker.getOrCreate(3)
+	stream2.mu.Lock()
+	stream2.state = streamHalfClosedRemote
+	stream2.mu.Unlock()
+	assert.Equal(t, streamHalfClosedRemote, stream2.state)
+
+	// Transition to closed
+	stream.mu.Lock()
+	stream.state = streamClosed
+	stream.mu.Unlock()
+	assert.Equal(t, streamClosed, stream.state)
+}
+
+func TestStreamTrackerConcurrentOperations(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStreamTracker()
+	done := make(chan bool, 30)
+
+	// Concurrent getOrCreate, get, remove
+	for i := 0; i < 10; i++ {
+		go func(id uint32) {
+			_ = tracker.getOrCreate(id)
+			done <- true
+		}(uint32(i))
+	}
+
+	for i := 0; i < 10; i++ {
+		go func(id uint32) {
+			_, _ = tracker.get(id)
+			done <- true
+		}(uint32(i))
+	}
+
+	for i := 0; i < 10; i++ {
+		go func(id uint32) {
+			tracker.remove(id)
+			done <- true
+		}(uint32(i))
+	}
+
+	for i := 0; i < 30; i++ {
+		<-done
+	}
+}
+
+func TestH2StreamBufferGrowth(t *testing.T) {
+	t.Parallel()
+
+	tracker := newStreamTracker()
+	stream := tracker.getOrCreate(1)
+
+	// Write increasingly larger data
+	for i := 0; i < 10; i++ {
+		data := make([]byte, 1024*(i+1))
+		for j := range data {
+			data[j] = byte('A' + j%26)
+		}
+		stream.reqBodyFull.Write(data)
+	}
+
+	// Verify total size
+	expectedSize := 0
+	for i := 0; i < 10; i++ {
+		expectedSize += 1024 * (i + 1)
+	}
+	assert.Equal(t, expectedSize, stream.reqBodyFull.Len())
 }

@@ -193,10 +193,10 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Request, target Target, timeout time.Duration, protocol string) (*RawHTTP1Response, error) {
 	// Validate protocol value
 	switch protocol {
-	case "", "http/1.1", "h2":
+	case "", protocolHTTP11, protocolH2:
 		// Valid values
 	default:
-		return nil, fmt.Errorf("invalid protocol %q: must be \"http/1.1\", \"h2\", or empty", protocol)
+		return nil, fmt.Errorf("invalid protocol %q: must be %q, %q, or empty", protocol, protocolHTTP11, protocolH2)
 	}
 
 	// Determine dial timeout

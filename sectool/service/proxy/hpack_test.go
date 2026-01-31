@@ -172,6 +172,68 @@ func TestEncodeHeaders(t *testing.T) {
 	}
 }
 
+func TestEncodeHeadersForbiddenFiltering(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Include forbidden HTTP/2 headers
+	pseudos := map[string]string{":status": "200"}
+	headers := []Header{
+		{Name: "connection", Value: "keep-alive"},
+		{Name: "keep-alive", Value: "timeout=5"},
+		{Name: "transfer-encoding", Value: "chunked"},
+		{Name: "proxy-connection", Value: "keep-alive"},
+		{Name: "content-type", Value: "text/plain"}, // this should survive
+	}
+
+	encoded, err := h.encodeHeaders(pseudos, headers)
+	require.NoError(t, err)
+
+	h2 := newH2Conn(clientConn)
+	decodedPseudos, decodedHeaders, err := h2.decodeHeaders(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, "200", decodedPseudos[":status"])
+	// Only content-type should survive, forbidden headers filtered
+	assert.Len(t, decodedHeaders, 1)
+	assert.Equal(t, "content-type", decodedHeaders[0].Name)
+	assert.Equal(t, "text/plain", decodedHeaders[0].Value)
+}
+
+func TestEncodeHeadersEmptyBlock(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Only status pseudo-header, no regular headers
+	pseudos := map[string]string{":status": "204"}
+	var headers []Header
+
+	encoded, err := h.encodeHeaders(pseudos, headers)
+	require.NoError(t, err)
+	require.NotEmpty(t, encoded)
+
+	h2 := newH2Conn(clientConn)
+	decodedPseudos, decodedHeaders, err := h2.decodeHeaders(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, "204", decodedPseudos[":status"])
+	assert.Empty(t, decodedHeaders)
+}
+
 func TestNewH2Conn(t *testing.T) {
 	t.Parallel()
 
@@ -653,4 +715,307 @@ func TestFlowCtrlWait(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("flowCtrlWait channel should be closed")
 	}
+}
+
+func TestEncodeDecodeHeaders_LargeValues(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Test with a large header value (8KB)
+	largeValue := string(make([]byte, 8192))
+	for i := range largeValue {
+		largeValue = largeValue[:i] + string(byte('a'+i%26)) + largeValue[i+1:]
+	}
+
+	pseudos := map[string]string{":status": "200"}
+	headers := []Header{
+		{Name: "x-large-header", Value: largeValue},
+	}
+
+	encoded, err := h.encodeHeaders(pseudos, headers)
+	require.NoError(t, err)
+	require.NotEmpty(t, encoded)
+
+	h2 := newH2Conn(clientConn)
+	decodedPseudos, decodedHeaders, err := h2.decodeHeaders(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, "200", decodedPseudos[":status"])
+	require.Len(t, decodedHeaders, 1)
+	assert.Equal(t, "x-large-header", decodedHeaders[0].Name)
+	assert.Equal(t, largeValue, decodedHeaders[0].Value)
+}
+
+func TestEncodeDecodeHeaders_ManyHeaders(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Create 100 headers
+	headers := make([]Header, 100)
+	for i := 0; i < 100; i++ {
+		headers[i] = Header{
+			Name:  "x-header-" + string(rune('0'+i/10)) + string(rune('0'+i%10)),
+			Value: "value-" + string(rune('0'+i/10)) + string(rune('0'+i%10)),
+		}
+	}
+
+	pseudos := map[string]string{":status": "200"}
+
+	encoded, err := h.encodeHeaders(pseudos, headers)
+	require.NoError(t, err)
+
+	h2 := newH2Conn(clientConn)
+	decodedPseudos, decodedHeaders, err := h2.decodeHeaders(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, "200", decodedPseudos[":status"])
+	assert.Len(t, decodedHeaders, 100)
+}
+
+func TestEncodeDecodeHeaders_BinaryValues(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Test with non-ASCII characters (should be encoded as-is for HPACK)
+	pseudos := map[string]string{":status": "200"}
+	headers := []Header{
+		{Name: "x-custom", Value: "value-with-unicode-ñ-€"},
+	}
+
+	encoded, err := h.encodeHeaders(pseudos, headers)
+	require.NoError(t, err)
+
+	h2 := newH2Conn(clientConn)
+	decodedPseudos, decodedHeaders, err := h2.decodeHeaders(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, "200", decodedPseudos[":status"])
+	require.Len(t, decodedHeaders, 1)
+	assert.Equal(t, "value-with-unicode-ñ-€", decodedHeaders[0].Value)
+}
+
+func TestInitStreamSendWindow(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Initialize send window for stream 1
+	h.initStreamSendWindow(1)
+	assert.Equal(t, int32(h.initialWindowSize), h.sendWindowStream[1])
+
+	// Initialize send window for stream 3
+	h.initStreamSendWindow(3)
+	assert.Equal(t, int32(h.initialWindowSize), h.sendWindowStream[3])
+
+	// Verify both streams exist independently
+	assert.Len(t, h.sendWindowStream, 2)
+}
+
+func TestDecodeHeadersEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_block", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		t.Cleanup(func() {
+			_ = clientConn.Close()
+			_ = serverConn.Close()
+		})
+
+		h := newH2Conn(serverConn)
+		pseudos, headers, err := h.decodeHeaders([]byte{})
+		require.NoError(t, err)
+		assert.Empty(t, pseudos)
+		assert.Empty(t, headers)
+	})
+
+	t.Run("truncated_block", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		t.Cleanup(func() {
+			_ = clientConn.Close()
+			_ = serverConn.Close()
+		})
+
+		h := newH2Conn(serverConn)
+		// Partial HPACK encoded data
+		_, _, err := h.decodeHeaders([]byte{0x40, 0x05})
+		assert.Error(t, err)
+	})
+}
+
+func TestRemoveStreamWindowNonexistent(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Remove window for stream that was never initialized - should not panic
+	h.removeStreamWindow(999)
+
+	// Initialize one stream, remove a different non-existent one
+	h.initStreamSendWindow(1)
+	h.removeStreamWindow(999)
+
+	// Original stream should still exist
+	_, exists := h.sendWindowStream[1]
+	assert.True(t, exists)
+}
+
+func TestGetAvailableSendWindowUnknownStream(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Get window for unknown stream - should return connection window
+	available := h.getAvailableSendWindow(999)
+	assert.Equal(t, int(initialWindowSize), available)
+}
+
+func TestFlowControlErrorMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		err     *flowControlError
+		wantMsg string
+	}{
+		{
+			name:    "connection_level",
+			err:     &flowControlError{StreamID: 0, Message: "connection flow control window exceeded"},
+			wantMsg: "connection flow control window exceeded",
+		},
+		{
+			name:    "stream_level",
+			err:     &flowControlError{StreamID: 1, Message: "stream flow control window exceeded"},
+			wantMsg: "stream flow control window exceeded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantMsg, tt.err.Error())
+		})
+	}
+}
+
+func TestEncodeHeadersTEFiltering(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		teValue      string
+		wantFiltered bool
+	}{
+		{
+			name:         "te_trailers_kept",
+			teValue:      "trailers",
+			wantFiltered: false,
+		},
+		{
+			name:         "te_gzip_filtered",
+			teValue:      "gzip",
+			wantFiltered: true,
+		},
+		{
+			name:         "te_chunked_filtered",
+			teValue:      "chunked",
+			wantFiltered: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Each test needs its own connections to avoid HPACK state pollution
+			clientConn, serverConn := net.Pipe()
+			t.Cleanup(func() {
+				_ = clientConn.Close()
+				_ = serverConn.Close()
+			})
+
+			encoder := newH2Conn(serverConn)
+			decoder := newH2Conn(clientConn)
+
+			pseudos := map[string]string{":method": "GET", ":path": "/"}
+			headers := []Header{
+				{Name: "te", Value: tt.teValue},
+				{Name: "accept", Value: "*/*"},
+			}
+
+			encoded, err := encoder.encodeHeaders(pseudos, headers)
+			require.NoError(t, err)
+
+			_, decodedHeaders, err := decoder.decodeHeaders(encoded)
+			require.NoError(t, err)
+
+			hasTE := false
+			for _, hdr := range decodedHeaders {
+				if hdr.Name == "te" {
+					hasTE = true
+					break
+				}
+			}
+
+			if tt.wantFiltered {
+				assert.False(t, hasTE, "TE header should be filtered")
+			} else {
+				assert.True(t, hasTE, "TE header should be kept")
+			}
+		})
+	}
+}
+
+func TestNeedsWindowUpdateNonExistentStream(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	h := newH2Conn(serverConn)
+
+	// Call needsWindowUpdate for a stream that doesn't exist
+	connUpdate, streamUpdate := h.needsWindowUpdate(999)
+
+	// Should return 0 for both since stream doesn't exist
+	assert.Equal(t, uint32(0), connUpdate)
+	assert.Equal(t, uint32(0), streamUpdate)
 }

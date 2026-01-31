@@ -64,6 +64,77 @@ func TestParseConnectRequest(t *testing.T) {
 			input:   "\r\n",
 			wantErr: true,
 		},
+		{
+			name:    "invalid_port_non_numeric",
+			input:   "CONNECT example.com:abc HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			wantErr: true,
+		},
+		{
+			name:     "port_zero",
+			input:    "CONNECT example.com:0 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			wantHost: "example.com",
+			wantPort: 0,
+		},
+		{
+			name:     "empty_hostname_with_port",
+			input:    "CONNECT :443 HTTP/1.1\r\nHost: :443\r\n\r\n",
+			wantHost: "",
+			wantPort: 443,
+		},
+		{
+			name:     "ipv6_with_brackets",
+			input:    "CONNECT [::1]:443 HTTP/1.1\r\nHost: [::1]:443\r\n\r\n",
+			wantHost: "::1",
+			wantPort: 443,
+		},
+		{
+			name:     "ipv6_full_with_brackets",
+			input:    "CONNECT [2001:db8::1]:8443 HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\n\r\n",
+			wantHost: "2001:db8::1",
+			wantPort: 8443,
+		},
+		{
+			name:     "high_port",
+			input:    "CONNECT example.com:65535 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			wantHost: "example.com",
+			wantPort: 65535,
+		},
+		{
+			name:     "port_out_of_range",
+			input:    "CONNECT example.com:70000 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			wantHost: "example.com",
+			wantPort: 70000, // permissive parsing for security testing
+		},
+		{
+			name:     "negative_port",
+			input:    "CONNECT example.com:-443 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			wantHost: "example.com",
+			wantPort: -443, // permissive parsing for security testing
+		},
+		{
+			name:     "ipv6_localhost",
+			input:    "CONNECT [::1]:8443 HTTP/1.1\r\nHost: [::1]:8443\r\n\r\n",
+			wantHost: "::1",
+			wantPort: 8443,
+		},
+		{
+			name:     "ipv4_with_port",
+			input:    "CONNECT 192.168.1.1:443 HTTP/1.1\r\nHost: 192.168.1.1:443\r\n\r\n",
+			wantHost: "192.168.1.1",
+			wantPort: 443,
+		},
+		{
+			name:     "subdomain_with_hyphens",
+			input:    "CONNECT my-sub-domain.example.com:443 HTTP/1.1\r\nHost: my-sub-domain.example.com\r\n\r\n",
+			wantHost: "my-sub-domain.example.com",
+			wantPort: 443,
+		},
+		{
+			name:     "missing_http_version",
+			input:    "CONNECT example.com:443\r\nHost: example.com\r\n\r\n",
+			wantHost: "example.com",
+			wantPort: 443, // permissive parsing - HTTP version not required
+		},
 	}
 
 	for _, tc := range tests {
@@ -237,4 +308,98 @@ func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	u, err := url.Parse(rawURL)
 	require.NoError(t, err)
 	return u
+}
+
+func TestServerCapsCachingConcurrent(t *testing.T) {
+	t.Parallel()
+
+	certManager, err := newCertManager(t.TempDir())
+	require.NoError(t, err)
+
+	history := newHistoryStore(store.NewMemStorage())
+	http1Handler := &http1Handler{history: history, maxBodyBytes: 1024 * 1024}
+	http2Handler := newHTTP2Handler(history, 1024*1024)
+
+	handler := newConnectHandler(certManager, http1Handler, http2Handler, history, 1024*1024)
+
+	// Concurrent writes and reads
+	done := make(chan bool, 20)
+
+	for i := 0; i < 10; i++ {
+		go func(idx int) {
+			host := "example" + string(rune('A'+idx)) + ".com:443"
+			handler.capsMu.Lock()
+			handler.serverCaps[host] = "http/1.1"
+			handler.capsMu.Unlock()
+			done <- true
+		}(i)
+	}
+
+	for i := 0; i < 10; i++ {
+		go func() {
+			handler.capsMu.RLock()
+			_ = handler.serverCaps
+			handler.capsMu.RUnlock()
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+}
+
+func TestParseConnectRequestMoreEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		wantHost string
+		wantPort int
+		wantErr  bool
+	}{
+		{
+			name:     "single_label_domain",
+			input:    "CONNECT localhost:8443 HTTP/1.1\r\nHost: localhost:8443\r\n\r\n",
+			wantHost: "localhost",
+			wantPort: 8443,
+		},
+		{
+			name:     "domain_with_underscore",
+			input:    "CONNECT my_server.local:443 HTTP/1.1\r\nHost: my_server.local\r\n\r\n",
+			wantHost: "my_server.local",
+			wantPort: 443,
+		},
+		{
+			name:     "long_domain",
+			input:    "CONNECT very.long.subdomain.chain.example.com:443 HTTP/1.1\r\nHost: very.long.subdomain.chain.example.com\r\n\r\n",
+			wantHost: "very.long.subdomain.chain.example.com",
+			wantPort: 443,
+		},
+		{
+			name:     "only_port",
+			input:    "CONNECT :443 HTTP/1.1\r\nHost: :443\r\n\r\n",
+			wantHost: "",
+			wantPort: 443,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &connectHandler{}
+			reader := bufio.NewReader(strings.NewReader(tc.input))
+
+			target, err := h.parseConnectRequest(reader)
+
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantHost, target.Hostname)
+			assert.Equal(t, tc.wantPort, target.Port)
+		})
+	}
 }

@@ -238,6 +238,46 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestListEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_history", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		entries := h.List(10, 0)
+		assert.Empty(t, entries)
+	})
+
+	t.Run("offset_beyond_max", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		entry := &HistoryEntry{
+			Protocol: "http/1.1",
+			Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
+		}
+		h.Store(entry)
+
+		entries := h.List(10, 100)
+		assert.Empty(t, entries)
+	})
+
+	t.Run("zero_count", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		entry := &HistoryEntry{
+			Protocol: "http/1.1",
+			Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
+		}
+		h.Store(entry)
+
+		entries := h.List(0, 0)
+		assert.Empty(t, entries)
+	})
+}
+
 func TestUpdate(t *testing.T) {
 	t.Parallel()
 
@@ -654,6 +694,42 @@ func TestGetRequestHeader(t *testing.T) {
 			headerName: "Content-Type",
 			want:       "",
 		},
+		{
+			name: "case_insensitive_http1",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{{Name: "Content-Type", Value: "text/plain"}},
+				},
+			},
+			headerName: "content-type",
+			want:       "text/plain",
+		},
+		{
+			name: "case_insensitive_uppercase",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{{Name: "content-type", Value: "text/html"}},
+				},
+			},
+			headerName: "CONTENT-TYPE",
+			want:       "text/html",
+		},
+		{
+			name: "first_matching_header",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{
+						{Name: "X-Custom", Value: "first"},
+						{Name: "x-custom", Value: "second"},
+					},
+				},
+			},
+			headerName: "X-Custom",
+			want:       "first",
+		},
 	}
 
 	for _, tt := range tests {
@@ -661,6 +737,44 @@ func TestGetRequestHeader(t *testing.T) {
 			assert.Equal(t, tt.want, tt.entry.GetRequestHeader(tt.headerName))
 		})
 	}
+}
+
+func TestHistoryStoreClose(t *testing.T) {
+	t.Parallel()
+
+	t.Run("close_idempotent", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+
+		// Store some entries before closing
+		entry := &HistoryEntry{
+			Protocol: "http/1.1",
+			Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
+		}
+		h.Store(entry)
+
+		// Close should not panic on first call
+		h.Close()
+
+		// Close should not panic on second call
+		h.Close()
+	})
+
+	t.Run("access_after_close", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+
+		entry := &HistoryEntry{
+			Protocol: "http/1.1",
+			Request:  &RawHTTP1Request{Method: "GET", Path: "/test"},
+		}
+		offset := h.Store(entry)
+
+		h.Close()
+
+		// Should still be able to read after close
+		retrieved, ok := h.Get(offset)
+		assert.True(t, ok)
+		assert.Equal(t, "/test", retrieved.Request.Path)
+	})
 }
 
 func TestGetResponseHeader(t *testing.T) {
@@ -703,6 +817,42 @@ func TestGetResponseHeader(t *testing.T) {
 			headerName: "Content-Type",
 			want:       "",
 		},
+		{
+			name: "empty_header_name_search",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Response: &RawHTTP1Response{
+					Headers: []Header{{Name: "X-Header", Value: "value"}},
+				},
+			},
+			headerName: "",
+			want:       "",
+		},
+		{
+			name: "header_with_empty_value",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Response: &RawHTTP1Response{
+					Headers: []Header{{Name: "X-Empty", Value: ""}},
+				},
+			},
+			headerName: "X-Empty",
+			want:       "",
+		},
+		{
+			name: "first_matching_header",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Response: &RawHTTP1Response{
+					Headers: []Header{
+						{Name: "Set-Cookie", Value: "first=1"},
+						{Name: "Set-Cookie", Value: "second=2"},
+					},
+				},
+			},
+			headerName: "Set-Cookie",
+			want:       "first=1",
+		},
 	}
 
 	for _, tt := range tests {
@@ -710,4 +860,315 @@ func TestGetResponseHeader(t *testing.T) {
 			assert.Equal(t, tt.want, tt.entry.GetResponseHeader(tt.headerName))
 		})
 	}
+}
+
+func TestCount(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_history", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		assert.Equal(t, 0, h.Count())
+	})
+
+	t.Run("after_stores", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		for i := 0; i < 5; i++ {
+			entry := &HistoryEntry{
+				Protocol: "http/1.1",
+				Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
+			}
+			h.Store(entry)
+			assert.Equal(t, i+1, h.Count())
+		}
+	})
+}
+
+func TestListConcurrentWithStore(t *testing.T) {
+	t.Parallel()
+
+	h := newHistoryStore(store.NewMemStorage())
+	t.Cleanup(h.Close)
+
+	// Pre-populate
+	for i := 0; i < 100; i++ {
+		entry := &HistoryEntry{
+			Protocol: "http/1.1",
+			Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
+		}
+		h.Store(entry)
+	}
+
+	var wg sync.WaitGroup
+
+	// Concurrent readers
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				entries := h.List(10, uint32(j%10))
+				_ = entries // just read
+			}
+		}()
+	}
+
+	// Concurrent writers
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				entry := &HistoryEntry{
+					Protocol: "http/1.1",
+					Request:  &RawHTTP1Request{Method: "POST", Path: "/concurrent"},
+				}
+				h.Store(entry)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify all entries are accessible
+	count := h.Count()
+	assert.GreaterOrEqual(t, count, 100)
+}
+
+func TestFormatRequestEmptyHeaders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		entry *HistoryEntry
+		check func(t *testing.T, result []byte)
+	}{
+		{
+			name: "h2_empty_headers",
+			entry: &HistoryEntry{
+				Protocol: "h2",
+				H2Request: &H2RequestData{
+					Method:    "GET",
+					Path:      "/test",
+					Authority: "example.com",
+					Headers:   []Header{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "GET /test HTTP/1.1")
+				assert.Contains(t, string(result), "host: example.com")
+			},
+		},
+		{
+			name: "h2_nil_headers",
+			entry: &HistoryEntry{
+				Protocol: "h2",
+				H2Request: &H2RequestData{
+					Method:    "GET",
+					Path:      "/test",
+					Authority: "example.com",
+					Headers:   nil,
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "GET /test HTTP/1.1")
+			},
+		},
+		{
+			name: "http1_empty_body",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Method:  "GET",
+					Path:    "/",
+					Version: "HTTP/1.1",
+					Headers: []Header{{Name: "Host", Value: "example.com"}},
+					Body:    []byte{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "GET / HTTP/1.1")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.entry.FormatRequest()
+			require.NotNil(t, result)
+			tt.check(t, result)
+		})
+	}
+}
+
+func TestFormatResponseEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		entry *HistoryEntry
+		check func(t *testing.T, result []byte)
+	}{
+		{
+			name: "h2_empty_headers",
+			entry: &HistoryEntry{
+				Protocol: "h2",
+				H2Response: &H2ResponseData{
+					StatusCode: 200,
+					Headers:    []Header{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "HTTP/2 200")
+			},
+		},
+		{
+			name: "h2_nonstandard_status",
+			entry: &HistoryEntry{
+				Protocol: "h2",
+				H2Response: &H2ResponseData{
+					StatusCode: 999,
+					Headers:    []Header{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				// StatusText should default to empty or unknown for non-standard codes
+				assert.Contains(t, string(result), "HTTP/2 999")
+			},
+		},
+		{
+			name: "http1_empty_body",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Response: &RawHTTP1Response{
+					Version:    "HTTP/1.1",
+					StatusCode: 204,
+					StatusText: "No Content",
+					Headers:    []Header{},
+					Body:       []byte{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "HTTP/1.1 204 No Content")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.entry.FormatResponse()
+			require.NotNil(t, result)
+			tt.check(t, result)
+		})
+	}
+}
+
+func TestGetHostEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		entry *HistoryEntry
+		want  string
+	}{
+		{
+			name: "h2_empty_authority",
+			entry: &HistoryEntry{
+				Protocol:  "h2",
+				H2Request: &H2RequestData{Authority: ""},
+			},
+			want: "",
+		},
+		{
+			name: "http1_host_case_insensitive",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{{Name: "host", Value: "lowercase.com"}},
+				},
+			},
+			want: "lowercase.com",
+		},
+		{
+			name: "http1_no_host_header",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{{Name: "X-Custom", Value: "value"}},
+				},
+			},
+			want: "",
+		},
+		{
+			name: "http1_empty_headers",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{},
+				},
+			},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.entry.GetHost())
+		})
+	}
+}
+
+func TestUpdateConcurrent(t *testing.T) {
+	t.Parallel()
+
+	h := newHistoryStore(store.NewMemStorage())
+	t.Cleanup(h.Close)
+
+	// Store an entry
+	entry := &HistoryEntry{
+		Protocol: "http/1.1",
+		Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
+	}
+	offset := h.Store(entry)
+
+	// Concurrent updates
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			entry, ok := h.Get(offset)
+			if !ok {
+				return
+			}
+			entry.Response = &RawHTTP1Response{
+				Version:    "HTTP/1.1",
+				StatusCode: 200 + idx,
+			}
+			h.Update(entry)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify entry is still readable
+	retrieved, ok := h.Get(offset)
+	require.True(t, ok)
+	require.NotNil(t, retrieved.Response)
+	assert.GreaterOrEqual(t, retrieved.Response.StatusCode, 200)
 }

@@ -31,6 +31,14 @@ func TestNormalizeEncoding(t *testing.T) {
 		{"brotli_unsupported", "br", "br", false},
 		{"empty", "", "", false},
 		{"multiple_encodings", "gzip, br", "", false},
+		{"x_gzip_uppercase", "X-GZIP", "gzip", true},
+		{"x_gzip_mixed", "X-Gzip", "gzip", true},
+		{"tabs_around_gzip", "\tgzip\t", "gzip", true},
+		{"newline_in_encoding", "\ngzip\n", "gzip", true},
+		{"encoding_with_numbers", "gzip123", "gzip123", false},
+		{"encoding_with_special", "gzip-variant", "gzip-variant", false},
+		{"zstd_unsupported", "zstd", "zstd", false},
+		{"compress_unsupported", "compress", "compress", false},
 	}
 
 	for _, tt := range tests {
@@ -167,6 +175,13 @@ func TestDecompress(t *testing.T) {
 			{"gzip_invalid", []byte("not gzip data"), "gzip"},
 			{"deflate_invalid", []byte{0xFF, 0xFE, 0xFD}, "deflate"},
 			{"gzip_truncated", gzipBytes(t, []byte("Hello"))[:5], "gzip"},
+			{"gzip_single_byte", []byte{0x1F}, "gzip"},
+			{"gzip_partial_magic", []byte{0x1F, 0x8B}, "gzip"},
+			{"deflate_single_byte", []byte{0x78}, "deflate"},
+			{"gzip_empty_data", []byte{}, "gzip"},
+			{"deflate_empty_data", []byte{}, "deflate"},
+			{"gzip_corrupted_middle", append(gzipBytes(t, []byte("Hello"))[:8], []byte{0xFF, 0xFF, 0xFF}...), "gzip"},
+			{"deflate_partial_zlib_header", []byte{0x78, 0x9C, 0xFF}, "deflate"},
 		}
 
 		for _, tt := range tests {
@@ -193,6 +208,8 @@ func TestCompress(t *testing.T) {
 			{"deflate", []byte("Hello, World!"), "deflate"},
 			{"gzip_empty_body", []byte{}, "gzip"},
 			{"deflate_empty_body", []byte{}, "deflate"},
+			{"x_gzip", []byte("X-Gzip Test"), "x-gzip"},
+			{"x_gzip_uppercase", []byte("X-GZIP Test"), "X-GZIP"},
 		}
 
 		for _, tt := range tests {
@@ -251,6 +268,125 @@ func TestCompress(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("roundtrip_mixed_case", func(t *testing.T) {
+		// Test compress with one case, decompress with another
+		data := []byte("Test data for case-insensitive round-trip")
+
+		compressed, err := Compress(data, "GZIP")
+		require.NoError(t, err)
+
+		decompressed, wasCompressed := Decompress(compressed, "gzip")
+		assert.True(t, wasCompressed)
+		assert.Equal(t, data, decompressed)
+	})
+
+	t.Run("tiny_payloads", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			data     []byte
+			encoding string
+		}{
+			{"gzip_single_byte", []byte{0x42}, "gzip"},
+			{"deflate_single_byte", []byte{0x42}, "deflate"},
+			{"gzip_two_bytes", []byte{0x42, 0x43}, "gzip"},
+			{"deflate_two_bytes", []byte{0x42, 0x43}, "deflate"},
+			{"gzip_three_bytes", []byte{0x42, 0x43, 0x44}, "gzip"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				compressed, err := Compress(tt.data, tt.encoding)
+				require.NoError(t, err)
+
+				decompressed, wasCompressed := Decompress(compressed, tt.encoding)
+				assert.True(t, wasCompressed)
+				assert.Equal(t, tt.data, decompressed)
+			})
+		}
+	})
+
+	t.Run("null_bytes_in_body", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			data     []byte
+			encoding string
+		}{
+			{"gzip_null_bytes", []byte{0x00, 0x00, 0x00, 0x00}, "gzip"},
+			{"deflate_null_bytes", []byte{0x00, 0x00, 0x00, 0x00}, "deflate"},
+			{"gzip_mixed_nulls", []byte{'H', 0x00, 'e', 0x00, 'l', 0x00}, "gzip"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				compressed, err := Compress(tt.data, tt.encoding)
+				require.NoError(t, err)
+
+				decompressed, wasCompressed := Decompress(compressed, tt.encoding)
+				assert.True(t, wasCompressed)
+				assert.Equal(t, tt.data, decompressed)
+			})
+		}
+	})
+}
+
+func TestDecompressCorruptedChecksum(t *testing.T) {
+	t.Parallel()
+
+	// Create valid gzip data
+	validGzip := gzipBytes(t, []byte("Test data"))
+
+	// Gzip trailer is last 8 bytes (4-byte CRC32 + 4-byte original size)
+	// Corrupt the CRC32 checksum
+	corruptedGzip := make([]byte, len(validGzip))
+	copy(corruptedGzip, validGzip)
+	corruptedGzip[len(corruptedGzip)-5] ^= 0xFF // flip bits in CRC
+
+	got, wasCompressed := Decompress(corruptedGzip, "gzip")
+
+	// Should detect corruption and return nil
+	assert.True(t, wasCompressed)
+	assert.Nil(t, got)
+}
+
+func TestDecompressZlibFallback(t *testing.T) {
+	t.Parallel()
+
+	// Create zlib-wrapped data (deflate with zlib header)
+	originalData := []byte("Zlib fallback test data")
+	zlibData := zlibBytes(t, originalData)
+
+	// Decompress as deflate - should try raw deflate first, fail, then try zlib
+	got, wasCompressed := Decompress(zlibData, "deflate")
+
+	assert.True(t, wasCompressed)
+	assert.Equal(t, originalData, got)
+}
+
+func TestNormalizeEncodingEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		encoding      string
+		wantNorm      string
+		wantSupported bool
+	}{
+		{"only_whitespace", "   ", "", false},
+		{"leading_zeros", "0gzip", "0gzip", false},
+		{"unicode_space", "\u00A0gzip", "gzip", true}, // non-breaking space trimmed by TrimSpace
+		{"carriage_return", "gzip\r", "gzip", true},
+		{"mixed_whitespace_tabs_spaces", "  \t gzip \t  ", "gzip", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotNorm, gotSupported := NormalizeEncoding(tt.encoding)
+
+			assert.Equal(t, tt.wantNorm, gotNorm)
+			assert.Equal(t, tt.wantSupported, gotSupported)
+		})
+	}
 }
 
 func gzipBytes(t *testing.T, data []byte) []byte {

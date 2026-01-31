@@ -273,6 +273,44 @@ func TestSender_Send(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "connect")
 	})
+
+	t.Run("invalid_protocol", func(t *testing.T) {
+		sender := &Sender{}
+
+		rawReq := []byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		_, err := sender.Send(t.Context(), SendOptions{
+			RawRequest: rawReq,
+			Target: Target{
+				Hostname:  "localhost",
+				Port:      8080,
+				UsesHTTPS: false,
+			},
+			Protocol: "h3", // invalid protocol
+			Force:    true,
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid protocol")
+	})
+
+	t.Run("h2_on_http_target", func(t *testing.T) {
+		sender := &Sender{}
+
+		rawReq := []byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		_, err := sender.Send(t.Context(), SendOptions{
+			RawRequest: rawReq,
+			Target: Target{
+				Hostname:  "localhost",
+				Port:      8080,
+				UsesHTTPS: false, // HTTP not HTTPS
+			},
+			Protocol: "h2", // H2 requires HTTPS
+			Force:    true,
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "HTTP/2 requires HTTPS")
+	})
 }
 
 func TestSender_SendWithRedirects(t *testing.T) {
@@ -593,6 +631,97 @@ func TestApplyQueryModifications(t *testing.T) {
 	assert.Contains(t, req.Query, "new=added")
 	assert.Contains(t, req.Query, "keep=modified")
 	assert.NotContains(t, req.Query, "old=value")
+}
+
+func TestApplyQueryModifications_EdgeCases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_query", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/api",
+			Query:   "",
+			Version: "HTTP/1.1",
+		}
+
+		mods := &Modifications{
+			SetParams: map[string]string{"new": "value"},
+		}
+
+		applyQueryModifications(req, mods)
+
+		assert.Contains(t, req.Query, "new=value")
+	})
+
+	t.Run("remove_nonexistent", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/api",
+			Query:   "existing=value",
+			Version: "HTTP/1.1",
+		}
+
+		mods := &Modifications{
+			RemoveParams: []string{"nonexistent"},
+		}
+
+		applyQueryModifications(req, mods)
+
+		assert.Equal(t, "existing=value", req.Query)
+	})
+
+	t.Run("special_characters_in_value", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/api",
+			Query:   "",
+			Version: "HTTP/1.1",
+		}
+
+		mods := &Modifications{
+			SetParams: map[string]string{"param": "value with spaces&special=chars"},
+		}
+
+		applyQueryModifications(req, mods)
+
+		// URL encoding should be applied
+		assert.Contains(t, req.Query, "param=")
+	})
+}
+
+func TestSender_ValidationBypass(t *testing.T) {
+	t.Parallel()
+
+	t.Run("force_bypasses_validation", func(t *testing.T) {
+		var receivedMethod string
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedMethod = r.Method
+			w.WriteHeader(200)
+		}))
+		t.Cleanup(testServer.Close)
+
+		serverURL, _ := url.Parse(testServer.URL)
+		port, _ := strconv.Atoi(serverURL.Port())
+
+		sender := &Sender{}
+
+		// Use an unusual but valid HTTP method
+		rawReq := []byte("CUSTOMMETHOD / HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := sender.Send(t.Context(), SendOptions{
+			RawRequest: rawReq,
+			Target: Target{
+				Hostname:  serverURL.Hostname(),
+				Port:      port,
+				UsesHTTPS: false,
+			},
+			Timeout: 10 * time.Second,
+			Force:   true,
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, 200, result.Response.StatusCode)
+		assert.Equal(t, "CUSTOMMETHOD", receivedMethod)
+	})
 }
 
 // newH2TestServer creates an HTTP/2-enabled TLS test server.
@@ -953,4 +1082,191 @@ func TestSender_SendWithRedirects_H2(t *testing.T) {
 		assert.Equal(t, []byte("H2 final"), result.Response.Body)
 		assert.Equal(t, 1, redirectCount)
 	})
+}
+
+func TestApplyQueryModificationsAdvanced(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		query        string
+		setParams    map[string]string
+		removeParams []string
+		wantContain  []string
+		wantExclude  []string
+	}{
+		{
+			name:        "add_param",
+			query:       "existing=value",
+			setParams:   map[string]string{"new": "param"},
+			wantContain: []string{"existing=value", "new=param"},
+		},
+		{
+			name:         "remove_param",
+			query:        "keep=this&remove=that",
+			removeParams: []string{"remove"},
+			wantContain:  []string{"keep=this"},
+			wantExclude:  []string{"remove=that"},
+		},
+		{
+			name:         "add_and_remove",
+			query:        "old=val",
+			setParams:    map[string]string{"new": "val"},
+			removeParams: []string{"old"},
+			wantContain:  []string{"new=val"},
+			wantExclude:  []string{"old=val"},
+		},
+		{
+			name:        "empty_query_add",
+			query:       "",
+			setParams:   map[string]string{"key": "value"},
+			wantContain: []string{"key=value"},
+		},
+		{
+			name:         "remove_nonexistent",
+			query:        "keep=this",
+			removeParams: []string{"nonexistent"},
+			wantContain:  []string{"keep=this"},
+		},
+		{
+			name:        "override_existing",
+			query:       "key=old",
+			setParams:   map[string]string{"key": "new"},
+			wantContain: []string{"key=new"},
+			wantExclude: []string{"key=old"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/test",
+				Query:   tt.query,
+				Version: "HTTP/1.1",
+			}
+
+			mods := &Modifications{
+				SetParams:    tt.setParams,
+				RemoveParams: tt.removeParams,
+			}
+
+			applyQueryModifications(req, mods)
+
+			for _, want := range tt.wantContain {
+				assert.Contains(t, req.Query, want)
+			}
+			for _, exclude := range tt.wantExclude {
+				assert.NotContains(t, req.Query, exclude)
+			}
+		})
+	}
+}
+
+func TestSendOptions_Custom_Method(t *testing.T) {
+	t.Parallel()
+
+	var receivedMethod string
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	sender := &Sender{}
+
+	// Test custom HTTP methods
+	methods := []string{"PATCH", "DELETE", "OPTIONS", "PROPFIND", "CUSTOMMETHOD"}
+
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			rawReq := []byte(method + " /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+			_, err := sender.Send(t.Context(), SendOptions{
+				RawRequest: rawReq,
+				Target: Target{
+					Hostname:  serverURL.Hostname(),
+					Port:      port,
+					UsesHTTPS: false,
+				},
+				Timeout: 10 * time.Second,
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, method, receivedMethod)
+		})
+	}
+}
+
+func TestResolveRedirectLocationEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	currentTarget := Target{
+		Hostname:  "example.com",
+		Port:      443,
+		UsesHTTPS: true,
+	}
+	currentPath := "/current/page"
+
+	tests := []struct {
+		name       string
+		location   string
+		wantPath   string
+		wantTarget Target
+		wantErr    bool
+	}{
+		{
+			name:       "empty_location",
+			location:   "",
+			wantTarget: currentTarget,
+			wantPath:   "/current", // empty location resolved against /current/page yields /current
+		},
+		{
+			name:     "location_with_fragment",
+			location: "/new#section",
+			wantPath: "/new#section",
+		},
+		{
+			name:     "ipv6_host",
+			location: "https://[::1]:8443/path",
+			wantTarget: Target{
+				Hostname:  "::1",
+				Port:      8443,
+				UsesHTTPS: true,
+			},
+			wantPath: "/path",
+		},
+		{
+			name:       "dot_relative",
+			location:   "./sibling",
+			wantTarget: currentTarget,
+			wantPath:   "/current/sibling",
+		},
+		{
+			name:       "dotdot_relative",
+			location:   "../parent",
+			wantTarget: currentTarget,
+			wantPath:   "/parent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, path, err := resolveRedirectLocation(tt.location, currentTarget, currentPath)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			if tt.wantTarget.Hostname != "" {
+				assert.Equal(t, tt.wantTarget.Hostname, target.Hostname)
+				assert.Equal(t, tt.wantTarget.Port, target.Port)
+			}
+			assert.Equal(t, tt.wantPath, path)
+		})
+	}
 }

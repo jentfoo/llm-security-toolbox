@@ -262,6 +262,38 @@ func TestReadWSFrame(t *testing.T) {
 			frameBytes: []byte{0x81, 0x85, 0x37, 0xfa}, // mask flag set but only 2 mask bytes
 			wantErr:    true,
 		},
+		{
+			name:        "length_exactly_125",
+			frameBytes:  append([]byte{0x81, 125}, bytes.Repeat([]byte{'x'}, 125)...),
+			wantFin:     true,
+			wantRsv:     0,
+			wantOpcode:  1,
+			wantPayload: bytes.Repeat([]byte{'x'}, 125),
+		},
+		{
+			name:        "length_exactly_126",
+			frameBytes:  append([]byte{0x81, 126, 0x00, 126}, bytes.Repeat([]byte{'y'}, 126)...),
+			wantFin:     true,
+			wantRsv:     0,
+			wantOpcode:  1,
+			wantPayload: bytes.Repeat([]byte{'y'}, 126),
+		},
+		{
+			name:        "zero_length_close_frame",
+			frameBytes:  []byte{0x88, 0x00},
+			wantFin:     true,
+			wantRsv:     0,
+			wantOpcode:  8,
+			wantPayload: []byte{},
+		},
+		{
+			name:        "close_with_reason",
+			frameBytes:  []byte{0x88, 0x09, 0x03, 0xe8, 'g', 'o', 'o', 'd', 'b', 'y', 'e'}, // code 1000 + "goodbye"
+			wantFin:     true,
+			wantRsv:     0,
+			wantOpcode:  8,
+			wantPayload: []byte{0x03, 0xe8, 'g', 'o', 'o', 'd', 'b', 'y', 'e'},
+		},
 	}
 
 	for _, tt := range tests {
@@ -506,6 +538,393 @@ func TestOpcodeToString(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
 			assert.Equal(t, tt.want, opcodeToString(tt.opcode))
+		})
+	}
+}
+
+func TestReadWSFrame_ReservedOpcodes(t *testing.T) {
+	t.Parallel()
+
+	// Reserved opcodes 3-7 (data frames) and 11-15 (control frames)
+	reservedOpcodes := []byte{3, 4, 5, 6, 7, 11, 12, 13, 14, 15}
+
+	for _, opcode := range reservedOpcodes {
+		t.Run(opcodeToString(opcode), func(t *testing.T) {
+			// Create a valid frame with the reserved opcode
+			frameBytes := []byte{0x80 | opcode, 0x02, 'h', 'i'}
+			frame, err := readWSFrame(bytes.NewReader(frameBytes))
+
+			// Parser should still parse the frame, it's up to the handler to reject
+			require.NoError(t, err)
+			assert.Equal(t, opcode, frame.opcode)
+			assert.Equal(t, []byte("hi"), frame.payload)
+		})
+	}
+}
+
+func TestReadWSFrame_ControlFramePayloadLimits(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ping_max_125_bytes", func(t *testing.T) {
+		payload := bytes.Repeat([]byte{'x'}, 125)
+		frameBytes := append([]byte{0x89, 125}, payload...)
+		frame, err := readWSFrame(bytes.NewReader(frameBytes))
+
+		require.NoError(t, err)
+		assert.Equal(t, byte(9), frame.opcode)
+		assert.Len(t, frame.payload, 125)
+	})
+
+	t.Run("pong_max_125_bytes", func(t *testing.T) {
+		payload := bytes.Repeat([]byte{'x'}, 125)
+		frameBytes := append([]byte{0x8A, 125}, payload...)
+		frame, err := readWSFrame(bytes.NewReader(frameBytes))
+
+		require.NoError(t, err)
+		assert.Equal(t, byte(10), frame.opcode)
+		assert.Len(t, frame.payload, 125)
+	})
+
+	t.Run("close_max_125_bytes", func(t *testing.T) {
+		// Close frame: 2 bytes code + 123 bytes reason = 125 bytes total
+		payload := append([]byte{0x03, 0xe8}, bytes.Repeat([]byte{'x'}, 123)...)
+		frameBytes := append([]byte{0x88, 125}, payload...)
+		frame, err := readWSFrame(bytes.NewReader(frameBytes))
+
+		require.NoError(t, err)
+		assert.Equal(t, byte(8), frame.opcode)
+		assert.Len(t, frame.payload, 125)
+	})
+}
+
+func TestEncodeWSFrame_LargePayloadLengthEncoding(t *testing.T) {
+	t.Parallel()
+
+	t.Run("16bit_length_boundary", func(t *testing.T) {
+		// Test payload length at 16-bit boundary (65535)
+		payload := bytes.Repeat([]byte{'x'}, 65535)
+		frame := &wsFrame{
+			fin:     true,
+			opcode:  2,
+			masked:  false,
+			payload: payload,
+		}
+
+		encoded := encodeWSFrame(frame)
+
+		// Should use 16-bit length encoding (len byte = 126)
+		assert.Equal(t, byte(126), encoded[1])
+
+		// Verify round-trip
+		decoded, err := readWSFrame(bytes.NewReader(encoded))
+		require.NoError(t, err)
+		assert.Equal(t, payload, decoded.payload)
+	})
+
+	t.Run("64bit_length_encoding", func(t *testing.T) {
+		// Test payload length requiring 64-bit encoding (> 65535)
+		payload := bytes.Repeat([]byte{'x'}, 65536)
+		frame := &wsFrame{
+			fin:     true,
+			opcode:  2,
+			masked:  false,
+			payload: payload,
+		}
+
+		encoded := encodeWSFrame(frame)
+
+		// Should use 64-bit length encoding (len byte = 127)
+		assert.Equal(t, byte(127), encoded[1])
+
+		// Verify round-trip
+		decoded, err := readWSFrame(bytes.NewReader(encoded))
+		require.NoError(t, err)
+		assert.Len(t, decoded.payload, len(payload))
+	})
+}
+
+func TestIsWebSocketUpgrade_EdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		req  *RawHTTP1Request
+		want bool
+	}{
+		{
+			name: "upgrade_with_multiple_connection_tokens",
+			req: &RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/ws",
+				Version: "HTTP/1.1",
+				Headers: []Header{
+					{Name: "Upgrade", Value: "websocket"},
+					{Name: "Connection", Value: "keep-alive, Upgrade, close"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "upgrade_with_whitespace",
+			req: &RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/ws",
+				Version: "HTTP/1.1",
+				Headers: []Header{
+					{Name: "Upgrade", Value: "  websocket  "},
+					{Name: "Connection", Value: "  Upgrade  "},
+				},
+			},
+			want: false, // exact match required currently
+		},
+		{
+			name: "h2c_upgrade_not_websocket",
+			req: &RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/",
+				Version: "HTTP/1.1",
+				Headers: []Header{
+					{Name: "Upgrade", Value: "h2c"},
+					{Name: "Connection", Value: "Upgrade, HTTP2-Settings"},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isWebSocketUpgrade(tt.req))
+		})
+	}
+}
+
+func TestOpcodeToStringAll(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		opcode byte
+		want   string
+	}{
+		{0, "continuation"},
+		{1, "text"},
+		{2, "binary"},
+		{3, "unknown-3"},
+		{4, "unknown-4"},
+		{5, "unknown-5"},
+		{6, "unknown-6"},
+		{7, "unknown-7"},
+		{8, "close"},
+		{9, "ping"},
+		{10, "pong"},
+		{11, "unknown-11"},
+		{12, "unknown-12"},
+		{13, "unknown-13"},
+		{14, "unknown-14"},
+		{15, "unknown-15"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			assert.Equal(t, tt.want, opcodeToString(tt.opcode))
+		})
+	}
+}
+
+func TestWSFrameRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		fin     bool
+		rsv     byte
+		opcode  byte
+		payload []byte
+		masked  bool
+	}{
+		{"text_unmasked", true, 0, 1, []byte("Hello"), false},
+		{"binary_masked", true, 0, 2, []byte{0x01, 0x02, 0x03}, true},
+		{"continuation_frame", false, 0, 0, []byte("cont"), false},
+		{"empty_payload", true, 0, 1, []byte{}, false},
+		{"close_frame", true, 0, 8, []byte{0x03, 0xe8}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := &wsFrame{
+				fin:     tt.fin,
+				rsv:     tt.rsv,
+				opcode:  tt.opcode,
+				payload: tt.payload,
+				masked:  tt.masked,
+			}
+			if tt.masked {
+				frame.mask = [4]byte{0x11, 0x22, 0x33, 0x44}
+			}
+			encoded := encodeWSFrame(frame)
+
+			decoded, err := readWSFrame(bytes.NewReader(encoded))
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.fin, decoded.fin)
+			assert.Equal(t, tt.rsv, decoded.rsv)
+			assert.Equal(t, tt.opcode, decoded.opcode)
+			assert.Equal(t, tt.payload, decoded.payload)
+		})
+	}
+}
+
+func TestEncodeWSFramePayloadLengths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		payloadLen   int
+		expectedSize int
+	}{
+		{"tiny_0", 0, 2},
+		{"small_125", 125, 127},
+		{"medium_126", 126, 130},
+		{"medium_1000", 1000, 1004},
+		{"large_65535", 65535, 65539},
+		{"very_large_65536", 65536, 65546},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := make([]byte, tt.payloadLen)
+			frame := &wsFrame{
+				fin:     true,
+				rsv:     0,
+				opcode:  1,
+				payload: payload,
+			}
+			encoded := encodeWSFrame(frame)
+			assert.Len(t, encoded, tt.expectedSize)
+		})
+	}
+}
+
+func TestStripExtensions(t *testing.T) {
+	t.Parallel()
+
+	h := &webSocketHandler{}
+
+	tests := []struct {
+		name          string
+		inputHeaders  []Header
+		expectRemoved bool
+	}{
+		{
+			name: "removes_extensions_header",
+			inputHeaders: []Header{
+				{Name: "Upgrade", Value: "websocket"},
+				{Name: "Connection", Value: "Upgrade"},
+				{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate"},
+				{Name: "Sec-WebSocket-Key", Value: "abc123"},
+			},
+			expectRemoved: true,
+		},
+		{
+			name: "no_extensions_header",
+			inputHeaders: []Header{
+				{Name: "Upgrade", Value: "websocket"},
+				{Name: "Connection", Value: "Upgrade"},
+				{Name: "Sec-WebSocket-Key", Value: "abc123"},
+			},
+			expectRemoved: false,
+		},
+		{
+			name: "multiple_extensions",
+			inputHeaders: []Header{
+				{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate; client_max_window_bits"},
+				{Name: "Upgrade", Value: "websocket"},
+			},
+			expectRemoved: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/ws",
+				Version: "HTTP/1.1",
+				Headers: make([]Header, len(tt.inputHeaders)),
+			}
+			copy(req.Headers, tt.inputHeaders)
+
+			h.stripExtensions(req)
+
+			// Check that Sec-WebSocket-Extensions is removed
+			hasExtensions := false
+			for _, hdr := range req.Headers {
+				if hdr.Name == "Sec-WebSocket-Extensions" {
+					hasExtensions = true
+					break
+				}
+			}
+
+			if tt.expectRemoved {
+				assert.False(t, hasExtensions, "extensions header should be removed")
+			}
+		})
+	}
+}
+
+func TestStripResponseExtensions(t *testing.T) {
+	t.Parallel()
+
+	h := &webSocketHandler{}
+
+	tests := []struct {
+		name          string
+		inputHeaders  []Header
+		expectRemoved bool
+	}{
+		{
+			name: "removes_extensions_from_response",
+			inputHeaders: []Header{
+				{Name: "Upgrade", Value: "websocket"},
+				{Name: "Connection", Value: "Upgrade"},
+				{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate"},
+				{Name: "Sec-WebSocket-Accept", Value: "hash123"},
+			},
+			expectRemoved: true,
+		},
+		{
+			name: "no_extensions_in_response",
+			inputHeaders: []Header{
+				{Name: "Upgrade", Value: "websocket"},
+				{Name: "Sec-WebSocket-Accept", Value: "hash123"},
+			},
+			expectRemoved: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &RawHTTP1Response{
+				Version:    "HTTP/1.1",
+				StatusCode: 101,
+				StatusText: "Switching Protocols",
+				Headers:    make([]Header, len(tt.inputHeaders)),
+			}
+			copy(resp.Headers, tt.inputHeaders)
+
+			h.stripResponseExtensions(resp)
+
+			hasExtensions := false
+			for _, hdr := range resp.Headers {
+				if hdr.Name == "Sec-WebSocket-Extensions" {
+					hasExtensions = true
+					break
+				}
+			}
+
+			if tt.expectRemoved {
+				assert.False(t, hasExtensions, "extensions header should be removed from response")
+			}
 		})
 	}
 }
