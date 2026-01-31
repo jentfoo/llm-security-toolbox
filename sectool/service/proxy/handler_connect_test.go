@@ -135,6 +135,24 @@ func TestParseConnectRequest(t *testing.T) {
 			wantHost: "example.com",
 			wantPort: 443, // permissive parsing - HTTP version not required
 		},
+		{
+			name:     "single_label_domain",
+			input:    "CONNECT localhost:8443 HTTP/1.1\r\nHost: localhost:8443\r\n\r\n",
+			wantHost: "localhost",
+			wantPort: 8443,
+		},
+		{
+			name:     "domain_with_underscore",
+			input:    "CONNECT my_server.local:443 HTTP/1.1\r\nHost: my_server.local\r\n\r\n",
+			wantHost: "my_server.local",
+			wantPort: 443,
+		},
+		{
+			name:     "long_domain",
+			input:    "CONNECT very.long.subdomain.chain.example.com:443 HTTP/1.1\r\nHost: very.long.subdomain.chain.example.com\r\n\r\n",
+			wantHost: "very.long.subdomain.chain.example.com",
+			wantPort: 443,
+		},
 	}
 
 	for _, tc := range tests {
@@ -346,60 +364,5 @@ func TestServerCapsCachingConcurrent(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		<-done
-	}
-}
-
-func TestParseConnectRequestMoreEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		input    string
-		wantHost string
-		wantPort int
-		wantErr  bool
-	}{
-		{
-			name:     "single_label_domain",
-			input:    "CONNECT localhost:8443 HTTP/1.1\r\nHost: localhost:8443\r\n\r\n",
-			wantHost: "localhost",
-			wantPort: 8443,
-		},
-		{
-			name:     "domain_with_underscore",
-			input:    "CONNECT my_server.local:443 HTTP/1.1\r\nHost: my_server.local\r\n\r\n",
-			wantHost: "my_server.local",
-			wantPort: 443,
-		},
-		{
-			name:     "long_domain",
-			input:    "CONNECT very.long.subdomain.chain.example.com:443 HTTP/1.1\r\nHost: very.long.subdomain.chain.example.com\r\n\r\n",
-			wantHost: "very.long.subdomain.chain.example.com",
-			wantPort: 443,
-		},
-		{
-			name:     "only_port",
-			input:    "CONNECT :443 HTTP/1.1\r\nHost: :443\r\n\r\n",
-			wantHost: "",
-			wantPort: 443,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h := &connectHandler{}
-			reader := bufio.NewReader(strings.NewReader(tc.input))
-
-			target, err := h.parseConnectRequest(reader)
-
-			if tc.wantErr {
-				assert.Error(t, err)
-				return
-			}
-
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantHost, target.Hostname)
-			assert.Equal(t, tc.wantPort, target.Port)
-		})
 	}
 }

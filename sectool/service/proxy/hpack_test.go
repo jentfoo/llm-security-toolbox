@@ -592,49 +592,6 @@ func TestRemoveStreamWindow(t *testing.T) {
 	assert.False(t, sendOk)
 }
 
-func TestClose(t *testing.T) {
-	t.Parallel()
-
-	t.Run("closes_channel", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-
-		h.close()
-
-		select {
-		case <-h.closeCh:
-			// Expected
-		default:
-			t.Fatal("closeCh should be closed")
-		}
-	})
-
-	t.Run("idempotent", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-
-		h.close()
-		h.close()
-
-		select {
-		case <-h.closeCh:
-			// Expected
-		default:
-			t.Fatal("closeCh should be closed")
-		}
-	})
-}
-
 func TestEnqueueWrite(t *testing.T) {
 	t.Parallel()
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,40 +170,6 @@ func TestShutdown(t *testing.T) {
 
 func TestServeEdgeCases(t *testing.T) {
 	t.Parallel()
-
-	t.Run("empty_connection_close", func(t *testing.T) {
-		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024)
-		require.NoError(t, err)
-		go func() { _ = proxy.Serve() }()
-		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
-
-		conn, err := net.Dial("tcp", proxy.Addr())
-		require.NoError(t, err)
-		// Close immediately without sending data
-		_ = conn.Close()
-
-		// Should not crash - just verify no panic
-		time.Sleep(50 * time.Millisecond)
-	})
-
-	t.Run("partial_request", func(t *testing.T) {
-		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024)
-		require.NoError(t, err)
-		go func() { _ = proxy.Serve() }()
-		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
-
-		conn, err := net.Dial("tcp", proxy.Addr())
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = conn.Close() })
-
-		// Send incomplete request
-		_, _ = conn.Write([]byte("GET / HTTP/1.1\r\n"))
-		// Close without completing headers
-		_ = conn.Close()
-
-		// Should not crash - just verify no panic
-		time.Sleep(50 * time.Millisecond)
-	})
 
 	t.Run("malformed_request_line", func(t *testing.T) {
 		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024)
@@ -421,51 +388,77 @@ func TestLargeRequestBody(t *testing.T) {
 func TestProxyServerRuleApplier(t *testing.T) {
 	t.Parallel()
 
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Original", "yes")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("original body"))
+	}))
+	t.Cleanup(testServer.Close)
+
 	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024)
 	require.NoError(t, err)
+	go func() { _ = proxy.Serve() }()
 	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
 
-	// Initially no rule applier
-	// Set a rule applier
-	mockApplier := &mockRuleApplier{}
-	proxy.SetRuleApplier(mockApplier)
+	applier := &trackingRuleApplier{}
+	proxy.SetRuleApplier(applier)
 
-	// Should not panic even if we set it multiple times
-	proxy.SetRuleApplier(mockApplier)
-	proxy.SetRuleApplier(nil)
+	proxyURL, _ := url.Parse("http://" + proxy.Addr())
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	req, _ := http.NewRequestWithContext(t.Context(), "POST", testServer.URL+"/test", bytes.NewReader([]byte("request body")))
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	time.Sleep(100 * time.Millisecond) // wait for async history write
+	assert.True(t, applier.requestCalled.Load(), "ApplyRequestRules should be invoked")
+	assert.True(t, applier.responseCalled.Load(), "ApplyResponseRules should be invoked")
 }
 
-type mockRuleApplier struct{}
+type trackingRuleApplier struct {
+	requestCalled  atomic.Bool
+	responseCalled atomic.Bool
+}
 
-func (m *mockRuleApplier) ApplyRequestRules(req *RawHTTP1Request) *RawHTTP1Request {
+func (t *trackingRuleApplier) ApplyRequestRules(req *RawHTTP1Request) *RawHTTP1Request {
+	t.requestCalled.Store(true)
 	return req
 }
 
-func (m *mockRuleApplier) ApplyResponseRules(resp *RawHTTP1Response) *RawHTTP1Response {
+func (t *trackingRuleApplier) ApplyResponseRules(resp *RawHTTP1Response) *RawHTTP1Response {
+	t.responseCalled.Store(true)
 	return resp
 }
 
-func (m *mockRuleApplier) ApplyH2RequestRules(req *H2RequestData) *H2RequestData {
+func (t *trackingRuleApplier) ApplyH2RequestRules(req *H2RequestData) *H2RequestData {
+	t.requestCalled.Store(true)
 	return req
 }
 
-func (m *mockRuleApplier) ApplyH2ResponseRules(resp *H2ResponseData) *H2ResponseData {
+func (t *trackingRuleApplier) ApplyH2ResponseRules(resp *H2ResponseData) *H2ResponseData {
+	t.responseCalled.Store(true)
 	return resp
 }
 
-func (m *mockRuleApplier) ApplyRequestBodyOnlyRules(body []byte) []byte {
+func (t *trackingRuleApplier) ApplyRequestBodyOnlyRules(body []byte) []byte {
 	return body
 }
 
-func (m *mockRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers []Header) []byte {
+func (t *trackingRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers []Header) []byte {
 	return body
 }
 
-func (m *mockRuleApplier) ApplyWSRules(payload []byte, direction string) []byte {
+func (t *trackingRuleApplier) ApplyWSRules(payload []byte, direction string) []byte {
 	return payload
 }
 
-func (m *mockRuleApplier) HasBodyRules(isRequest bool) bool {
+func (t *trackingRuleApplier) HasBodyRules(isRequest bool) bool {
 	return false
 }
 

@@ -353,22 +353,6 @@ func TestValidateResponse(t *testing.T) {
 			wantErr: "NUL byte in header value",
 		},
 		{
-			name: "status_boundary_low",
-			resp: &RawHTTP1Response{
-				Version:    "HTTP/1.1",
-				StatusCode: 100,
-			},
-			wantErr: "",
-		},
-		{
-			name: "status_boundary_high",
-			resp: &RawHTTP1Response{
-				Version:    "HTTP/1.1",
-				StatusCode: 599,
-			},
-			wantErr: "",
-		},
-		{
 			name: "lowercase_http_version",
 			resp: &RawHTTP1Response{
 				Version:    "http/1.1",

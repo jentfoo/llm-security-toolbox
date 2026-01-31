@@ -502,6 +502,36 @@ func TestEncodeWSFrame_roundtrip(t *testing.T) {
 				payload: []byte("Hello, masked frame!"),
 			},
 		},
+		{
+			name: "continuation_frame",
+			frame: &wsFrame{
+				fin:     false,
+				rsv:     0,
+				opcode:  0,
+				masked:  false,
+				payload: []byte("cont"),
+			},
+		},
+		{
+			name: "empty_payload",
+			frame: &wsFrame{
+				fin:     true,
+				rsv:     0,
+				opcode:  1,
+				masked:  false,
+				payload: []byte{},
+			},
+		},
+		{
+			name: "close_frame",
+			frame: &wsFrame{
+				fin:     true,
+				rsv:     0,
+				opcode:  8,
+				masked:  false,
+				payload: []byte{0x03, 0xe8},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -514,30 +544,6 @@ func TestEncodeWSFrame_roundtrip(t *testing.T) {
 			assert.Equal(t, tt.frame.rsv, decoded.rsv)
 			assert.Equal(t, tt.frame.opcode, decoded.opcode)
 			assert.Equal(t, tt.frame.payload, decoded.payload)
-		})
-	}
-}
-
-func TestOpcodeToString(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		opcode byte
-		want   string
-	}{
-		{0, "continuation"},
-		{1, "text"},
-		{2, "binary"},
-		{8, "close"},
-		{9, "ping"},
-		{10, "pong"},
-		{3, "unknown-3"},
-		{15, "unknown-15"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			assert.Equal(t, tt.want, opcodeToString(tt.opcode))
 		})
 	}
 }
@@ -727,49 +733,6 @@ func TestOpcodeToStringAll(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
 			assert.Equal(t, tt.want, opcodeToString(tt.opcode))
-		})
-	}
-}
-
-func TestWSFrameRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		fin     bool
-		rsv     byte
-		opcode  byte
-		payload []byte
-		masked  bool
-	}{
-		{"text_unmasked", true, 0, 1, []byte("Hello"), false},
-		{"binary_masked", true, 0, 2, []byte{0x01, 0x02, 0x03}, true},
-		{"continuation_frame", false, 0, 0, []byte("cont"), false},
-		{"empty_payload", true, 0, 1, []byte{}, false},
-		{"close_frame", true, 0, 8, []byte{0x03, 0xe8}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			frame := &wsFrame{
-				fin:     tt.fin,
-				rsv:     tt.rsv,
-				opcode:  tt.opcode,
-				payload: tt.payload,
-				masked:  tt.masked,
-			}
-			if tt.masked {
-				frame.mask = [4]byte{0x11, 0x22, 0x33, 0x44}
-			}
-			encoded := encodeWSFrame(frame)
-
-			decoded, err := readWSFrame(bytes.NewReader(encoded))
-			require.NoError(t, err)
-
-			assert.Equal(t, tt.fin, decoded.fin)
-			assert.Equal(t, tt.rsv, decoded.rsv)
-			assert.Equal(t, tt.opcode, decoded.opcode)
-			assert.Equal(t, tt.payload, decoded.payload)
 		})
 	}
 }

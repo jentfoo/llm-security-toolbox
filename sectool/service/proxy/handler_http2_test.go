@@ -72,25 +72,6 @@ func TestStreamTracker(t *testing.T) {
 		tracker.remove(999) // should not panic
 		assert.Empty(t, tracker.all())
 	})
-
-	t.Run("concurrent_access", func(t *testing.T) {
-		tracker := newStreamTracker()
-		done := make(chan bool)
-
-		// Concurrent getOrCreate
-		for i := 0; i < 10; i++ {
-			go func(id uint32) {
-				_ = tracker.getOrCreate(id)
-				done <- true
-			}(uint32(i))
-		}
-
-		for i := 0; i < 10; i++ {
-			<-done
-		}
-
-		assert.Len(t, tracker.all(), 10)
-	})
 }
 
 func TestH2StreamInitialState(t *testing.T) {
@@ -933,35 +914,6 @@ func TestFlowControlError(t *testing.T) {
 	})
 }
 
-func TestStreamStateTransitionsAll(t *testing.T) {
-	t.Parallel()
-
-	tracker := newStreamTracker()
-	stream := tracker.getOrCreate(1)
-
-	// Initial state should be open
-	assert.Equal(t, streamOpen, stream.state)
-
-	// Transition to half-closed (local)
-	stream.mu.Lock()
-	stream.state = streamHalfClosedLocal
-	stream.mu.Unlock()
-	assert.Equal(t, streamHalfClosedLocal, stream.state)
-
-	// Transition to half-closed (remote)
-	stream2 := tracker.getOrCreate(3)
-	stream2.mu.Lock()
-	stream2.state = streamHalfClosedRemote
-	stream2.mu.Unlock()
-	assert.Equal(t, streamHalfClosedRemote, stream2.state)
-
-	// Transition to closed
-	stream.mu.Lock()
-	stream.state = streamClosed
-	stream.mu.Unlock()
-	assert.Equal(t, streamClosed, stream.state)
-}
-
 func TestStreamTrackerConcurrentOperations(t *testing.T) {
 	t.Parallel()
 
@@ -993,27 +945,4 @@ func TestStreamTrackerConcurrentOperations(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		<-done
 	}
-}
-
-func TestH2StreamBufferGrowth(t *testing.T) {
-	t.Parallel()
-
-	tracker := newStreamTracker()
-	stream := tracker.getOrCreate(1)
-
-	// Write increasingly larger data
-	for i := 0; i < 10; i++ {
-		data := make([]byte, 1024*(i+1))
-		for j := range data {
-			data[j] = byte('A' + j%26)
-		}
-		stream.reqBodyFull.Write(data)
-	}
-
-	// Verify total size
-	expectedSize := 0
-	for i := 0; i < 10; i++ {
-		expectedSize += 1024 * (i + 1)
-	}
-	assert.Equal(t, expectedSize, stream.reqBodyFull.Len())
 }
