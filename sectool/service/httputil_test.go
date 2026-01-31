@@ -516,7 +516,7 @@ func TestModifyRequestLine(t *testing.T) {
 			opts:     &PathQueryOpts{Method: "PUT"},
 			expected: "PUT /api/data HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\ntest",
 		},
-		// Proxy-form URL tests (what goproxy captures when client uses HTTP proxy)
+		// Proxy-form URL tests (what proxy captures when client uses HTTP proxy)
 		{
 			name:     "proxy_form_remove_query",
 			input:    []byte("GET http://127.0.0.1:8080/path?foo=bar&remove=this HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n"),

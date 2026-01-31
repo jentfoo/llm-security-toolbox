@@ -746,12 +746,13 @@ func parseTarget(raw []byte, targetOverride string) (host string, port int, uses
 		if p, err := strconv.Atoi(host[idx+1:]); err == nil {
 			port = p
 			host = host[:idx]
-			usesHTTPS = port != 80
+			// Port 443 implies HTTPS, port 80 implies HTTP, others default to HTTP
+			usesHTTPS = port == 443
 			return
 		}
 	}
 
-	// Default to HTTPS
+	// Default to HTTPS when no port is specified (common for web traffic)
 	port = 443
 	usesHTTPS = true
 	return
@@ -921,10 +922,7 @@ type RequestSender func(ctx context.Context, req SendRequestInput, start time.Ti
 
 // FollowRedirects sends a request and follows redirects up to maxRedirects times.
 // Uses sender to perform individual requests, allowing different backend implementations.
-//
-// TODO: Remove this function once GoProxyBackend is removed.
-// The wire-fidelity sender in proxy/sender.go has its own SendWithRedirects that
-// should be used instead (it has identical redirect behavior but preserves header order).
+// Used by BurpBackend which doesn't use the wire-fidelity sender.
 func FollowRedirects(ctx context.Context, req SendRequestInput, start time.Time, maxRedirects int, sender RequestSender) (*SendRequestResult, error) {
 	currentReq := req
 	currentPath := extractRequestPath(currentReq.RawRequest)

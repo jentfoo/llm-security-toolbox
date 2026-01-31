@@ -128,7 +128,8 @@ func TestHistoryEntry_FormatH2Request(t *testing.T) {
 	}
 
 	formatted := entry.FormatRequest()
-	assert.Contains(t, string(formatted), "GET /test HTTP/2")
+	// FormatRequest uses HTTP/1.1 for parser compatibility; actual protocol is tracked in entry.Protocol
+	assert.Contains(t, string(formatted), "GET /test HTTP/1.1")
 	assert.Contains(t, string(formatted), "host: example.com")
 	assert.Contains(t, string(formatted), "user-agent: test/1.0")
 	assert.Contains(t, string(formatted), "request body")

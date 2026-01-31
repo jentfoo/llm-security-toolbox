@@ -259,15 +259,17 @@ func (e *HistoryEntry) GetResponseHeader(name string) string {
 	return ""
 }
 
-// formatH2Request formats an H2 request for display.
+// formatH2Request formats an H2 request as HTTP/1.1 text for display and replay.
+// Uses HTTP/1.1 version in the request line so it can be parsed by the standard
+// HTTP/1.1 parser. The actual protocol ("h2") is tracked separately in HistoryEntry.Protocol.
 func formatH2Request(req *H2RequestData) []byte {
 	var buf bytes.Buffer
 
-	// Request line
+	// Request line - use HTTP/1.1 for parser compatibility; actual protocol tracked separately
 	buf.WriteString(req.Method)
 	buf.WriteByte(' ')
 	buf.WriteString(req.Path)
-	buf.WriteString(" HTTP/2\r\n")
+	buf.WriteString(" HTTP/1.1\r\n")
 
 	// Host from authority
 	buf.WriteString("host: ")

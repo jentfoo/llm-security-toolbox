@@ -661,3 +661,390 @@ func TestSender_JSONModifier(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(receivedBody), "modified")
 }
+
+// newH2TestServer creates an HTTP/2-enabled TLS test server.
+func newH2TestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	return server
+}
+
+// newH1OnlyTLSServer creates a TLS server that only supports HTTP/1.1.
+func newH1OnlyTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = false
+	server.StartTLS()
+	return server
+}
+
+func TestSender_Send_h2_success(t *testing.T) {
+	t.Parallel()
+
+	var receivedMethod, receivedPath, receivedProto string
+	testServer := newH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		receivedPath = r.URL.Path
+		receivedProto = r.Proto
+		w.Header().Set("X-Custom", "h2-response")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("H2 OK"))
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	rawReq := []byte("GET /h2-test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+	result, err := sender.Send(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  serverURL.Hostname(),
+			Port:      port,
+			UsesHTTPS: true,
+		},
+		Protocol: "h2",
+		Timeout:  10 * time.Second,
+		Force:    true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "GET", receivedMethod)
+	assert.Equal(t, "/h2-test", receivedPath)
+	assert.Equal(t, "HTTP/2.0", receivedProto)
+	assert.Equal(t, 200, result.Response.StatusCode)
+	assert.Equal(t, "h2-response", result.Response.GetHeader("X-Custom"))
+	assert.Equal(t, []byte("H2 OK"), result.Response.Body)
+}
+
+func TestSender_Send_h2_with_body(t *testing.T) {
+	t.Parallel()
+
+	var receivedBody []byte
+	testServer := newH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	rawReq := []byte("POST /api HTTP/1.1\r\nHost: " + serverURL.Host + "\r\nContent-Length: 13\r\n\r\nH2 body test!")
+	result, err := sender.Send(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  serverURL.Hostname(),
+			Port:      port,
+			UsesHTTPS: true,
+		},
+		Protocol: "h2",
+		Timeout:  10 * time.Second,
+		Force:    true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 200, result.Response.StatusCode)
+	assert.Equal(t, []byte("H2 body test!"), receivedBody)
+}
+
+func TestSender_Send_h2_mismatch_errors(t *testing.T) {
+	t.Parallel()
+
+	// Server that only supports HTTP/1.1 (no H2)
+	testServer := newH1OnlyTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	rawReq := []byte("GET / HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+	_, err := sender.Send(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  serverURL.Hostname(),
+			Port:      port,
+			UsesHTTPS: true,
+		},
+		Protocol: "h2",
+		Timeout:  10 * time.Second,
+		Force:    true,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server does not support HTTP/2")
+	assert.Contains(t, err.Error(), "replay as HTTP/1.1")
+}
+
+func TestSender_Send_h2_requires_https(t *testing.T) {
+	t.Parallel()
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	rawReq := []byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	_, err := sender.Send(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  "localhost",
+			Port:      80,
+			UsesHTTPS: false, // HTTP, not HTTPS
+		},
+		Protocol: "h2",
+		Timeout:  10 * time.Second,
+		Force:    true,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP/2 requires HTTPS")
+}
+
+func TestSender_Send_h2_filters_forbidden_headers(t *testing.T) {
+	t.Parallel()
+
+	var receivedHeaders http.Header
+	testServer := newH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	// Include headers that should be filtered per RFC 9113
+	rawReq := []byte("GET / HTTP/1.1\r\n" +
+		"Host: " + serverURL.Host + "\r\n" +
+		"Connection: keep-alive\r\n" +
+		"Keep-Alive: timeout=5\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Proxy-Connection: keep-alive\r\n" +
+		"TE: gzip\r\n" +
+		"X-Custom: allowed\r\n" +
+		"\r\n")
+
+	_, err := sender.Send(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  serverURL.Hostname(),
+			Port:      port,
+			UsesHTTPS: true,
+		},
+		Protocol: "h2",
+		Timeout:  10 * time.Second,
+		Force:    true,
+	})
+
+	require.NoError(t, err)
+	// These should be filtered
+	assert.Empty(t, receivedHeaders.Get("Connection"))
+	assert.Empty(t, receivedHeaders.Get("Keep-Alive"))
+	assert.Empty(t, receivedHeaders.Get("Transfer-Encoding"))
+	assert.Empty(t, receivedHeaders.Get("Upgrade"))
+	assert.Empty(t, receivedHeaders.Get("Proxy-Connection"))
+	assert.Empty(t, receivedHeaders.Get("TE")) // TE with non-trailers value should be filtered
+	// This should be preserved
+	assert.Equal(t, "allowed", receivedHeaders.Get("X-Custom"))
+}
+
+func TestSender_Send_h2_modifications_apply(t *testing.T) {
+	t.Parallel()
+
+	var receivedHeaders http.Header
+	var receivedBody []byte
+	var receivedMethod string
+	testServer := newH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		receivedHeaders = r.Header
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	rawReq := []byte("GET /original HTTP/1.1\r\n" +
+		"Host: " + serverURL.Host + "\r\n" +
+		"X-Remove: should-be-gone\r\n" +
+		"\r\n")
+
+	_, err := sender.Send(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  serverURL.Hostname(),
+			Port:      port,
+			UsesHTTPS: true,
+		},
+		Protocol: "h2",
+		Modifications: &Modifications{
+			Method:        "POST",
+			SetHeaders:    map[string]string{"X-Added": "new-value"},
+			RemoveHeaders: []string{"X-Remove"},
+			Body:          []byte("modified body"),
+		},
+		Timeout: 10 * time.Second,
+		Force:   true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "POST", receivedMethod)
+	assert.Equal(t, "new-value", receivedHeaders.Get("X-Added"))
+	assert.Empty(t, receivedHeaders.Get("X-Remove"))
+	assert.Equal(t, []byte("modified body"), receivedBody)
+}
+
+func TestSender_SendWithRedirects_h2_preserves_protocol(t *testing.T) {
+	t.Parallel()
+
+	redirectCount := 0
+	testServer := newH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			redirectCount++
+			w.Header().Set("Location", "/final")
+			w.WriteHeader(302)
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("H2 final"))
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	rawReq := []byte("GET /redirect HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+	result, err := sender.SendWithRedirects(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  serverURL.Hostname(),
+			Port:      port,
+			UsesHTTPS: true,
+		},
+		Protocol: "h2",
+		Timeout:  10 * time.Second,
+		Force:    true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 200, result.Response.StatusCode)
+	assert.Equal(t, []byte("H2 final"), result.Response.Body)
+	assert.Equal(t, 1, redirectCount)
+}
+
+func TestSender_Send_h2_large_body(t *testing.T) {
+	t.Parallel()
+
+	// Create a body larger than the default initial flow control window (65535 bytes)
+	// This forces flow control handling and WINDOW_UPDATE frame reading
+	largeBody := make([]byte, 100*1024) // 100KB
+	for i := range largeBody {
+		largeBody[i] = byte('A' + (i % 26))
+	}
+
+	var receivedBody []byte
+	testServer := newH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("large body received"))
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	rawReq := []byte("POST /upload HTTP/1.1\r\nHost: " + serverURL.Host + "\r\nContent-Length: " +
+		strconv.Itoa(len(largeBody)) + "\r\n\r\n")
+	rawReq = append(rawReq, largeBody...)
+
+	result, err := sender.Send(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  serverURL.Hostname(),
+			Port:      port,
+			UsesHTTPS: true,
+		},
+		Protocol: "h2",
+		Timeout:  30 * time.Second,
+		Force:    true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 200, result.Response.StatusCode)
+	assert.Equal(t, largeBody, receivedBody)
+	assert.Equal(t, []byte("large body received"), result.Response.Body)
+}
+
+func TestSender_Send_h2_early_error_response(t *testing.T) {
+	t.Parallel()
+
+	// Server that immediately rejects with 401 before reading the full body
+	// This simulates auth failures or request validation errors
+	testServer := newH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Don't read the body - respond immediately with error
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte("Unauthorized"))
+	}))
+	t.Cleanup(testServer.Close)
+
+	serverURL, _ := url.Parse(testServer.URL)
+	port, _ := strconv.Atoi(serverURL.Port())
+
+	// Large body that exceeds initial window - server should respond before we finish sending
+	largeBody := make([]byte, 100*1024) // 100KB
+	for i := range largeBody {
+		largeBody[i] = byte('X')
+	}
+
+	sender := &Sender{}
+	ctx := context.Background()
+
+	rawReq := []byte("POST /api HTTP/1.1\r\nHost: " + serverURL.Host + "\r\nContent-Length: " +
+		strconv.Itoa(len(largeBody)) + "\r\n\r\n")
+	rawReq = append(rawReq, largeBody...)
+
+	result, err := sender.Send(ctx, SendOptions{
+		RawRequest: rawReq,
+		Target: Target{
+			Hostname:  serverURL.Hostname(),
+			Port:      port,
+			UsesHTTPS: true,
+		},
+		Protocol: "h2",
+		Timeout:  30 * time.Second,
+		Force:    true,
+	})
+
+	// Should receive the 401 response, not hang or lose frames
+	require.NoError(t, err)
+	assert.Equal(t, 401, result.Response.StatusCode)
+	assert.Equal(t, "Bearer", result.Response.GetHeader("WWW-Authenticate"))
+	assert.Equal(t, []byte("Unauthorized"), result.Response.Body)
+}

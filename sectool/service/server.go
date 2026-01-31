@@ -17,7 +17,10 @@ import (
 	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout = 10 * time.Second
+	caCertFile      = "ca.pem" // CA certificate filename in config directory
+)
 
 // Server is the sectool MCP server.
 type Server struct {
@@ -33,7 +36,7 @@ type Server struct {
 	mcpPort           int
 	mcpWorkflowMode   string
 	proxyPort         int  // resolved port for built-in proxy
-	usingBuiltinProxy bool // true if using goproxy instead of Burp
+	usingBuiltinProxy bool // true if using built-in proxy instead of Burp
 
 	// Runtime state
 	mcpServer *mcpServer
@@ -326,15 +329,8 @@ func (s *Server) printMCPConfig() {
 	_, _ = fmt.Fprintln(os.Stderr, "")
 	_, _ = fmt.Fprintln(os.Stderr, "================================================================================")
 	if s.usingBuiltinProxy {
-		var proxyAddr string
-		switch backend := s.httpBackend.(type) {
-		case *CustomProxyBackend:
-			proxyAddr = backend.Addr()
-		case *GoProxyBackend:
-			proxyAddr = backend.Addr()
-		}
-		if proxyAddr != "" {
-			s.printBuiltinProxyConfigAddr(proxyAddr)
+		if backend, ok := s.httpBackend.(*CustomProxyBackend); ok {
+			s.printBuiltinProxyConfigAddr(backend.Addr())
 			_, _ = fmt.Fprintln(os.Stderr, "")
 			_, _ = fmt.Fprintln(os.Stderr, "----------------------------------------------------------------")
 			_, _ = fmt.Fprintln(os.Stderr, "")

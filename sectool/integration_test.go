@@ -34,11 +34,11 @@ import (
 type httpBackendType string
 
 const (
-	backendBurp    httpBackendType = "burp"
-	backendGoProxy httpBackendType = "goproxy"
+	backendBurp   httpBackendType = "burp"
+	backendCustom httpBackendType = "custom"
 )
 
-var httpBackendTypes = []httpBackendType{backendBurp, backendGoProxy}
+var httpBackendTypes = []httpBackendType{backendBurp, backendCustom}
 
 // setupIntegrationEnv creates the MCP server with the specified backend and returns a connected client.
 // Skips if Burp is unavailable (for burp backend) or if running in short mode.
@@ -64,12 +64,17 @@ func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.C
 			WorkflowMode: service.WorkflowModeNone,
 		}
 
-	case backendGoProxy:
-		// Create goproxy backend and seed with test data
+	case backendCustom:
+		// Create custom backend and seed with test data
 		configDir := t.TempDir()
-		backend, err := service.NewGoProxyBackend(0, configDir)
+		backend, err := service.NewCustomProxyBackend(0, configDir, 0)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
+
+		// Start proxy server in background
+		go func() { _ = backend.Serve() }()
+		// Wait for server to be ready
+		time.Sleep(50 * time.Millisecond)
 
 		seedProxyHistory(t, backend)
 		httpBackend = backend
@@ -103,10 +108,8 @@ func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.C
 	return client
 }
 
-// seedProxyHistory populates the goproxy backend with test traffic.
-//
-//nolint:staticcheck // GoProxyBackend is deprecated but still needs testing
-func seedProxyHistory(t *testing.T, backend *service.GoProxyBackend) {
+// seedProxyHistory populates the custom backend with test traffic.
+func seedProxyHistory(t *testing.T, backend *service.CustomProxyBackend) {
 	t.Helper()
 
 	// Create a local test server
@@ -342,8 +345,8 @@ func TestIntegration_ProxyGet(t *testing.T) {
 func TestIntegration_ProxyRules(t *testing.T) {
 	t.Parallel()
 
-	// only run on goproxy backend, burp will fail if config writes are not enabled
-	client := setupIntegrationEnv(t, backendGoProxy)
+	// only run on custom backend, burp will fail if config writes are not enabled
+	client := setupIntegrationEnv(t, backendCustom)
 	test := func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
 
@@ -587,11 +590,14 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 	}))
 	t.Cleanup(targetServer.Close)
 
-	// Setup goproxy backend
+	// Setup custom backend
 	configDir := t.TempDir()
-	backend, err := service.NewGoProxyBackend(0, configDir)
+	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
+	// Start proxy server in background
+	go func() { _ = backend.Serve() }()
+	time.Sleep(50 * time.Millisecond)
 
 	// Make request through proxy to seed history
 	proxyURL, err := url.Parse("http://" + backend.Addr())

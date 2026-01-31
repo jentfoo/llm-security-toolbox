@@ -46,10 +46,10 @@ This starts an MCP server on port 9119 with two endpoints:
 | Option | Description |
 |--------|-------------|
 | (default) | Auto-detect: tries Burp MCP first, falls back to built-in proxy |
-| `--proxy-port 8080` | Force built-in proxy on specified port (goproxy-based) |
+| `--proxy-port 8080` | Force built-in proxy on specified port |
 | `--burp` | Force Burp MCP (fails if unavailable) |
 
-The built-in proxy supports HTTPS interception via auto-generated CA certificates, match/replace rules, and WebSocket proxying. To use HTTPS interception, install the generated CA certificate from `~/.sectool/ca.crt`.
+The built-in proxy supports HTTPS interception via auto-generated CA certificates, match/replace rules, and WebSocket proxying. To use HTTPS interception, install the generated CA certificate from `~/.sectool/ca.pem`.
 
 **Burp Suite setup (optional):** To use Burp Suite instead of the built-in proxy, install [Burp Suite Community](https://portswigger.net/burp/communitydownload) and add the MCP extension from the BApp Store. Start Burp and ensure the MCP server is running on `http://127.0.0.1:9876/sse`. By default sectool will auto-detect and prefer Burp when available.
 
@@ -73,7 +73,7 @@ Agents generally want to do everything for you (sometimes poorly), or step you t
 
 ### 3. Configure your browser (built-in proxy only)
 
-When using the built-in proxy, configure your browser to use `127.0.0.1:8080` (or your specified `--proxy-port`). For HTTPS interception, install the CA certificate from `~/.sectool/ca.crt`.
+When using the built-in proxy, configure your browser to use `127.0.0.1:8080` (or your specified `--proxy-port`). For HTTPS interception, install the CA certificate from `~/.sectool/ca.pem`.
 
 If using Burp Suite, configure your browser through Burp's proxy settings instead.
 

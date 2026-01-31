@@ -7,7 +7,7 @@ Key characteristics:
 - CLI is a thin client over MCP for human interaction
 - Global config at `~/.sectool/config.json` (auto-created on first run)
 - All output in markdown format for LLM consumption
-- Pluggable backend architecture (built-in goproxy or Burp MCP for HTTP, Interactsh for OAST, Colly for crawling)
+- Pluggable backend architecture (custom built-in proxy or Burp MCP for HTTP, Interactsh for OAST, Colly for crawling)
 
 ## Build Commands
 
@@ -51,13 +51,22 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/mcp_encode.go` - Encode tool handlers (url, base64, html)
 - `sectool/service/flags.go` - MCP server flag parsing (`--port`, `--workflow`, `--config`)
 - `sectool/service/backend.go` - HttpBackend, OastBackend, CrawlerBackend interfaces
-- `sectool/service/backend_http_builtin.go` - Built-in goproxy implementation of HttpBackend
+- `sectool/service/backend_http_custom.go` - Custom built-in proxy implementation of HttpBackend
 - `sectool/service/backend_http_burp.go` - Burp MCP implementation of HttpBackend
 - `sectool/service/backend_oast_interactsh.go` - Interactsh implementation of OastBackend
 - `sectool/service/backend_crawler_colly.go` - Colly-based crawler implementation
 - `sectool/service/httputil.go` - HTTP request/response parsing utilities
 - `sectool/service/jsonutil.go` - JSON field modification utilities
 - `sectool/service/types.go` - Service-specific request and internal types
+
+### Proxy Package
+
+- `sectool/service/proxy/sender.go` - HTTP/1.1 and HTTP/2 request sender with TLS/ALPN support
+- `sectool/service/proxy/server.go` - MITM proxy server handling HTTP and HTTPS tunneling
+- `sectool/service/proxy/history.go` - In-memory proxy history storage with offset-based pagination
+- `sectool/service/proxy/cert.go` - Dynamic TLS certificate generation and caching
+- `sectool/service/proxy/handler_http2.go` - HTTP/2 MITM connection handler
+- `sectool/service/proxy/types.go` - Proxy-specific types (Target, Modifications, RawHTTP1Request/Response)
 
 ### Burp MCP Client
 

@@ -79,6 +79,7 @@ type ProxyEntry struct {
 	Request  string `json:"request"`  // Raw HTTP request
 	Response string `json:"response"` // Raw HTTP response
 	Notes    string `json:"notes"`    // User annotations
+	Protocol string `json:"protocol"` // "http/1.1" or "h2" (empty defaults to http/1.1)
 }
 
 // Target specifies the destination for a request.
@@ -92,6 +93,10 @@ type SendRequestInput struct {
 	FollowRedirects bool
 	Timeout         time.Duration
 	Force           bool // Skip validation for protocol-level tests
+
+	// Protocol from the original history entry ("http/1.1" or "h2")
+	// Empty defaults to HTTP/1.1
+	Protocol string
 }
 
 // SendRequestResult contains the response from a sent request.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -88,6 +89,7 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 
 	// Try proxy flowStore first, then crawler backend
 	var rawRequest []byte
+	var httpProtocol string // "http/1.1", "h2", or empty (defaults to http/1.1)
 	if entry, ok := m.service.flowStore.Lookup(flowID); ok {
 		proxyEntries, err := m.service.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)
 		if err != nil {
@@ -97,8 +99,10 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 			return errorResult("flow not found in proxy history"), nil
 		}
 		rawRequest = []byte(proxyEntries[0].Request)
+		httpProtocol = proxyEntries[0].Protocol
 	} else if flow, err := m.service.crawlerBackend.GetFlow(ctx, flowID); err == nil && flow != nil {
 		rawRequest = flow.Request
+		// Crawler uses HTTP/1.1
 	} else {
 		return errorResult("flow_id not found: run proxy_poll or crawl_poll to see available flows"), nil
 	}
@@ -152,7 +156,18 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		}
 	}
 
-	host, port, usesHTTPS := parseTarget(rawRequest, req.GetString("target", ""))
+	targetOverride := req.GetString("target", "")
+	host, port, usesHTTPS := parseTarget(rawRequest, targetOverride)
+
+	// HTTP/2 requires TLS.
+	// If replaying an H2 request and user explicitly specified http://, return error.
+	// Otherwise force HTTPS (handles non-443 ports where parseTarget can't infer scheme).
+	if httpProtocol == "h2" {
+		if targetOverride != "" && strings.HasPrefix(strings.ToLower(targetOverride), "http://") {
+			return errorResult("cannot replay HTTP/2 request to http:// target: HTTP/2 requires TLS. To replay as HTTP/1.1, use a flow captured as HTTP/1.1 or manually construct the request."), nil
+		}
+		usesHTTPS = true
+	}
 
 	replayID := ids.Generate(ids.DefaultLength)
 
@@ -181,6 +196,7 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		FollowRedirects: req.GetBool("follow_redirects", false),
 		Timeout:         timeout,
 		Force:           req.GetBool("force", false),
+		Protocol:        httpProtocol,
 	}
 
 	result, err := m.service.httpBackend.SendRequest(ctx, "sectool-"+replayID, sendInput)

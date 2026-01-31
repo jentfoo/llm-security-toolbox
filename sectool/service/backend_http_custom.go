@@ -19,10 +19,8 @@ import (
 )
 
 // CustomProxyBackend implements HttpBackend using the custom proxy.
-// This backend provides wire-level fidelity for security testing.
-//
-// Note: This is the replacement for GoProxyBackend. It is built in Phase 3
-// but does not become the default until Phase 4 achieves feature parity.
+// This backend provides wire-level fidelity for security testing including
+// HTTP/1.1 and HTTP/2 support with header order preservation.
 type CustomProxyBackend struct {
 	server *proxy.ProxyServer
 
@@ -101,6 +99,7 @@ func (b *CustomProxyBackend) GetProxyHistory(ctx context.Context, count int, off
 		result = append(result, ProxyEntry{
 			Request:  reqStr,
 			Response: respStr,
+			Protocol: entry.Protocol,
 		})
 	}
 
@@ -112,10 +111,14 @@ func (b *CustomProxyBackend) SendRequest(ctx context.Context, name string, req S
 	if req.Target.UsesHTTPS {
 		scheme = schemeHTTPS
 	}
-	log.Printf("custom: sending request %s to %s://%s:%d (follow_redirects=%v)",
-		name, scheme, req.Target.Hostname, req.Target.Port, req.FollowRedirects)
+	protocol := req.Protocol
+	if protocol == "" {
+		protocol = "http/1.1"
+	}
+	log.Printf("custom: sending request %s to %s://%s:%d (protocol=%s, follow_redirects=%v)",
+		name, scheme, req.Target.Hostname, req.Target.Port, protocol, req.FollowRedirects)
 
-	// Build send options
+	// Build send options using the defaulted protocol for consistency with logging
 	opts := proxy.SendOptions{
 		RawRequest: req.RawRequest,
 		Target: proxy.Target{
@@ -123,8 +126,9 @@ func (b *CustomProxyBackend) SendRequest(ctx context.Context, name string, req S
 			Port:      req.Target.Port,
 			UsesHTTPS: req.Target.UsesHTTPS,
 		},
-		Force:   req.Force,
-		Timeout: req.Timeout,
+		Force:    req.Force,
+		Timeout:  req.Timeout,
+		Protocol: protocol,
 	}
 
 	// Create sender with JSON modifier
