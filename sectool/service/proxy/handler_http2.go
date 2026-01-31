@@ -188,6 +188,14 @@ func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls
 	proxyCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Close connections when context is cancelled to unblock blocking reads.
+	// ReadFrame doesn't accept context, so closing is the only way to interrupt it.
+	go func() {
+		<-ctx.Done()
+		_ = clientConn.Close()
+		_ = upstreamConn.Close()
+	}()
+
 	proxy := &h2Proxy{
 		handler:  h,
 		client:   newH2Conn(clientConn),
@@ -357,9 +365,6 @@ func (p *h2Proxy) writeSettingsAck(conn net.Conn) error {
 func (p *h2Proxy) readFrames(fromClient bool) {
 	defer p.wg.Done()
 	defer p.cancel()
-	// Close both connections to unblock the other reader goroutine
-	defer func() { _ = p.client.conn.Close() }()
-	defer func() { _ = p.upstream.conn.Close() }()
 
 	var src, dst *h2Conn
 	var headerBuf *bytes.Buffer

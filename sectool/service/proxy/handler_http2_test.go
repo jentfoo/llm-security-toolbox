@@ -635,7 +635,7 @@ func TestH2ConnFlowCtrlWait(t *testing.T) {
 	})
 }
 
-func TestHTTP2ProxyEndToEnd(t *testing.T) { // TODO - never completes
+func TestHTTP2ProxyEndToEnd(t *testing.T) {
 	t.Parallel()
 
 	testServer := newHTTP2TestServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -693,7 +693,7 @@ func TestHTTP2ProxyEndToEnd(t *testing.T) { // TODO - never completes
 	assert.Contains(t, string(entry.H2Response.Body), "Hello from HTTP/2 server")
 }
 
-func TestHTTP2ProxyHeaderRules(t *testing.T) { // TODO - never completes
+func TestHTTP2ProxyHeaderRules(t *testing.T) {
 	t.Parallel()
 
 	var receivedHeader string

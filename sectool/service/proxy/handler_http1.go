@@ -232,6 +232,14 @@ func (h *http1Handler) storeEntry(req *RawHTTP1Request, resp *RawHTTP1Response, 
 // Loops handling request/response pairs until connection closes.
 // target is needed for WebSocket upgrade detection (wss://).
 func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader *bufio.Reader, upstreamReader *bufio.Reader, target *Target) {
+	// Close connections when context is cancelled to unblock blocking reads.
+	// parseRequest doesn't accept context, so closing is the only way to interrupt it.
+	go func() {
+		<-ctx.Done()
+		_ = clientConn.Close()
+		_ = upstreamConn.Close()
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():

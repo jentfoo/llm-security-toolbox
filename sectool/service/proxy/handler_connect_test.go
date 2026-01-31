@@ -111,7 +111,7 @@ func TestHandle(t *testing.T) {
 		assert.Contains(t, line, "200 Connection Established")
 	})
 
-	t.Run("https_end_to_end", func(t *testing.T) { // TODO - never completes
+	t.Run("https_end_to_end", func(t *testing.T) {
 		testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Test-Response", "success")
 			w.WriteHeader(200)
