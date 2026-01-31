@@ -391,6 +391,79 @@ func TestParseRequest(t *testing.T) {
 		// Non-numeric content-length should be skipped
 		assert.Empty(t, req.Body)
 	})
+
+	// edge cases
+	t.Run("asterisk_form_url", func(t *testing.T) {
+		input := "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, "OPTIONS", req.Method)
+		assert.Equal(t, "*", req.Path)
+	})
+
+	t.Run("connect_authority_form", func(t *testing.T) {
+		input := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, "CONNECT", req.Method)
+		assert.Equal(t, "example.com:443", req.Path)
+	})
+
+	t.Run("multiple_question_marks", func(t *testing.T) {
+		input := "GET /search?q=what?really? HTTP/1.1\r\nHost: example.com\r\n\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, "/search", req.Path)
+		assert.Equal(t, "q=what?really?", req.Query)
+	})
+
+	t.Run("header_with_multiple_colons", func(t *testing.T) {
+		input := "GET / HTTP/1.1\r\nAuthorization: Bearer: token: value\r\n\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, "Bearer: token: value", req.GetHeader("Authorization"))
+	})
+
+	t.Run("header_only_colon", func(t *testing.T) {
+		input := "GET / HTTP/1.1\r\n:\r\n\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Len(t, req.Headers, 1)
+		assert.Empty(t, req.Headers[0].Name)
+	})
+
+	t.Run("header_value_leading_tab", func(t *testing.T) {
+		input := "GET / HTTP/1.1\r\nHeader:\tvalue\r\n\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, "value", req.GetHeader("Header"))
+	})
+
+	t.Run("https_proxy_form", func(t *testing.T) {
+		input := "GET https://example.com/path?q=1 HTTP/1.1\r\nHost: proxy.local\r\n\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, "https://example.com/path", req.Path)
+		assert.Equal(t, "q=1", req.Query)
+	})
+
+	t.Run("content_length_zero_explicit", func(t *testing.T) {
+		input := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Empty(t, req.Body)
+	})
+
+	t.Run("many_headers", func(t *testing.T) {
+		var headers strings.Builder
+		for i := 0; i < 100; i++ {
+			headers.WriteString("X-Header-" + string(rune('A'+i%26)) + ": value\r\n")
+		}
+		input := "GET / HTTP/1.1\r\n" + headers.String() + "\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Len(t, req.Headers, 100)
+	})
 }
 
 func TestParseResponse(t *testing.T) {
@@ -540,6 +613,63 @@ func TestParseResponse(t *testing.T) {
 			}
 		})
 	}
+
+	// edge cases
+	t.Run("status_leading_zeros", func(t *testing.T) {
+		input := "HTTP/1.1 0200 OK\r\n\r\n"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		assert.Equal(t, 200, resp.StatusCode)
+	})
+
+	t.Run("1xx_status_no_body", func(t *testing.T) {
+		tests := []struct {
+			input string
+			code  int
+		}{
+			{"HTTP/1.1 100 Continue\r\n\r\n", 100},
+			{"HTTP/1.1 101 Switching Protocols\r\n\r\n", 101},
+			{"HTTP/1.1 102 Processing\r\n\r\n", 102},
+			{"HTTP/1.1 103 Early Hints\r\n\r\n", 103},
+		}
+		for _, tt := range tests {
+			resp, err := parseResponse(strings.NewReader(tt.input), "GET")
+			require.NoError(t, err)
+			assert.Equal(t, tt.code, resp.StatusCode)
+			assert.Empty(t, resp.Body)
+		}
+	})
+
+	t.Run("status_text_with_numbers", func(t *testing.T) {
+		input := "HTTP/1.1 404 Not Found 2024\r\n\r\n"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		assert.Equal(t, "Not Found 2024", resp.StatusText)
+	})
+
+	t.Run("non_chunked_transfer_encoding", func(t *testing.T) {
+		input := "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 5\r\n\r\nHello"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		// gzip TE should be treated as non-chunked, use Content-Length
+		assert.Equal(t, []byte("Hello"), resp.Body)
+	})
+
+	t.Run("multiple_transfer_encoding_headers", func(t *testing.T) {
+		input := "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n0\r\n\r\n"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		// GetHeader returns first header, so "gzip" is seen, not chunked
+		// Body is read until EOF as raw bytes
+		assert.Equal(t, []byte("5\r\nHello\r\n0\r\n\r\n"), resp.Body)
+	})
+
+	t.Run("extra_whitespace_in_status", func(t *testing.T) {
+		input := "HTTP/1.1  200  OK\r\nContent-Length: 5\r\n\r\nHello"
+		_, err := parseResponse(strings.NewReader(input), "GET")
+		// Parser rejects extra whitespace in status line
+		require.Error(t, err)
+	})
 }
 
 func TestRawHTTP1Request_Serialize(t *testing.T) {
@@ -849,6 +979,47 @@ func TestParseRequestLine(t *testing.T) {
 			input:   "INVALID",
 			wantErr: true,
 		},
+		// edge cases
+		{
+			name:        "asterisk_form",
+			input:       "OPTIONS * HTTP/1.1",
+			wantMethod:  "OPTIONS",
+			wantPath:    "*",
+			wantVersion: "HTTP/1.1",
+		},
+		{
+			name:        "authority_form",
+			input:       "CONNECT example.com:443 HTTP/1.1",
+			wantMethod:  "CONNECT",
+			wantPath:    "example.com:443",
+			wantVersion: "HTTP/1.1",
+		},
+		{
+			name:        "lowercase_method",
+			input:       "get / HTTP/1.1",
+			wantMethod:  "get",
+			wantPath:    "/",
+			wantVersion: "HTTP/1.1",
+		},
+		{
+			name:        "lowercase_http_version",
+			input:       "GET / http/1.1",
+			wantMethod:  "GET",
+			wantPath:    "/",
+			wantVersion: "http/1.1",
+		},
+		{
+			name:    "only_method",
+			input:   "GET",
+			wantErr: true,
+		},
+		{
+			name:        "empty_query",
+			input:       "GET /path? HTTP/1.1",
+			wantMethod:  "GET",
+			wantPath:    "/path",
+			wantVersion: "HTTP/1.1",
+		},
 	}
 
 	for _, tt := range tests {
@@ -967,6 +1138,35 @@ func TestParseStatusLine(t *testing.T) {
 			wantCode:    200,
 			wantText:    "OK",
 		},
+		// edge cases
+		{
+			name:        "leading_zero_status",
+			input:       "HTTP/1.1 0404 Not Found",
+			wantVersion: "HTTP/1.1",
+			wantCode:    404,
+			wantText:    "Not Found",
+		},
+		{
+			name:        "nonstandard_status_code",
+			input:       "HTTP/1.1 999 Custom Status",
+			wantVersion: "HTTP/1.1",
+			wantCode:    999,
+			wantText:    "Custom Status",
+		},
+		{
+			name:        "negative_status_code",
+			input:       "HTTP/1.1 -200 OK",
+			wantVersion: "HTTP/1.1",
+			wantCode:    -200, // permissive parsing for security testing
+			wantText:    "OK",
+		},
+		{
+			name:        "status_code_too_large",
+			input:       "HTTP/1.1 99999 Error",
+			wantVersion: "HTTP/1.1",
+			wantCode:    99999, // permissive parsing for security testing
+			wantText:    "Error",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1065,278 +1265,6 @@ func TestRawHTTP1Response_SerializeHeaders(t *testing.T) {
 	})
 }
 
-func TestParseRequestEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	t.Run("asterisk_form_url", func(t *testing.T) {
-		input := "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Equal(t, "OPTIONS", req.Method)
-		assert.Equal(t, "*", req.Path)
-	})
-
-	t.Run("connect_authority_form", func(t *testing.T) {
-		input := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Equal(t, "CONNECT", req.Method)
-		assert.Equal(t, "example.com:443", req.Path)
-	})
-
-	t.Run("multiple_question_marks", func(t *testing.T) {
-		input := "GET /search?q=what?really? HTTP/1.1\r\nHost: example.com\r\n\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Equal(t, "/search", req.Path)
-		assert.Equal(t, "q=what?really?", req.Query)
-	})
-
-	t.Run("header_with_multiple_colons", func(t *testing.T) {
-		input := "GET / HTTP/1.1\r\nAuthorization: Bearer: token: value\r\n\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Equal(t, "Bearer: token: value", req.GetHeader("Authorization"))
-	})
-
-	t.Run("header_only_colon", func(t *testing.T) {
-		input := "GET / HTTP/1.1\r\n:\r\n\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Len(t, req.Headers, 1)
-		assert.Empty(t, req.Headers[0].Name)
-	})
-
-	t.Run("header_value_leading_tab", func(t *testing.T) {
-		input := "GET / HTTP/1.1\r\nHeader:\tvalue\r\n\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Equal(t, "value", req.GetHeader("Header"))
-	})
-
-	t.Run("https_proxy_form", func(t *testing.T) {
-		input := "GET https://example.com/path?q=1 HTTP/1.1\r\nHost: proxy.local\r\n\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Equal(t, "https://example.com/path", req.Path)
-		assert.Equal(t, "q=1", req.Query)
-	})
-
-	t.Run("content_length_zero_explicit", func(t *testing.T) {
-		input := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Empty(t, req.Body)
-	})
-
-	t.Run("many_headers", func(t *testing.T) {
-		var headers strings.Builder
-		for i := 0; i < 100; i++ {
-			headers.WriteString("X-Header-" + string(rune('A'+i%26)) + ": value\r\n")
-		}
-		input := "GET / HTTP/1.1\r\n" + headers.String() + "\r\n"
-		req, err := parseRequest(strings.NewReader(input))
-		require.NoError(t, err)
-		assert.Len(t, req.Headers, 100)
-	})
-}
-
-func TestParseResponseEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	t.Run("status_leading_zeros", func(t *testing.T) {
-		input := "HTTP/1.1 0200 OK\r\n\r\n"
-		resp, err := parseResponse(strings.NewReader(input), "GET")
-		require.NoError(t, err)
-		assert.Equal(t, 200, resp.StatusCode)
-	})
-
-	t.Run("1xx_status_no_body", func(t *testing.T) {
-		tests := []struct {
-			input string
-			code  int
-		}{
-			{"HTTP/1.1 100 Continue\r\n\r\n", 100},
-			{"HTTP/1.1 101 Switching Protocols\r\n\r\n", 101},
-			{"HTTP/1.1 102 Processing\r\n\r\n", 102},
-			{"HTTP/1.1 103 Early Hints\r\n\r\n", 103},
-		}
-		for _, tt := range tests {
-			resp, err := parseResponse(strings.NewReader(tt.input), "GET")
-			require.NoError(t, err)
-			assert.Equal(t, tt.code, resp.StatusCode)
-			assert.Empty(t, resp.Body)
-		}
-	})
-
-	t.Run("status_text_with_numbers", func(t *testing.T) {
-		input := "HTTP/1.1 404 Not Found 2024\r\n\r\n"
-		resp, err := parseResponse(strings.NewReader(input), "GET")
-		require.NoError(t, err)
-		assert.Equal(t, "Not Found 2024", resp.StatusText)
-	})
-
-	t.Run("non_chunked_transfer_encoding", func(t *testing.T) {
-		input := "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 5\r\n\r\nHello"
-		resp, err := parseResponse(strings.NewReader(input), "GET")
-		require.NoError(t, err)
-		// gzip TE should be treated as non-chunked, use Content-Length
-		assert.Equal(t, []byte("Hello"), resp.Body)
-	})
-
-	t.Run("multiple_transfer_encoding_headers", func(t *testing.T) {
-		input := "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n0\r\n\r\n"
-		resp, err := parseResponse(strings.NewReader(input), "GET")
-		require.NoError(t, err)
-		// GetHeader returns first header, so "gzip" is seen, not chunked
-		// Body is read until EOF as raw bytes
-		assert.Equal(t, []byte("5\r\nHello\r\n0\r\n\r\n"), resp.Body)
-	})
-
-	t.Run("extra_whitespace_in_status", func(t *testing.T) {
-		input := "HTTP/1.1  200  OK\r\nContent-Length: 5\r\n\r\nHello"
-		// This might fail or parse differently; test actual behavior
-		resp, err := parseResponse(strings.NewReader(input), "GET")
-		if err == nil {
-			// Parser tolerates extra whitespace
-			assert.Equal(t, 200, resp.StatusCode)
-		}
-		// If error, that's also valid behavior
-	})
-}
-
-func TestParseRequestLineEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		input       string
-		wantMethod  string
-		wantPath    string
-		wantVersion string
-		wantErr     bool
-	}{
-		{
-			name:        "asterisk_form",
-			input:       "OPTIONS * HTTP/1.1",
-			wantMethod:  "OPTIONS",
-			wantPath:    "*",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "authority_form",
-			input:       "CONNECT example.com:443 HTTP/1.1",
-			wantMethod:  "CONNECT",
-			wantPath:    "example.com:443",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "lowercase_method",
-			input:       "get / HTTP/1.1",
-			wantMethod:  "get",
-			wantPath:    "/",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "lowercase_http_version",
-			input:       "GET / http/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/",
-			wantVersion: "http/1.1",
-		},
-		{
-			name:    "only_method",
-			input:   "GET",
-			wantErr: true,
-		},
-		{
-			name:        "empty_query",
-			input:       "GET /path? HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/path",
-			wantVersion: "HTTP/1.1",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			method, path, _, version, err := ParseRequestLine([]byte(tt.input))
-
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantMethod, method)
-			assert.Equal(t, tt.wantPath, path)
-			assert.Equal(t, tt.wantVersion, version)
-		})
-	}
-}
-
-func TestParseStatusLineEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		input       string
-		wantVersion string
-		wantCode    int
-		wantText    string
-		wantErr     bool
-	}{
-		{
-			name:        "leading_zero_status",
-			input:       "HTTP/1.1 0404 Not Found",
-			wantVersion: "HTTP/1.1",
-			wantCode:    404,
-			wantText:    "Not Found",
-		},
-		{
-			name:        "nonstandard_status_code",
-			input:       "HTTP/1.1 999 Custom Status",
-			wantVersion: "HTTP/1.1",
-			wantCode:    999,
-			wantText:    "Custom Status",
-		},
-		{
-			name:        "negative_status_code",
-			input:       "HTTP/1.1 -200 OK",
-			wantVersion: "HTTP/1.1",
-			wantCode:    -200, // permissive parsing for security testing
-			wantText:    "OK",
-		},
-		{
-			name:        "status_code_too_large",
-			input:       "HTTP/1.1 99999 Error",
-			wantVersion: "HTTP/1.1",
-			wantCode:    99999, // permissive parsing for security testing
-			wantText:    "Error",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			version, code, text, err := parseStatusLine([]byte(tt.input))
-
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-
-			if err != nil {
-				// Some edge cases may error
-				return
-			}
-
-			assert.Equal(t, tt.wantVersion, version)
-			assert.Equal(t, tt.wantCode, code)
-			assert.Equal(t, tt.wantText, text)
-		})
-	}
-}
-
 func TestReadChunkedBody(t *testing.T) {
 	t.Parallel()
 
@@ -1410,11 +1338,8 @@ func TestReadChunkedBody(t *testing.T) {
 			assert.Equal(t, tt.wantTrailers, string(trailers))
 		})
 	}
-}
 
-func TestReadChunkedBodyEdgeCases(t *testing.T) {
-	t.Parallel()
-
+	// edge cases
 	t.Run("invalid_hex_chunk_size", func(t *testing.T) {
 		input := "GG\r\nHello\r\n0\r\n\r\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))

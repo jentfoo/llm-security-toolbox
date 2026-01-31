@@ -121,6 +121,45 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "multiple_connection_tokens",
+			req: &RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/ws",
+				Version: "HTTP/1.1",
+				Headers: []Header{
+					{Name: "Upgrade", Value: "websocket"},
+					{Name: "Connection", Value: "keep-alive, Upgrade, close"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "whitespace_trimming",
+			req: &RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/ws",
+				Version: "HTTP/1.1",
+				Headers: []Header{
+					{Name: "Upgrade", Value: "  websocket  "},
+					{Name: "Connection", Value: "  Upgrade  "},
+				},
+			},
+			want: false, // exact match required currently
+		},
+		{
+			name: "h2c_upgrade_not_websocket",
+			req: &RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/",
+				Version: "HTTP/1.1",
+				Headers: []Header{
+					{Name: "Upgrade", Value: "h2c"},
+					{Name: "Connection", Value: "Upgrade, HTTP2-Settings"},
+				},
+			},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -647,62 +686,6 @@ func TestEncodeWSFrame_LargePayloadLengthEncoding(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, decoded.payload, len(payload))
 	})
-}
-
-func TestIsWebSocketUpgrade_EdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		req  *RawHTTP1Request
-		want bool
-	}{
-		{
-			name: "upgrade_with_multiple_connection_tokens",
-			req: &RawHTTP1Request{
-				Method:  "GET",
-				Path:    "/ws",
-				Version: "HTTP/1.1",
-				Headers: []Header{
-					{Name: "Upgrade", Value: "websocket"},
-					{Name: "Connection", Value: "keep-alive, Upgrade, close"},
-				},
-			},
-			want: true,
-		},
-		{
-			name: "upgrade_with_whitespace",
-			req: &RawHTTP1Request{
-				Method:  "GET",
-				Path:    "/ws",
-				Version: "HTTP/1.1",
-				Headers: []Header{
-					{Name: "Upgrade", Value: "  websocket  "},
-					{Name: "Connection", Value: "  Upgrade  "},
-				},
-			},
-			want: false, // exact match required currently
-		},
-		{
-			name: "h2c_upgrade_not_websocket",
-			req: &RawHTTP1Request{
-				Method:  "GET",
-				Path:    "/",
-				Version: "HTTP/1.1",
-				Headers: []Header{
-					{Name: "Upgrade", Value: "h2c"},
-					{Name: "Connection", Value: "Upgrade, HTTP2-Settings"},
-				},
-			},
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isWebSocketUpgrade(tt.req))
-		})
-	}
 }
 
 func TestOpcodeToStringAll(t *testing.T) {

@@ -39,6 +39,12 @@ func TestNormalizeEncoding(t *testing.T) {
 		{"encoding_with_special", "gzip-variant", "gzip-variant", false},
 		{"zstd_unsupported", "zstd", "zstd", false},
 		{"compress_unsupported", "compress", "compress", false},
+		// edge cases
+		{"only_whitespace", "   ", "", false},
+		{"leading_zeros", "0gzip", "0gzip", false},
+		{"unicode_space", "\u00A0gzip", "gzip", true}, // non-breaking space trimmed by TrimSpace
+		{"carriage_return", "gzip\r", "gzip", true},
+		{"mixed_whitespace_tabs_spaces", "  \t gzip \t  ", "gzip", true},
 	}
 
 	for _, tt := range tests {
@@ -361,32 +367,6 @@ func TestDecompressZlibFallback(t *testing.T) {
 
 	assert.True(t, wasCompressed)
 	assert.Equal(t, originalData, got)
-}
-
-func TestNormalizeEncodingEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		encoding      string
-		wantNorm      string
-		wantSupported bool
-	}{
-		{"only_whitespace", "   ", "", false},
-		{"leading_zeros", "0gzip", "0gzip", false},
-		{"unicode_space", "\u00A0gzip", "gzip", true}, // non-breaking space trimmed by TrimSpace
-		{"carriage_return", "gzip\r", "gzip", true},
-		{"mixed_whitespace_tabs_spaces", "  \t gzip \t  ", "gzip", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotNorm, gotSupported := NormalizeEncoding(tt.encoding)
-
-			assert.Equal(t, tt.wantNorm, gotNorm)
-			assert.Equal(t, tt.wantSupported, gotSupported)
-		})
-	}
 }
 
 func gzipBytes(t *testing.T, data []byte) []byte {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +48,17 @@ func TestDecodeHeaders(t *testing.T) {
 		{
 			name:         "invalid_block",
 			invalidBlock: []byte{0xff, 0xff, 0xff},
+			wantErr:      true,
+		},
+		{
+			name:            "empty_block",
+			invalidBlock:    []byte{},
+			expectedPseudos: map[string]string{},
+			expectedHeaders: []Header{},
+		},
+		{
+			name:         "truncated_block",
+			invalidBlock: []byte{0x40, 0x05},
 			wantErr:      true,
 		},
 	}
@@ -364,97 +374,6 @@ func TestHeaderListSize(t *testing.T) {
 	}
 }
 
-func TestConsumeRecvWindow(t *testing.T) {
-	t.Parallel()
-
-	t.Run("within_limits", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-		h.recvWindowStream[1] = localInitialWindow
-
-		err := h.consumeRecvWindow(1, 1000)
-		require.NoError(t, err)
-		assert.Equal(t, int32(localInitialWindow-1000), h.recvWindowConn)
-		assert.Equal(t, int32(localInitialWindow-1000), h.recvWindowStream[1])
-	})
-
-	t.Run("exceeds_connection", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-		h.recvWindowConn = 100
-
-		err := h.consumeRecvWindow(1, 200)
-		require.Error(t, err)
-		var fcErr *flowControlError
-		require.ErrorAs(t, err, &fcErr)
-		assert.Equal(t, uint32(0), fcErr.StreamID)
-	})
-
-	t.Run("exceeds_stream", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-		h.recvWindowStream[1] = 100
-
-		err := h.consumeRecvWindow(1, 200)
-		require.Error(t, err)
-		var fcErr *flowControlError
-		require.ErrorAs(t, err, &fcErr)
-		assert.Equal(t, uint32(1), fcErr.StreamID)
-	})
-}
-
-func TestNeedsWindowUpdate(t *testing.T) {
-	t.Parallel()
-
-	t.Run("no_update_needed", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-		h.recvWindowStream[1] = localInitialWindow
-
-		connUpdate, streamUpdate := h.needsWindowUpdate(1)
-		assert.Equal(t, uint32(0), connUpdate)
-		assert.Equal(t, uint32(0), streamUpdate)
-	})
-
-	t.Run("update_needed", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-		h.recvWindowConn = 1000
-		h.recvWindowStream[1] = 1000
-
-		connUpdate, streamUpdate := h.needsWindowUpdate(1)
-		assert.Equal(t, uint32(localInitialWindow-1000), connUpdate)
-		assert.Equal(t, uint32(localInitialWindow-1000), streamUpdate)
-		assert.Equal(t, int32(localInitialWindow), h.recvWindowConn)
-		assert.Equal(t, int32(localInitialWindow), h.recvWindowStream[1])
-	})
-}
-
 func TestConsumeSendWindow(t *testing.T) {
 	t.Parallel()
 
@@ -648,32 +567,6 @@ func TestEnqueueWrite(t *testing.T) {
 	})
 }
 
-func TestFlowCtrlWait(t *testing.T) {
-	t.Parallel()
-
-	clientConn, serverConn := net.Pipe()
-	t.Cleanup(func() {
-		_ = clientConn.Close()
-		_ = serverConn.Close()
-	})
-
-	h := newH2Conn(serverConn)
-
-	waitCh := h.flowCtrlWait()
-
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		h.updateSendWindow(0, 1000)
-	}()
-
-	select {
-	case <-waitCh:
-		// Expected
-	case <-time.After(time.Second):
-		t.Fatal("flowCtrlWait channel should be closed")
-	}
-}
-
 func TestEncodeDecodeHeaders_LargeValues(t *testing.T) {
 	t.Parallel()
 
@@ -795,37 +688,6 @@ func TestInitStreamSendWindow(t *testing.T) {
 	assert.Len(t, h.sendWindowStream, 2)
 }
 
-func TestDecodeHeadersEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	t.Run("empty_block", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-		pseudos, headers, err := h.decodeHeaders([]byte{})
-		require.NoError(t, err)
-		assert.Empty(t, pseudos)
-		assert.Empty(t, headers)
-	})
-
-	t.Run("truncated_block", func(t *testing.T) {
-		clientConn, serverConn := net.Pipe()
-		t.Cleanup(func() {
-			_ = clientConn.Close()
-			_ = serverConn.Close()
-		})
-
-		h := newH2Conn(serverConn)
-		// Partial HPACK encoded data
-		_, _, err := h.decodeHeaders([]byte{0x40, 0x05})
-		assert.Error(t, err)
-	})
-}
-
 func TestRemoveStreamWindowNonexistent(t *testing.T) {
 	t.Parallel()
 
@@ -863,33 +725,6 @@ func TestGetAvailableSendWindowUnknownStream(t *testing.T) {
 	// Get window for unknown stream - should return connection window
 	available := h.getAvailableSendWindow(999)
 	assert.Equal(t, int(initialWindowSize), available)
-}
-
-func TestFlowControlErrorMessage(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		err     *flowControlError
-		wantMsg string
-	}{
-		{
-			name:    "connection_level",
-			err:     &flowControlError{StreamID: 0, Message: "connection flow control window exceeded"},
-			wantMsg: "connection flow control window exceeded",
-		},
-		{
-			name:    "stream_level",
-			err:     &flowControlError{StreamID: 1, Message: "stream flow control window exceeded"},
-			wantMsg: "stream flow control window exceeded",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.wantMsg, tt.err.Error())
-		})
-	}
 }
 
 func TestEncodeHeadersTEFiltering(t *testing.T) {

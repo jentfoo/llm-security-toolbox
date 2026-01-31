@@ -177,69 +177,67 @@ func TestGet(t *testing.T) {
 func TestList(t *testing.T) {
 	t.Parallel()
 
-	h := newHistoryStore(store.NewMemStorage())
-	t.Cleanup(h.Close)
+	t.Run("pagination", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
 
-	for i := 0; i < 10; i++ {
-		entry := &HistoryEntry{
-			Protocol: "http/1.1",
-			Request: &RawHTTP1Request{
-				Method:  "GET",
-				Path:    "/" + string(rune('a'+i)),
-				Version: "HTTP/1.1",
+		for i := 0; i < 10; i++ {
+			entry := &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Method:  "GET",
+					Path:    "/" + string(rune('a'+i)),
+					Version: "HTTP/1.1",
+				},
+			}
+			h.Store(entry)
+		}
+
+		tests := []struct {
+			name      string
+			count     int
+			offset    uint32
+			wantLen   int
+			wantFirst string
+			wantLast  string
+		}{
+			{
+				name:      "first_five",
+				count:     5,
+				offset:    0,
+				wantLen:   5,
+				wantFirst: "/a",
+				wantLast:  "/e",
+			},
+			{
+				name:      "from_offset_five",
+				count:     5,
+				offset:    5,
+				wantLen:   5,
+				wantFirst: "/f",
+				wantLast:  "/j",
+			},
+			{
+				name:      "partial_remaining",
+				count:     5,
+				offset:    8,
+				wantLen:   2,
+				wantFirst: "/i",
+				wantLast:  "/j",
 			},
 		}
-		h.Store(entry)
-	}
 
-	tests := []struct {
-		name      string
-		count     int
-		offset    uint32
-		wantLen   int
-		wantFirst string
-		wantLast  string
-	}{
-		{
-			name:      "first_five",
-			count:     5,
-			offset:    0,
-			wantLen:   5,
-			wantFirst: "/a",
-			wantLast:  "/e",
-		},
-		{
-			name:      "from_offset_five",
-			count:     5,
-			offset:    5,
-			wantLen:   5,
-			wantFirst: "/f",
-			wantLast:  "/j",
-		},
-		{
-			name:      "partial_remaining",
-			count:     5,
-			offset:    8,
-			wantLen:   2,
-			wantFirst: "/i",
-			wantLast:  "/j",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entries := h.List(tt.count, tt.offset)
-			assert.Len(t, entries, tt.wantLen)
-			if tt.wantLen > 0 {
-				assert.Equal(t, tt.wantFirst, entries[0].Request.Path)
-				assert.Equal(t, tt.wantLast, entries[len(entries)-1].Request.Path)
-			}
-		})
-	}
-}
-
-func TestListEdgeCases(t *testing.T) {
-	t.Parallel()
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				entries := h.List(tt.count, tt.offset)
+				assert.Len(t, entries, tt.wantLen)
+				if tt.wantLen > 0 {
+					assert.Equal(t, tt.wantFirst, entries[0].Request.Path)
+					assert.Equal(t, tt.wantLast, entries[len(entries)-1].Request.Path)
+				}
+			})
+		}
+	})
 
 	t.Run("empty_history", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
@@ -387,6 +385,60 @@ func TestFormatRequest(t *testing.T) {
 			},
 			wantNil: true,
 		},
+		// edge cases
+		{
+			name: "h2_empty_headers",
+			entry: &HistoryEntry{
+				Protocol: "h2",
+				H2Request: &H2RequestData{
+					Method:    "GET",
+					Path:      "/test",
+					Authority: "example.com",
+					Headers:   []Header{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "GET /test HTTP/1.1")
+				assert.Contains(t, string(result), "host: example.com")
+			},
+		},
+		{
+			name: "h2_nil_headers",
+			entry: &HistoryEntry{
+				Protocol: "h2",
+				H2Request: &H2RequestData{
+					Method:    "GET",
+					Path:      "/test",
+					Authority: "example.com",
+					Headers:   nil,
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "GET /test HTTP/1.1")
+			},
+		},
+		{
+			name: "http1_empty_body",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Method:  "GET",
+					Path:    "/",
+					Version: "HTTP/1.1",
+					Headers: []Header{{Name: "Host", Value: "example.com"}},
+					Body:    []byte{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "GET / HTTP/1.1")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -464,6 +516,56 @@ func TestFormatResponse(t *testing.T) {
 				H2Response: nil,
 			},
 			wantNil: true,
+		},
+		// edge cases
+		{
+			name: "h2_empty_headers",
+			entry: &HistoryEntry{
+				Protocol: "h2",
+				H2Response: &H2ResponseData{
+					StatusCode: 200,
+					Headers:    []Header{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "HTTP/2 200")
+			},
+		},
+		{
+			name: "h2_nonstandard_status",
+			entry: &HistoryEntry{
+				Protocol: "h2",
+				H2Response: &H2ResponseData{
+					StatusCode: 999,
+					Headers:    []Header{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				// StatusText should default to empty or unknown for non-standard codes
+				assert.Contains(t, string(result), "HTTP/2 999")
+			},
+		},
+		{
+			name: "http1_empty_body",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Response: &RawHTTP1Response{
+					Version:    "HTTP/1.1",
+					StatusCode: 204,
+					StatusText: "No Content",
+					Headers:    []Header{},
+					Body:       []byte{},
+				},
+			},
+			check: func(t *testing.T, result []byte) {
+				t.Helper()
+
+				assert.Contains(t, string(result), "HTTP/1.1 204 No Content")
+			},
 		},
 	}
 
@@ -601,6 +703,45 @@ func TestGetHost(t *testing.T) {
 			entry: &HistoryEntry{
 				Protocol: "http/1.1",
 				Request:  nil,
+			},
+			want: "",
+		},
+		// edge cases
+		{
+			name: "h2_empty_authority",
+			entry: &HistoryEntry{
+				Protocol:  "h2",
+				H2Request: &H2RequestData{Authority: ""},
+			},
+			want: "",
+		},
+		{
+			name: "http1_host_case_insensitive",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{{Name: "host", Value: "lowercase.com"}},
+				},
+			},
+			want: "lowercase.com",
+		},
+		{
+			name: "http1_no_host_header",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{{Name: "X-Custom", Value: "value"}},
+				},
+			},
+			want: "",
+		},
+		{
+			name: "http1_empty_headers",
+			entry: &HistoryEntry{
+				Protocol: "http/1.1",
+				Request: &RawHTTP1Request{
+					Headers: []Header{},
+				},
 			},
 			want: "",
 		},
@@ -936,201 +1077,6 @@ func TestListConcurrentWithStore(t *testing.T) {
 	// Verify all entries are accessible
 	count := h.Count()
 	assert.GreaterOrEqual(t, count, 100)
-}
-
-func TestFormatRequestEmptyHeaders(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		entry *HistoryEntry
-		check func(t *testing.T, result []byte)
-	}{
-		{
-			name: "h2_empty_headers",
-			entry: &HistoryEntry{
-				Protocol: "h2",
-				H2Request: &H2RequestData{
-					Method:    "GET",
-					Path:      "/test",
-					Authority: "example.com",
-					Headers:   []Header{},
-				},
-			},
-			check: func(t *testing.T, result []byte) {
-				t.Helper()
-
-				assert.Contains(t, string(result), "GET /test HTTP/1.1")
-				assert.Contains(t, string(result), "host: example.com")
-			},
-		},
-		{
-			name: "h2_nil_headers",
-			entry: &HistoryEntry{
-				Protocol: "h2",
-				H2Request: &H2RequestData{
-					Method:    "GET",
-					Path:      "/test",
-					Authority: "example.com",
-					Headers:   nil,
-				},
-			},
-			check: func(t *testing.T, result []byte) {
-				t.Helper()
-
-				assert.Contains(t, string(result), "GET /test HTTP/1.1")
-			},
-		},
-		{
-			name: "http1_empty_body",
-			entry: &HistoryEntry{
-				Protocol: "http/1.1",
-				Request: &RawHTTP1Request{
-					Method:  "GET",
-					Path:    "/",
-					Version: "HTTP/1.1",
-					Headers: []Header{{Name: "Host", Value: "example.com"}},
-					Body:    []byte{},
-				},
-			},
-			check: func(t *testing.T, result []byte) {
-				t.Helper()
-
-				assert.Contains(t, string(result), "GET / HTTP/1.1")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := tt.entry.FormatRequest()
-			require.NotNil(t, result)
-			tt.check(t, result)
-		})
-	}
-}
-
-func TestFormatResponseEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		entry *HistoryEntry
-		check func(t *testing.T, result []byte)
-	}{
-		{
-			name: "h2_empty_headers",
-			entry: &HistoryEntry{
-				Protocol: "h2",
-				H2Response: &H2ResponseData{
-					StatusCode: 200,
-					Headers:    []Header{},
-				},
-			},
-			check: func(t *testing.T, result []byte) {
-				t.Helper()
-
-				assert.Contains(t, string(result), "HTTP/2 200")
-			},
-		},
-		{
-			name: "h2_nonstandard_status",
-			entry: &HistoryEntry{
-				Protocol: "h2",
-				H2Response: &H2ResponseData{
-					StatusCode: 999,
-					Headers:    []Header{},
-				},
-			},
-			check: func(t *testing.T, result []byte) {
-				t.Helper()
-
-				// StatusText should default to empty or unknown for non-standard codes
-				assert.Contains(t, string(result), "HTTP/2 999")
-			},
-		},
-		{
-			name: "http1_empty_body",
-			entry: &HistoryEntry{
-				Protocol: "http/1.1",
-				Response: &RawHTTP1Response{
-					Version:    "HTTP/1.1",
-					StatusCode: 204,
-					StatusText: "No Content",
-					Headers:    []Header{},
-					Body:       []byte{},
-				},
-			},
-			check: func(t *testing.T, result []byte) {
-				t.Helper()
-
-				assert.Contains(t, string(result), "HTTP/1.1 204 No Content")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := tt.entry.FormatResponse()
-			require.NotNil(t, result)
-			tt.check(t, result)
-		})
-	}
-}
-
-func TestGetHostEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		entry *HistoryEntry
-		want  string
-	}{
-		{
-			name: "h2_empty_authority",
-			entry: &HistoryEntry{
-				Protocol:  "h2",
-				H2Request: &H2RequestData{Authority: ""},
-			},
-			want: "",
-		},
-		{
-			name: "http1_host_case_insensitive",
-			entry: &HistoryEntry{
-				Protocol: "http/1.1",
-				Request: &RawHTTP1Request{
-					Headers: []Header{{Name: "host", Value: "lowercase.com"}},
-				},
-			},
-			want: "lowercase.com",
-		},
-		{
-			name: "http1_no_host_header",
-			entry: &HistoryEntry{
-				Protocol: "http/1.1",
-				Request: &RawHTTP1Request{
-					Headers: []Header{{Name: "X-Custom", Value: "value"}},
-				},
-			},
-			want: "",
-		},
-		{
-			name: "http1_empty_headers",
-			entry: &HistoryEntry{
-				Protocol: "http/1.1",
-				Request: &RawHTTP1Request{
-					Headers: []Header{},
-				},
-			},
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, tt.entry.GetHost())
-		})
-	}
 }
 
 func TestUpdateConcurrent(t *testing.T) {

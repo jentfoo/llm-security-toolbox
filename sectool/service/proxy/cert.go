@@ -103,9 +103,71 @@ func (m *CertManager) loadOrGenerateCA(configDir string) error {
 		return fmt.Errorf("CA key exists at %s but certificate is missing at %s; delete both to regenerate", keyPath, certPath)
 	}
 
-	if !certExists {
-		log.Printf("proxy: generating new CA certificate")
-		return m.generateCA(configDir)
+	now := time.Now()
+	if !certExists { // generate a new CA
+		key, err := rsa.GenerateKey(rand.Reader, 4096)
+		if err != nil {
+			return fmt.Errorf("generate key: %w", err)
+		}
+
+		serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		if err != nil {
+			return fmt.Errorf("generate serial: %w", err)
+		}
+
+		template := &x509.Certificate{
+			SerialNumber: serialNumber,
+			Subject: pkix.Name{
+				Organization: []string{"sectool"},
+				CommonName:   "sectool CA",
+			},
+			NotBefore:             now.Add(-time.Hour), // clock skew tolerance
+			NotAfter:              now.AddDate(10, 0, 0),
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			BasicConstraintsValid: true,
+			IsCA:                  true,
+			MaxPathLen:            0,
+			MaxPathLenZero:        true,
+		}
+
+		certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+		if err != nil {
+			return fmt.Errorf("create certificate: %w", err)
+		}
+
+		cert, err := x509.ParseCertificate(certDER)
+		if err != nil {
+			return fmt.Errorf("parse certificate: %w", err)
+		}
+
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			return fmt.Errorf("create config dir: %w", err)
+		}
+
+		certPath := filepath.Join(configDir, caCertFile)
+		certFile, err := os.OpenFile(certPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			return fmt.Errorf("create cert file: %w", err)
+		}
+		defer func() { _ = certFile.Close() }()
+		if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+			return fmt.Errorf("write cert: %w", err)
+		}
+
+		// Write key (restricted permissions)
+		keyPath := filepath.Join(configDir, caKeyFile)
+		keyFile, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if err != nil {
+			return fmt.Errorf("create key file: %w", err)
+		}
+		defer func() { _ = keyFile.Close() }()
+		if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
+			return fmt.Errorf("write key: %w", err)
+		}
+
+		m.caCert = cert
+		m.caKey = key
+		log.Printf("proxy: generated CA certificate at %s", certPath)
 	}
 
 	certPEM, err := os.ReadFile(certPath)
@@ -139,82 +201,13 @@ func (m *CertManager) loadOrGenerateCA(configDir string) error {
 		return fmt.Errorf("certificate at %s is not a CA certificate; delete both files to regenerate", certPath)
 	} else if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
 		return fmt.Errorf("certificate at %s lacks KeyUsageCertSign; delete both files to regenerate", certPath)
-	} else if time.Now().After(cert.NotAfter) {
+	} else if now.After(cert.NotAfter) {
 		return fmt.Errorf("certificate at %s has expired; delete both files to regenerate", certPath)
 	}
 
 	m.caCert = cert
 	m.caKey = key
 	log.Printf("proxy: loaded CA certificate from %s", certPath)
-	return nil
-}
-
-// generateCA creates a new self-signed CA certificate.
-func (m *CertManager) generateCA(configDir string) error {
-	key, err := rsa.GenerateKey(rand.Reader, 4096)
-	if err != nil {
-		return fmt.Errorf("generate key: %w", err)
-	}
-
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return fmt.Errorf("generate serial: %w", err)
-	}
-
-	now := time.Now()
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"sectool"},
-			CommonName:   "sectool CA",
-		},
-		NotBefore:             now.Add(-time.Hour), // clock skew tolerance
-		NotAfter:              now.AddDate(10, 0, 0),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		MaxPathLen:            0,
-		MaxPathLenZero:        true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		return fmt.Errorf("create certificate: %w", err)
-	}
-
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		return fmt.Errorf("parse certificate: %w", err)
-	}
-
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-
-	certPath := filepath.Join(configDir, caCertFile)
-	certFile, err := os.OpenFile(certPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("create cert file: %w", err)
-	}
-	defer func() { _ = certFile.Close() }()
-	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
-		return fmt.Errorf("write cert: %w", err)
-	}
-
-	// Write key (restricted permissions)
-	keyPath := filepath.Join(configDir, caKeyFile)
-	keyFile, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("create key file: %w", err)
-	}
-	defer func() { _ = keyFile.Close() }()
-	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
-		return fmt.Errorf("write key: %w", err)
-	}
-
-	m.caCert = cert
-	m.caKey = key
-	log.Printf("proxy: generated CA certificate at %s", certPath)
 	return nil
 }
 
