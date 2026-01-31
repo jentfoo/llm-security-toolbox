@@ -255,7 +255,6 @@ func TestParseRequest(t *testing.T) {
 			assert.Equal(t, tt.want.Version, got.Version)
 			assert.Equal(t, tt.want.Protocol, got.Protocol)
 			assert.Equal(t, tt.want.Headers, got.Headers)
-			// Handle nil vs empty slice for body
 			if len(tt.want.Body) == 0 {
 				assert.Empty(t, got.Body)
 			} else {
@@ -263,49 +262,104 @@ func TestParseRequest(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestParseRequest_ChunkedBody(t *testing.T) {
-	t.Parallel()
+	t.Run("chunked_body", func(t *testing.T) {
+		input := "POST /upload HTTP/1.1\r\n" +
+			"Host: example.com\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"\r\n" +
+			"5\r\n" +
+			"Hello\r\n" +
+			"6\r\n" +
+			"World!\r\n" +
+			"0\r\n" +
+			"\r\n"
 
-	input := "POST /upload HTTP/1.1\r\n" +
-		"Host: example.com\r\n" +
-		"Transfer-Encoding: chunked\r\n" +
-		"\r\n" +
-		"5\r\n" +
-		"Hello\r\n" +
-		"6\r\n" +
-		"World!\r\n" +
-		"0\r\n" +
-		"\r\n"
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
 
-	req, err := parseRequest(strings.NewReader(input))
-	require.NoError(t, err)
+		assert.Equal(t, "POST", req.Method)
+		assert.Equal(t, "/upload", req.Path)
+		assert.Equal(t, []byte("HelloWorld!"), req.Body)
+	})
 
-	assert.Equal(t, "POST", req.Method)
-	assert.Equal(t, "/upload", req.Path)
-	assert.Equal(t, []byte("HelloWorld!"), req.Body)
-}
+	t.Run("chunked_with_trailers", func(t *testing.T) {
+		input := "POST /upload HTTP/1.1\r\n" +
+			"Host: example.com\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"Trailer: Checksum\r\n" +
+			"\r\n" +
+			"5\r\n" +
+			"Hello\r\n" +
+			"0\r\n" +
+			"Checksum: abc123\r\n" +
+			"\r\n"
 
-func TestParseRequest_ChunkedWithTrailers(t *testing.T) {
-	t.Parallel()
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
 
-	input := "POST /upload HTTP/1.1\r\n" +
-		"Host: example.com\r\n" +
-		"Transfer-Encoding: chunked\r\n" +
-		"Trailer: Checksum\r\n" +
-		"\r\n" +
-		"5\r\n" +
-		"Hello\r\n" +
-		"0\r\n" +
-		"Checksum: abc123\r\n" +
-		"\r\n"
+		assert.Equal(t, []byte("Hello"), req.Body)
+		assert.Contains(t, string(req.Trailers), "Checksum: abc123")
+	})
 
-	req, err := parseRequest(strings.NewReader(input))
-	require.NoError(t, err)
+	t.Run("large_header_value", func(t *testing.T) {
+		largeValue := strings.Repeat("x", 10000)
+		input := "GET / HTTP/1.1\r\nHost: example.com\r\nX-Large: " + largeValue + "\r\n\r\n"
 
-	assert.Equal(t, []byte("Hello"), req.Body)
-	assert.Contains(t, string(req.Trailers), "Checksum: abc123")
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+
+		assert.Equal(t, largeValue, req.GetHeader("X-Large"))
+	})
+
+	t.Run("invalid_header_name", func(t *testing.T) {
+		input := "GET / HTTP/1.1\r\nInvalid<Header>: value\r\n\r\n"
+
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+
+		assert.Equal(t, "Invalid<Header>", req.Headers[0].Name)
+		assert.Equal(t, "value", req.Headers[0].Value)
+	})
+
+	t.Run("control_characters", func(t *testing.T) {
+		input := "GET / HTTP/1.1\r\nX-Test: value\twith\ttabs\r\n\r\n"
+
+		req, err := parseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+
+		assert.Equal(t, "value\twith\ttabs", req.GetHeader("X-Test"))
+	})
+
+	t.Run("round_trip", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			input string
+		}{
+			{
+				name:  "simple_get",
+				input: "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			},
+			{
+				name:  "with_body",
+				input: "POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nHello",
+			},
+			{
+				name:  "multiple_headers",
+				input: "GET / HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\nUser-Agent: test\r\n\r\n",
+			},
+		}
+
+		var buf bytes.Buffer
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				req, err := parseRequest(strings.NewReader(tc.input))
+				require.NoError(t, err)
+
+				assert.Equal(t, tc.input, string(req.Serialize(&buf)))
+			})
+		}
+	})
 }
 
 func TestParseResponse(t *testing.T) {
@@ -443,13 +497,11 @@ func TestParseResponse(t *testing.T) {
 			assert.Equal(t, tt.want.Version, got.Version)
 			assert.Equal(t, tt.want.StatusCode, got.StatusCode)
 			assert.Equal(t, tt.want.StatusText, got.StatusText)
-			// Handle nil vs empty slice for headers
 			if len(tt.want.Headers) == 0 {
 				assert.Empty(t, got.Headers)
 			} else {
 				assert.Equal(t, tt.want.Headers, got.Headers)
 			}
-			// Handle nil vs empty slice for body
 			if len(tt.want.Body) == 0 {
 				assert.Empty(t, got.Body)
 			} else {
@@ -459,7 +511,7 @@ func TestParseResponse(t *testing.T) {
 	}
 }
 
-func TestSerialize_Request(t *testing.T) {
+func TestRawHTTP1Request_Serialize(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -535,15 +587,55 @@ func TestSerialize_Request(t *testing.T) {
 		},
 	}
 
-	var buf bytes.Buffer // reuse to verify reset
+	var buf bytes.Buffer
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, string(tt.req.Serialize(&buf)))
 		})
 	}
+
+	t.Run("removes_chunked", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/",
+			Version: "HTTP/1.1",
+			Headers: []Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Transfer-Encoding", Value: "chunked"},
+			},
+			Body: []byte("Hello"),
+		}
+
+		serialized := string(req.Serialize(bytes.NewBuffer(nil)))
+
+		assert.NotContains(t, serialized, "Transfer-Encoding")
+		assert.Contains(t, serialized, "Content-Length: 5")
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/",
+			Version: "HTTP/1.1",
+			Headers: []Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Transfer-Encoding", Value: "chunked"},
+			},
+			Body: []byte("test"),
+		}
+
+		first := req.Serialize(bytes.NewBuffer(nil))
+		second := req.Serialize(bytes.NewBuffer(nil))
+		third := req.Serialize(bytes.NewBuffer(nil))
+
+		assert.Equal(t, first, second)
+		assert.Equal(t, second, third)
+		assert.Len(t, req.Headers, 2)
+		assert.Equal(t, "Transfer-Encoding", req.Headers[1].Name)
+	})
 }
 
-func TestSerialize_Response(t *testing.T) {
+func TestRawHTTP1Response_Serialize(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -588,85 +680,34 @@ func TestSerialize_Response(t *testing.T) {
 		},
 	}
 
-	var buf bytes.Buffer // reuse to verify reset
+	var buf bytes.Buffer
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, string(tt.resp.Serialize(&buf)))
 		})
 	}
+
+	t.Run("idempotent", func(t *testing.T) {
+		resp := &RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []Header{
+				{Name: "Transfer-Encoding", Value: "chunked"},
+			},
+			Body: []byte("test"),
+		}
+
+		first := resp.Serialize(bytes.NewBuffer(nil))
+		second := resp.Serialize(bytes.NewBuffer(nil))
+
+		assert.Equal(t, first, second)
+		assert.Len(t, resp.Headers, 1)
+		assert.Equal(t, "Transfer-Encoding", resp.Headers[0].Name)
+	})
 }
 
-func TestRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input string
-	}{
-		{
-			name:  "simple_get",
-			input: "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
-		},
-		{
-			name:  "with_body",
-			input: "POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nHello",
-		},
-		{
-			name:  "multiple_headers",
-			input: "GET / HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\nUser-Agent: test\r\n\r\n",
-		},
-	}
-
-	var buf bytes.Buffer // reuse to verify reset
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req, err := parseRequest(strings.NewReader(tt.input))
-			require.NoError(t, err)
-
-			assert.Equal(t, tt.input, string(req.Serialize(&buf)))
-		})
-	}
-}
-
-func TestParseRequest_LargeHeaderValue(t *testing.T) {
-	t.Parallel()
-
-	// Header value > 8KB
-	largeValue := strings.Repeat("x", 10000)
-	input := "GET / HTTP/1.1\r\nHost: example.com\r\nX-Large: " + largeValue + "\r\n\r\n"
-
-	req, err := parseRequest(strings.NewReader(input))
-	require.NoError(t, err)
-
-	assert.Equal(t, largeValue, req.GetHeader("X-Large"))
-}
-
-func TestParseRequest_InvalidHeaderName(t *testing.T) {
-	t.Parallel()
-
-	// Invalid characters in header name should be accepted (tolerant parsing)
-	input := "GET / HTTP/1.1\r\nInvalid<Header>: value\r\n\r\n"
-
-	req, err := parseRequest(strings.NewReader(input))
-	require.NoError(t, err)
-
-	assert.Equal(t, "Invalid<Header>", req.Headers[0].Name)
-	assert.Equal(t, "value", req.Headers[0].Value)
-}
-
-func TestParseRequest_ControlCharacters(t *testing.T) {
-	t.Parallel()
-
-	// Control characters in value should be preserved
-	input := "GET / HTTP/1.1\r\nX-Test: value\twith\ttabs\r\n\r\n"
-
-	req, err := parseRequest(strings.NewReader(input))
-	require.NoError(t, err)
-
-	assert.Equal(t, "value\twith\ttabs", req.GetHeader("X-Test"))
-}
-
-func TestGetHeader(t *testing.T) {
+func TestRawHTTP1Request_GetHeader(t *testing.T) {
 	t.Parallel()
 
 	req := &RawHTTP1Request{
@@ -684,25 +725,33 @@ func TestGetHeader(t *testing.T) {
 	assert.Empty(t, req.GetHeader("Missing"))
 }
 
-func TestSetHeader(t *testing.T) {
+func TestRawHTTP1Request_SetHeader(t *testing.T) {
 	t.Parallel()
 
-	req := &RawHTTP1Request{
-		Headers: []Header{
-			{Name: "Content-Type", Value: "text/plain"},
-		},
-	}
+	t.Run("update_existing", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Headers: []Header{
+				{Name: "Content-Type", Value: "text/plain"},
+			},
+		}
 
-	// Update existing
-	req.SetHeader("Content-Type", "application/json")
-	assert.Equal(t, "application/json", req.GetHeader("Content-Type"))
+		req.SetHeader("Content-Type", "application/json")
+		assert.Equal(t, "application/json", req.GetHeader("Content-Type"))
+	})
 
-	// Add new
-	req.SetHeader("X-New", "value")
-	assert.Equal(t, "value", req.GetHeader("X-New"))
+	t.Run("add_new", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Headers: []Header{
+				{Name: "Content-Type", Value: "text/plain"},
+			},
+		}
+
+		req.SetHeader("X-New", "value")
+		assert.Equal(t, "value", req.GetHeader("X-New"))
+	})
 }
 
-func TestRemoveHeader(t *testing.T) {
+func TestRawHTTP1Request_RemoveHeader(t *testing.T) {
 	t.Parallel()
 
 	req := &RawHTTP1Request{
@@ -720,73 +769,6 @@ func TestRemoveHeader(t *testing.T) {
 	assert.Equal(t, "text/plain", req.GetHeader("Content-Type"))
 	assert.Equal(t, "keep", req.GetHeader("Keep"))
 	assert.Len(t, req.Headers, 2)
-}
-
-func TestSerialize_RemovesChunked(t *testing.T) {
-	t.Parallel()
-
-	req := &RawHTTP1Request{
-		Method:  "POST",
-		Path:    "/",
-		Version: "HTTP/1.1",
-		Headers: []Header{
-			{Name: "Host", Value: "example.com"},
-			{Name: "Transfer-Encoding", Value: "chunked"},
-		},
-		Body: []byte("Hello"),
-	}
-
-	serialized := string(req.Serialize(bytes.NewBuffer(nil)))
-
-	assert.NotContains(t, serialized, "Transfer-Encoding")
-	assert.Contains(t, serialized, "Content-Length: 5")
-}
-
-func TestSerialize_Idempotent(t *testing.T) {
-	t.Parallel()
-
-	t.Run("request_with_chunked", func(t *testing.T) {
-		req := &RawHTTP1Request{
-			Method:  "POST",
-			Path:    "/",
-			Version: "HTTP/1.1",
-			Headers: []Header{
-				{Name: "Host", Value: "example.com"},
-				{Name: "Transfer-Encoding", Value: "chunked"},
-			},
-			Body: []byte("test"),
-		}
-
-		first := req.Serialize(bytes.NewBuffer(nil))
-		second := req.Serialize(bytes.NewBuffer(nil))
-		third := req.Serialize(bytes.NewBuffer(nil))
-
-		assert.Equal(t, first, second)
-		assert.Equal(t, second, third)
-		// Original headers should be unchanged
-		assert.Len(t, req.Headers, 2)
-		assert.Equal(t, "Transfer-Encoding", req.Headers[1].Name)
-	})
-
-	t.Run("response_with_chunked", func(t *testing.T) {
-		resp := &RawHTTP1Response{
-			Version:    "HTTP/1.1",
-			StatusCode: 200,
-			StatusText: "OK",
-			Headers: []Header{
-				{Name: "Transfer-Encoding", Value: "chunked"},
-			},
-			Body: []byte("test"),
-		}
-
-		first := resp.Serialize(bytes.NewBuffer(nil))
-		second := resp.Serialize(bytes.NewBuffer(nil))
-
-		assert.Equal(t, first, second)
-		// Original headers should be unchanged
-		assert.Len(t, resp.Headers, 1)
-		assert.Equal(t, "Transfer-Encoding", resp.Headers[0].Name)
-	})
 }
 
 func TestParseRequestLine(t *testing.T) {
@@ -934,15 +916,10 @@ func TestRawHTTP1Response_SerializeHeaders(t *testing.T) {
 		buf := bytes.NewBuffer(nil)
 		headers := resp.SerializeHeaders(buf)
 
-		// Headers should contain status line and headers
 		assert.Contains(t, string(headers), "HTTP/1.1 200 OK")
 		assert.Contains(t, string(headers), "Content-Type: text/plain")
 		assert.Contains(t, string(headers), "Content-Length: 25")
-
-		// Headers should NOT contain the body
 		assert.NotContains(t, string(headers), "This is the response body")
-
-		// Should end with \r\n\r\n (header terminator)
 		assert.True(t, bytes.HasSuffix(headers, []byte("\r\n\r\n")))
 	})
 
@@ -960,7 +937,6 @@ func TestRawHTTP1Response_SerializeHeaders(t *testing.T) {
 		buf := bytes.NewBuffer(nil)
 		headers := resp.SerializeHeaders(buf)
 
-		// Content-Length should be updated to actual body size
 		assert.Contains(t, string(headers), "Content-Length: 5")
 		assert.NotContains(t, string(headers), "Content-Length: 999")
 	})
@@ -979,9 +955,7 @@ func TestRawHTTP1Response_SerializeHeaders(t *testing.T) {
 		buf := bytes.NewBuffer(nil)
 		headers := resp.SerializeHeaders(buf)
 
-		// Transfer-Encoding: chunked should be stripped
 		assert.NotContains(t, string(headers), "Transfer-Encoding")
-		// Content-Length should be added
 		assert.Contains(t, string(headers), "Content-Length: 12")
 	})
 
@@ -1000,7 +974,6 @@ func TestRawHTTP1Response_SerializeHeaders(t *testing.T) {
 
 		assert.Contains(t, string(headers), "HTTP/1.1 204 No Content")
 		assert.Contains(t, string(headers), "X-Custom: value")
-		// No Content-Length for empty body
 		assert.NotContains(t, string(headers), "Content-Length")
 	})
 }

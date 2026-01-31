@@ -260,7 +260,7 @@ Structure and conventions:
 - One `_test.go` file per implementation file that requires testing
 - One `func Test<FunctionName>` per target function, using table-driven tests or `t.Run` cases
 - Test case names should be at most 3 to 5 words and in lower case with underscores
-- Use `t.Parallel()` at test function start when no shared state
+- Use `t.Parallel()` at test function start when no shared state, but not in the test cases
 - Isolated temp directories via `t.TempDir()` when needed
 - Context timeouts via `t.Context()` for tests with I/O
 

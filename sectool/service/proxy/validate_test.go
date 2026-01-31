@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func Test_validateRequest(t *testing.T) {
+func TestValidateRequest(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -17,7 +17,7 @@ func Test_validateRequest(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "valid_request",
+			name: "valid_get",
 			req: &RawHTTP1Request{
 				Method:  "GET",
 				Path:    "/",
@@ -53,7 +53,7 @@ func Test_validateRequest(t *testing.T) {
 			wantErr: "empty method",
 		},
 		{
-			name: "invalid_method_space",
+			name: "method_with_space",
 			req: &RawHTTP1Request{
 				Method:  "GET POST",
 				Path:    "/",
@@ -62,7 +62,7 @@ func Test_validateRequest(t *testing.T) {
 			wantErr: "invalid method characters",
 		},
 		{
-			name: "invalid_method_control",
+			name: "method_with_control",
 			req: &RawHTTP1Request{
 				Method:  "GET\x00",
 				Path:    "/",
@@ -137,7 +137,7 @@ func Test_validateRequest(t *testing.T) {
 	}
 }
 
-func Test_validateResponse(t *testing.T) {
+func TestValidateResponse(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -168,7 +168,7 @@ func Test_validateResponse(t *testing.T) {
 			wantErr: "invalid HTTP version",
 		},
 		{
-			name: "invalid_status_low",
+			name: "status_code_too_low",
 			resp: &RawHTTP1Response{
 				Version:    "HTTP/1.1",
 				StatusCode: 99,
@@ -176,7 +176,7 @@ func Test_validateResponse(t *testing.T) {
 			wantErr: "invalid status code",
 		},
 		{
-			name: "invalid_status_high",
+			name: "status_code_too_high",
 			resp: &RawHTTP1Response{
 				Version:    "HTTP/1.1",
 				StatusCode: 600,
@@ -229,7 +229,7 @@ func TestCheckLineEndings(t *testing.T) {
 			wantMsg: "using LF instead of CRLF",
 		},
 		{
-			name:    "mixed",
+			name:    "mixed_endings",
 			input:   "GET / HTTP/1.1\r\nHost: example.com\n\r\n",
 			wantMsg: "mixed line endings",
 		},
@@ -239,7 +239,7 @@ func TestCheckLineEndings(t *testing.T) {
 			wantMsg: "bare CR without LF",
 		},
 		{
-			name:    "empty",
+			name:    "empty_input",
 			input:   "",
 			wantMsg: "",
 		},
@@ -277,22 +277,22 @@ func TestIsValidToken(t *testing.T) {
 			want:  true,
 		},
 		{
-			name:  "valid_custom",
+			name:  "valid_custom_header",
 			input: "X-CUSTOM",
 			want:  true,
 		},
 		{
-			name:  "valid_with_numbers",
+			name:  "with_numbers",
 			input: "HTTP2",
 			want:  true,
 		},
 		{
-			name:  "valid_special",
+			name:  "special_chars",
 			input: "!#$%&'*+-.^_`|~",
 			want:  true,
 		},
 		{
-			name:  "empty",
+			name:  "empty_string",
 			input: "",
 			want:  false,
 		},
@@ -317,7 +317,7 @@ func TestIsValidToken(t *testing.T) {
 			want:  false,
 		},
 		{
-			name:  "with_control",
+			name:  "with_tab",
 			input: "GET\t",
 			want:  false,
 		},
@@ -330,11 +330,8 @@ func TestIsValidToken(t *testing.T) {
 	}
 }
 
-func TestParserAcceptsWhatValidationRejects(t *testing.T) {
+func TestParseValidationIntegration(t *testing.T) {
 	t.Parallel()
-
-	// Parser should be tolerant and accept malformed input
-	// Validation should flag issues but parsing should succeed
 
 	tests := []struct {
 		name      string

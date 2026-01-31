@@ -138,7 +138,7 @@ func (h *h2Conn) decodeHeaders(block []byte) (pseudos map[string]string, headers
 // headerListSize calculates the header list size per RFC 7541 Section 4.1.
 // Size = sum of (name length + value length + 32) for each field.
 func headerListSize(pseudos map[string]string, headers []Header) int {
-	size := 0
+	var size int
 	for name, value := range pseudos {
 		size += len(name) + len(value) + 32
 	}
@@ -171,14 +171,7 @@ func (h *h2Conn) encodeHeaders(pseudos map[string]string, headers []Header) ([]b
 
 	// Encode any remaining pseudo-headers not in canonical order
 	for name, value := range pseudos {
-		found := false
-		for _, ordered := range pseudoOrder {
-			if name == ordered {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(pseudoOrder, name) {
 			if err := h.hpackEnc.WriteField(hpack.HeaderField{Name: name, Value: value}); err != nil {
 				return nil, err
 			}

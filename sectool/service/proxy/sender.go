@@ -816,7 +816,7 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 	var headersEndStream bool
 
 	// Index into buffered frames
-	bufIdx := 0
+	var bufIdx int
 
 	// getNextFrame returns the next frame, first from buffer, then from framer
 	getNextFrame := func() (http2.Frame, error) {

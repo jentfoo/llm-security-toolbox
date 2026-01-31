@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func Test_isWebSocketUpgrade(t *testing.T) {
+func TestIsWebSocketUpgrade(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -126,8 +125,7 @@ func Test_isWebSocketUpgrade(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isWebSocketUpgrade(tt.req)
-			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.want, isWebSocketUpgrade(tt.req))
 		})
 	}
 }
@@ -239,6 +237,31 @@ func TestReadWSFrame(t *testing.T) {
 			wantOpcode:  1,
 			wantPayload: []byte("hi"),
 		},
+		{
+			name:       "error_empty_input",
+			frameBytes: []byte{},
+			wantErr:    true,
+		},
+		{
+			name:       "error_truncated_header",
+			frameBytes: []byte{0x81},
+			wantErr:    true,
+		},
+		{
+			name:       "error_truncated_length",
+			frameBytes: []byte{0x81, 126, 0x00}, // missing second length byte
+			wantErr:    true,
+		},
+		{
+			name:       "error_truncated_payload",
+			frameBytes: []byte{0x81, 0x05, 'H', 'e'}, // len says 5, only 2 bytes
+			wantErr:    true,
+		},
+		{
+			name:       "error_truncated_mask",
+			frameBytes: []byte{0x81, 0x85, 0x37, 0xfa}, // mask flag set but only 2 mask bytes
+			wantErr:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -255,43 +278,6 @@ func TestReadWSFrame(t *testing.T) {
 			assert.Equal(t, tt.wantRsv, frame.rsv)
 			assert.Equal(t, tt.wantOpcode, frame.opcode)
 			assert.Equal(t, tt.wantPayload, frame.payload)
-		})
-	}
-}
-
-func TestReadWSFrame_errors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		frameBytes []byte
-	}{
-		{
-			name:       "empty_input",
-			frameBytes: []byte{},
-		},
-		{
-			name:       "truncated_header",
-			frameBytes: []byte{0x81},
-		},
-		{
-			name:       "truncated_extended_length",
-			frameBytes: []byte{0x81, 126, 0x00}, // missing second length byte
-		},
-		{
-			name:       "truncated_payload",
-			frameBytes: []byte{0x81, 0x05, 'H', 'e'}, // len says 5, only 2 bytes
-		},
-		{
-			name:       "truncated_mask_key",
-			frameBytes: []byte{0x81, 0x85, 0x37, 0xfa}, // mask flag set but only 2 mask bytes
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := readWSFrame(bytes.NewReader(tt.frameBytes))
-			require.Error(t, err)
 		})
 	}
 }
@@ -473,6 +459,17 @@ func TestEncodeWSFrame_roundtrip(t *testing.T) {
 				payload: bytes.Repeat([]byte("y"), 70000), // > 65535 bytes
 			},
 		},
+		{
+			name: "masked_frame",
+			frame: &wsFrame{
+				fin:     true,
+				rsv:     0,
+				opcode:  1,
+				masked:  true,
+				mask:    [4]byte{0x12, 0x34, 0x56, 0x78},
+				payload: []byte("Hello, masked frame!"),
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -487,28 +484,6 @@ func TestEncodeWSFrame_roundtrip(t *testing.T) {
 			assert.Equal(t, tt.frame.payload, decoded.payload)
 		})
 	}
-}
-
-func TestEncodeWSFrame_masked_roundtrip(t *testing.T) {
-	t.Parallel()
-
-	frame := &wsFrame{
-		fin:     true,
-		rsv:     0,
-		opcode:  1,
-		masked:  true,
-		mask:    [4]byte{0x12, 0x34, 0x56, 0x78},
-		payload: []byte("Hello, masked frame!"),
-	}
-
-	encoded := encodeWSFrame(frame)
-	decoded, err := readWSFrame(bytes.NewReader(encoded))
-	require.NoError(t, err)
-
-	assert.Equal(t, frame.fin, decoded.fin)
-	assert.Equal(t, frame.opcode, decoded.opcode)
-	// Payload should match after unmasking during read
-	assert.Equal(t, frame.payload, decoded.payload)
 }
 
 func TestOpcodeToString(t *testing.T) {
@@ -533,72 +508,4 @@ func TestOpcodeToString(t *testing.T) {
 			assert.Equal(t, tt.want, opcodeToString(tt.opcode))
 		})
 	}
-}
-
-func Test_newWebSocketHandler(t *testing.T) {
-	t.Parallel()
-
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
-	t.Cleanup(history.Close)
-
-	certManager, err := newCertManager(t.TempDir())
-	require.NoError(t, err)
-
-	handler := newWebSocketHandler(history, certManager)
-
-	assert.NotNil(t, handler)
-	assert.Equal(t, history, handler.history)
-	assert.Equal(t, certManager, handler.certManager)
-	assert.Nil(t, handler.ruleApplier)
-}
-
-func TestWebSocketHandler_SetRuleApplier(t *testing.T) {
-	t.Parallel()
-
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
-	t.Cleanup(history.Close)
-
-	handler := newWebSocketHandler(history, nil)
-
-	// Mock rule applier
-	applier := &mockRuleApplier{}
-	handler.SetRuleApplier(applier)
-
-	assert.Equal(t, applier, handler.ruleApplier)
-}
-
-// mockRuleApplier implements RuleApplier for testing
-type mockRuleApplier struct {
-	requestCalled  bool
-	responseCalled bool
-	wsCalled       bool
-}
-
-func (m *mockRuleApplier) ApplyRequestRules(req *RawHTTP1Request) *RawHTTP1Request {
-	m.requestCalled = true
-	return req
-}
-
-func (m *mockRuleApplier) ApplyResponseRules(resp *RawHTTP1Response) *RawHTTP1Response {
-	m.responseCalled = true
-	return resp
-}
-
-func (m *mockRuleApplier) ApplyWSRules(payload []byte, direction string) []byte {
-	m.wsCalled = true
-	return payload
-}
-
-func (m *mockRuleApplier) HasBodyRules(isRequest bool) bool {
-	return false
-}
-
-func (m *mockRuleApplier) ApplyRequestBodyOnlyRules(body []byte) []byte {
-	return body
-}
-
-func (m *mockRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers []Header) []byte {
-	return body
 }

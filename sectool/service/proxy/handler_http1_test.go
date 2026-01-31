@@ -9,22 +9,27 @@ import (
 	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
 )
 
-func TestExtractTarget_ProxyForm(t *testing.T) {
-	t.Parallel()
+func newTestHTTP1Handler(t *testing.T) *http1Handler {
+	t.Helper()
 
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
-	h := &http1Handler{history: history}
+	history := newHistoryStore(store.NewMemStorage())
 	t.Cleanup(history.Close)
+	return &http1Handler{history: history}
+}
+
+func TestExtractTarget(t *testing.T) {
+	t.Parallel()
 
 	tests := []struct {
 		name     string
 		path     string
-		host     string
+		headers  []Header
 		wantHost string
 		wantPort int
 		wantTLS  bool
+		wantErr  string
 	}{
+		// proxy form cases
 		{
 			name:     "http_default_port",
 			path:     "http://example.com/path",
@@ -53,19 +58,51 @@ func TestExtractTarget_ProxyForm(t *testing.T) {
 			wantPort: 8443,
 			wantTLS:  true,
 		},
+		// host header cases
+		{
+			name:     "host_only",
+			path:     "/path",
+			headers:  []Header{{Name: "Host", Value: "example.com"}},
+			wantHost: "example.com",
+			wantPort: 80,
+			wantTLS:  false,
+		},
+		{
+			name:     "host_with_port",
+			path:     "/path",
+			headers:  []Header{{Name: "Host", Value: "example.com:8080"}},
+			wantHost: "example.com",
+			wantPort: 8080,
+			wantTLS:  false,
+		},
+		// error case
+		{
+			name:    "no_host",
+			path:    "/path",
+			wantErr: "no Host header",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHTTP1Handler(t)
+
 			req := &RawHTTP1Request{
 				Method:  "GET",
 				Path:    tt.path,
 				Version: "HTTP/1.1",
+				Headers: tt.headers,
 			}
 
 			target, err := h.extractTarget(req)
-			require.NoError(t, err)
 
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
 			assert.Equal(t, tt.wantHost, target.Hostname)
 			assert.Equal(t, tt.wantPort, target.Port)
 			assert.Equal(t, tt.wantTLS, target.UsesHTTPS)
@@ -73,83 +110,8 @@ func TestExtractTarget_ProxyForm(t *testing.T) {
 	}
 }
 
-func TestExtractTarget_HostHeader(t *testing.T) {
-	t.Parallel()
-
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
-	h := &http1Handler{history: history}
-	t.Cleanup(history.Close)
-
-	tests := []struct {
-		name     string
-		path     string
-		host     string
-		wantHost string
-		wantPort int
-	}{
-		{
-			name:     "host_only",
-			path:     "/path",
-			host:     "example.com",
-			wantHost: "example.com",
-			wantPort: 80,
-		},
-		{
-			name:     "host_with_port",
-			path:     "/path",
-			host:     "example.com:8080",
-			wantHost: "example.com",
-			wantPort: 8080,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := &RawHTTP1Request{
-				Method:  "GET",
-				Path:    tt.path,
-				Version: "HTTP/1.1",
-				Headers: []Header{
-					{Name: "Host", Value: tt.host},
-				},
-			}
-
-			target, err := h.extractTarget(req)
-			require.NoError(t, err)
-
-			assert.Equal(t, tt.wantHost, target.Hostname)
-			assert.Equal(t, tt.wantPort, target.Port)
-		})
-	}
-}
-
-func TestExtractTarget_NoHost(t *testing.T) {
-	t.Parallel()
-
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
-	h := &http1Handler{history: history}
-	t.Cleanup(history.Close)
-
-	req := &RawHTTP1Request{
-		Method:  "GET",
-		Path:    "/path",
-		Version: "HTTP/1.1",
-	}
-
-	_, err := h.extractTarget(req)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no Host header")
-}
-
 func TestRewriteToOriginForm(t *testing.T) {
 	t.Parallel()
-
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
-	h := &http1Handler{history: history}
-	t.Cleanup(history.Close)
 
 	tests := []struct {
 		name        string
@@ -223,6 +185,8 @@ func TestRewriteToOriginForm(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHTTP1Handler(t)
+
 			req := &RawHTTP1Request{
 				Method:  "GET",
 				Path:    tt.inputPath,
@@ -243,11 +207,6 @@ func TestRewriteToOriginForm(t *testing.T) {
 
 func TestParseHostPort(t *testing.T) {
 	t.Parallel()
-
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
-	h := &http1Handler{history: history}
-	t.Cleanup(history.Close)
 
 	tests := []struct {
 		name      string
@@ -286,20 +245,19 @@ func TestParseHostPort(t *testing.T) {
 			wantPort:  9000,
 		},
 		{
-			name:      "invalid_port",
-			hostPort:  "example.com:abc",
-			usesHTTPS: false,
-			wantErr:   true,
+			name:     "invalid_port",
+			hostPort: "example.com:abc",
+			wantErr:  true,
 		},
 		{
-			name:      "ipv6_with_brackets_and_port",
+			name:      "ipv6_brackets_with_port",
 			hostPort:  "[::1]:8080",
 			usesHTTPS: false,
 			wantHost:  "::1",
 			wantPort:  8080,
 		},
 		{
-			name:      "ipv6_with_brackets_no_port",
+			name:      "ipv6_brackets_no_port",
 			hostPort:  "[::1]",
 			usesHTTPS: false,
 			wantHost:  "::1",
@@ -316,6 +274,8 @@ func TestParseHostPort(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHTTP1Handler(t)
+
 			target, err := h.parseHostPort(tt.hostPort, tt.usesHTTPS)
 
 			if tt.wantErr {
@@ -336,13 +296,13 @@ func TestBodyTruncation(t *testing.T) {
 
 	storage := store.NewMemStorage()
 	history := newHistoryStore(storage)
-	h := &http1Handler{
-		history:      history,
-		maxBodyBytes: 10, // Very small limit for testing
-	}
 	t.Cleanup(history.Close)
 
-	// Create a large request body
+	h := &http1Handler{
+		history:      history,
+		maxBodyBytes: 10,
+	}
+
 	largeBody := make([]byte, 100)
 	for i := range largeBody {
 		largeBody[i] = byte('A' + i%26)
@@ -358,7 +318,7 @@ func TestBodyTruncation(t *testing.T) {
 		Body: largeBody,
 	}
 
-	// Manually call body truncation logic
+	// Simulate truncation logic from handler
 	if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
 		req.Body = req.Body[:h.maxBodyBytes]
 	}
