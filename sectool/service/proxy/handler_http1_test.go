@@ -260,7 +260,6 @@ func TestRewriteToOriginForm(t *testing.T) {
 			wantPath:    "/path",
 			wantHostHdr: "example.com:8080",
 		},
-		// edge cases
 		{
 			name:       "query_only_in_path",
 			inputPath:  "http://example.com?foo=bar",
@@ -428,7 +427,6 @@ func TestParseHostPort(t *testing.T) {
 			wantHost:  "example.com",
 			wantPort:  -1,
 		},
-		// edge cases
 		{
 			name:      "empty_string",
 			hostPort:  "",
@@ -487,10 +485,8 @@ func TestParseHostPort(t *testing.T) {
 func TestBodyTruncation(t *testing.T) {
 	t.Parallel()
 
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
+	history := newHistoryStore(store.NewMemStorage())
 	t.Cleanup(history.Close)
-
 	h := &http1Handler{
 		history:      history,
 		maxBodyBytes: 10,
@@ -523,10 +519,8 @@ func TestBodyTruncation(t *testing.T) {
 func TestBodyTruncation_ZeroDisabled(t *testing.T) {
 	t.Parallel()
 
-	storage := store.NewMemStorage()
-	history := newHistoryStore(storage)
+	history := newHistoryStore(store.NewMemStorage())
 	t.Cleanup(history.Close)
-
 	h := &http1Handler{
 		history:      history,
 		maxBodyBytes: 0, // zero means no truncation

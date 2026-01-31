@@ -124,12 +124,9 @@ func parseSend(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("replay send", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout, requestTimeout time.Duration
-	var flow, bundle, file, body, target string
+	var flow, bundle, file, body, target, path, query string
 	var followRedirects, force bool
-	var headers, removeHeaders []string
-	var path, query string
-	var setQuery, removeQuery []string
-	var setJSON, removeJSON []string
+	var headers, removeHeaders, setQuery, removeQuery, setJSON, removeJSON []string
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&flow, "flow", "", "flow_id to replay from proxy history")
@@ -277,9 +274,8 @@ func parseCreate(args []string, mcpURL string) error {
 	fs.SetInterspersed(true)
 
 	var timeout time.Duration
-	var method string
+	var method, bodyPath string
 	var headers []string
-	var bodyPath string
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&method, "method", "GET", "HTTP method")

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"golang.org/x/net/http2"
 )
 
@@ -151,11 +152,7 @@ func (t *h2StreamTracker) remove(id uint32) {
 func (t *h2StreamTracker) all() []*h2Stream {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	result := make([]*h2Stream, 0, len(t.streams))
-	for _, s := range t.streams {
-		result = append(result, s)
-	}
-	return result
+	return bulk.MapValuesSlice(t.streams)
 }
 
 // h2Proxy manages the HTTP/2 proxying between client and upstream.
@@ -734,11 +731,8 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 	}
 
 	// Capture data needed outside the lock for write operations
-	var writeData []byte
-	var writeEndStream bool
-	var flushBuffered []byte
-	var applyRules bool
-	var bodyForRules []byte
+	var writeData, flushBuffered, bodyForRules []byte
+	var writeEndStream, applyRules bool
 
 	if hasBodyRules && !isOverflow {
 		// Buffer mode: accumulate full body for rule application

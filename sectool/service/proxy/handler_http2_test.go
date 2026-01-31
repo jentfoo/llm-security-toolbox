@@ -318,7 +318,6 @@ func TestApplyBodyRules(t *testing.T) {
 
 	t.Run("request_with_headers", func(t *testing.T) {
 		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024)
-
 		applier := &h2MockRuleApplier{
 			reqBodyMod: func(body []byte) []byte {
 				return append(body, []byte("-modified")...)
@@ -343,8 +342,7 @@ func TestApplyBodyRules(t *testing.T) {
 	t.Run("response_uses_body_only", func(t *testing.T) {
 		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024)
 
-		var bodyOnlyCalled bool
-		var fullMethodCalled bool
+		var bodyOnlyCalled, fullMethodCalled bool
 		applier := &h2MockRuleApplier{
 			respBodyMod: func(body []byte) []byte {
 				bodyOnlyCalled = true
@@ -376,7 +374,6 @@ func TestApplyBodyRules(t *testing.T) {
 
 func TestCopyToHistoryBuffer(t *testing.T) {
 	handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 10)
-
 	stream := &h2Stream{id: 1}
 	p := &h2Proxy{handler: handler}
 
@@ -392,7 +389,6 @@ func TestCopyToFullBuffer(t *testing.T) {
 
 	t.Run("no_overflow", func(t *testing.T) {
 		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024)
-
 		stream := &h2Stream{id: 1}
 		p := &h2Proxy{handler: handler}
 
@@ -404,7 +400,6 @@ func TestCopyToFullBuffer(t *testing.T) {
 
 	t.Run("overflow", func(t *testing.T) {
 		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024)
-
 		stream := &h2Stream{id: 1}
 		stream.reqBodyOverflow = true
 		p := &h2Proxy{handler: handler}
@@ -418,10 +413,8 @@ func TestUpdateHistoryWithModifiedBody(t *testing.T) {
 	t.Parallel()
 
 	handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 5)
-
 	stream := &h2Stream{id: 1}
 	stream.reqBody.WriteString("original")
-
 	p := &h2Proxy{handler: handler}
 
 	p.updateHistoryWithModifiedBody(stream, []byte("new body content"), true)
@@ -435,7 +428,6 @@ func TestStoreStreamInHistory(t *testing.T) {
 
 	history := newHistoryStore(store.NewMemStorage())
 	handler := newHTTP2Handler(history, 1024)
-
 	stream := &h2Stream{
 		id:          1,
 		state:       streamClosed,
@@ -450,7 +442,6 @@ func TestStoreStreamInHistory(t *testing.T) {
 	}
 	stream.reqBody.WriteString("request body")
 	stream.respBody.WriteString(`{"ok": true}`)
-
 	p := &h2Proxy{
 		handler: handler,
 		streams: newStreamTracker(),

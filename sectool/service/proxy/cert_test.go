@@ -523,7 +523,6 @@ func TestCACertConcurrentReads(t *testing.T) {
 	const goroutines = 20
 	var wg sync.WaitGroup
 	results := make([]*x509.Certificate, goroutines)
-
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func(idx int) {
@@ -531,7 +530,6 @@ func TestCACertConcurrentReads(t *testing.T) {
 			results[idx] = cm.CACert()
 		}(i)
 	}
-
 	wg.Wait()
 
 	// All should return the same CA certificate

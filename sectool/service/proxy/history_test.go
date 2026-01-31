@@ -40,7 +40,6 @@ func TestStore(t *testing.T) {
 		var wg sync.WaitGroup
 		const numGoroutines = 10
 		const entriesPerGoroutine = 100
-
 		for i := 0; i < numGoroutines; i++ {
 			wg.Add(1)
 			go func() {
@@ -75,7 +74,6 @@ func TestGet(t *testing.T) {
 	t.Run("retrieves_stored_entry", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-
 		entry := &HistoryEntry{
 			Protocol:  "http/1.1",
 			Timestamp: time.Now(),
@@ -123,7 +121,6 @@ func TestGet(t *testing.T) {
 	t.Run("serialization_roundtrip", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-
 		entry := &HistoryEntry{
 			Protocol:  "http/1.1",
 			Timestamp: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
@@ -250,7 +247,6 @@ func TestList(t *testing.T) {
 	t.Run("offset_beyond_max", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-
 		entry := &HistoryEntry{
 			Protocol: "http/1.1",
 			Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
@@ -264,7 +260,6 @@ func TestList(t *testing.T) {
 	t.Run("zero_count", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-
 		entry := &HistoryEntry{
 			Protocol: "http/1.1",
 			Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
@@ -282,7 +277,6 @@ func TestUpdate(t *testing.T) {
 	t.Run("updates_existing_entry", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-
 		entry := &HistoryEntry{
 			Protocol: "http/1.1",
 			Request: &RawHTTP1Request{
@@ -902,7 +896,6 @@ func TestHistoryStoreClose(t *testing.T) {
 
 	t.Run("access_after_close", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
-
 		entry := &HistoryEntry{
 			Protocol: "http/1.1",
 			Request:  &RawHTTP1Request{Method: "GET", Path: "/test"},

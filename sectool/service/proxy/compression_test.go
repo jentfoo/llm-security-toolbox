@@ -39,7 +39,6 @@ func TestNormalizeEncoding(t *testing.T) {
 		{"encoding_with_special", "gzip-variant", "gzip-variant", false},
 		{"zstd_unsupported", "zstd", "zstd", false},
 		{"compress_unsupported", "compress", "compress", false},
-		// edge cases
 		{"only_whitespace", "   ", "", false},
 		{"leading_zeros", "0gzip", "0gzip", false},
 		{"unicode_space", "\u00A0gzip", "gzip", true}, // non-breaking space trimmed by TrimSpace

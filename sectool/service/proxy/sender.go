@@ -804,8 +804,7 @@ func (s *Sender) readH2SettingsAndAck(framer *http2.Framer, h2c *h2Conn) error {
 // It first processes any frames buffered during flow control waiting,
 // then continues reading from the framer.
 func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint32, bufferedFrames []http2.Frame) (*RawHTTP1Response, error) {
-	var headers []Header
-	var trailers []Header
+	var headers, trailers []Header
 	var statusCode int
 	var body bytes.Buffer
 	var gotInitialHeaders bool

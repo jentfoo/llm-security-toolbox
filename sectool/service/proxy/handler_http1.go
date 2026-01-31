@@ -115,11 +115,7 @@ func (h *http1Handler) Handle(ctx context.Context, clientConn net.Conn, clientRe
 	if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
 		req.Body = req.Body[:h.maxBodyBytes]
 	}
-	if h.maxBodyBytes > 0 && len(resp.Body) > h.maxBodyBytes {
-		resp.Body = resp.Body[:h.maxBodyBytes]
-	}
 
-	// Store in history
 	h.storeEntry(req, resp, startTime)
 }
 
