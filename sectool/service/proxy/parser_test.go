@@ -241,7 +241,7 @@ func TestParseRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseRequest(strings.NewReader(tt.input))
+			got, err := parseRequest(strings.NewReader(tt.input))
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -279,7 +279,7 @@ func TestParseRequest_ChunkedBody(t *testing.T) {
 		"0\r\n" +
 		"\r\n"
 
-	req, err := ParseRequest(strings.NewReader(input))
+	req, err := parseRequest(strings.NewReader(input))
 	require.NoError(t, err)
 
 	assert.Equal(t, "POST", req.Method)
@@ -301,7 +301,7 @@ func TestParseRequest_ChunkedWithTrailers(t *testing.T) {
 		"Checksum: abc123\r\n" +
 		"\r\n"
 
-	req, err := ParseRequest(strings.NewReader(input))
+	req, err := parseRequest(strings.NewReader(input))
 	require.NoError(t, err)
 
 	assert.Equal(t, []byte("Hello"), req.Body)
@@ -432,7 +432,7 @@ func TestParseResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseResponse(strings.NewReader(tt.input), tt.requestMethod)
+			got, err := parseResponse(strings.NewReader(tt.input), tt.requestMethod)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -620,7 +620,7 @@ func TestRoundTrip(t *testing.T) {
 	var buf bytes.Buffer // reuse to verify reset
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, err := ParseRequest(strings.NewReader(tt.input))
+			req, err := parseRequest(strings.NewReader(tt.input))
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.input, string(req.Serialize(&buf)))
@@ -635,7 +635,7 @@ func TestParseRequest_LargeHeaderValue(t *testing.T) {
 	largeValue := strings.Repeat("x", 10000)
 	input := "GET / HTTP/1.1\r\nHost: example.com\r\nX-Large: " + largeValue + "\r\n\r\n"
 
-	req, err := ParseRequest(strings.NewReader(input))
+	req, err := parseRequest(strings.NewReader(input))
 	require.NoError(t, err)
 
 	assert.Equal(t, largeValue, req.GetHeader("X-Large"))
@@ -647,7 +647,7 @@ func TestParseRequest_InvalidHeaderName(t *testing.T) {
 	// Invalid characters in header name should be accepted (tolerant parsing)
 	input := "GET / HTTP/1.1\r\nInvalid<Header>: value\r\n\r\n"
 
-	req, err := ParseRequest(strings.NewReader(input))
+	req, err := parseRequest(strings.NewReader(input))
 	require.NoError(t, err)
 
 	assert.Equal(t, "Invalid<Header>", req.Headers[0].Name)
@@ -660,7 +660,7 @@ func TestParseRequest_ControlCharacters(t *testing.T) {
 	// Control characters in value should be preserved
 	input := "GET / HTTP/1.1\r\nX-Test: value\twith\ttabs\r\n\r\n"
 
-	req, err := ParseRequest(strings.NewReader(input))
+	req, err := parseRequest(strings.NewReader(input))
 	require.NoError(t, err)
 
 	assert.Equal(t, "value\twith\ttabs", req.GetHeader("X-Test"))
@@ -840,7 +840,7 @@ func TestParseRequestLine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			method, path, query, version, err := parseRequestLine([]byte(tt.input))
+			method, path, query, version, err := ParseRequestLine([]byte(tt.input))
 
 			if tt.wantErr {
 				require.Error(t, err)

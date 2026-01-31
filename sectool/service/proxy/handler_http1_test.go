@@ -13,8 +13,8 @@ func TestExtractTarget_ProxyForm(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
-	h := &HTTP1Handler{history: history}
+	history := newHistoryStore(storage)
+	h := &http1Handler{history: history}
 	t.Cleanup(history.Close)
 
 	tests := []struct {
@@ -77,8 +77,8 @@ func TestExtractTarget_HostHeader(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
-	h := &HTTP1Handler{history: history}
+	history := newHistoryStore(storage)
+	h := &http1Handler{history: history}
 	t.Cleanup(history.Close)
 
 	tests := []struct {
@@ -128,8 +128,8 @@ func TestExtractTarget_NoHost(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
-	h := &HTTP1Handler{history: history}
+	history := newHistoryStore(storage)
+	h := &http1Handler{history: history}
 	t.Cleanup(history.Close)
 
 	req := &RawHTTP1Request{
@@ -147,8 +147,8 @@ func TestRewriteToOriginForm(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
-	h := &HTTP1Handler{history: history}
+	history := newHistoryStore(storage)
+	h := &http1Handler{history: history}
 	t.Cleanup(history.Close)
 
 	tests := []struct {
@@ -245,8 +245,8 @@ func TestParseHostPort(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
-	h := &HTTP1Handler{history: history}
+	history := newHistoryStore(storage)
+	h := &http1Handler{history: history}
 	t.Cleanup(history.Close)
 
 	tests := []struct {
@@ -335,8 +335,8 @@ func TestBodyTruncation(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
-	h := &HTTP1Handler{
+	history := newHistoryStore(storage)
+	h := &http1Handler{
 		history:      history,
 		maxBodyBytes: 10, // Very small limit for testing
 	}

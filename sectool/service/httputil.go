@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-harden/llm-security-toolbox/sectool/config"
 	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
+	"github.com/go-harden/llm-security-toolbox/sectool/service/proxy"
 )
 
 const (
@@ -319,29 +320,6 @@ func (o *PathQueryOpts) HasModifications() bool {
 	return o.Method != "" || o.Path != "" || o.Query != "" || len(o.SetQuery) > 0 || len(o.RemoveQuery) > 0
 }
 
-// parseRequestLine parses the HTTP request line into method, path, query, and version.
-// Example: "GET /api/users?id=123 HTTP/1.1" -> "GET", "/api/users", "id=123", "HTTP/1.1"
-func parseRequestLine(line string) (method, path, query, version string) {
-	parts := strings.SplitN(line, " ", 3)
-	if len(parts) < 2 {
-		return "", "", "", ""
-	}
-	method = parts[0]
-	fullPath := parts[1]
-	if len(parts) >= 3 {
-		version = parts[2]
-	}
-
-	// Split path and query
-	if idx := strings.Index(fullPath, "?"); idx >= 0 {
-		path = fullPath[:idx]
-		query = fullPath[idx+1:]
-	} else {
-		path = fullPath
-	}
-	return method, path, query, version
-}
-
 // buildRequestLine reconstructs the request line from components.
 func buildRequestLine(method, path, query, version string) string {
 	if query != "" {
@@ -380,9 +358,8 @@ func modifyRequestLine(raw []byte, opts *PathQueryOpts) []byte {
 		return raw
 	}
 
-	firstLine := string(raw[:lineEnd])
-	method, path, query, version := parseRequestLine(firstLine)
-	if method == "" {
+	method, path, query, version, err := proxy.ParseRequestLine(raw[:lineEnd])
+	if err != nil {
 		return raw
 	}
 
@@ -479,14 +456,6 @@ func globToRegex(glob string) string {
 	escaped = strings.ReplaceAll(escaped, `\*`, ".*")
 	escaped = strings.ReplaceAll(escaped, `\?`, ".")
 	return escaped
-}
-
-// pathWithoutQuery returns the path portion before any query string.
-func pathWithoutQuery(path string) string {
-	if idx := strings.Index(path, "?"); idx != -1 {
-		return path[:idx]
-	}
-	return path
 }
 
 // matchesGlob checks if s matches a simple glob pattern.
@@ -633,27 +602,6 @@ func applyHeaderModifications(headers []byte, req *ReplaySendRequest) []byte {
 	return headers
 }
 
-// checkLineEndings detects line ending issues in HTTP headers.
-func checkLineEndings(headers []byte) string {
-	hasCRLF := bytes.Contains(headers, []byte("\r\n"))
-	var hasBareLF bool
-	for i := 0; i < len(headers); i++ {
-		if headers[i] == '\n' {
-			if i == 0 || headers[i-1] != '\r' {
-				hasBareLF = true
-				break
-			}
-		}
-	}
-
-	if hasBareLF && hasCRLF {
-		return "mixed line endings (some CRLF, some bare LF)"
-	} else if hasBareLF {
-		return "using LF instead of CRLF line endings"
-	}
-	return ""
-}
-
 // validationIssue represents a single validation problem.
 type validationIssue struct {
 	Check  string
@@ -667,7 +615,7 @@ func validateRequest(raw []byte) []validationIssue {
 	headers, _ := splitHeadersBody(raw)
 
 	// Check line endings FIRST - HTTP requires CRLF
-	if issue := checkLineEndings(headers); issue != "" {
+	if issue := proxy.CheckLineEndings(headers); issue != "" {
 		issues = append(issues, validationIssue{
 			Check:  "crlf",
 			Detail: issue + "; HTTP requires CRLF (\\r\\n) line endings, use --force to send anyway",

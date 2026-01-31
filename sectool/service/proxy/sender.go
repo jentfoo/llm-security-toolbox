@@ -73,7 +73,7 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 	start := time.Now()
 
 	// Parse raw request
-	req, err := ParseRequest(bytes.NewReader(opts.RawRequest))
+	req, err := parseRequest(bytes.NewReader(opts.RawRequest))
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
 	}
@@ -87,7 +87,7 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 
 	// Validate request (unless force=true)
 	if !opts.Force {
-		if err := ValidateRequest(req); err != nil {
+		if err := validateRequest(req); err != nil {
 			return nil, fmt.Errorf("validation failed: %w (use force=true to bypass)", err)
 		}
 	}
@@ -109,7 +109,7 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 	start := time.Now()
 
 	// Parse raw request
-	req, err := ParseRequest(bytes.NewReader(opts.RawRequest))
+	req, err := parseRequest(bytes.NewReader(opts.RawRequest))
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
 	}
@@ -123,7 +123,7 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 
 	// Validate request (unless force=true)
 	if !opts.Force {
-		if err := ValidateRequest(req); err != nil {
+		if err := validateRequest(req); err != nil {
 			return nil, fmt.Errorf("validation failed: %w (use force=true to bypass)", err)
 		}
 	}
@@ -280,8 +280,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 
-	// Read response
-	resp, err := ParseResponse(bufio.NewReader(conn), req.Method)
+	resp, err := parseResponse(bufio.NewReader(conn), req.Method)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -377,7 +376,7 @@ func buildRedirectRequest(originalReq *RawHTTP1Request, location string, current
 	// Build new request
 	newReq := &RawHTTP1Request{
 		Method:   "GET",
-		Path:     pathWithoutQuery(newPath),
+		Path:     PathWithoutQuery(newPath),
 		Query:    queryFromPath(newPath),
 		Version:  originalReq.Version,
 		Protocol: originalReq.Protocol,
@@ -486,7 +485,7 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 	}
 
 	// Relative path
-	baseDir := path.Dir(pathWithoutQuery(currentPath))
+	baseDir := path.Dir(PathWithoutQuery(currentPath))
 	if baseDir == "." {
 		baseDir = "/"
 	}
@@ -498,8 +497,8 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 	return currentTarget, resolved, nil
 }
 
-// pathWithoutQuery returns the path portion before any query string.
-func pathWithoutQuery(p string) string {
+// PathWithoutQuery returns the path portion before any query string.
+func PathWithoutQuery(p string) string {
 	if idx := strings.Index(p, "?"); idx >= 0 {
 		return p[:idx]
 	}
@@ -589,9 +588,7 @@ func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *RawHTTP1
 	// Initialize stream send window
 	h2c.initStreamSendWindow(streamID)
 
-	// Buffer for frames read during flow control waiting.
-	// These may include early response frames (e.g., auth failures) that arrive
-	// before we finish sending the request body.
+	// Buffer frames read during flow control waiting (may include early responses)
 	var bufferedFrames []http2.Frame
 
 	// Send DATA frames if body present (chunked to max frame size with flow control)
@@ -648,10 +645,8 @@ func (s *Sender) writeH2Headers(framer *http2.Framer, streamID uint32, encoded [
 	return nil
 }
 
-// writeH2DataWithReader writes DATA frames with integrated flow control frame reading.
-// For small bodies that fit in the initial window, no reading is needed.
-// For larger bodies, we poll for WINDOW_UPDATE frames when blocked.
-// Any non-control frames read during flow control waiting are buffered for later processing.
+// writeH2DataWithReader writes DATA frames with flow control.
+// Polls for WINDOW_UPDATE when blocked; buffers any response frames for later.
 func (s *Sender) writeH2DataWithReader(ctx context.Context, framer *http2.Framer, h2c *h2Conn, streamID uint32, body []byte, maxFrameSize int, bufferedFrames *[]http2.Frame) error {
 	remaining := body
 
@@ -685,8 +680,7 @@ func (s *Sender) writeH2DataWithReader(ctx context.Context, framer *http2.Framer
 
 // pollForWindowUpdate reads frames until we have enough send window credit.
 // Processes WINDOW_UPDATE, SETTINGS, PING, and detects RST_STREAM/GOAWAY.
-// Any response frames (HEADERS, DATA, CONTINUATION) are buffered for later processing
-// by readH2Response to prevent frame loss during large request body uploads.
+// Buffers response frames for later processing by readH2Response.
 func (s *Sender) pollForWindowUpdate(ctx context.Context, framer *http2.Framer, h2c *h2Conn, streamID uint32, needed int, bufferedFrames *[]http2.Frame) error {
 	for {
 		select {
@@ -758,9 +752,7 @@ func (s *Sender) pollForWindowUpdate(ctx context.Context, framer *http2.Framer, 
 }
 
 // readH2SettingsAndAck reads server SETTINGS and sends ACK.
-// Returns after receiving server SETTINGS and sending our ACK, without
-// waiting for server to ACK our settings. This is more resilient against
-// misbehaving servers while remaining spec-compliant.
+// Returns after sending our ACK without waiting for server to ACK our settings.
 func (s *Sender) readH2SettingsAndAck(framer *http2.Framer, h2c *h2Conn) error {
 	for {
 		frame, err := framer.ReadFrame()

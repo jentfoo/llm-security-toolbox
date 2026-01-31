@@ -6,12 +6,12 @@ import (
 	"strings"
 )
 
-// ValidateRequest performs basic sanity checks on a parsed request.
+// validateRequest performs basic sanity checks on a parsed request.
 // Used when force=false to reject clearly malformed requests in user-facing scenarios.
 // When force=true in replay, this validation is skipped entirely.
 //
 // Returns nil if request is valid, or an error describing the issue.
-func ValidateRequest(req *RawHTTP1Request) error {
+func validateRequest(req *RawHTTP1Request) error {
 	if req == nil {
 		return errors.New("nil request")
 	}
@@ -110,8 +110,8 @@ func CheckLineEndings(raw []byte) string {
 	return ""
 }
 
-// ValidateResponse performs basic sanity checks on a parsed response.
-func ValidateResponse(resp *RawHTTP1Response) error {
+// validateResponse performs basic sanity checks on a parsed response.
+func validateResponse(resp *RawHTTP1Response) error {
 	if resp == nil {
 		return errors.New("nil response")
 	}

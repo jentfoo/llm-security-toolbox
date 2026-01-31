@@ -34,9 +34,9 @@ type CertManager struct {
 	cache map[string]*tls.Certificate // TODO - Consider adding a size limit or LRU eviction
 }
 
-// NewCertManager loads or generates a CA certificate.
+// newCertManager loads or generates a CA certificate.
 // configDir is the directory for CA files (typically ~/.sectool).
-func NewCertManager(configDir string) (*CertManager, error) {
+func newCertManager(configDir string) (*CertManager, error) {
 	m := &CertManager{
 		cache: make(map[string]*tls.Certificate),
 	}
@@ -90,7 +90,6 @@ func (m *CertManager) loadOrGenerateCA(configDir string) error {
 	certPath := filepath.Join(configDir, caCertFile)
 	keyPath := filepath.Join(configDir, caKeyFile)
 
-	// Check file existence
 	_, certErr := os.Stat(certPath)
 	_, keyErr := os.Stat(keyPath)
 	certExists := certErr == nil
@@ -104,13 +103,11 @@ func (m *CertManager) loadOrGenerateCA(configDir string) error {
 		return fmt.Errorf("CA key exists at %s but certificate is missing at %s; delete both to regenerate", keyPath, certPath)
 	}
 
-	// Both missing - generate new CA
 	if !certExists {
 		log.Printf("proxy: generating new CA certificate")
 		return m.generateCA(configDir)
 	}
 
-	// Both exist - load them
 	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
 		return fmt.Errorf("read CA certificate: %w", err)
@@ -138,7 +135,6 @@ func (m *CertManager) loadOrGenerateCA(configDir string) error {
 		return fmt.Errorf("parse CA key: %w", err)
 	}
 
-	// Validate certificate properties
 	if !cert.IsCA {
 		return fmt.Errorf("certificate at %s is not a CA certificate; delete both files to regenerate", certPath)
 	} else if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
@@ -160,13 +156,11 @@ func (m *CertManager) generateCA(configDir string) error {
 		return fmt.Errorf("generate key: %w", err)
 	}
 
-	// Generate serial number
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return fmt.Errorf("generate serial: %w", err)
 	}
 
-	// Create CA certificate template
 	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
@@ -183,24 +177,20 @@ func (m *CertManager) generateCA(configDir string) error {
 		MaxPathLenZero:        true,
 	}
 
-	// Self-sign the certificate
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
 		return fmt.Errorf("create certificate: %w", err)
 	}
 
-	// Parse back the certificate
 	cert, err := x509.ParseCertificate(certDER)
 	if err != nil {
 		return fmt.Errorf("parse certificate: %w", err)
 	}
 
-	// Ensure config directory exists
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	// Write certificate
 	certPath := filepath.Join(configDir, caCertFile)
 	certFile, err := os.OpenFile(certPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
@@ -236,7 +226,6 @@ func (m *CertManager) generateCertificate(hostname string) (*tls.Certificate, er
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
 
-	// Generate serial number
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, fmt.Errorf("generate serial: %w", err)
@@ -261,7 +250,6 @@ func (m *CertManager) generateCertificate(hostname string) (*tls.Certificate, er
 		template.DNSNames = []string{hostname}
 	}
 
-	// Sign with CA
 	certDER, err := x509.CreateCertificate(rand.Reader, template, m.caCert, &key.PublicKey, m.caKey)
 	if err != nil {
 		return nil, fmt.Errorf("create certificate: %w", err)

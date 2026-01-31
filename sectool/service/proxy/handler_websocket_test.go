@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIsWebSocketUpgrade(t *testing.T) {
+func Test_isWebSocketUpgrade(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -126,7 +126,7 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsWebSocketUpgrade(tt.req)
+			got := isWebSocketUpgrade(tt.req)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -535,17 +535,17 @@ func TestOpcodeToString(t *testing.T) {
 	}
 }
 
-func TestNewWebSocketHandler(t *testing.T) {
+func Test_newWebSocketHandler(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
+	history := newHistoryStore(storage)
 	t.Cleanup(history.Close)
 
-	certManager, err := NewCertManager(t.TempDir())
+	certManager, err := newCertManager(t.TempDir())
 	require.NoError(t, err)
 
-	handler := NewWebSocketHandler(history, certManager)
+	handler := newWebSocketHandler(history, certManager)
 
 	assert.NotNil(t, handler)
 	assert.Equal(t, history, handler.history)
@@ -557,10 +557,10 @@ func TestWebSocketHandler_SetRuleApplier(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
+	history := newHistoryStore(storage)
 	t.Cleanup(history.Close)
 
-	handler := NewWebSocketHandler(history, nil)
+	handler := newWebSocketHandler(history, nil)
 
 	// Mock rule applier
 	applier := &mockRuleApplier{}

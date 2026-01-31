@@ -15,7 +15,7 @@ func TestHistoryStore_StoreAndGet(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	h := NewHistoryStore(storage)
+	h := newHistoryStore(storage)
 	t.Cleanup(h.Close)
 
 	entry := &HistoryEntry{
@@ -59,7 +59,7 @@ func TestHistoryStore_AutoIncrement(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	h := NewHistoryStore(storage)
+	h := newHistoryStore(storage)
 	t.Cleanup(h.Close)
 
 	for i := 0; i < 5; i++ {
@@ -82,7 +82,7 @@ func TestHistoryStore_GetNotFound(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	h := NewHistoryStore(storage)
+	h := newHistoryStore(storage)
 	t.Cleanup(h.Close)
 
 	_, ok := h.Get(999)
@@ -93,7 +93,7 @@ func TestHistoryStore_List(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	h := NewHistoryStore(storage)
+	h := newHistoryStore(storage)
 	t.Cleanup(h.Close)
 
 	// Store 10 entries
@@ -132,7 +132,7 @@ func TestHistoryStore_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	h := NewHistoryStore(storage)
+	h := newHistoryStore(storage)
 	t.Cleanup(h.Close)
 
 	var wg sync.WaitGroup
@@ -172,7 +172,7 @@ func TestHistoryStore_SerializationRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	storage := store.NewMemStorage()
-	h := NewHistoryStore(storage)
+	h := newHistoryStore(storage)
 	t.Cleanup(h.Close)
 
 	entry := &HistoryEntry{

@@ -20,8 +20,8 @@ type HistoryStore struct {
 	offsetKeys map[uint32]string // offset → storage key
 }
 
-// NewHistoryStore creates a history store using the provided storage backend.
-func NewHistoryStore(storage store.Storage) *HistoryStore {
+// newHistoryStore creates a history store using the provided storage backend.
+func newHistoryStore(storage store.Storage) *HistoryStore {
 	return &HistoryStore{
 		storage:    storage,
 		offsetKeys: make(map[uint32]string),

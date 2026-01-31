@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestValidateRequest(t *testing.T) {
+func Test_validateRequest(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -125,7 +125,7 @@ func TestValidateRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateRequest(tt.req)
+			err := validateRequest(tt.req)
 
 			if tt.wantErr == "" {
 				require.NoError(t, err)
@@ -137,7 +137,7 @@ func TestValidateRequest(t *testing.T) {
 	}
 }
 
-func TestValidateResponse(t *testing.T) {
+func Test_validateResponse(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -198,7 +198,7 @@ func TestValidateResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateResponse(tt.resp)
+			err := validateResponse(tt.resp)
 
 			if tt.wantErr == "" {
 				require.NoError(t, err)
@@ -358,7 +358,7 @@ func TestParserAcceptsWhatValidationRejects(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, err := ParseRequest(strings.NewReader(tt.input))
+			req, err := parseRequest(strings.NewReader(tt.input))
 
 			if tt.wantParse {
 				require.NoError(t, err)
@@ -367,7 +367,7 @@ func TestParserAcceptsWhatValidationRejects(t *testing.T) {
 				return
 			}
 
-			err = ValidateRequest(req)
+			err = validateRequest(req)
 			if tt.wantValid {
 				require.NoError(t, err)
 			} else {

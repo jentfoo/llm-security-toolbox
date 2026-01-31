@@ -105,10 +105,7 @@ func newH2Conn(conn net.Conn) *h2Conn {
 		flowCtrlCh:           make(chan struct{}),
 	}
 
-	// Create HPACK decoder
 	h.hpackDec = hpack.NewDecoder(hpackDynamicTableSize, nil)
-
-	// Create HPACK encoder
 	h.hpackEnc = hpack.NewEncoder(&h.hpackBuf)
 	h.hpackEnc.SetMaxDynamicTableSize(hpackDynamicTableSize)
 
@@ -233,9 +230,7 @@ func (h *h2Conn) updateSettings(settings []http2.Setting) {
 		case http2.SettingInitialWindowSize:
 			// Handled by updateSendWindowFromSettings() under flowMu - skip here to avoid race
 		case http2.SettingHeaderTableSize:
-			// Peer's SETTINGS_HEADER_TABLE_SIZE constrains OUR encoder, not decoder.
-			// Decoder size is determined by what WE advertise (hpackDynamicTableSize).
-			// Clamp to our configured max to stay within memory bounds.
+			// Peer's SETTINGS_HEADER_TABLE_SIZE constrains our encoder, not decoder
 			tableSize := s.Val
 			if tableSize > hpackDynamicTableSize {
 				tableSize = hpackDynamicTableSize
@@ -267,13 +262,13 @@ func (h *h2Conn) close() {
 	})
 }
 
-// FlowControlError indicates a flow control violation by the peer.
-type FlowControlError struct {
+// flowControlError indicates a flow control violation by the peer.
+type flowControlError struct {
 	StreamID uint32 // 0 for connection-level violation
 	Message  string
 }
 
-func (e *FlowControlError) Error() string {
+func (e *flowControlError) Error() string {
 	return e.Message
 }
 
@@ -286,7 +281,7 @@ func (h *h2Conn) consumeRecvWindow(streamID uint32, size int) error {
 
 	// Check connection-level window
 	if size > int(h.recvWindowConn) {
-		return &FlowControlError{
+		return &flowControlError{
 			StreamID: 0,
 			Message:  "connection flow control window exceeded",
 		}
@@ -298,7 +293,7 @@ func (h *h2Conn) consumeRecvWindow(streamID uint32, size int) error {
 		streamWindow = localInitialWindow
 	}
 	if size > int(streamWindow) {
-		return &FlowControlError{
+		return &flowControlError{
 			StreamID: streamID,
 			Message:  "stream flow control window exceeded",
 		}

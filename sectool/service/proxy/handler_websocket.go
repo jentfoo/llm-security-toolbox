@@ -18,28 +18,28 @@ import (
 
 const maxWebSocketFrameSize = 100 * 1024 * 1024 // 100 MB
 
-// WebSocketHandler handles WebSocket proxying for both ws:// and wss://.
-type WebSocketHandler struct {
+// webSocketHandler handles WebSocket proxying for both ws:// and wss://.
+type webSocketHandler struct {
 	history     *HistoryStore
 	ruleApplier RuleApplier
 	certManager *CertManager
 }
 
-// NewWebSocketHandler creates a new WebSocket handler.
-func NewWebSocketHandler(history *HistoryStore, certManager *CertManager) *WebSocketHandler {
-	return &WebSocketHandler{
+// newWebSocketHandler creates a new WebSocket handler.
+func newWebSocketHandler(history *HistoryStore, certManager *CertManager) *webSocketHandler {
+	return &webSocketHandler{
 		history:     history,
 		certManager: certManager,
 	}
 }
 
 // SetRuleApplier sets the rule applier for WebSocket rules.
-func (h *WebSocketHandler) SetRuleApplier(applier RuleApplier) {
+func (h *webSocketHandler) SetRuleApplier(applier RuleApplier) {
 	h.ruleApplier = applier
 }
 
-// IsWebSocketUpgrade checks if the request is a WebSocket upgrade.
-func IsWebSocketUpgrade(req *RawHTTP1Request) bool {
+// isWebSocketUpgrade checks if the request is a WebSocket upgrade.
+func isWebSocketUpgrade(req *RawHTTP1Request) bool {
 	upgrade := req.GetHeader("Upgrade")
 	connection := req.GetHeader("Connection")
 	return strings.EqualFold(upgrade, "websocket") &&
@@ -47,7 +47,7 @@ func IsWebSocketUpgrade(req *RawHTTP1Request) bool {
 }
 
 // Handle proxies a WebSocket connection (plain HTTP).
-func (h *WebSocketHandler) Handle(
+func (h *webSocketHandler) Handle(
 	ctx context.Context,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
@@ -56,10 +56,9 @@ func (h *WebSocketHandler) Handle(
 ) {
 	startTime := time.Now()
 
-	// Strip compression extensions to ensure rules can be applied to uncompressed text
+	// Strip compression extensions so rules can be applied to uncompressed text
 	h.stripExtensions(req)
 
-	// Connect to upstream
 	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
 	dialer := net.Dialer{Timeout: dialTimeout}
 	upstreamConn, err := dialer.DialContext(ctx, "tcp", upstreamAddr)
@@ -74,7 +73,7 @@ func (h *WebSocketHandler) Handle(
 
 // HandleTLS proxies a WebSocket connection over TLS by creating a new upstream connection.
 // Use HandleTLSWithUpstream when an upstream connection already exists.
-func (h *WebSocketHandler) HandleTLS(
+func (h *webSocketHandler) HandleTLS(
 	ctx context.Context,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
@@ -83,10 +82,8 @@ func (h *WebSocketHandler) HandleTLS(
 ) {
 	startTime := time.Now()
 
-	// Strip compression extensions
 	h.stripExtensions(req)
 
-	// Connect to upstream with TLS
 	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
 	tlsDialer := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: dialTimeout},
@@ -108,7 +105,7 @@ func (h *WebSocketHandler) HandleTLS(
 
 // HandleTLSWithUpstream proxies a WebSocket connection using an existing upstream TLS connection.
 // This avoids the race window of closing and reopening the upstream connection.
-func (h *WebSocketHandler) HandleTLSWithUpstream(
+func (h *webSocketHandler) HandleTLSWithUpstream(
 	ctx context.Context,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
@@ -118,7 +115,6 @@ func (h *WebSocketHandler) HandleTLSWithUpstream(
 ) {
 	startTime := time.Now()
 
-	// Strip compression extensions
 	h.stripExtensions(req)
 
 	h.proxyWebSocketWithReader(ctx, clientConn, clientReader, upstreamConn, upstreamReader, req, startTime)
@@ -126,7 +122,7 @@ func (h *WebSocketHandler) HandleTLSWithUpstream(
 
 // proxyWebSocket handles the WebSocket upgrade and frame proxying.
 // Creates its own upstream reader.
-func (h *WebSocketHandler) proxyWebSocket(
+func (h *webSocketHandler) proxyWebSocket(
 	ctx context.Context,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
@@ -139,7 +135,7 @@ func (h *WebSocketHandler) proxyWebSocket(
 }
 
 // proxyWebSocketWithReader handles WebSocket upgrade and frame proxying with existing readers.
-func (h *WebSocketHandler) proxyWebSocketWithReader(
+func (h *webSocketHandler) proxyWebSocketWithReader(
 	ctx context.Context,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
@@ -160,7 +156,7 @@ func (h *WebSocketHandler) proxyWebSocketWithReader(
 	}
 
 	// Read upstream response
-	resp, err := ParseResponse(upstreamReader, req.Method)
+	resp, err := parseResponse(upstreamReader, req.Method)
 	if err != nil {
 		log.Printf("proxy: websocket upgrade response parse failed: %v", err)
 		h.sendError(clientConn, 502, "Bad Gateway: malformed response")
@@ -182,12 +178,12 @@ func (h *WebSocketHandler) proxyWebSocketWithReader(
 		return
 	}
 
-	// Apply response rules to 101 response (before stripping extensions)
+	// Apply response rules before stripping extensions
 	if h.ruleApplier != nil {
 		resp = h.ruleApplier.ApplyResponseRules(resp)
 	}
 
-	// Strip extensions from response as well (after rules, to ensure no compression)
+	// Strip extensions from response (after rules, to ensure no compression)
 	h.stripResponseExtensions(resp)
 
 	// Store upgrade handshake in history and get reference for frame storage
@@ -213,17 +209,17 @@ func (h *WebSocketHandler) proxyWebSocketWithReader(
 }
 
 // stripExtensions removes Sec-WebSocket-Extensions header to disable compression.
-func (h *WebSocketHandler) stripExtensions(req *RawHTTP1Request) {
+func (h *webSocketHandler) stripExtensions(req *RawHTTP1Request) {
 	req.RemoveHeader("Sec-WebSocket-Extensions")
 }
 
 // stripResponseExtensions removes Sec-WebSocket-Extensions from response.
-func (h *WebSocketHandler) stripResponseExtensions(resp *RawHTTP1Response) {
+func (h *webSocketHandler) stripResponseExtensions(resp *RawHTTP1Response) {
 	resp.RemoveHeader("Sec-WebSocket-Extensions")
 }
 
 // sendError writes an HTTP error response.
-func (h *WebSocketHandler) sendError(conn net.Conn, code int, message string) {
+func (h *webSocketHandler) sendError(conn net.Conn, code int, message string) {
 	resp := &RawHTTP1Response{
 		Version:    "HTTP/1.1",
 		StatusCode: code,
@@ -239,7 +235,7 @@ func (h *WebSocketHandler) sendError(conn net.Conn, code int, message string) {
 
 // storeHandshake stores the WebSocket upgrade handshake in history.
 // Returns the entry so frames can be appended to it.
-func (h *WebSocketHandler) storeHandshake(req *RawHTTP1Request, resp *RawHTTP1Response, startTime time.Time) *HistoryEntry {
+func (h *webSocketHandler) storeHandshake(req *RawHTTP1Request, resp *RawHTTP1Response, startTime time.Time) *HistoryEntry {
 	entry := &HistoryEntry{
 		Protocol:  "websocket",
 		Request:   req,
@@ -257,7 +253,7 @@ func (h *WebSocketHandler) storeHandshake(req *RawHTTP1Request, resp *RawHTTP1Re
 
 // wsProxy handles bidirectional WebSocket frame proxying.
 type wsProxy struct {
-	handler      *WebSocketHandler
+	handler      *webSocketHandler
 	historyEntry *HistoryEntry // handshake entry where frames are appended
 	entryMu      sync.Mutex    // protects historyEntry.WSFrames
 	clientConn   net.Conn
@@ -288,13 +284,9 @@ func (p *wsProxy) run() {
 	p.close()
 }
 
-// proxyFrames reads frames from src and writes to dst, applying rules.
-// outputMasked indicates whether to mask frames when encoding (per RFC 6455).
-//
-// Rules are only applied to complete, uncompressed text frames per RFC 6455:
-//   - opcode=1 (text frame, not binary/ping/pong/close)
-//   - fin=true (complete message, not fragmented)
-//   - rsv=0 (no extensions active - extensions stripped during upgrade)
+// proxyFrames reads frames from src and writes to dst.
+// outputMasked controls masking per RFC 6455 (true for client→upstream, false for server→client).
+// Rules apply only to complete, uncompressed text frames (opcode=1, fin=true, rsv=0).
 func (p *wsProxy) proxyFrames(src *bufio.Reader, dst net.Conn, direction string, outputMasked bool) {
 	for {
 		select {

@@ -67,7 +67,7 @@ func TestParseConnectRequest(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &ConnectHandler{}
+			h := &connectHandler{}
 			reader := bufio.NewReader(strings.NewReader(tc.input))
 
 			target, err := h.parseConnectRequest(reader)
@@ -215,14 +215,14 @@ func TestHTTPSProxy_HeadersPreserved(t *testing.T) {
 func TestServerCapabilityCaching(t *testing.T) {
 	t.Parallel()
 
-	certManager, err := NewCertManager(t.TempDir())
+	certManager, err := newCertManager(t.TempDir())
 	require.NoError(t, err)
 
-	history := NewHistoryStore(store.NewMemStorage())
-	http1Handler := &HTTP1Handler{history: history, maxBodyBytes: 1024 * 1024}
-	http2Handler := NewHTTP2Handler(history, 1024*1024)
+	history := newHistoryStore(store.NewMemStorage())
+	http1Handler := &http1Handler{history: history, maxBodyBytes: 1024 * 1024}
+	http2Handler := newHTTP2Handler(history, 1024*1024)
 
-	handler := NewConnectHandler(certManager, http1Handler, http2Handler, history, 1024*1024)
+	handler := newConnectHandler(certManager, http1Handler, http2Handler, history, 1024*1024)
 
 	// Initially empty cache
 	handler.capsMu.RLock()

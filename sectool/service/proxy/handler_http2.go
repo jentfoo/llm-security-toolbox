@@ -43,29 +43,28 @@ const (
 	streamClosed
 )
 
-// HTTP2Handler handles HTTP/2 MITM interception.
-type HTTP2Handler struct {
+// http2Handler handles HTTP/2 MITM interception.
+type http2Handler struct {
 	history      *HistoryStore
 	ruleApplier  RuleApplier
 	maxBodyBytes int
 }
 
-// NewHTTP2Handler creates a new HTTP/2 handler.
-func NewHTTP2Handler(history *HistoryStore, maxBodyBytes int) *HTTP2Handler {
-	return &HTTP2Handler{
+// newHTTP2Handler creates a new HTTP/2 handler.
+func newHTTP2Handler(history *HistoryStore, maxBodyBytes int) *http2Handler {
+	return &http2Handler{
 		history:      history,
 		maxBodyBytes: maxBodyBytes,
 	}
 }
 
 // SetRuleApplier sets the rule applier for header and body modifications.
-func (h *HTTP2Handler) SetRuleApplier(applier RuleApplier) {
+func (h *http2Handler) SetRuleApplier(applier RuleApplier) {
 	h.ruleApplier = applier
 }
 
 // h2Stream tracks the state of a single HTTP/2 stream.
-// All mutable fields are protected by mu to prevent data races between
-// the two reader goroutines (client→upstream and upstream→client).
+// All mutable fields are protected by mu to prevent data races.
 type h2Stream struct {
 	mu sync.Mutex
 	id uint32
@@ -161,7 +160,7 @@ func (t *h2StreamTracker) all() []*h2Stream {
 
 // h2Proxy manages the HTTP/2 proxying between client and upstream.
 type h2Proxy struct {
-	handler  *HTTP2Handler
+	handler  *http2Handler
 	client   *h2Conn
 	upstream *h2Conn
 	streams  *h2StreamTracker
@@ -177,8 +176,7 @@ type h2Proxy struct {
 	upstreamHeaderStream    uint32
 	upstreamHeaderEndStream bool // END_STREAM flag from HEADERS frame
 
-	// PUSH_PROMISE accumulation state (upstream only since push is server-initiated)
-	// We need to track and decode PUSH_PROMISE + CONTINUATION to maintain HPACK state
+	// PUSH_PROMISE accumulation (upstream only; decode to maintain HPACK state)
 	upstreamPushBuf       bytes.Buffer
 	upstreamPushStream    uint32 // originating stream ID for CONTINUATION
 	upstreamPushPromiseID uint32 // promised stream ID
@@ -186,7 +184,7 @@ type h2Proxy struct {
 }
 
 // Handle proxies HTTP/2 traffic between client and upstream connections.
-func (h *HTTP2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls.Conn) {
+func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls.Conn) {
 	proxyCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -237,9 +235,8 @@ func (h *HTTP2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls
 }
 
 // exchangeSettings performs the initial SETTINGS exchange.
-// HTTP/2 connection preface: after the magic preface, both sides must send SETTINGS.
-// Many servers won't send their SETTINGS until they receive client's SETTINGS.
-// To avoid deadlock, we send SETTINGS to upstream before reading upstream's response.
+// Send SETTINGS to upstream before reading to avoid deadlock (some servers
+// won't send SETTINGS until they receive client's SETTINGS).
 func (p *h2Proxy) exchangeSettings() error {
 	// Read client SETTINGS (client sends immediately after preface)
 	clientSettings, clientGotSettings, err := p.readSettingsFrame(p.client)
@@ -248,7 +245,6 @@ func (p *h2Proxy) exchangeSettings() error {
 	}
 	if clientGotSettings {
 		p.client.updateSettings(clientSettings)
-		// Apply initial window size to send windows (updateSettings skips this to avoid races)
 		for _, s := range clientSettings {
 			if s.ID == http2.SettingInitialWindowSize {
 				p.client.updateSendWindowFromSettings(s.Val)
@@ -275,7 +271,6 @@ func (p *h2Proxy) exchangeSettings() error {
 	}
 	if upstreamGotSettings {
 		p.upstream.updateSettings(upstreamSettings)
-		// Apply initial window size to send windows (updateSettings skips this to avoid races)
 		for _, s := range upstreamSettings {
 			if s.ID == http2.SettingInitialWindowSize {
 				p.upstream.updateSendWindowFromSettings(s.Val)
@@ -362,9 +357,7 @@ func (p *h2Proxy) writeSettingsAck(conn net.Conn) error {
 func (p *h2Proxy) readFrames(fromClient bool) {
 	defer p.wg.Done()
 	defer p.cancel()
-	// Close both connections to unblock the other reader goroutine.
-	// ReadFrame() blocks on I/O and won't see context cancellation until the
-	// underlying connection is closed.
+	// Close both connections to unblock the other reader goroutine
 	defer func() { _ = p.client.conn.Close() }()
 	defer func() { _ = p.upstream.conn.Close() }()
 
@@ -432,10 +425,7 @@ func (p *h2Proxy) readFrames(fromClient bool) {
 			p.forwardPriorityFrame(f, dst)
 
 		case *http2.PushPromiseFrame:
-			// Server push is disabled via SETTINGS_ENABLE_PUSH=0.
-			// Drop PUSH_PROMISE frames (they shouldn't arrive, but handle gracefully).
-			// We still need to decode the HPACK block to maintain compression state.
-			// PUSH_PROMISE only comes from upstream (server), never from client.
+			// Server push disabled; decode HPACK block to maintain compression state
 			if !fromClient {
 				p.handlePushPromiseFrame(f, src)
 			}
@@ -567,8 +557,7 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 
 			// Apply request header rules
 			if p.handler.ruleApplier != nil {
-				// Convert to RawHTTP1Request format for rule application.
-				// Split :path into path and query components per RawHTTP1Request semantics.
+				// Convert to RawHTTP1Request for rule application
 				pathPart, queryPart, _ := strings.Cut(stream.path, "?")
 				req := &RawHTTP1Request{
 					Method:  stream.method,
@@ -580,9 +569,7 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 				headers = req.Headers
 			}
 
-			// Strip content-length if body rules are enabled and there will be body data.
-			// Body rules may modify payload length, making Content-Length incorrect.
-			// In HTTP/2, framing handles message delimitation, so Content-Length is optional.
+			// Strip content-length if body rules may modify payload length
 			if !endStream && p.handler.ruleApplier != nil && p.handler.ruleApplier.HasBodyRules(true) {
 				headers = filterOutHeader(headers, "content-length")
 			}
@@ -610,9 +597,7 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 				headers = resp.Headers
 			}
 
-			// Strip content-length if body rules are enabled and there will be body data.
-			// Body rules may modify payload length, making Content-Length incorrect.
-			// In HTTP/2, framing handles message delimitation, so Content-Length is optional.
+			// Strip content-length if body rules may modify payload length
 			if !endStream && p.handler.ruleApplier != nil && p.handler.ruleApplier.HasBodyRules(false) {
 				headers = filterOutHeader(headers, "content-length")
 			}
@@ -622,8 +607,7 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 		}
 	}
 
-	// If this is a trailer with END_STREAM and we have buffered body data, flush it first.
-	// This handles gRPC and other protocols where END_STREAM is on trailing HEADERS, not DATA.
+	// Flush buffered body before trailers (handles gRPC where END_STREAM is on trailers)
 	if isTrailer && endStream {
 		hasBodyRules := p.handler.ruleApplier != nil && p.handler.ruleApplier.HasBodyRules(fromClient)
 		if hasBodyRules {
@@ -690,11 +674,10 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 	data := f.Data()
 	endStream := f.StreamEnded()
 
-	// Consume receive window on the source connection (we're receiving data).
-	// Check for flow control violations per RFC 9113 §6.9.
+	// Consume receive window; check for flow control violations per RFC 9113 §6.9
 	dataLen := len(data)
 	if err := src.consumeRecvWindow(streamID, dataLen); err != nil {
-		var fcErr *FlowControlError
+		var fcErr *flowControlError
 		if errors.As(err, &fcErr) {
 			if fcErr.StreamID == 0 {
 				// Connection-level violation: send GOAWAY and close
@@ -971,8 +954,6 @@ func (p *h2Proxy) updateHistoryWithModifiedBodyLocked(stream *h2Stream, body []b
 
 // handleSettingsFrame processes a SETTINGS frame.
 // Uses endpoint model: SETTINGS are hop-by-hop, not forwarded across connections.
-// Each connection (client-proxy and proxy-upstream) is an independent HTTP/2 endpoint.
-// ACK SETTINGS are absorbed (they acknowledge SETTINGS we sent, not the peer's).
 func (p *h2Proxy) handleSettingsFrame(f *http2.SettingsFrame, src, dst *h2Conn) {
 	if f.IsAck() {
 		// Absorb ACK - it acknowledges SETTINGS we sent to this peer.

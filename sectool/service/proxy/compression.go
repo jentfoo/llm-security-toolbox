@@ -74,7 +74,6 @@ func Decompress(data []byte, encoding string) ([]byte, bool) {
 		if err == nil {
 			return decompressed, true
 		}
-		// Try zlib-wrapped deflate
 		decompressed, err = decompressZlib(data)
 		if err == nil {
 			return decompressed, true

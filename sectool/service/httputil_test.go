@@ -347,78 +347,6 @@ func TestTransformRequestForValidation(t *testing.T) {
 	}
 }
 
-func TestParseRequestLine(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		line        string
-		wantMethod  string
-		wantPath    string
-		wantQuery   string
-		wantVersion string
-	}{
-		{
-			name:        "simple_get",
-			line:        "GET /api/users HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/api/users",
-			wantQuery:   "",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "get_with_query",
-			line:        "GET /api/users?id=123&role=admin HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/api/users",
-			wantQuery:   "id=123&role=admin",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "post_http_2",
-			line:        "POST /api/data HTTP/2",
-			wantMethod:  "POST",
-			wantPath:    "/api/data",
-			wantQuery:   "",
-			wantVersion: "HTTP/2",
-		},
-		{
-			name:        "root_path",
-			line:        "GET / HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/",
-			wantQuery:   "",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "empty_query_value",
-			line:        "GET /search?q= HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/search",
-			wantQuery:   "q=",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "empty_input",
-			line:        "",
-			wantMethod:  "",
-			wantPath:    "",
-			wantQuery:   "",
-			wantVersion: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			method, path, query, version := parseRequestLine(tc.line)
-			assert.Equal(t, tc.wantMethod, method)
-			assert.Equal(t, tc.wantPath, path)
-			assert.Equal(t, tc.wantQuery, query)
-			assert.Equal(t, tc.wantVersion, version)
-		})
-	}
-}
-
 func TestModifyRequestLine(t *testing.T) {
 	t.Parallel()
 
@@ -1180,28 +1108,6 @@ func TestParseStatusFilter(t *testing.T) {
 		assert.True(t, f.Matches(404))
 		assert.True(t, f.Matches(503))
 	})
-}
-
-func TestPathWithoutQuery(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		path string
-		want string
-	}{
-		{"/api/users", "/api/users"},
-		{"/search?q=test", "/search"},
-		{"/api?a=1&b=2", "/api"},
-		{"?query=only", ""},
-		{"/path/with/multiple?a=1?b=2", "/path/with/multiple"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			assert.Equal(t, tt.want, pathWithoutQuery(tt.path))
-		})
-	}
 }
 
 func TestUpdateContentLength(t *testing.T) {

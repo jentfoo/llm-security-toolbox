@@ -16,11 +16,11 @@ import (
 	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
 )
 
-func TestNewHTTP2Handler(t *testing.T) {
+func Test_newHTTP2Handler(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 1024*1024)
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 1024*1024)
 
 	require.NotNil(t, handler)
 	assert.Equal(t, 1024*1024, handler.maxBodyBytes)
@@ -30,8 +30,8 @@ func TestNewHTTP2Handler(t *testing.T) {
 func TestHTTP2Handler_SetRuleApplier(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 1024*1024)
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 1024*1024)
 
 	// Initially nil
 	assert.Nil(t, handler.ruleApplier)
@@ -303,8 +303,8 @@ func (m *h2MockRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers []He
 func TestApplyBodyRules_RequestWithHeaders(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 1024)
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 1024)
 
 	// Set up rule applier that modifies body
 	applier := &h2MockRuleApplier{
@@ -334,8 +334,8 @@ func TestApplyBodyRules_RequestWithHeaders(t *testing.T) {
 func TestApplyBodyRules_ResponseUsesBodyOnlyMethod(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 1024)
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 1024)
 
 	// Track whether the body-only method or full method is called
 	var bodyOnlyCalled bool
@@ -379,8 +379,8 @@ func TestApplyBodyRules_ResponseUsesBodyOnlyMethod(t *testing.T) {
 func TestCopyToHistoryBuffer_RespectLimit(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 10) // 10 byte limit
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 10) // 10 byte limit
 
 	stream := &h2Stream{id: 1}
 	p := &h2Proxy{handler: handler}
@@ -397,8 +397,8 @@ func TestCopyToHistoryBuffer_RespectLimit(t *testing.T) {
 func TestCopyToFullBuffer_NoOverflow(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 1024)
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 1024)
 
 	stream := &h2Stream{id: 1}
 	p := &h2Proxy{handler: handler}
@@ -413,8 +413,8 @@ func TestCopyToFullBuffer_NoOverflow(t *testing.T) {
 func TestCopyToFullBuffer_Overflow(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 1024)
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 1024)
 
 	stream := &h2Stream{id: 1}
 	p := &h2Proxy{handler: handler}
@@ -429,8 +429,8 @@ func TestCopyToFullBuffer_Overflow(t *testing.T) {
 func TestUpdateHistoryWithModifiedBody(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 5) // 5 byte limit
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 5) // 5 byte limit
 
 	stream := &h2Stream{id: 1}
 	stream.reqBody.WriteString("original")
@@ -448,8 +448,8 @@ func TestUpdateHistoryWithModifiedBody(t *testing.T) {
 func TestStoreStreamInHistory(t *testing.T) {
 	t.Parallel()
 
-	history := NewHistoryStore(store.NewMemStorage())
-	handler := NewHTTP2Handler(history, 1024)
+	history := newHistoryStore(store.NewMemStorage())
+	handler := newHTTP2Handler(history, 1024)
 
 	stream := &h2Stream{
 		id:          1,
@@ -527,7 +527,7 @@ func TestH2Conn_FlowControl_ConsumeWindow_Violation(t *testing.T) {
 		err := h.consumeRecvWindow(1, 2000)
 		require.Error(t, err)
 
-		var fcErr *FlowControlError
+		var fcErr *flowControlError
 		require.ErrorAs(t, err, &fcErr)
 		assert.Equal(t, uint32(0), fcErr.StreamID) // 0 indicates connection-level
 
@@ -546,7 +546,7 @@ func TestH2Conn_FlowControl_ConsumeWindow_Violation(t *testing.T) {
 		err := h.consumeRecvWindow(1, 1000)
 		require.Error(t, err)
 
-		var fcErr *FlowControlError
+		var fcErr *flowControlError
 		require.ErrorAs(t, err, &fcErr)
 		assert.Equal(t, uint32(1), fcErr.StreamID)
 

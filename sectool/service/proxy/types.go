@@ -32,6 +32,7 @@ type RawHTTP1Request struct {
 	Body []byte `json:"body,omitempty"`
 
 	// Trailers for chunked encoding (raw bytes, rare but must preserve)
+	// TODO - FUTURE - Parse trailers into []Header if trailer rules are needed
 	Trailers []byte `json:"trailers,omitempty"`
 
 	// Protocol metadata for replay fidelity
@@ -52,6 +53,7 @@ type RawHTTP1Response struct {
 	Body []byte `json:"body,omitempty"`
 
 	// Trailers for chunked encoding (raw bytes)
+	// TODO - FUTURE - Parse trailers into []Header if trailer rules are needed
 	Trailers []byte `json:"trailers,omitempty"`
 }
 

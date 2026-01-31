@@ -16,13 +16,12 @@ var (
 	ErrInvalidResponse = errors.New("invalid status line")
 )
 
-// ParseRequest parses an HTTP/1.1 request from the reader.
+// parseRequest parses an HTTP/1.1 request from the reader.
 // Returns error only for truly unparseable input.
 // Tolerant of malformed input to support security testing.
-func ParseRequest(r io.Reader) (*RawHTTP1Request, error) {
+func parseRequest(r io.Reader) (*RawHTTP1Request, error) {
 	br := bufio.NewReader(r)
 
-	// Read request line
 	line, err := readLine(br)
 	if err != nil {
 		if errors.Is(err, io.EOF) && len(line) == 0 {
@@ -33,7 +32,7 @@ func ParseRequest(r io.Reader) (*RawHTTP1Request, error) {
 		// Continue with partial line
 	}
 
-	method, path, query, version, err := parseRequestLine(line)
+	method, path, query, version, err := ParseRequestLine(line)
 	if err != nil {
 		return nil, err
 	}
@@ -51,16 +50,16 @@ func ParseRequest(r io.Reader) (*RawHTTP1Request, error) {
 	}
 
 	// Determine body handling
-	if req.Body, req.Trailers, err = readRequestBody(br, req.Headers); err != nil && !errors.Is(err, io.EOF) {
+	if req.Body, req.Trailers, err = readRequestBody(br, req); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 
 	return req, nil
 }
 
-// ParseResponse parses an HTTP/1.1 response from the reader.
+// parseResponse parses an HTTP/1.1 response from the reader.
 // The request method is needed to determine body handling for HEAD responses.
-func ParseResponse(r io.Reader, requestMethod string) (*RawHTTP1Response, error) {
+func parseResponse(r io.Reader, requestMethod string) (*RawHTTP1Response, error) {
 	br := bufio.NewReader(r)
 
 	// Read status line
@@ -98,7 +97,7 @@ func ParseResponse(r io.Reader, requestMethod string) (*RawHTTP1Response, error)
 		return resp, nil
 	}
 
-	if resp.Body, resp.Trailers, err = readResponseBody(br, resp.Headers); err != nil && !errors.Is(err, io.EOF) {
+	if resp.Body, resp.Trailers, err = readResponseBody(br, resp); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 
@@ -115,15 +114,14 @@ func readLine(br *bufio.Reader) ([]byte, error) {
 		line = bytes.TrimSuffix(line, []byte("\r"))
 		return line, err
 	}
-	// Remove trailing \n and any preceding \r
 	line = line[:len(line)-1]
 	line = bytes.TrimSuffix(line, []byte("\r"))
 	return line, nil
 }
 
-// parseRequestLine extracts method, path, query, version from request line.
+// ParseRequestLine extracts method, path, query, version from request line.
 // Tolerant: accepts malformed lines if method and path are extractable.
-func parseRequestLine(line []byte) (method, path, query, version string, err error) {
+func ParseRequestLine(line []byte) (method, path, query, version string, err error) {
 	s := string(line)
 	parts := strings.SplitN(s, " ", 3)
 	if len(parts) < 2 {
@@ -238,14 +236,14 @@ func parseHeaderLine(line []byte) Header {
 }
 
 // readRequestBody reads the request body based on headers.
-func readRequestBody(br *bufio.Reader, headers []Header) (body, trailers []byte, err error) {
+func readRequestBody(br *bufio.Reader, req *RawHTTP1Request) (body, trailers []byte, err error) {
 	// Check for chunked encoding first (takes precedence over Content-Length)
-	te := getHeaderValue(headers, "Transfer-Encoding")
+	te := req.GetHeader("Transfer-Encoding")
 	if strings.Contains(strings.ToLower(te), "chunked") {
 		return readChunkedBody(br)
 	}
 
-	clStr := getHeaderValue(headers, "Content-Length")
+	clStr := req.GetHeader("Content-Length")
 	if clStr != "" {
 		cl, err := strconv.ParseInt(clStr, 10, 64)
 		if err != nil || cl <= 0 {
@@ -261,14 +259,14 @@ func readRequestBody(br *bufio.Reader, headers []Header) (body, trailers []byte,
 }
 
 // readResponseBody reads the response body based on headers.
-func readResponseBody(br *bufio.Reader, headers []Header) (body, trailers []byte, err error) {
+func readResponseBody(br *bufio.Reader, resp *RawHTTP1Response) (body, trailers []byte, err error) {
 	// Check for chunked encoding first
-	te := getHeaderValue(headers, "Transfer-Encoding")
+	te := resp.GetHeader("Transfer-Encoding")
 	if strings.Contains(strings.ToLower(te), "chunked") {
 		return readChunkedBody(br)
 	}
 
-	clStr := getHeaderValue(headers, "Content-Length")
+	clStr := resp.GetHeader("Content-Length")
 	if clStr != "" {
 		cl, err := strconv.ParseInt(clStr, 10, 64)
 		if err != nil || cl < 0 {
@@ -293,7 +291,6 @@ func readResponseBody(br *bufio.Reader, headers []Header) (body, trailers []byte
 func readChunkedBody(br *bufio.Reader) (body, trailers []byte, err error) {
 	var bodyBuf bytes.Buffer
 	for {
-		// Read chunk size line
 		sizeLine, err := readLine(br)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return bodyBuf.Bytes(), nil, err
@@ -351,16 +348,6 @@ func readTrailers(br *bufio.Reader) ([]byte, error) {
 			return buf.Bytes(), nil
 		}
 	}
-}
-
-// getHeaderValue returns the first value for a header name (case-insensitive).
-func getHeaderValue(headers []Header, name string) string {
-	for _, h := range headers {
-		if strings.EqualFold(h.Name, name) {
-			return h.Value
-		}
-	}
-	return ""
 }
 
 // Serialize reconstructs wire bytes from the request components.

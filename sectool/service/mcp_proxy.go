@@ -13,6 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
+	"github.com/go-harden/llm-security-toolbox/sectool/service/proxy"
 	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
 )
 
@@ -507,7 +508,7 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, flowStore *st
 			return false // Status filter
 		} else if req.Host != "" && !matchesGlob(e.host, req.Host) {
 			return false // Host filter (if using client-side filtering)
-		} else if req.Path != "" && !matchesGlob(e.path, req.Path) && !matchesGlob(pathWithoutQuery(e.path), req.Path) {
+		} else if req.Path != "" && !matchesGlob(e.path, req.Path) && !matchesGlob(proxy.PathWithoutQuery(e.path), req.Path) {
 			return false
 		} else if req.ExcludeHost != "" && matchesGlob(e.host, req.ExcludeHost) {
 			return false // Exclude host

@@ -28,10 +28,10 @@ type ProxyServer struct {
 	history *HistoryStore
 
 	// Handlers for different protocols
-	http1Handler   *HTTP1Handler
-	http2Handler   *HTTP2Handler
-	connectHandler *ConnectHandler
-	wsHandler      *WebSocketHandler
+	http1Handler   *http1Handler
+	http2Handler   *http2Handler
+	connectHandler *connectHandler
+	wsHandler      *webSocketHandler
 
 	// Shutdown coordination
 	ctx    context.Context
@@ -44,8 +44,7 @@ type ProxyServer struct {
 // configDir is the directory for CA certificates (e.g., ~/.sectool).
 // maxBodyBytes limits request and response body sizes stored in history.
 func NewProxyServer(port int, configDir string, maxBodyBytes int) (*ProxyServer, error) {
-	// Initialize certificate manager for HTTPS MITM
-	certManager, err := NewCertManager(configDir)
+	certManager, err := newCertManager(configDir)
 	if err != nil {
 		return nil, fmt.Errorf("create cert manager: %w", err)
 	}
@@ -57,21 +56,20 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int) (*ProxyServer,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-
 	storage := store.NewMemStorage()
-	history := NewHistoryStore(storage)
+	history := newHistoryStore(storage)
 
-	wsHandler := NewWebSocketHandler(history, certManager)
+	wsHandler := newWebSocketHandler(history, certManager)
 
-	http1Handler := &HTTP1Handler{
+	http1Handler := &http1Handler{
 		history:      history,
 		maxBodyBytes: maxBodyBytes,
 		wsHandler:    wsHandler,
 	}
 
-	http2Handler := NewHTTP2Handler(history, maxBodyBytes)
+	http2Handler := newHTTP2Handler(history, maxBodyBytes)
 
-	connectHandler := NewConnectHandler(certManager, http1Handler, http2Handler, history, maxBodyBytes)
+	connectHandler := newConnectHandler(certManager, http1Handler, http2Handler, history, maxBodyBytes)
 
 	s := &ProxyServer{
 		listener:       listener,
@@ -120,9 +118,8 @@ func (s *ProxyServer) Serve() error {
 		conn, err := s.listener.Accept()
 		if err != nil {
 			if s.closed.Load() {
-				return nil // graceful shutdown
+				return nil
 			}
-			// Check if context was cancelled
 			select {
 			case <-s.ctx.Done():
 				return nil

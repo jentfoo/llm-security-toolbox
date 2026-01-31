@@ -14,11 +14,11 @@ import (
 	"sync"
 )
 
-// ConnectHandler handles CONNECT requests for HTTPS MITM interception.
-type ConnectHandler struct {
+// connectHandler handles CONNECT requests for HTTPS MITM interception.
+type connectHandler struct {
 	certManager  *CertManager
-	http1Handler *HTTP1Handler
-	http2Handler *HTTP2Handler
+	http1Handler *http1Handler
+	http2Handler *http2Handler
 	history      *HistoryStore
 	maxBodyBytes int
 
@@ -29,9 +29,9 @@ type ConnectHandler struct {
 	serverCaps map[string]string
 }
 
-// NewConnectHandler creates a new CONNECT handler.
-func NewConnectHandler(certManager *CertManager, http1Handler *HTTP1Handler, http2Handler *HTTP2Handler, history *HistoryStore, maxBodyBytes int) *ConnectHandler {
-	return &ConnectHandler{
+// newConnectHandler creates a new CONNECT handler.
+func newConnectHandler(certManager *CertManager, http1Handler *http1Handler, http2Handler *http2Handler, history *HistoryStore, maxBodyBytes int) *connectHandler {
+	return &connectHandler{
 		certManager:  certManager,
 		http1Handler: http1Handler,
 		http2Handler: http2Handler,
@@ -42,7 +42,7 @@ func NewConnectHandler(certManager *CertManager, http1Handler *HTTP1Handler, htt
 }
 
 // SetRuleApplier propagates the rule applier to child handlers.
-func (h *ConnectHandler) SetRuleApplier(applier RuleApplier) {
+func (h *connectHandler) SetRuleApplier(applier RuleApplier) {
 	h.http1Handler.ruleApplier = applier
 	if h.http2Handler != nil {
 		h.http2Handler.SetRuleApplier(applier)
@@ -50,8 +50,7 @@ func (h *ConnectHandler) SetRuleApplier(applier RuleApplier) {
 }
 
 // Handle processes a CONNECT request for HTTPS tunneling with MITM.
-func (h *ConnectHandler) Handle(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader) {
-	// Parse CONNECT request
+func (h *connectHandler) Handle(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader) {
 	target, err := h.parseConnectRequest(clientReader)
 	if err != nil {
 		log.Printf("proxy: failed to parse CONNECT request: %v", err)
@@ -59,26 +58,22 @@ func (h *ConnectHandler) Handle(ctx context.Context, clientConn net.Conn, client
 		return
 	}
 
-	// Send 200 Connection Established
 	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		log.Printf("proxy: failed to send CONNECT response: %v", err)
 		return
 	}
 
-	// Perform TLS handshake with delayed protocol probing
 	h.handleTLS(ctx, clientConn, target)
 }
 
 // parseConnectRequest parses "CONNECT host:port HTTP/1.1" and reads remaining headers.
-func (h *ConnectHandler) parseConnectRequest(reader *bufio.Reader) (*Target, error) {
-	// Read request line
+func (h *connectHandler) parseConnectRequest(reader *bufio.Reader) (*Target, error) {
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, fmt.Errorf("read request line: %w", err)
 	}
 	line = strings.TrimSpace(line)
 
-	// Parse "CONNECT host:port HTTP/1.1"
 	parts := strings.SplitN(line, " ", 3)
 	if len(parts) < 2 || parts[0] != "CONNECT" {
 		return nil, errors.New("invalid CONNECT request line")
@@ -86,10 +81,8 @@ func (h *ConnectHandler) parseConnectRequest(reader *bufio.Reader) (*Target, err
 
 	hostPort := parts[1]
 
-	// Parse host:port (default port 443)
 	host, portStr, err := net.SplitHostPort(hostPort)
 	if err != nil {
-		// No port specified, use default 443
 		host = hostPort
 		portStr = "443"
 	}
@@ -122,7 +115,7 @@ func (h *ConnectHandler) parseConnectRequest(reader *bufio.Reader) (*Target, err
 
 // handleTLS performs TLS handshake with delayed protocol probing.
 // The probe happens inside GetConfigForClient to ensure protocol matching.
-func (h *ConnectHandler) handleTLS(ctx context.Context, clientConn net.Conn, target *Target) {
+func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, target *Target) {
 	targetAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
 
 	// Variables to capture from GetConfigForClient callback
@@ -196,7 +189,7 @@ func (h *ConnectHandler) handleTLS(ctx context.Context, clientConn net.Conn, tar
 
 // probeOrConnect returns an open upstream connection with the appropriate protocol.
 // Uses cached protocol if available, otherwise probes the server.
-func (h *ConnectHandler) probeOrConnect(ctx context.Context, targetAddr, sni string, clientALPN []string) (net.Conn, string, error) {
+func (h *connectHandler) probeOrConnect(ctx context.Context, targetAddr, sni string, clientALPN []string) (net.Conn, string, error) {
 	// Check cache
 	h.capsMu.RLock()
 	cachedProto, cached := h.serverCaps[targetAddr]
@@ -219,7 +212,7 @@ func (h *ConnectHandler) probeOrConnect(ctx context.Context, targetAddr, sni str
 }
 
 // probeUpstream connects to the server and discovers its protocol capabilities.
-func (h *ConnectHandler) probeUpstream(ctx context.Context, targetAddr, sni string, clientALPN []string) (net.Conn, string, error) {
+func (h *connectHandler) probeUpstream(ctx context.Context, targetAddr, sni string, clientALPN []string) (net.Conn, string, error) {
 	conn, err := h.dialUpstream(ctx, targetAddr, sni, clientALPN)
 	if err != nil {
 		return nil, "", err
@@ -245,7 +238,7 @@ func (h *ConnectHandler) probeUpstream(ctx context.Context, targetAddr, sni stri
 }
 
 // dialUpstream establishes a TLS connection to the upstream server.
-func (h *ConnectHandler) dialUpstream(ctx context.Context, targetAddr, sni string, alpn []string) (net.Conn, error) {
+func (h *connectHandler) dialUpstream(ctx context.Context, targetAddr, sni string, alpn []string) (net.Conn, error) {
 	tlsDialer := &tls.Dialer{
 		NetDialer: &net.Dialer{
 			Timeout: dialTimeout,
@@ -262,7 +255,7 @@ func (h *ConnectHandler) dialUpstream(ctx context.Context, targetAddr, sni strin
 }
 
 // routeByProtocol routes the connection to the appropriate protocol handler.
-func (h *ConnectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, protocol string, target *Target) {
+func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, protocol string, target *Target) {
 	defer func() {
 		_ = clientTLS.Close()
 		_ = upstreamConn.Close()
@@ -288,7 +281,7 @@ func (h *ConnectHandler) routeByProtocol(ctx context.Context, clientTLS, upstrea
 }
 
 // sendConnectError writes an HTTP error response for CONNECT failures.
-func (h *ConnectHandler) sendConnectError(conn net.Conn, code int, message string) {
+func (h *connectHandler) sendConnectError(conn net.Conn, code int, message string) {
 	resp := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s\n",
 		code, message, message)
 	_, _ = conn.Write([]byte(resp))

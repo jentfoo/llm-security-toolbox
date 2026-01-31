@@ -18,7 +18,7 @@ func TestCertManager_NewGeneratesCA(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Create manager - should generate CA
-	cm, err := NewCertManager(tempDir)
+	cm, err := newCertManager(tempDir)
 	require.NoError(t, err)
 	require.NotNil(t, cm)
 
@@ -43,12 +43,12 @@ func TestCertManager_LoadsExistingCA(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Create first manager to generate CA
-	cm1, err := NewCertManager(tempDir)
+	cm1, err := newCertManager(tempDir)
 	require.NoError(t, err)
 	caCert1 := cm1.CACert()
 
 	// Create second manager - should load existing CA
-	cm2, err := NewCertManager(tempDir)
+	cm2, err := newCertManager(tempDir)
 	require.NoError(t, err)
 	caCert2 := cm2.CACert()
 
@@ -65,7 +65,7 @@ func TestCertManager_ErrorOnOrphanedCert(t *testing.T) {
 	err := os.WriteFile(filepath.Join(tempDir, "ca.pem"), []byte("dummy"), 0644)
 	require.NoError(t, err)
 
-	_, err = NewCertManager(tempDir)
+	_, err = newCertManager(tempDir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "key is missing")
 }
@@ -79,7 +79,7 @@ func TestCertManager_ErrorOnOrphanedKey(t *testing.T) {
 	err := os.WriteFile(filepath.Join(tempDir, "ca-key.pem"), []byte("dummy"), 0600)
 	require.NoError(t, err)
 
-	_, err = NewCertManager(tempDir)
+	_, err = newCertManager(tempDir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "certificate is missing")
 }
@@ -88,7 +88,7 @@ func TestCertManager_GetCertificate(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	cm, err := NewCertManager(tempDir)
+	cm, err := newCertManager(tempDir)
 	require.NoError(t, err)
 
 	// Generate certificate for hostname
@@ -111,7 +111,7 @@ func TestCertManager_GetCertificateCached(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	cm, err := NewCertManager(tempDir)
+	cm, err := newCertManager(tempDir)
 	require.NoError(t, err)
 
 	// Get certificate twice
@@ -129,7 +129,7 @@ func TestCertManager_GetCertificateForIP(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	cm, err := NewCertManager(tempDir)
+	cm, err := newCertManager(tempDir)
 	require.NoError(t, err)
 
 	// Generate certificate for IP address
@@ -151,7 +151,7 @@ func TestCertManager_CertificateChain(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	cm, err := NewCertManager(tempDir)
+	cm, err := newCertManager(tempDir)
 	require.NoError(t, err)
 
 	cert, err := cm.GetCertificate("example.com")
@@ -175,7 +175,7 @@ func TestCertManager_CertificateUsableForTLS(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	cm, err := NewCertManager(tempDir)
+	cm, err := newCertManager(tempDir)
 	require.NoError(t, err)
 
 	cert, err := cm.GetCertificate("localhost")
@@ -195,7 +195,7 @@ func TestCertManager_CAProperties(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	cm, err := NewCertManager(tempDir)
+	cm, err := newCertManager(tempDir)
 	require.NoError(t, err)
 
 	caCert := cm.CACert()
