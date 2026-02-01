@@ -1023,3 +1023,156 @@ func TestApplyRequestRules_empty_body(t *testing.T) {
 
 	assert.Empty(t, modified.Body)
 }
+
+func TestApplyRequestRules_compressed_body(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add body rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "body-rule",
+		Type:    RuleTypeRequestBody,
+		IsRegex: &isRegex,
+		Match:   "secret",
+		Replace: "HIDDEN",
+	})
+	require.NoError(t, err)
+
+	// Create gzip-compressed request body
+	originalBody := []byte(`{"password":"secret123"}`)
+	compressedBody, err := proxy.Compress(originalBody, "gzip")
+	require.NoError(t, err)
+
+	req := &proxy.RawHTTP1Request{
+		Method:  "POST",
+		Path:    "/api",
+		Version: "HTTP/1.1",
+		Headers: []proxy.Header{
+			{Name: "Host", Value: "example.com"},
+			{Name: "Content-Encoding", Value: "gzip"},
+			{Name: "Content-Length", Value: strconv.Itoa(len(compressedBody))},
+		},
+		Body: compressedBody,
+	}
+
+	modified := backend.ApplyRequestRules(req)
+
+	// Decompress and verify the rule was applied
+	decompressed, wasCompressed := proxy.Decompress(modified.Body, "gzip")
+	assert.True(t, wasCompressed)
+	assert.Contains(t, string(decompressed), "HIDDEN123")
+	assert.NotContains(t, string(decompressed), "secret")
+}
+
+func TestApplyRequestBodyOnlyRules_compression(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add body rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "body-rule",
+		Type:    RuleTypeRequestBody,
+		IsRegex: &isRegex,
+		Match:   "token",
+		Replace: "REDACTED",
+	})
+	require.NoError(t, err)
+
+	// Create gzip-compressed body
+	originalBody := []byte(`{"auth":"token123"}`)
+	compressedBody, err := proxy.Compress(originalBody, "gzip")
+	require.NoError(t, err)
+
+	headers := []proxy.Header{
+		{Name: "Content-Encoding", Value: "gzip"},
+	}
+
+	modified, modErr := backend.ApplyRequestBodyOnlyRules(compressedBody, headers)
+	require.NoError(t, modErr)
+
+	// Decompress and verify the rule was applied
+	decompressed, wasCompressed := proxy.Decompress(modified, "gzip")
+	assert.True(t, wasCompressed)
+	assert.Contains(t, string(decompressed), "REDACTED123")
+}
+
+func TestApplyRequestBodyOnlyRules_unsupported_encoding(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add body rule that would corrupt brotli if applied
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "body-rule",
+		Type:    RuleTypeRequestBody,
+		IsRegex: &isRegex,
+		Match:   "test",
+		Replace: "MODIFIED",
+	})
+	require.NoError(t, err)
+
+	// Fake brotli-compressed body (unsupported encoding)
+	fakeCompressed := []byte{0x1b, 0x03, 0x00, 0xf8, 0xff}
+	originalBody := make([]byte, len(fakeCompressed))
+	copy(originalBody, fakeCompressed)
+
+	headers := []proxy.Header{
+		{Name: "Content-Encoding", Value: "br"},
+	}
+
+	modified, modErr := backend.ApplyRequestBodyOnlyRules(fakeCompressed, headers)
+	require.NoError(t, modErr)
+
+	// Body should be unchanged since br is unsupported
+	assert.Equal(t, originalBody, modified)
+}
+
+func TestApplyRequestBodyOnlyRules_no_encoding(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	backend, err := NewCustomProxyBackend(0, tempDir, 10*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	isRegex := false
+
+	// Add body rule
+	_, err = backend.AddRule(ctx, ProxyRuleInput{
+		Label:   "body-rule",
+		Type:    RuleTypeRequestBody,
+		IsRegex: &isRegex,
+		Match:   "original",
+		Replace: "modified",
+	})
+	require.NoError(t, err)
+
+	body := []byte(`{"data":"original-value"}`)
+	headers := []proxy.Header{} // no Content-Encoding
+
+	modified, modErr := backend.ApplyRequestBodyOnlyRules(body, headers)
+	require.NoError(t, modErr)
+
+	assert.JSONEq(t, `{"data":"modified-value"}`, string(modified))
+}

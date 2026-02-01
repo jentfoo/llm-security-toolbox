@@ -308,22 +308,33 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 // applyModifications applies all modifications to a request.
 // When force is true, Content-Length is not auto-updated on body changes
 // (allows testing scenarios like request smuggling).
+// User-specified Content-Length in SetHeaders is preserved (not overwritten).
 func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications, force bool) error {
 	if mods == nil {
 		return nil
 	}
 
-	// 1. Method override
+	// Check if user explicitly set Content-Length via SetHeaders before we apply them.
+	// If so, we won't auto-update Content-Length on body changes.
+	var userSetContentLength bool
+	for name := range mods.SetHeaders {
+		if strings.EqualFold(name, "Content-Length") {
+			userSetContentLength = true
+			break
+		}
+	}
+
+	// Method override
 	if mods.Method != "" {
 		req.Method = mods.Method
 	}
 
-	// 2. Query parameter modifications
+	// Query parameter modifications
 	if len(mods.SetParams) > 0 || len(mods.RemoveParams) > 0 {
 		applyQueryModifications(req, mods)
 	}
 
-	// 3. Header modifications (sets, then removes)
+	// Header modifications (sets, then removes)
 	// Sort keys for deterministic order (map iteration is random)
 	if len(mods.SetHeaders) > 0 {
 		headerNames := bulk.MapKeysSlice(mods.SetHeaders)
@@ -336,11 +347,15 @@ func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications, f
 		req.RemoveHeader(name)
 	}
 
-	// 4. Body modifications (mutually exclusive)
-	// When force=true, skip Content-Length updates to allow mismatched headers for security testing
+	// Body modifications (mutually exclusive)
+	// Auto-update Content-Length only if:
+	// - force=false (not bypassing validation)
+	// - User didn't explicitly set Content-Length in SetHeaders
+	shouldAutoUpdateCL := !force && !userSetContentLength
+
 	if mods.Body != nil {
 		req.Body = mods.Body
-		if !force {
+		if shouldAutoUpdateCL {
 			req.SetHeader("Content-Length", strconv.Itoa(len(mods.Body)))
 		}
 	} else if len(mods.SetJSON) > 0 || len(mods.RemoveJSON) > 0 {
@@ -353,7 +368,7 @@ func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications, f
 				return fmt.Errorf("JSON modification failed: %w", err)
 			}
 			req.Body = modified
-			if !force {
+			if shouldAutoUpdateCL {
 				req.SetHeader("Content-Length", strconv.Itoa(len(modified)))
 			}
 		}
@@ -368,13 +383,10 @@ func isEmptyModifications(mods *Modifications) bool {
 		return true
 	}
 	return mods.Method == "" &&
-		len(mods.SetHeaders) == 0 &&
-		len(mods.RemoveHeaders) == 0 &&
+		len(mods.SetHeaders) == 0 && len(mods.RemoveHeaders) == 0 &&
 		mods.Body == nil &&
-		len(mods.SetJSON) == 0 &&
-		len(mods.RemoveJSON) == 0 &&
-		len(mods.SetParams) == 0 &&
-		len(mods.RemoveParams) == 0
+		len(mods.SetJSON) == 0 && len(mods.RemoveJSON) == 0 &&
+		len(mods.SetParams) == 0 && len(mods.RemoveParams) == 0
 }
 
 // sendRawRequest sends raw request bytes without parsing/serializing.
@@ -524,7 +536,7 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 
 		target := Target{
 			Hostname:  u.Hostname(),
-			UsesHTTPS: u.Scheme == "https",
+			UsesHTTPS: u.Scheme == schemeHTTPS,
 		}
 		if u.Port() != "" {
 			target.Port, _ = strconv.Atoi(u.Port())
@@ -539,9 +551,9 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 
 	// Protocol-relative URL
 	if strings.HasPrefix(location, "//") {
-		scheme := "https"
+		scheme := schemeHTTPS
 		if !currentTarget.UsesHTTPS {
-			scheme = "http"
+			scheme = schemeHTTP
 		}
 		u, err := url.Parse(scheme + ":" + location)
 		if err != nil {
@@ -550,7 +562,7 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 
 		target := Target{
 			Hostname:  u.Hostname(),
-			UsesHTTPS: scheme == "https",
+			UsesHTTPS: scheme == schemeHTTPS,
 		}
 		if u.Port() != "" {
 			target.Port, _ = strconv.Atoi(u.Port())
@@ -646,7 +658,7 @@ func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *RawHTTP1
 	pseudos := map[string]string{
 		":method":    req.Method,
 		":path":      requestPath,
-		":scheme":    "https",
+		":scheme":    schemeHTTPS,
 		":authority": authority,
 	}
 
@@ -888,7 +900,7 @@ func (s *Sender) readH2SettingsAndAck(framer *http2.Framer, h2c *h2Conn) error {
 // It first processes any frames buffered during flow control waiting,
 // then continues reading from the framer.
 func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint32, bufferedFrames []http2.Frame) (*RawHTTP1Response, error) {
-	var headers, trailers []Header
+	var headers, trailers Headers
 	var statusCode int
 	var body bytes.Buffer
 	var gotInitialHeaders bool
@@ -1067,7 +1079,7 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 
 // buildH2ResponseWithTrailers creates a RawHTTP1Response from HTTP/2 response data.
 // Trailers are appended to headers for compatibility with HTTP/1.1-style response handling.
-func buildH2ResponseWithTrailers(statusCode int, headers, trailers []Header, body []byte) *RawHTTP1Response {
+func buildH2ResponseWithTrailers(statusCode int, headers, trailers Headers, body []byte) *RawHTTP1Response {
 	allHeaders := headers
 	if len(trailers) > 0 {
 		allHeaders = append(allHeaders, trailers...)

@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -469,7 +468,11 @@ func (b *CustomProxyBackend) HasBodyRules(isRequest bool) bool {
 
 // ApplyRequestBodyOnlyRules applies only body rules to a request body.
 // Used by HTTP/2 where headers are sent separately before body.
-func (b *CustomProxyBackend) ApplyRequestBodyOnlyRules(body []byte) []byte {
+// Requires headers for Content-Encoding detection (compression-aware).
+// IMPORTANT: In HTTP/2, headers are already sent before body arrives.
+// If recompression fails, we must return an error so caller can reset the stream
+// rather than sending uncompressed data with Content-Encoding header still set.
+func (b *CustomProxyBackend) ApplyRequestBodyOnlyRules(body []byte, headers proxy.Headers) ([]byte, error) {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
@@ -481,14 +484,61 @@ func (b *CustomProxyBackend) ApplyRequestBodyOnlyRules(body []byte) []byte {
 	}
 
 	if len(bodyRules) == 0 || len(body) == 0 {
-		return body
+		return body, nil
 	}
 
-	modified := body
+	// Get Content-Encoding from headers for compression handling
+	encoding := headers.Get("content-encoding")
+
+	// Check if encoding is present but not supported
+	if encoding != "" {
+		_, supported := proxy.NormalizeEncoding(encoding)
+		if !supported {
+			log.Printf("proxy: unsupported Content-Encoding %q, skipping request body rules", encoding)
+			return body, nil
+		}
+	}
+
+	// Keep reference to original body for fallback cases
+	originalBody := body
+
+	// Decompress if needed
+	decompressed, wasCompressed := proxy.Decompress(body, encoding)
+	if wasCompressed && decompressed == nil {
+		log.Printf("proxy: Content-Encoding %s but decompression failed, skipping request body rules", encoding)
+		return body, nil
+	}
+
+	workingBody := body
+	if wasCompressed {
+		workingBody = decompressed
+	}
+
+	modified := workingBody
+
+	// Apply each rule in order
 	for _, rule := range bodyRules {
 		modified = applyMatchReplaceRule(modified, rule, false) // body content is case-sensitive
 	}
-	return modified
+
+	// If no changes, return original body (still compressed if it was)
+	if bytes.Equal(modified, workingBody) {
+		return originalBody, nil
+	}
+
+	// Recompress if originally compressed
+	if wasCompressed {
+		compressed, err := proxy.Compress(modified, encoding)
+		if err != nil {
+			// Recompression failed - return error so caller can reset stream.
+			// In HTTP/2, headers are already sent with Content-Encoding, so we cannot
+			// return uncompressed data without corrupting the request.
+			return nil, fmt.Errorf("recompression failed: %w", err)
+		}
+		return compressed, nil
+	}
+
+	return modified, nil
 }
 
 // ApplyResponseBodyOnlyRules applies only body rules to a response body.
@@ -497,7 +547,7 @@ func (b *CustomProxyBackend) ApplyRequestBodyOnlyRules(body []byte) []byte {
 // IMPORTANT: In HTTP/2, headers are already sent before body arrives.
 // If recompression fails, we must return the original body to avoid
 // sending uncompressed data with Content-Encoding header still set.
-func (b *CustomProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers []proxy.Header) []byte {
+func (b *CustomProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers proxy.Headers) []byte {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
@@ -513,13 +563,7 @@ func (b *CustomProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers []p
 	}
 
 	// Get Content-Encoding from headers for compression handling
-	var encoding string
-	for _, h := range headers {
-		if strings.EqualFold(h.Name, "content-encoding") {
-			encoding = h.Value
-			break
-		}
-	}
+	encoding := headers.Get("content-encoding")
 
 	// Check if encoding is present but not supported
 	if encoding != "" {
@@ -602,10 +646,33 @@ func (b *CustomProxyBackend) applyRequestHeaderRules(req *proxy.RawHTTP1Request,
 	return req
 }
 
-// applyRequestBodyRules applies body rules to request.
+// applyRequestBodyRules applies body rules to request with compression handling.
 func (b *CustomProxyBackend) applyRequestBodyRules(req *proxy.RawHTTP1Request, rules []customStoredRule) *proxy.RawHTTP1Request {
-	original := req.Body
-	modified := original
+	encoding := req.GetHeader("Content-Encoding")
+
+	// Check if encoding is present but not supported
+	if encoding != "" {
+		_, supported := proxy.NormalizeEncoding(encoding)
+		if !supported {
+			log.Printf("proxy: unsupported Content-Encoding %q, skipping request body rules", encoding)
+			return req
+		}
+	}
+
+	// Decompress if needed
+	body := req.Body
+	decompressed, wasCompressed := proxy.Decompress(body, encoding)
+	if wasCompressed && decompressed == nil {
+		// Decompression failed - skip body rules
+		log.Printf("proxy: Content-Encoding %s but decompression failed, skipping request body rules", encoding)
+		return req
+	}
+	if wasCompressed {
+		body = decompressed
+	}
+
+	original := body
+	modified := body
 
 	// Apply each rule in order
 	for _, rule := range rules {
@@ -615,6 +682,17 @@ func (b *CustomProxyBackend) applyRequestBodyRules(req *proxy.RawHTTP1Request, r
 	// If no changes, return original
 	if bytes.Equal(modified, original) {
 		return req
+	}
+
+	// Recompress if originally compressed
+	if wasCompressed {
+		compressed, err := proxy.Compress(modified, encoding)
+		if err != nil {
+			// Recompression failed - log and skip rules (for HTTP/1.1, request not yet sent)
+			log.Printf("proxy: recompression failed, skipping request body rules: %v", err)
+			return req
+		}
+		modified = compressed
 	}
 
 	// Update body and Content-Length

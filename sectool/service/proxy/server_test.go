@@ -450,11 +450,11 @@ func (t *trackingRuleApplier) ApplyH2ResponseRules(resp *H2ResponseData) *H2Resp
 	return resp
 }
 
-func (t *trackingRuleApplier) ApplyRequestBodyOnlyRules(body []byte) []byte {
-	return body
+func (t *trackingRuleApplier) ApplyRequestBodyOnlyRules(body []byte, headers Headers) ([]byte, error) {
+	return body, nil
 }
 
-func (t *trackingRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers []Header) []byte {
+func (t *trackingRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers Headers) []byte {
 	return body
 }
 

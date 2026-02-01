@@ -182,8 +182,8 @@ func parseStatusLine(line []byte) (version string, code int, text string, err er
 
 // readHeaders reads headers until an empty line.
 // Handles obs-fold (continuation lines starting with SP or HTAB).
-func readHeaders(br *bufio.Reader) ([]Header, error) {
-	var headers []Header
+func readHeaders(br *bufio.Reader) (Headers, error) {
+	var headers Headers
 	for {
 		line, err := readLine(br)
 		if err != nil && !errors.Is(err, io.EOF) {

@@ -130,14 +130,14 @@ func (m *h2MockRuleApplier) HasBodyRules(isRequest bool) bool {
 	return m.hasRespBodyRules
 }
 
-func (m *h2MockRuleApplier) ApplyRequestBodyOnlyRules(body []byte) []byte {
+func (m *h2MockRuleApplier) ApplyRequestBodyOnlyRules(body []byte, headers Headers) ([]byte, error) {
 	if m.reqBodyMod != nil {
-		return m.reqBodyMod(body)
+		return m.reqBodyMod(body), nil
 	}
-	return body
+	return body, nil
 }
 
-func (m *h2MockRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers []Header) []byte {
+func (m *h2MockRuleApplier) ApplyResponseBodyOnlyRules(body []byte, headers Headers) []byte {
 	if m.respBodyMod != nil {
 		return m.respBodyMod(body)
 	}
@@ -166,7 +166,8 @@ func TestApplyBodyRules(t *testing.T) {
 
 		p := &h2Proxy{handler: handler}
 
-		result := p.applyBodyRules(stream, stream.reqBodyFull.Bytes(), true)
+		result, err := p.applyBodyRules(stream, stream.reqBodyFull.Bytes(), true)
+		require.NoError(t, err)
 		assert.Equal(t, "hello-modified", string(result))
 	})
 
@@ -195,7 +196,8 @@ func TestApplyBodyRules(t *testing.T) {
 
 		p := &h2Proxy{handler: handler}
 
-		result := p.applyBodyRules(stream, stream.respBodyFull.Bytes(), false)
+		result, err := p.applyBodyRules(stream, stream.respBodyFull.Bytes(), false)
+		require.NoError(t, err)
 
 		assert.Equal(t, "test body-modified", string(result))
 		assert.True(t, bodyOnlyCalled)

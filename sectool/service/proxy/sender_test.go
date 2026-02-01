@@ -1406,6 +1406,122 @@ func TestSender_SendWithRedirects_H2(t *testing.T) {
 	})
 }
 
+func TestApplyModifications_User_ContentLength_Preserved(t *testing.T) {
+	t.Parallel()
+
+	t.Run("user_set_content_length_not_overwritten", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Content-Length", Value: "5"}},
+			Body:    []byte("hello"),
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			Body:       []byte("longer body content"),              // 19 bytes
+			SetHeaders: map[string]string{"Content-Length": "100"}, // user explicitly sets CL
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "longer body content", string(req.Body))
+		// User-specified Content-Length should be preserved, not auto-updated
+		assert.Equal(t, "100", req.GetHeader("Content-Length"))
+	})
+
+	t.Run("auto_update_when_user_did_not_set_content_length", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Content-Length", Value: "5"}},
+			Body:    []byte("hello"),
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			Body:       []byte("longer body content"),          // 19 bytes
+			SetHeaders: map[string]string{"X-Custom": "value"}, // user sets other headers but not CL
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "longer body content", string(req.Body))
+		// Content-Length should be auto-updated since user didn't set it
+		assert.Equal(t, "19", req.GetHeader("Content-Length"))
+	})
+
+	t.Run("user_set_content_length_case_insensitive", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Content-Length", Value: "5"}},
+			Body:    []byte("hello"),
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			Body:       []byte("new body"),                        // 8 bytes
+			SetHeaders: map[string]string{"content-length": "42"}, // lowercase
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "new body", string(req.Body))
+		// User-specified Content-Length should be preserved (case-insensitive check)
+		assert.Equal(t, "42", req.GetHeader("Content-Length"))
+	})
+
+	t.Run("json_modification_with_user_content_length", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Content-Length", Value: "2"}},
+			Body:    []byte("{}"),
+		}
+
+		sender := &Sender{
+			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
+				return []byte(`{"key":"value"}`), nil // 15 bytes
+			},
+		}
+		err := sender.applyModifications(req, &Modifications{
+			SetJSON:    map[string]any{"key": "value"},
+			SetHeaders: map[string]string{"Content-Length": "999"},
+		}, false)
+
+		require.NoError(t, err)
+		// User-specified Content-Length should be preserved
+		assert.Equal(t, "999", req.GetHeader("Content-Length"))
+	})
+}
+
+func TestContainsContentLengthHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{"exact_match", map[string]string{"Content-Length": "100"}, true},
+		{"lowercase", map[string]string{"content-length": "100"}, true},
+		{"mixed_case", map[string]string{"CONTENT-LENGTH": "100"}, true},
+		{"not_present", map[string]string{"Content-Type": "text/plain"}, false},
+		{"empty_map", map[string]string{}, false},
+		{"nil_map", nil, false},
+		{"with_other_headers", map[string]string{"X-Custom": "val", "Content-Length": "50"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := containsContentLengthHeader(tt.headers)
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
 func TestSendOptions_Custom_Method(t *testing.T) {
 	t.Parallel()
 

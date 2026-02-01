@@ -114,9 +114,8 @@ func newH2Conn(conn net.Conn) *h2Conn {
 
 // decodeHeaders decodes an HPACK-compressed header block.
 // Returns pseudo-headers and regular headers separately.
-func (h *h2Conn) decodeHeaders(block []byte) (pseudos map[string]string, headers []Header, err error) {
+func (h *h2Conn) decodeHeaders(block []byte) (pseudos map[string]string, headers Headers, err error) {
 	pseudos = make(map[string]string)
-	headers = nil
 
 	fields, err := h.hpackDec.DecodeFull(block)
 	if err != nil {
@@ -137,7 +136,7 @@ func (h *h2Conn) decodeHeaders(block []byte) (pseudos map[string]string, headers
 
 // headerListSize calculates the header list size per RFC 7541 Section 4.1.
 // Size = sum of (name length + value length + 32) for each field.
-func headerListSize(pseudos map[string]string, headers []Header) int {
+func headerListSize(pseudos map[string]string, headers Headers) int {
 	var size int
 	for name, value := range pseudos {
 		size += len(name) + len(value) + 32
@@ -151,7 +150,7 @@ func headerListSize(pseudos map[string]string, headers []Header) int {
 // encodeHeaders encodes pseudo-headers and regular headers into HPACK.
 // Pseudo-headers must be written first per HTTP/2 spec.
 // Header names are lowercased and connection-specific headers are filtered per RFC 9113.
-func (h *h2Conn) encodeHeaders(pseudos map[string]string, headers []Header) ([]byte, error) {
+func (h *h2Conn) encodeHeaders(pseudos map[string]string, headers Headers) ([]byte, error) {
 	h.hpackMu.Lock()
 	defer h.hpackMu.Unlock()
 

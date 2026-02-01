@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha1"
 	"crypto/tls"
@@ -4126,5 +4127,178 @@ func TestIntegration_WebSocketPingPong(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, byte(1), echoFrame.opcode)
 		assert.Equal(t, textMsg, echoFrame.payload)
+	})
+}
+
+// TestIntegration_CompressedRequestBodyRule tests that proxy rules correctly
+// handle compressed request bodies by decompressing, applying rules, and recompressing.
+func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	receivedBody := make(chan []byte, 10)
+	receivedEncoding := make(chan string, 10)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		encoding := r.Header.Get("Content-Encoding")
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case receivedBody <- body:
+		case <-time.After(100 * time.Millisecond):
+		}
+		select {
+		case receivedEncoding <- encoding:
+		case <-time.After(100 * time.Millisecond):
+		}
+		w.WriteHeader(200)
+	})
+
+	// Only test with custom backend (Burp may handle compression differently)
+	t.Run("custom", func(t *testing.T) {
+		configDir := t.TempDir()
+		backend, err := service.NewCustomProxyBackend(0, configDir, 0)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		go func() { _ = backend.Serve() }()
+		require.NoError(t, backend.WaitReady(t.Context()))
+
+		// Start test server
+		testServer := httptest.NewServer(handler)
+		t.Cleanup(testServer.Close)
+
+		// Start MCP server
+		flags := service.MCPServerFlags{
+			MCPPort:      findAvailablePort(t),
+			WorkflowMode: service.WorkflowModeNone,
+		}
+		srv, err := service.NewServer(flags, backend, nil, nil)
+		require.NoError(t, err)
+
+		serverErr := make(chan error, 1)
+		go func() { serverErr <- srv.Run(t.Context()) }()
+		srv.WaitTillStarted()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		mcpClient, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
+		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			_ = mcpClient.Close()
+			srv.RequestShutdown()
+			<-serverErr
+		})
+
+		t.Run("gzip_request_body_rule", func(t *testing.T) {
+			label := "gzip-req-body-test-" + strconv.FormatInt(rand.Int63(), 10)
+			rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+				Type:    service.RuleTypeRequestBody,
+				Label:   label,
+				Match:   "SECRET_TOKEN",
+				Replace: "REDACTED",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+			// Drain channels
+			for len(receivedBody) > 0 {
+				<-receivedBody
+			}
+			for len(receivedEncoding) > 0 {
+				<-receivedEncoding
+			}
+
+			// Create gzip-compressed body
+			originalBody := []byte(`{"password":"SECRET_TOKEN","data":"test"}`)
+			var buf bytes.Buffer
+			gw := gzip.NewWriter(&buf)
+			_, _ = gw.Write(originalBody)
+			_ = gw.Close()
+			compressedBody := buf.Bytes()
+
+			// Send through proxy
+			serverURL, _ := url.Parse(testServer.URL)
+			proxyURL, _ := url.Parse("http://" + backend.Addr())
+			client := &http.Client{
+				Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+			}
+
+			req, _ := http.NewRequest("POST", testServer.URL+"/test", bytes.NewReader(compressedBody))
+			req.Header.Set("Host", serverURL.Host)
+			req.Header.Set("Content-Encoding", "gzip")
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+
+			// Verify server received modified, recompressed body
+			select {
+			case body := <-receivedBody:
+				encoding := <-receivedEncoding
+				assert.Equal(t, "gzip", encoding, "Content-Encoding should be preserved")
+
+				// Decompress received body
+				gr, err := gzip.NewReader(bytes.NewReader(body))
+				require.NoError(t, err)
+				decompressed, err := io.ReadAll(gr)
+				require.NoError(t, err)
+
+				assert.Contains(t, string(decompressed), "REDACTED")
+				assert.NotContains(t, string(decompressed), "SECRET_TOKEN")
+			case <-time.After(2 * time.Second):
+				t.Fatal("target server didn't receive request")
+			}
+		})
+
+		t.Run("unsupported_encoding_skips_rules", func(t *testing.T) {
+			label := "br-req-body-test-" + strconv.FormatInt(rand.Int63(), 10)
+			rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+				Type:    service.RuleTypeRequestBody,
+				Label:   label,
+				Match:   "SHOULD_NOT_MATCH",
+				Replace: "MODIFIED",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+			// Drain channels
+			for len(receivedBody) > 0 {
+				<-receivedBody
+			}
+			for len(receivedEncoding) > 0 {
+				<-receivedEncoding
+			}
+
+			// Create fake brotli body (just raw bytes, not real brotli)
+			fakeBody := []byte("SHOULD_NOT_MATCH - raw data")
+
+			// Send through proxy
+			proxyURL, _ := url.Parse("http://" + backend.Addr())
+			client := &http.Client{
+				Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+			}
+
+			req, _ := http.NewRequest("POST", testServer.URL+"/test", bytes.NewReader(fakeBody))
+			req.Header.Set("Content-Encoding", "br") // unsupported
+			req.Header.Set("Content-Type", "application/octet-stream")
+
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+
+			// Verify body passed through unchanged (rules skipped for unsupported encoding)
+			select {
+			case body := <-receivedBody:
+				encoding := <-receivedEncoding
+				assert.Equal(t, "br", encoding, "Content-Encoding should be preserved")
+				// Body should be unchanged since we can't decompress brotli
+				assert.Equal(t, fakeBody, body)
+			case <-time.After(2 * time.Second):
+				t.Fatal("target server didn't receive request")
+			}
+		})
 	})
 }

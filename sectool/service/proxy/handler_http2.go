@@ -77,12 +77,12 @@ type h2Stream struct {
 	scheme     string
 	authority  string
 	path       string
-	reqHeaders []Header
+	reqHeaders Headers
 	reqBody    bytes.Buffer // history capture (limited to maxBodyBytes)
 
 	// Response data
 	statusCode  int
-	respHeaders []Header
+	respHeaders Headers
 	respBody    bytes.Buffer // history capture (limited to maxBodyBytes)
 
 	// Full body buffers for body rule application (when rules exist)
@@ -580,7 +580,7 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 
 			// Strip content-length if body rules may modify payload length
 			if !endStream && p.handler.ruleApplier != nil && p.handler.ruleApplier.HasBodyRules(true) {
-				headers = filterOutHeader(headers, "content-length")
+				headers.Remove("content-length")
 			}
 
 			// Store post-rule headers for history
@@ -608,7 +608,7 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 
 			// Strip content-length if body rules may modify payload length
 			if !endStream && p.handler.ruleApplier != nil && p.handler.ruleApplier.HasBodyRules(false) {
-				headers = filterOutHeader(headers, "content-length")
+				headers.Remove("content-length")
 			}
 
 			// Store post-rule headers for history
@@ -630,7 +630,14 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 			if len(bufferedBody) > 0 {
 				// Release lock for I/O operations
 				stream.mu.Unlock()
-				body := p.applyBodyRules(stream, bufferedBody, fromClient)
+				body, err := p.applyBodyRules(stream, bufferedBody, fromClient)
+				if err != nil {
+					log.Printf("h2: body rule application failed: %v", err)
+					// Send RST_STREAM to destination to signal error
+					p.sendRSTStream(buf, dst, streamID, http2.ErrCodeInternal)
+					p.cleanupStream(streamID)
+					return
+				}
 				p.writeDataFrame(buf, dst, streamID, body, false) // trailers carry END_STREAM, not DATA
 				stream.mu.Lock()
 				p.updateHistoryWithModifiedBodyLocked(stream, body, fromClient)
@@ -807,7 +814,14 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 
 	if applyRules {
 		// Apply body rules (may call ruleApplier which shouldn't hold stream lock)
-		body := p.applyBodyRules(stream, bodyForRules, fromClient)
+		body, err := p.applyBodyRules(stream, bodyForRules, fromClient)
+		if err != nil {
+			log.Printf("h2: body rule application failed: %v", err)
+			// Send RST_STREAM to destination to signal error
+			p.sendRSTStream(buf, dst, streamID, http2.ErrCodeInternal)
+			p.cleanupStream(streamID)
+			return
+		}
 
 		// Update history buffer with modified body (needs lock)
 		stream.mu.Lock()
@@ -890,15 +904,20 @@ func (p *h2Proxy) copyToFullBufferLocked(stream *h2Stream, data []byte, fromClie
 
 // applyBodyRules applies body rules and returns the modified body.
 // Uses the body-only rule methods to avoid re-applying header rules.
-// For responses, passes headers so compression-aware logic can work correctly.
-func (p *h2Proxy) applyBodyRules(stream *h2Stream, body []byte, fromClient bool) []byte {
+// Both request and response paths need headers for Content-Encoding detection.
+// Returns error if recompression fails (caller should reset stream).
+func (p *h2Proxy) applyBodyRules(stream *h2Stream, body []byte, fromClient bool) ([]byte, error) {
 	if p.handler.ruleApplier == nil {
-		return body
+		return body, nil
 	}
 
 	if fromClient {
-		// Request body rules don't need compression handling
-		return p.handler.ruleApplier.ApplyRequestBodyOnlyRules(body)
+		// Request body rules need headers for Content-Encoding detection
+		stream.mu.Lock()
+		headers := stream.reqHeaders
+		stream.mu.Unlock()
+
+		return p.handler.ruleApplier.ApplyRequestBodyOnlyRules(body, headers)
 	}
 
 	// Response body rules need headers for Content-Encoding detection
@@ -906,7 +925,7 @@ func (p *h2Proxy) applyBodyRules(stream *h2Stream, body []byte, fromClient bool)
 	headers := stream.respHeaders
 	stream.mu.Unlock()
 
-	return p.handler.ruleApplier.ApplyResponseBodyOnlyRules(body, headers)
+	return p.handler.ruleApplier.ApplyResponseBodyOnlyRules(body, headers), nil
 }
 
 // updateHistoryWithModifiedBodyLocked updates the history buffer with the modified body.
@@ -1292,13 +1311,14 @@ func (p *h2Proxy) sendGoAway(dst *h2Conn, lastStreamID uint32, code http2.ErrCod
 	dst.enqueueWrite(p.ctx, buf.Bytes())
 }
 
-// filterOutHeader removes all headers with the given name (case-insensitive).
-// Passed in headers are mutated in place, slice must be discarded after use.
-func filterOutHeader(headers []Header, name string) []Header {
-	return bulk.SliceFilterInPlace(func(h Header) bool {
-		return !strings.EqualFold(h.Name, name)
-	}, headers)
+// sendRSTStream sends a RST_STREAM frame to reset a stream with an error.
+func (p *h2Proxy) sendRSTStream(buf *bytes.Buffer, dst *h2Conn, streamID uint32, code http2.ErrCode) {
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
+	_ = framer.WriteRSTStream(streamID, code)
+	dst.enqueueWrite(p.ctx, buf.Bytes())
 }
+
 
 // storeStreamInHistory stores a completed stream in history.
 func (p *h2Proxy) storeStreamInHistory(stream *h2Stream) {

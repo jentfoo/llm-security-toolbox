@@ -3,6 +3,8 @@ package proxy
 import (
 	"strings"
 	"time"
+
+	"github.com/go-analyze/bulk"
 )
 
 // Header represents a single HTTP header preserving original formatting.
@@ -15,6 +17,40 @@ type Header struct {
 	Value string `json:"value"`
 }
 
+// Headers is a slice of Header with helper methods for case-insensitive access.
+// JSON serializes as an array, same as []Header.
+type Headers []Header
+
+// Get returns the first header value with the given name (case-insensitive).
+// Returns empty string if not found.
+func (h *Headers) Get(name string) string {
+	for _, hdr := range *h {
+		if strings.EqualFold(hdr.Name, name) {
+			return hdr.Value
+		}
+	}
+	return ""
+}
+
+// Set sets or replaces the first header with the given name (case-insensitive).
+// If not found, appends a new header.
+func (h *Headers) Set(name, value string) {
+	for i, hdr := range *h {
+		if strings.EqualFold(hdr.Name, name) {
+			(*h)[i].Value = value
+			return
+		}
+	}
+	*h = append(*h, Header{Name: name, Value: value})
+}
+
+// Remove removes all headers with the given name (case-insensitive).
+func (h *Headers) Remove(name string) {
+	*h = bulk.SliceFilterInPlace(func(hdr Header) bool {
+		return !strings.EqualFold(hdr.Name, name)
+	}, *h)
+}
+
 // RawHTTP1Request represents a parsed HTTP/1.1 request with wire-level fidelity.
 // The Serialize() method reconstructs wire bytes from the stored components.
 type RawHTTP1Request struct {
@@ -25,7 +61,7 @@ type RawHTTP1Request struct {
 	Version string `json:"version"`         // "HTTP/1.1" or "HTTP/1.0"
 
 	// Headers preserves order and original name casing/whitespace
-	Headers []Header `json:"headers"`
+	Headers Headers `json:"headers"`
 
 	// Body is the request body (decoded if chunked, raw otherwise)
 	// For chunked encoding, this contains the reassembled body without chunk framing
@@ -47,7 +83,7 @@ type RawHTTP1Response struct {
 	StatusText string `json:"status_text,omitempty"` // "OK", "Not Found", etc.
 
 	// Headers preserves order and original name casing
-	Headers []Header `json:"headers"`
+	Headers Headers `json:"headers"`
 
 	// Body is the response body (decoded if chunked, raw otherwise)
 	Body []byte `json:"body,omitempty"`
@@ -58,60 +94,22 @@ type RawHTTP1Response struct {
 }
 
 // GetHeader returns the first header value with the given name (case-insensitive).
-// Returns empty string if not found.
-func (r *RawHTTP1Request) GetHeader(name string) string {
-	for _, h := range r.Headers {
-		if strings.EqualFold(h.Name, name) {
-			return h.Value
-		}
-	}
-	return ""
-}
+func (r *RawHTTP1Request) GetHeader(name string) string { return r.Headers.Get(name) }
+
+// SetHeader sets or replaces the first header with the given name (case-insensitive).
+func (r *RawHTTP1Request) SetHeader(name, value string) { r.Headers.Set(name, value) }
+
+// RemoveHeader removes all headers with the given name (case-insensitive).
+func (r *RawHTTP1Request) RemoveHeader(name string) { r.Headers.Remove(name) }
 
 // GetHeader returns the first header value with the given name (case-insensitive).
-// Returns empty string if not found.
-func (r *RawHTTP1Response) GetHeader(name string) string {
-	for _, h := range r.Headers {
-		if strings.EqualFold(h.Name, name) {
-			return h.Value
-		}
-	}
-	return ""
-}
+func (r *RawHTTP1Response) GetHeader(name string) string { return r.Headers.Get(name) }
 
 // SetHeader sets or replaces the first header with the given name (case-insensitive).
-// If not found, appends a new header.
-func (r *RawHTTP1Request) SetHeader(name, value string) {
-	for i, h := range r.Headers {
-		if strings.EqualFold(h.Name, name) {
-			r.Headers[i].Value = value
-			return
-		}
-	}
-	r.Headers = append(r.Headers, Header{Name: name, Value: value})
-}
+func (r *RawHTTP1Response) SetHeader(name, value string) { r.Headers.Set(name, value) }
 
 // RemoveHeader removes all headers with the given name (case-insensitive).
-func (r *RawHTTP1Request) RemoveHeader(name string) {
-	r.Headers = filterOutHeader(r.Headers, name)
-}
-
-// SetHeader sets or replaces the first header with the given name (case-insensitive).
-// If not found, appends a new header.
-func (r *RawHTTP1Response) SetHeader(name, value string) {
-	for i, h := range r.Headers {
-		if strings.EqualFold(h.Name, name) {
-			r.Headers[i].Value = value
-			return
-		}
-	}
-	r.Headers = append(r.Headers, Header{Name: name, Value: value})
-}
-
-// RemoveHeader removes all headers with the given name (case-insensitive).
-func (r *RawHTTP1Response) RemoveHeader(name string) {
-	r.Headers = filterOutHeader(r.Headers, name)
-}
+func (r *RawHTTP1Response) RemoveHeader(name string) { r.Headers.Remove(name) }
 
 // HistoryEntry represents a stored request/response pair.
 // Embeds the parsed types directly for memory efficiency.
@@ -165,7 +163,7 @@ type H2RequestData struct {
 	Path      string `json:"path"`      // from :path
 
 	// Regular headers (not pseudo-headers)
-	Headers []Header `json:"headers"`
+	Headers Headers `json:"headers"`
 
 	// Body is the request body
 	Body []byte `json:"body,omitempty"`
@@ -177,53 +175,23 @@ type H2ResponseData struct {
 	StatusCode int `json:"status_code"`
 
 	// Regular headers (not pseudo-headers)
-	Headers []Header `json:"headers"`
+	Headers Headers `json:"headers"`
 
 	// Body is the response body
 	Body []byte `json:"body,omitempty"`
 }
 
 // GetHeader returns the first header value with the given name (case-insensitive).
-func (r *H2RequestData) GetHeader(name string) string {
-	for _, h := range r.Headers {
-		if strings.EqualFold(h.Name, name) {
-			return h.Value
-		}
-	}
-	return ""
-}
+func (r *H2RequestData) GetHeader(name string) string { return r.Headers.Get(name) }
 
 // SetHeader sets or replaces the first header with the given name (case-insensitive).
-func (r *H2RequestData) SetHeader(name, value string) {
-	for i, h := range r.Headers {
-		if strings.EqualFold(h.Name, name) {
-			r.Headers[i].Value = value
-			return
-		}
-	}
-	r.Headers = append(r.Headers, Header{Name: name, Value: value})
-}
+func (r *H2RequestData) SetHeader(name, value string) { r.Headers.Set(name, value) }
 
 // GetHeader returns the first header value with the given name (case-insensitive).
-func (r *H2ResponseData) GetHeader(name string) string {
-	for _, h := range r.Headers {
-		if strings.EqualFold(h.Name, name) {
-			return h.Value
-		}
-	}
-	return ""
-}
+func (r *H2ResponseData) GetHeader(name string) string { return r.Headers.Get(name) }
 
 // SetHeader sets or replaces the first header with the given name (case-insensitive).
-func (r *H2ResponseData) SetHeader(name, value string) {
-	for i, h := range r.Headers {
-		if strings.EqualFold(h.Name, name) {
-			r.Headers[i].Value = value
-			return
-		}
-	}
-	r.Headers = append(r.Headers, Header{Name: name, Value: value})
-}
+func (r *H2ResponseData) SetHeader(name, value string) { r.Headers.Set(name, value) }
 
 // Target specifies where to send a request.
 type Target struct {
@@ -246,14 +214,16 @@ type RuleApplier interface {
 
 	// ApplyRequestBodyOnlyRules applies only body rules to a request body.
 	// Used by HTTP/2 where headers are sent separately before body.
+	// Requires headers for Content-Encoding detection (compression-aware).
 	// Does not apply header rules.
-	ApplyRequestBodyOnlyRules(body []byte) []byte
+	// Returns error if recompression fails (caller should reset stream).
+	ApplyRequestBodyOnlyRules(body []byte, headers Headers) ([]byte, error)
 
 	// ApplyResponseBodyOnlyRules applies only body rules to a response body.
 	// Used by HTTP/2 where headers are sent separately before body.
 	// Requires headers for Content-Encoding detection (compression-aware).
 	// Does not apply header rules.
-	ApplyResponseBodyOnlyRules(body []byte, headers []Header) []byte
+	ApplyResponseBodyOnlyRules(body []byte, headers Headers) []byte
 
 	// ApplyWSRules applies WebSocket rules to frame payload.
 	// direction is "ws:to-server" or "ws:to-client".
