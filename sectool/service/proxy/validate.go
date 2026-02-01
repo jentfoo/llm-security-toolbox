@@ -109,31 +109,3 @@ func CheckLineEndings(raw []byte) string {
 	}
 	return ""
 }
-
-// validateResponse performs basic sanity checks on a parsed response.
-func validateResponse(resp *RawHTTP1Response) error {
-	if resp == nil {
-		return errors.New("nil response")
-	}
-
-	// Version should be HTTP/1.x or HTTP/2.x
-	if !strings.HasPrefix(resp.Version, "HTTP/") {
-		return fmt.Errorf("invalid HTTP version: %q", resp.Version)
-	}
-
-	// Status code should be in valid range
-	if resp.StatusCode < 100 || resp.StatusCode >= 600 {
-		return fmt.Errorf("invalid status code: %d", resp.StatusCode)
-	}
-
-	// Check for NUL bytes in header names and values
-	for _, h := range resp.Headers {
-		if strings.ContainsRune(h.Name, '\x00') {
-			return fmt.Errorf("NUL byte in header name: %q", h.Name)
-		} else if strings.ContainsRune(h.Value, '\x00') {
-			return fmt.Errorf("NUL byte in header value for %q", h.Name)
-		}
-	}
-
-	return nil
-}
