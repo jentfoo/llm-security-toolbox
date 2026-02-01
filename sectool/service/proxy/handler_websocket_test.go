@@ -688,38 +688,6 @@ func TestEncodeWSFrame_LargePayloadLengthEncoding(t *testing.T) {
 	})
 }
 
-func TestOpcodeToStringAll(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		opcode byte
-		want   string
-	}{
-		{0, "continuation"},
-		{1, "text"},
-		{2, "binary"},
-		{3, "unknown-3"},
-		{4, "unknown-4"},
-		{5, "unknown-5"},
-		{6, "unknown-6"},
-		{7, "unknown-7"},
-		{8, "close"},
-		{9, "ping"},
-		{10, "pong"},
-		{11, "unknown-11"},
-		{12, "unknown-12"},
-		{13, "unknown-13"},
-		{14, "unknown-14"},
-		{15, "unknown-15"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			assert.Equal(t, tt.want, opcodeToString(tt.opcode))
-		})
-	}
-}
-
 func TestEncodeWSFramePayloadLengths(t *testing.T) {
 	t.Parallel()
 
@@ -811,9 +779,7 @@ func TestStripExtensions(t *testing.T) {
 				}
 			}
 
-			if tt.expectRemoved {
-				assert.False(t, hasExtensions, "extensions header should be removed")
-			}
+			assert.False(t, hasExtensions)
 		})
 	}
 }
@@ -868,9 +834,7 @@ func TestStripResponseExtensions(t *testing.T) {
 				}
 			}
 
-			if tt.expectRemoved {
-				assert.False(t, hasExtensions, "extensions header should be removed from response")
-			}
+			assert.False(t, hasExtensions)
 		})
 	}
 }

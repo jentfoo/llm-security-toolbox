@@ -417,15 +417,30 @@ func TestH2ConnClose(t *testing.T) {
 func TestH2ConnEnqueueWrite(t *testing.T) {
 	t.Parallel()
 
-	h := &h2Conn{
-		writeCh: make(chan []byte),
-		closeCh: make(chan struct{}),
-	}
+	t.Run("closed_connection", func(t *testing.T) {
+		h := &h2Conn{
+			writeCh: make(chan []byte),
+			closeCh: make(chan struct{}),
+		}
 
-	h.close()
+		h.close()
 
-	ok := h.enqueueWrite(context.Background(), []byte("test"))
-	assert.False(t, ok)
+		ok := h.enqueueWrite(context.Background(), []byte("test"))
+		assert.False(t, ok)
+	})
+
+	t.Run("successful_enqueue", func(t *testing.T) {
+		h := &h2Conn{
+			writeCh: make(chan []byte, 1),
+			closeCh: make(chan struct{}),
+		}
+
+		ok := h.enqueueWrite(context.Background(), []byte("test"))
+		assert.True(t, ok)
+
+		data := <-h.writeCh
+		assert.Equal(t, []byte("test"), data)
+	})
 }
 
 func TestH2ConnFlowCtrlWait(t *testing.T) {

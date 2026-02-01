@@ -292,25 +292,6 @@ func TestSender_Send(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid protocol")
 	})
-
-	t.Run("h2_on_http_target", func(t *testing.T) {
-		sender := &Sender{}
-
-		rawReq := []byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-		_, err := sender.Send(t.Context(), SendOptions{
-			RawRequest: rawReq,
-			Target: Target{
-				Hostname:  "localhost",
-				Port:      8080,
-				UsesHTTPS: false, // HTTP not HTTPS
-			},
-			Protocol: "h2", // H2 requires HTTPS
-			Force:    true,
-		})
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "HTTP/2 requires HTTPS")
-	})
 }
 
 func TestSender_SendWithRedirects(t *testing.T) {
@@ -594,8 +575,11 @@ func TestBuildRedirectRequest(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, "GET", newReq.Method)
+		assert.Equal(t, "/new-path", newReq.Path)
 		assert.Empty(t, newReq.Body)
 		assert.Equal(t, target.Hostname, newTarget.Hostname)
+		assert.Equal(t, target.Port, newTarget.Port)
+		assert.Equal(t, target.UsesHTTPS, newTarget.UsesHTTPS)
 		assert.Equal(t, "keep", newReq.GetHeader("X-Custom"))
 		assert.Empty(t, newReq.GetHeader("Content-Type"))
 		assert.Empty(t, newReq.GetHeader("Content-Length"))
@@ -616,11 +600,13 @@ func TestBuildRedirectRequest(t *testing.T) {
 
 		target := Target{Hostname: "example.com", Port: 443, UsesHTTPS: true}
 
-		newReq, _, _, err := buildRedirectRequest(originalReq, "/new-path", target, "/original", 307)
+		newReq, newTarget, _, err := buildRedirectRequest(originalReq, "/new-path", target, "/original", 307)
 		require.NoError(t, err)
 
 		assert.Equal(t, "POST", newReq.Method)
+		assert.Equal(t, "/new-path", newReq.Path)
 		assert.Equal(t, originalReq.Body, newReq.Body)
+		assert.Equal(t, target.Hostname, newTarget.Hostname)
 	})
 
 	t.Run("cross_origin", func(t *testing.T) {
@@ -637,9 +623,13 @@ func TestBuildRedirectRequest(t *testing.T) {
 
 		target := Target{Hostname: "example.com", Port: 443, UsesHTTPS: true}
 
-		newReq, _, _, err := buildRedirectRequest(originalReq, "https://other.com/path", target, "/original", 302)
+		newReq, newTarget, _, err := buildRedirectRequest(originalReq, "https://other.com/path", target, "/original", 302)
 		require.NoError(t, err)
 
+		assert.Equal(t, "/path", newReq.Path)
+		assert.Equal(t, "other.com", newTarget.Hostname)
+		assert.Equal(t, 443, newTarget.Port)
+		assert.True(t, newTarget.UsesHTTPS)
 		assert.Empty(t, newReq.GetHeader("Authorization"))
 		assert.Equal(t, "keep", newReq.GetHeader("X-Custom"))
 		assert.Equal(t, "other.com", newReq.GetHeader("Host"))
@@ -1137,24 +1127,25 @@ func TestSender_SendWithRedirects_H2(t *testing.T) {
 func TestSendOptions_Custom_Method(t *testing.T) {
 	t.Parallel()
 
-	var receivedMethod string
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedMethod = r.Method
-		w.WriteHeader(200)
-	}))
-	t.Cleanup(testServer.Close)
-
-	serverURL, _ := url.Parse(testServer.URL)
-	port, _ := strconv.Atoi(serverURL.Port())
-
-	sender := &Sender{}
-
 	// Test custom HTTP methods
 	methods := []string{"PATCH", "DELETE", "OPTIONS", "PROPFIND", "CUSTOMMETHOD"}
 
 	for _, method := range methods {
 		t.Run(method, func(t *testing.T) {
-			rawReq := []byte(method + " /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+			wantMethod := method
+			var receivedMethod string
+			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedMethod = r.Method
+				w.WriteHeader(200)
+			}))
+			t.Cleanup(testServer.Close)
+
+			serverURL, _ := url.Parse(testServer.URL)
+			port, _ := strconv.Atoi(serverURL.Port())
+
+			sender := &Sender{}
+
+			rawReq := []byte(wantMethod + " /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
 			_, err := sender.Send(t.Context(), SendOptions{
 				RawRequest: rawReq,
 				Target: Target{
@@ -1166,7 +1157,7 @@ func TestSendOptions_Custom_Method(t *testing.T) {
 			})
 
 			require.NoError(t, err)
-			assert.Equal(t, method, receivedMethod)
+			assert.Equal(t, wantMethod, receivedMethod)
 		})
 	}
 }

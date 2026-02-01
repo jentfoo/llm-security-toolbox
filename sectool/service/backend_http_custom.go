@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"regexp"
@@ -86,6 +87,11 @@ func (b *CustomProxyBackend) Close() error {
 	defer cancel()
 
 	return b.server.Shutdown(ctx)
+}
+
+// CACert returns the CA certificate used for MITM TLS interception.
+func (b *CustomProxyBackend) CACert() *x509.Certificate {
+	return b.server.CertManager().CACert()
 }
 
 func (b *CustomProxyBackend) GetProxyHistory(ctx context.Context, count int, offset uint32) ([]ProxyEntry, error) {
@@ -700,6 +706,15 @@ func (b *CustomProxyBackend) applyResponseBodyRules(resp *proxy.RawHTTP1Response
 
 // applyMatchReplaceRule applies a single match/replace rule to data.
 func applyMatchReplaceRule(input []byte, rule customStoredRule) []byte {
+	// Empty match means "append" - add the replacement at the end
+	if rule.Match == "" {
+		// For headers, ensure proper line ending before appending
+		if len(input) > 0 && !bytes.HasSuffix(input, []byte("\r\n")) {
+			input = append(input, '\r', '\n')
+		}
+		return append(input, []byte(rule.Replace)...)
+	}
+
 	if !rule.IsRegex {
 		return bytes.ReplaceAll(input, []byte(rule.Match), []byte(rule.Replace))
 	}

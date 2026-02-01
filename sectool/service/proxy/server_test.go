@@ -187,9 +187,13 @@ func TestServeEdgeCases(t *testing.T) {
 
 		buf := make([]byte, 1024)
 		n, err := conn.Read(buf)
+		// Proxy may respond with 400 or close connection; either is acceptable
 		if err == nil && n > 0 {
 			response := string(buf[:n])
 			assert.Contains(t, response, "400")
+		} else {
+			// Connection closed without response is acceptable for malformed input
+			assert.Error(t, err)
 		}
 	})
 
@@ -325,7 +329,7 @@ func TestConcurrentConnections(t *testing.T) {
 
 	// Wait for history to be recorded
 	time.Sleep(200 * time.Millisecond) // TODO - avoid the sleep with push / notify
-	assert.GreaterOrEqual(t, proxy.History().Count(), numRequests)
+	assert.Equal(t, numRequests, proxy.History().Count())
 }
 
 func TestProxyServerDifferentPorts(t *testing.T) {

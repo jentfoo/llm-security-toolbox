@@ -265,42 +265,21 @@ func TestGetCertificate(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("usable_for_tls", func(t *testing.T) {
-		cert, err := cm.GetCertificate("tls.example.com")
-		require.NoError(t, err)
-
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{*cert},
-		}
-
-		assert.NotNil(t, tlsConfig.Certificates)
-		assert.Len(t, tlsConfig.Certificates, 1)
-	})
-
 	t.Run("ipv6_address_cert", func(t *testing.T) {
-		cert, err := cm.GetCertificate("::1")
-		require.NoError(t, err)
-		require.NotNil(t, cert)
+		ipv6Addresses := []string{"::1", "2001:db8::1"}
 
-		x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
-		require.NoError(t, err)
+		for _, addr := range ipv6Addresses {
+			cert, err := cm.GetCertificate(addr)
+			require.NoError(t, err)
+			require.NotNil(t, cert)
 
-		assert.Empty(t, x509Cert.DNSNames)
-		assert.Len(t, x509Cert.IPAddresses, 1)
-		assert.Equal(t, "::1", x509Cert.IPAddresses[0].String())
-	})
+			x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
+			require.NoError(t, err)
 
-	t.Run("ipv6_full_address_cert", func(t *testing.T) {
-		cert, err := cm.GetCertificate("2001:db8::1")
-		require.NoError(t, err)
-		require.NotNil(t, cert)
-
-		x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
-		require.NoError(t, err)
-
-		assert.Empty(t, x509Cert.DNSNames)
-		assert.Len(t, x509Cert.IPAddresses, 1)
-		assert.Equal(t, "2001:db8::1", x509Cert.IPAddresses[0].String())
+			assert.Empty(t, x509Cert.DNSNames)
+			assert.Len(t, x509Cert.IPAddresses, 1)
+			assert.Equal(t, addr, x509Cert.IPAddresses[0].String())
+		}
 	})
 
 	t.Run("wildcard_hostname", func(t *testing.T) {

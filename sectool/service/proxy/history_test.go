@@ -885,13 +885,16 @@ func TestHistoryStoreClose(t *testing.T) {
 			Protocol: "http/1.1",
 			Request:  &RawHTTP1Request{Method: "GET", Path: "/"},
 		}
-		h.Store(entry)
+		offset := h.Store(entry)
 
-		// Close should not panic on first call
+		h.Close()
 		h.Close()
 
-		// Close should not panic on second call
-		h.Close()
+		// Verify store is still accessible after double close
+		retrieved, ok := h.Get(offset)
+		assert.True(t, ok)
+		assert.Equal(t, 1, h.Count())
+		assert.Equal(t, "/", retrieved.Request.Path)
 	})
 
 	t.Run("access_after_close", func(t *testing.T) {
@@ -1067,9 +1070,17 @@ func TestListConcurrentWithStore(t *testing.T) {
 
 	wg.Wait()
 
-	// Verify all entries are accessible
+	// Verify all entries are accessible: 100 initial + 250 concurrent writes (5 writers * 50 each)
 	count := h.Count()
-	assert.GreaterOrEqual(t, count, 100)
+	assert.Equal(t, 350, count)
+
+	// Verify data integrity by checking some entries
+	entries := h.List(10, 0)
+	require.Len(t, entries, 10)
+	for _, entry := range entries {
+		assert.NotEmpty(t, entry.GetMethod())
+		assert.NotEmpty(t, entry.GetPath())
+	}
 }
 
 func TestUpdateConcurrent(t *testing.T) {
@@ -1105,9 +1116,11 @@ func TestUpdateConcurrent(t *testing.T) {
 
 	wg.Wait()
 
-	// Verify entry is still readable
+	// Verify entry is still readable with valid data
 	retrieved, ok := h.Get(offset)
 	require.True(t, ok)
 	require.NotNil(t, retrieved.Response)
+	assert.Equal(t, "HTTP/1.1", retrieved.Response.Version)
 	assert.GreaterOrEqual(t, retrieved.Response.StatusCode, 200)
+	assert.Less(t, retrieved.Response.StatusCode, 210)
 }
