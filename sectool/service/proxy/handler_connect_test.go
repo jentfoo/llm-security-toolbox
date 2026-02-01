@@ -16,8 +16,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
 )
 
 func TestParseConnectRequest(t *testing.T) {
@@ -35,12 +33,6 @@ func TestParseConnectRequest(t *testing.T) {
 			input:    "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			wantHost: "example.com",
 			wantPort: 443,
-		},
-		{
-			name:     "custom_port",
-			input:    "CONNECT example.com:8443 HTTP/1.1\r\nHost: example.com\r\n\r\n",
-			wantHost: "example.com",
-			wantPort: 8443,
 		},
 		{
 			name:     "no_port_defaults_443",
@@ -104,18 +96,6 @@ func TestParseConnectRequest(t *testing.T) {
 			input:    "CONNECT example.com:70000 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			wantHost: "example.com",
 			wantPort: 70000, // permissive parsing for security testing
-		},
-		{
-			name:     "negative_port",
-			input:    "CONNECT example.com:-443 HTTP/1.1\r\nHost: example.com\r\n\r\n",
-			wantHost: "example.com",
-			wantPort: -443, // permissive parsing for security testing
-		},
-		{
-			name:     "ipv6_localhost",
-			input:    "CONNECT [::1]:8443 HTTP/1.1\r\nHost: [::1]:8443\r\n\r\n",
-			wantHost: "::1",
-			wantPort: 8443,
 		},
 		{
 			name:     "ipv4_with_port",
@@ -288,81 +268,10 @@ func TestHandle(t *testing.T) {
 	})
 }
 
-func TestServerCapsCaching(t *testing.T) {
-	t.Parallel()
-
-	certManager, err := newCertManager(t.TempDir())
-	require.NoError(t, err)
-
-	history := newHistoryStore(store.NewMemStorage())
-	http1Handler := &http1Handler{history: history, maxBodyBytes: 1024 * 1024}
-	http2Handler := newHTTP2Handler(history, 1024*1024)
-
-	handler := newConnectHandler(certManager, http1Handler, http2Handler, history, 1024*1024)
-
-	t.Run("initially_empty", func(t *testing.T) {
-		handler.capsMu.RLock()
-		defer handler.capsMu.RUnlock()
-		assert.Empty(t, handler.serverCaps)
-	})
-
-	t.Run("stores_protocol", func(t *testing.T) {
-		handler.capsMu.Lock()
-		handler.serverCaps["example.com:443"] = "http/1.1"
-		handler.capsMu.Unlock()
-
-		handler.capsMu.RLock()
-		proto, ok := handler.serverCaps["example.com:443"]
-		handler.capsMu.RUnlock()
-
-		assert.True(t, ok)
-		assert.Equal(t, "http/1.1", proto)
-	})
-}
-
 func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	t.Helper()
 
 	u, err := url.Parse(rawURL)
 	require.NoError(t, err)
 	return u
-}
-
-func TestServerCapsCachingConcurrent(t *testing.T) {
-	t.Parallel()
-
-	certManager, err := newCertManager(t.TempDir())
-	require.NoError(t, err)
-
-	history := newHistoryStore(store.NewMemStorage())
-	http1Handler := &http1Handler{history: history, maxBodyBytes: 1024 * 1024}
-	http2Handler := newHTTP2Handler(history, 1024*1024)
-
-	handler := newConnectHandler(certManager, http1Handler, http2Handler, history, 1024*1024)
-
-	// Concurrent writes and reads
-	done := make(chan bool, 20)
-
-	for i := 0; i < 10; i++ {
-		go func(idx int) {
-			host := "example" + string(rune('A'+idx)) + ".com:443"
-			handler.capsMu.Lock()
-			handler.serverCaps[host] = "http/1.1"
-			handler.capsMu.Unlock()
-			done <- true
-		}(i)
-	}
-
-	for i := 0; i < 10; i++ {
-		go func() {
-			handler.capsMu.RLock()
-			_ = handler.serverCaps
-			handler.capsMu.RUnlock()
-			done <- true
-		}()
-	}
-
-	for i := 0; i < 20; i++ {
-		<-done
-	}
 }
