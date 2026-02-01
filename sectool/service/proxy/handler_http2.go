@@ -818,14 +818,6 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 	}
 }
 
-// copyToHistoryBuffer copies data to the history buffer (limited to maxBodyBytes).
-// Acquires stream lock internally.
-func (p *h2Proxy) copyToHistoryBuffer(stream *h2Stream, data []byte, fromClient bool) {
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	p.copyToHistoryBufferLocked(stream, data, fromClient)
-}
-
 // copyToHistoryBufferLocked copies data to the history buffer (limited to maxBodyBytes).
 // Caller must hold stream.mu.
 func (p *h2Proxy) copyToHistoryBufferLocked(stream *h2Stream, data []byte, fromClient bool) {
@@ -857,15 +849,6 @@ func (p *h2Proxy) copyToHistoryBufferLocked(stream *h2Stream, data []byte, fromC
 	} else {
 		buf.Write(data[:remaining])
 	}
-}
-
-// copyToFullBuffer copies data to the full body buffer for rule application.
-// Returns true if the buffer exceeds maxBodyBytes (overflow).
-// Acquires stream lock internally.
-func (p *h2Proxy) copyToFullBuffer(stream *h2Stream, data []byte, fromClient bool) bool {
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	return p.copyToFullBufferLocked(stream, data, fromClient)
 }
 
 // copyToFullBufferLocked copies data to the full body buffer for rule application.
@@ -916,14 +899,6 @@ func (p *h2Proxy) applyBodyRules(stream *h2Stream, body []byte, fromClient bool)
 	stream.mu.Unlock()
 
 	return p.handler.ruleApplier.ApplyResponseBodyOnlyRules(body, headers)
-}
-
-// updateHistoryWithModifiedBody updates the history buffer with the modified body.
-// Acquires stream lock internally.
-func (p *h2Proxy) updateHistoryWithModifiedBody(stream *h2Stream, body []byte, fromClient bool) {
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	p.updateHistoryWithModifiedBodyLocked(stream, body, fromClient)
 }
 
 // updateHistoryWithModifiedBodyLocked updates the history buffer with the modified body.

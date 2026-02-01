@@ -208,8 +208,8 @@ func TestCopyToHistoryBuffer(t *testing.T) {
 	stream := &h2Stream{id: 1}
 	p := &h2Proxy{handler: handler}
 
-	p.copyToHistoryBuffer(stream, []byte("hello"), true)
-	p.copyToHistoryBuffer(stream, []byte("worldextra"), true)
+	p.copyToHistoryBufferLocked(stream, []byte("hello"), true)
+	p.copyToHistoryBufferLocked(stream, []byte("worldextra"), true)
 
 	assert.Equal(t, 10, stream.reqBody.Len())
 	assert.Equal(t, "helloworld", stream.reqBody.String())
@@ -223,7 +223,7 @@ func TestCopyToFullBuffer(t *testing.T) {
 		stream := &h2Stream{id: 1}
 		p := &h2Proxy{handler: handler}
 
-		overflow := p.copyToFullBuffer(stream, []byte("hello"), true)
+		overflow := p.copyToFullBufferLocked(stream, []byte("hello"), true)
 		assert.False(t, overflow)
 		assert.False(t, stream.reqBodyOverflow)
 		assert.Equal(t, "hello", stream.reqBodyFull.String())
@@ -235,7 +235,7 @@ func TestCopyToFullBuffer(t *testing.T) {
 		stream.reqBodyOverflow = true
 		p := &h2Proxy{handler: handler}
 
-		overflow := p.copyToFullBuffer(stream, []byte("more data"), true)
+		overflow := p.copyToFullBufferLocked(stream, []byte("more data"), true)
 		assert.True(t, overflow)
 	})
 }
@@ -248,7 +248,7 @@ func TestUpdateHistoryWithModifiedBody(t *testing.T) {
 	stream.reqBody.WriteString("original")
 	p := &h2Proxy{handler: handler}
 
-	p.updateHistoryWithModifiedBody(stream, []byte("new body content"), true)
+	p.updateHistoryWithModifiedBodyLocked(stream, []byte("new body content"), true)
 
 	assert.Equal(t, 5, stream.reqBody.Len())
 	assert.Equal(t, "new b", stream.reqBody.String())

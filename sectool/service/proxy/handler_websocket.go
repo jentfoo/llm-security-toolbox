@@ -480,23 +480,3 @@ func encodeWSFrame(frame *wsFrame) []byte {
 
 	return buf.Bytes()
 }
-
-// opcodeToString converts WebSocket opcode to string.
-func opcodeToString(opcode byte) string {
-	switch opcode {
-	case 0:
-		return "continuation"
-	case 1:
-		return "text"
-	case 2:
-		return "binary"
-	case 8:
-		return "close"
-	case 9:
-		return "ping"
-	case 10:
-		return "pong"
-	default:
-		return fmt.Sprintf("unknown-%d", opcode)
-	}
-}

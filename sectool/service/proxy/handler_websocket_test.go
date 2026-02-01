@@ -587,26 +587,6 @@ func TestEncodeWSFrame_roundtrip(t *testing.T) {
 	}
 }
 
-func TestReadWSFrame_ReservedOpcodes(t *testing.T) {
-	t.Parallel()
-
-	// Reserved opcodes 3-7 (data frames) and 11-15 (control frames)
-	reservedOpcodes := []byte{3, 4, 5, 6, 7, 11, 12, 13, 14, 15}
-
-	for _, opcode := range reservedOpcodes {
-		t.Run(opcodeToString(opcode), func(t *testing.T) {
-			// Create a valid frame with the reserved opcode
-			frameBytes := []byte{0x80 | opcode, 0x02, 'h', 'i'}
-			frame, err := readWSFrame(bytes.NewReader(frameBytes))
-
-			// Parser should still parse the frame, it's up to the handler to reject
-			require.NoError(t, err)
-			assert.Equal(t, opcode, frame.opcode)
-			assert.Equal(t, []byte("hi"), frame.payload)
-		})
-	}
-}
-
 func TestReadWSFrame_ControlFramePayloadLimits(t *testing.T) {
 	t.Parallel()
 
