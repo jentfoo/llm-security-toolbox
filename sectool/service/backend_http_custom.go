@@ -78,6 +78,11 @@ func (b *CustomProxyBackend) Addr() string {
 	return b.server.Addr()
 }
 
+// WaitReady blocks until Serve() has entered its accept loop.
+func (b *CustomProxyBackend) WaitReady(ctx context.Context) error {
+	return b.server.WaitReady(ctx)
+}
+
 func (b *CustomProxyBackend) Close() error {
 	if b.closed.Swap(true) {
 		return nil
@@ -438,7 +443,7 @@ func (b *CustomProxyBackend) ApplyWSRules(payload []byte, direction string) []by
 		if rule.Type != RuleTypeWSBoth && rule.Type != direction {
 			continue
 		}
-		payload = applyMatchReplaceRule(payload, rule)
+		payload = applyMatchReplaceRule(payload, rule, false) // body content is case-sensitive
 	}
 	return payload
 }
@@ -481,7 +486,7 @@ func (b *CustomProxyBackend) ApplyRequestBodyOnlyRules(body []byte) []byte {
 
 	modified := body
 	for _, rule := range bodyRules {
-		modified = applyMatchReplaceRule(modified, rule)
+		modified = applyMatchReplaceRule(modified, rule, false) // body content is case-sensitive
 	}
 	return modified
 }
@@ -544,7 +549,7 @@ func (b *CustomProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers []p
 
 	// Apply each rule in order
 	for _, rule := range bodyRules {
-		modified = applyMatchReplaceRule(modified, rule)
+		modified = applyMatchReplaceRule(modified, rule, false) // body content is case-sensitive
 	}
 
 	// If no changes, return original body (still compressed if it was)
@@ -582,9 +587,9 @@ func (b *CustomProxyBackend) applyRequestHeaderRules(req *proxy.RawHTTP1Request,
 	original := headerBuf.Bytes()
 	modified := original
 
-	// Apply each rule in order
+	// Apply each rule in order (case-insensitive for headers to handle HTTP/2 lowercase)
 	for _, rule := range rules {
-		modified = applyMatchReplaceRule(modified, rule)
+		modified = applyMatchReplaceRule(modified, rule, true)
 	}
 
 	// If no changes, return original
@@ -604,7 +609,7 @@ func (b *CustomProxyBackend) applyRequestBodyRules(req *proxy.RawHTTP1Request, r
 
 	// Apply each rule in order
 	for _, rule := range rules {
-		modified = applyMatchReplaceRule(modified, rule)
+		modified = applyMatchReplaceRule(modified, rule, false) // body content is case-sensitive
 	}
 
 	// If no changes, return original
@@ -632,9 +637,9 @@ func (b *CustomProxyBackend) applyResponseHeaderRules(resp *proxy.RawHTTP1Respon
 	original := headerBuf.Bytes()
 	modified := original
 
-	// Apply each rule in order
+	// Apply each rule in order (case-insensitive for headers to handle HTTP/2 lowercase)
 	for _, rule := range rules {
-		modified = applyMatchReplaceRule(modified, rule)
+		modified = applyMatchReplaceRule(modified, rule, true)
 	}
 
 	// If no changes, return original
@@ -678,7 +683,7 @@ func (b *CustomProxyBackend) applyResponseBodyRules(resp *proxy.RawHTTP1Response
 
 	// Apply each rule in order
 	for _, rule := range rules {
-		modified = applyMatchReplaceRule(modified, rule)
+		modified = applyMatchReplaceRule(modified, rule, false) // body content is case-sensitive
 	}
 
 	// If no changes, return original
@@ -705,7 +710,8 @@ func (b *CustomProxyBackend) applyResponseBodyRules(resp *proxy.RawHTTP1Response
 }
 
 // applyMatchReplaceRule applies a single match/replace rule to data.
-func applyMatchReplaceRule(input []byte, rule customStoredRule) []byte {
+// caseInsensitive makes literal (non-regex) matching case-insensitive.
+func applyMatchReplaceRule(input []byte, rule customStoredRule, caseInsensitive bool) []byte {
 	// Empty match means "append" - add the replacement at the end
 	if rule.Match == "" {
 		// For headers, ensure proper line ending before appending
@@ -716,6 +722,9 @@ func applyMatchReplaceRule(input []byte, rule customStoredRule) []byte {
 	}
 
 	if !rule.IsRegex {
+		if caseInsensitive {
+			return replaceCaseInsensitive(input, rule.Match, rule.Replace)
+		}
 		return bytes.ReplaceAll(input, []byte(rule.Match), []byte(rule.Replace))
 	}
 
@@ -728,6 +737,32 @@ func applyMatchReplaceRule(input []byte, rule customStoredRule) []byte {
 		}
 	}
 	return re.ReplaceAll(input, []byte(rule.Replace))
+}
+
+// replaceCaseInsensitive replaces all occurrences of match in input, case-insensitively.
+func replaceCaseInsensitive(input []byte, match, replace string) []byte {
+	if match == "" {
+		return input
+	}
+
+	matchBytes := []byte(match)
+	replaceBytes := []byte(replace)
+	inputLower := bytes.ToLower(input)
+	matchLower := bytes.ToLower(matchBytes)
+
+	var result []byte
+	start := 0
+	for {
+		idx := bytes.Index(inputLower[start:], matchLower)
+		if idx < 0 {
+			result = append(result, input[start:]...)
+			break
+		}
+		result = append(result, input[start:start+idx]...)
+		result = append(result, replaceBytes...)
+		start = start + idx + len(matchBytes)
+	}
+	return result
 }
 
 // parseHeadersFromText parses "Name: Value\r\n" lines into Header slice.

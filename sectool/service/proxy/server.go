@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -34,10 +35,11 @@ type ProxyServer struct {
 	wsHandler      *webSocketHandler
 
 	// Shutdown coordination
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	closed atomic.Bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	closed  atomic.Bool
+	running atomic.Bool
 }
 
 // NewProxyServer creates a new proxy server with HTTPS MITM support.
@@ -112,8 +114,22 @@ func (s *ProxyServer) SetRuleApplier(applier RuleApplier) {
 	s.wsHandler.SetRuleApplier(applier)
 }
 
+// WaitReady blocks until Serve() has entered its accept loop.
+func (s *ProxyServer) WaitReady(ctx context.Context) error {
+	for !s.running.Load() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			runtime.Gosched()
+		}
+	}
+	return nil
+}
+
 // Serve starts accepting connections. Blocks until shutdown.
 func (s *ProxyServer) Serve() error {
+	s.running.Store(true)
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {

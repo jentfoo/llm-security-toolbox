@@ -247,7 +247,9 @@ func (m *mcpServer) handleProxyGet(ctx context.Context, req mcp.CallToolRequest)
 		respBodyStr = base64.StdEncoding.EncodeToString(respBody)
 	} else {
 		reqBodyStr = previewBody(reqBody, fullBodyMaxSize)
-		respBodyStr = previewBody(respBody, fullBodyMaxSize)
+		// Decompress response for display (gzip/deflate)
+		displayBody, _ := decompressForDisplay(respBody, string(respHeaders))
+		respBodyStr = previewBody(displayBody, fullBodyMaxSize)
 	}
 
 	return jsonResult(protocol.ProxyGetResponse{

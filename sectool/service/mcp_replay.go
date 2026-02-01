@@ -147,14 +147,26 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		reqBody = modifiedBody
 	}
 
-	headers = updateContentLength(headers, len(reqBody))
+	force := req.GetBool("force", false)
+
+	// Check if user explicitly set Content-Length in add_headers
+	userSetContentLength := containsContentLengthHeader(sendReq.AddHeaders)
+
+	if !userSetContentLength {
+		// User didn't explicitly set Content-Length, so auto-update it to match body.
+		// This is the normal case for body replacement.
+		headers = updateContentLength(headers, len(reqBody))
+	}
+	// If user explicitly set Content-Length, preserve it for validation.
+
 	rawRequest = append(headers, reqBody...)
 
-	if !req.GetBool("force", false) {
+	if !force {
 		if issues := validateRequest(rawRequest); len(issues) > 0 {
 			return errorResult("validation failed:\n" + formatIssues(issues)), nil
 		}
 	}
+	// When force=true, skip validation and preserve user-specified Content-Length for security testing scenarios.
 
 	targetOverride := req.GetString("target", "")
 	host, port, usesHTTPS := parseTarget(rawRequest, targetOverride)
@@ -254,7 +266,9 @@ func (m *mcpServer) handleReplayGet(ctx context.Context, req mcp.CallToolRequest
 	if fullBody {
 		respBodyStr = base64.StdEncoding.EncodeToString(result.Body)
 	} else {
-		respBodyStr = previewBody(result.Body, fullBodyMaxSize)
+		// Decompress response for display (gzip/deflate)
+		displayBody, _ := decompressForDisplay(result.Body, string(result.Headers))
+		respBodyStr = previewBody(displayBody, fullBodyMaxSize)
 	}
 
 	return jsonResult(protocol.ReplayGetResponse{

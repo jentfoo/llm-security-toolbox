@@ -63,7 +63,6 @@ type Modifications struct {
 	RemoveParams  []string          // Remove query parameters
 }
 
-// SendResult contains the response from a sent request.
 type SendResult struct {
 	Response *RawHTTP1Response
 	Duration time.Duration
@@ -73,17 +72,38 @@ type SendResult struct {
 func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error) {
 	start := time.Now()
 
+	// Validate protocol early (applies to all paths)
+	switch opts.Protocol {
+	case "", protocolHTTP11, protocolH2:
+		// Valid values
+	default:
+		return nil, fmt.Errorf("invalid protocol %q: must be %q, %q, or empty", opts.Protocol, protocolHTTP11, protocolH2)
+	}
+
+	// When force=true, no modifications, and HTTP/1.1, send raw bytes directly.
+	// This preserves intentional Content-Length mismatches for security testing
+	// (e.g., request smuggling scenarios).
+	// Note: Raw byte sending only works for HTTP/1.1 - H2 requires framing.
+	isHTTP11 := opts.Protocol == "" || opts.Protocol == protocolHTTP11
+	if opts.Force && isHTTP11 && (opts.Modifications == nil || isEmptyModifications(opts.Modifications)) {
+		resp, err := s.sendRawRequest(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		return &SendResult{
+			Response: resp,
+			Duration: time.Since(start),
+		}, nil
+	}
+
 	// Parse raw request
 	req, err := parseRequest(bytes.NewReader(opts.RawRequest))
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
 	}
 
-	// Apply modifications
-	if opts.Modifications != nil {
-		if err := s.applyModifications(req, opts.Modifications); err != nil {
-			return nil, fmt.Errorf("apply modifications: %w", err)
-		}
+	if err := s.applyModifications(req, opts.Modifications, opts.Force); err != nil {
+		return nil, fmt.Errorf("apply modifications: %w", err)
 	}
 
 	// Validate request (unless force=true)
@@ -107,6 +127,7 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 
 // SendWithRedirects sends a request and follows redirects.
 func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*SendResult, error) {
+	// TODO - can we de-duplicate by using Send first
 	start := time.Now()
 
 	// Parse raw request
@@ -115,11 +136,8 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 		return nil, fmt.Errorf("parse request: %w", err)
 	}
 
-	// Apply modifications
-	if opts.Modifications != nil {
-		if err := s.applyModifications(req, opts.Modifications); err != nil {
-			return nil, fmt.Errorf("apply modifications: %w", err)
-		}
+	if err := s.applyModifications(req, opts.Modifications, opts.Force); err != nil {
+		return nil, fmt.Errorf("apply modifications: %w", err)
 	}
 
 	// Validate request (unless force=true)
@@ -200,21 +218,19 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 		return nil, fmt.Errorf("invalid protocol %q: must be %q, %q, or empty", protocol, protocolHTTP11, protocolH2)
 	}
 
-	// Determine dial timeout
+	// HTTP/2 requires HTTPS
+	if protocol == "h2" && !target.UsesHTTPS {
+		return nil, errors.New("HTTP/2 requires HTTPS; cannot send h2 request to non-TLS target")
+	}
+
 	dialTimeout := sendDialTimeout
 	if timeout > 0 && timeout < dialTimeout {
 		dialTimeout = timeout
 	}
 
-	// Connect to target
 	targetAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
 	var conn net.Conn
 	var err error
-
-	// HTTP/2 requires HTTPS
-	if protocol == "h2" && !target.UsesHTTPS {
-		return nil, errors.New("HTTP/2 requires HTTPS; cannot send h2 request to non-TLS target")
-	}
 
 	if target.UsesHTTPS {
 		// Build ALPN list based on protocol preference
@@ -290,7 +306,13 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 }
 
 // applyModifications applies all modifications to a request.
-func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications) error {
+// When force is true, Content-Length is not auto-updated on body changes
+// (allows testing scenarios like request smuggling).
+func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications, force bool) error {
+	if mods == nil {
+		return nil
+	}
+
 	// 1. Method override
 	if mods.Method != "" {
 		req.Method = mods.Method
@@ -315,9 +337,12 @@ func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications) e
 	}
 
 	// 4. Body modifications (mutually exclusive)
+	// When force=true, skip Content-Length updates to allow mismatched headers for security testing
 	if mods.Body != nil {
 		req.Body = mods.Body
-		req.SetHeader("Content-Length", strconv.Itoa(len(mods.Body)))
+		if !force {
+			req.SetHeader("Content-Length", strconv.Itoa(len(mods.Body)))
+		}
 	} else if len(mods.SetJSON) > 0 || len(mods.RemoveJSON) > 0 {
 		if s.JSONModifier != nil {
 			if len(req.Body) == 0 && len(mods.SetJSON) > 0 {
@@ -328,11 +353,83 @@ func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications) e
 				return fmt.Errorf("JSON modification failed: %w", err)
 			}
 			req.Body = modified
-			req.SetHeader("Content-Length", strconv.Itoa(len(modified)))
+			if !force {
+				req.SetHeader("Content-Length", strconv.Itoa(len(modified)))
+			}
 		}
 	}
 
 	return nil
+}
+
+// isEmptyModifications returns true if modifications struct has no actual changes.
+func isEmptyModifications(mods *Modifications) bool {
+	if mods == nil {
+		return true
+	}
+	return mods.Method == "" &&
+		len(mods.SetHeaders) == 0 &&
+		len(mods.RemoveHeaders) == 0 &&
+		mods.Body == nil &&
+		len(mods.SetJSON) == 0 &&
+		len(mods.RemoveJSON) == 0 &&
+		len(mods.SetParams) == 0 &&
+		len(mods.RemoveParams) == 0
+}
+
+// sendRawRequest sends raw request bytes without parsing/serializing.
+// Used when force=true to preserve intentional Content-Length mismatches.
+func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*RawHTTP1Response, error) {
+	// Parse just enough to get method for response parsing
+	req, err := parseRequest(bytes.NewReader(opts.RawRequest))
+	if err != nil {
+		return nil, fmt.Errorf("parse request: %w", err)
+	}
+	method := req.Method
+
+	dialTimeout := sendDialTimeout
+	if opts.Timeout > 0 && opts.Timeout < dialTimeout {
+		dialTimeout = opts.Timeout
+	}
+
+	targetAddr := fmt.Sprintf("%s:%d", opts.Target.Hostname, opts.Target.Port)
+	var conn net.Conn
+
+	if opts.Target.UsesHTTPS {
+		tlsDialer := &tls.Dialer{
+			NetDialer: &net.Dialer{Timeout: dialTimeout},
+			Config: &tls.Config{
+				ServerName:         opts.Target.Hostname,
+				InsecureSkipVerify: true,
+				MinVersion:         tls.VersionTLS10,
+				NextProtos:         []string{"http/1.1"},
+			},
+		}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", targetAddr)
+	} else {
+		dialer := &net.Dialer{Timeout: dialTimeout}
+		conn, err = dialer.DialContext(ctx, "tcp", targetAddr)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", targetAddr, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if opts.Timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(opts.Timeout))
+	}
+
+	// Send raw request bytes directly
+	if _, err := conn.Write(opts.RawRequest); err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+
+	resp, err := parseResponse(bufio.NewReader(conn), method)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	return resp, nil
 }
 
 // applyQueryModifications modifies query parameters in the request path.
@@ -365,11 +462,6 @@ func buildRedirectRequest(originalReq *RawHTTP1Request, location string, current
 	if err != nil {
 		return nil, Target{}, "", err
 	}
-
-	// Cross-origin includes scheme, host, or port changes (for header stripping decisions)
-	isCrossOrigin := newTarget.Hostname != currentTarget.Hostname ||
-		newTarget.Port != currentTarget.Port ||
-		newTarget.UsesHTTPS != currentTarget.UsesHTTPS
 
 	// Build new request
 	newReq := &RawHTTP1Request{
@@ -408,15 +500,9 @@ func buildRedirectRequest(originalReq *RawHTTP1Request, location string, current
 			continue
 		}
 
-		// Skip Authorization on cross-origin redirects
-		if isCrossOrigin && lowerName == "authorization" {
-			continue
-		}
-
 		newReq.Headers = append(newReq.Headers, h)
 	}
 
-	// Set Host header
 	newReq.SetHeader("Host", host)
 
 	// Update Content-Length if body changed
@@ -537,7 +623,7 @@ func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *RawHTTP1
 
 	// Read server's SETTINGS
 	if err := s.readH2SettingsAndAck(framer, h2c); err != nil {
-		return nil, fmt.Errorf("H2 handshake: %w", err)
+		return nil, fmt.Errorf("h2 handshake: %w", err)
 	}
 
 	// Build request path
@@ -765,7 +851,7 @@ func (s *Sender) readH2SettingsAndAck(framer *http2.Framer, h2c *h2Conn) error {
 				continue
 			}
 			// Process server settings
-			var settings []http2.Setting
+			settings := make([]http2.Setting, 0, f.NumSettings())
 			_ = f.ForeachSetting(func(s http2.Setting) error {
 				settings = append(settings, s)
 				return nil
@@ -846,6 +932,7 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 			headersEndStream = f.StreamEnded()
 
 			// Only decode when END_HEADERS is set (no CONTINUATION follows)
+			// TODO - de-duplicate with ContinuationFrame below
 			if f.HeadersEnded() {
 				pseudos, hdrs, err := h2c.decodeHeaders(headerBlock.Bytes())
 				if err != nil {

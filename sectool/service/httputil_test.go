@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bytes"
+	"compress/gzip"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1313,4 +1315,144 @@ func TestSetHeaderIfMissing(t *testing.T) {
 			assert.Equal(t, tt.want, string(setHeaderIfMissing([]byte(tt.headers), tt.hName, tt.hValue)))
 		})
 	}
+}
+
+func TestExtractHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers string
+		search  string
+		want    string
+	}{
+		{
+			name:    "content_encoding_gzip",
+			headers: "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "gzip",
+		},
+		{
+			name:    "case_insensitive",
+			headers: "HTTP/1.1 200 OK\r\ncontent-encoding: deflate\r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "deflate",
+		},
+		{
+			name:    "not_found",
+			headers: "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "",
+		},
+		{
+			name:    "with_whitespace",
+			headers: "HTTP/1.1 200 OK\r\nContent-Encoding:   gzip  \r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "gzip",
+		},
+		{
+			name:    "empty_headers",
+			headers: "",
+			search:  "Content-Encoding",
+			want:    "",
+		},
+		{
+			name:    "multiple_values",
+			headers: "HTTP/1.1 200 OK\r\nContent-Encoding: gzip, br\r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "gzip, br",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, extractHeader(tt.headers, tt.search))
+		})
+	}
+}
+
+func TestDecompressForDisplay(t *testing.T) {
+	t.Parallel()
+
+	// Create gzip compressed content
+	gzipBody := compressGzip(t, []byte("Hello, World!"))
+
+	tests := []struct {
+		name             string
+		body             []byte
+		headers          string
+		wantBody         string
+		wantDecompressed bool
+	}{
+		{
+			name:             "gzip_decompressed",
+			body:             gzipBody,
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody:         "Hello, World!",
+			wantDecompressed: true,
+		},
+		{
+			name:             "no_encoding_passthrough",
+			body:             []byte("Plain text"),
+			headers:          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n",
+			wantBody:         "Plain text",
+			wantDecompressed: false,
+		},
+		{
+			name:             "unsupported_encoding_passthrough",
+			body:             []byte{0x1f, 0x8b}, // looks like gzip magic but invalid
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\n\r\n",
+			wantBody:         string([]byte{0x1f, 0x8b}),
+			wantDecompressed: false,
+		},
+		{
+			name:             "multiple_encodings_passthrough",
+			body:             gzipBody,
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip, br\r\n\r\n",
+			wantBody:         string(gzipBody),
+			wantDecompressed: false,
+		},
+		{
+			name:             "corrupted_gzip_passthrough",
+			body:             []byte{0x1f, 0x8b, 0x08, 0x00, 0x00}, // invalid gzip
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody:         string([]byte{0x1f, 0x8b, 0x08, 0x00, 0x00}),
+			wantDecompressed: false,
+		},
+		{
+			name:             "empty_body",
+			body:             []byte{},
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody:         "",
+			wantDecompressed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, wasDecompressed := decompressForDisplay(tt.body, tt.headers)
+			assert.Equal(t, tt.wantBody, string(result))
+			assert.Equal(t, tt.wantDecompressed, wasDecompressed)
+		})
+	}
+}
+
+// compressGzip is a test helper that compresses data with gzip
+func compressGzip(t *testing.T, data []byte) []byte {
+	t.Helper()
+	compressed, err := compressGzipBytes(data)
+	require.NoError(t, err)
+	return compressed
+}
+
+func compressGzipBytes(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

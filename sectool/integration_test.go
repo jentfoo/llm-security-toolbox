@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha1"
 	"crypto/tls"
@@ -12,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +39,8 @@ import (
 // Skip automatically if:
 //   - Running with -short flag
 //   - Burp MCP is not available (for burp backend tests)
+
+const wsUpgradeHeader = "websocket"
 
 // httpBackendType identifies which HTTP backend to use for tests.
 type httpBackendType string
@@ -83,8 +85,7 @@ func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.C
 
 		// Start proxy server in background
 		go func() { _ = backend.Serve() }()
-		// Wait for server to be ready
-		time.Sleep(50 * time.Millisecond)
+		require.NoError(t, backend.WaitReady(t.Context()))
 
 		seedProxyHistory(t, backend)
 		httpBackend = backend
@@ -155,8 +156,7 @@ func seedProxyHistory(t *testing.T, backend *service.CustomProxyBackend) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 
-	// Allow async storage
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // Allow async storage
 }
 
 // runForAllBackends runs a test function for each backend type.
@@ -167,6 +167,98 @@ func runForAllBackends(t *testing.T, testFn func(t *testing.T, client *mcpclient
 		t.Run(string(backendType), func(t *testing.T) {
 			client := setupIntegrationEnv(t, backendType)
 			testFn(t, client)
+		})
+	}
+}
+
+// testEnv holds test infrastructure for dual-backend tests.
+type testEnv struct {
+	t           *testing.T
+	backendType httpBackendType
+	mcpClient   *mcpclient.Client
+	proxyAddr   string // proxy to route traffic through
+	targetURL   string // test server URL (unique per test)
+}
+
+// makeProxyClient returns an HTTP client configured to use the given proxy.
+func makeProxyClient(proxyAddr string) *http.Client {
+	proxyURL, _ := url.Parse("http://" + proxyAddr)
+	return &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+}
+
+// runForAllBackendsWithHandler runs a test for each backend type with a custom target server handler.
+// The handler receives requests that are routed through the proxy.
+// Test isolation: each test gets unique test server port, filter history by that host.
+func runForAllBackendsWithHandler(t *testing.T, handler http.HandlerFunc, testFn func(t *testing.T, env *testEnv)) {
+	t.Helper()
+
+	for _, backendType := range httpBackendTypes {
+		t.Run(string(backendType), func(t *testing.T) {
+			if testing.Short() {
+				t.Skip("skipping integration test in short mode")
+			}
+
+			// Create test server with unique port
+			testServer := httptest.NewServer(handler)
+			t.Cleanup(testServer.Close)
+
+			var proxyAddr string
+			var httpBackend service.HttpBackend
+
+			switch backendType {
+			case backendBurp:
+				testutil.ConnectBurpSSEOrSkip(t)
+				proxyAddr = testutil.GetBurpProxyAddr()
+
+			case backendCustom:
+				backend, err := service.NewCustomProxyBackend(0, t.TempDir(), 0)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = backend.Close() })
+				go func() { _ = backend.Serve() }()
+				require.NoError(t, backend.WaitReady(t.Context()))
+				proxyAddr = backend.Addr()
+				httpBackend = backend
+			}
+
+			// Start MCP server
+			flags := service.MCPServerFlags{
+				MCPPort:      findAvailablePort(t),
+				WorkflowMode: service.WorkflowModeNone,
+			}
+			if backendType == backendBurp {
+				flags.RequireBurp = true
+				flags.BurpMCPURL = config.DefaultBurpMCPURL
+			}
+
+			srv, err := service.NewServer(flags, httpBackend, nil, nil)
+			require.NoError(t, err)
+
+			serverErr := make(chan error, 1)
+			go func() { serverErr <- srv.Run(t.Context()) }()
+			srv.WaitTillStarted()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			mcpClient, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
+			cancel()
+			require.NoError(t, err)
+
+			t.Cleanup(func() {
+				_ = mcpClient.Close()
+				srv.RequestShutdown()
+				<-serverErr
+			})
+
+			env := &testEnv{
+				t:           t,
+				backendType: backendType,
+				mcpClient:   mcpClient,
+				proxyAddr:   proxyAddr,
+				targetURL:   testServer.URL,
+			}
+
+			testFn(t, env)
 		})
 	}
 }
@@ -386,6 +478,13 @@ func TestIntegration_ProxyRules(t *testing.T) {
 			t.Logf("created rule: %s (%s)", rule.RuleID, rule.Label)
 		})
 
+		// Ensure cleanup even if later subtests fail
+		if createdRuleID != "" {
+			t.Cleanup(func() {
+				_ = client.ProxyRuleDelete(context.Background(), createdRuleID)
+			})
+		}
+
 		t.Run("list_after_add", func(t *testing.T) {
 			resp, err := client.ProxyRuleList(t.Context(), "", 0)
 			require.NoError(t, err)
@@ -443,7 +542,7 @@ func TestIntegration_ProxyRules(t *testing.T) {
 			assert.Equal(t, "^X-Old:.*$", rule.Match)
 
 			t.Cleanup(func() {
-				_ = client.ProxyRuleDelete(t.Context(), rule.RuleID)
+				_ = client.ProxyRuleDelete(context.Background(), rule.RuleID)
 			})
 		})
 
@@ -474,16 +573,34 @@ func TestIntegration_ProxyRules(t *testing.T) {
 // =============================================================================
 
 func TestIntegration_Replay(t *testing.T) {
-	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Test-Header", "test-value")
+		_, _ = io.WriteString(w, "test response")
+	})
+
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
 		t.Helper()
 
-		// Get a flow to replay
-		listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Method: "GET", Limit: 1})
+		// Seed proxy history with a request to our test server
+		client := makeProxyClient(env.proxyAddr)
+		resp, err := client.Get(env.targetURL + "/replay-test")
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		time.Sleep(50 * time.Millisecond) // Allow proxy to record
+
+		// Parse host from target URL to filter flows
+		targetURL, err := url.Parse(env.targetURL)
 		require.NoError(t, err)
 
-		if len(listResp.Flows) == 0 {
-			t.Skip("no GET requests in proxy history")
-		}
+		// Get the flow we just seeded
+		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Method:     "GET",
+			Host:       targetURL.Host,
+			Limit:      1,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, listResp.Flows, "expected to find seeded flow")
 
 		flowID := listResp.Flows[0].FlowID
 		t.Logf("using flow %s for replay tests", flowID)
@@ -491,7 +608,7 @@ func TestIntegration_Replay(t *testing.T) {
 		var replayID string
 
 		t.Run("send_basic", func(t *testing.T) {
-			resp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+			resp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
 				FlowID: flowID,
 			})
 			require.NoError(t, err)
@@ -508,18 +625,19 @@ func TestIntegration_Replay(t *testing.T) {
 				t.Skip("no replay ID from previous test")
 			}
 
-			resp, err := client.ReplayGet(t.Context(), replayID)
+			resp, err := env.mcpClient.ReplayGet(t.Context(), replayID)
 			require.NoError(t, err)
 
 			assert.Equal(t, replayID, resp.ReplayID)
 			assert.NotEmpty(t, resp.RespHeaders)
-			assert.True(t, strings.HasPrefix(resp.RespHeaders, "HTTP/"))
+			assert.True(t, strings.HasPrefix(resp.RespHeaders, "HTTP/"),
+				"unexpected prefix: %s", resp.RespHeaders)
 
 			t.Logf("replay_get %s: status=%d body_size=%d", resp.ReplayID, resp.Status, resp.RespSize)
 		})
 
 		t.Run("send_with_header_mods", func(t *testing.T) {
-			resp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+			resp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
 				FlowID:        flowID,
 				AddHeaders:    []string{"X-Integration-Test: modified"},
 				RemoveHeaders: []string{"Accept-Encoding"},
@@ -530,7 +648,7 @@ func TestIntegration_Replay(t *testing.T) {
 		})
 
 		t.Run("send_invalid_flow", func(t *testing.T) {
-			_, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+			_, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
 				FlowID: "nonexistent",
 			})
 			require.Error(t, err)
@@ -538,7 +656,7 @@ func TestIntegration_Replay(t *testing.T) {
 		})
 
 		t.Run("get_invalid_replay", func(t *testing.T) {
-			_, err := client.ReplayGet(t.Context(), "nonexistent")
+			_, err := env.mcpClient.ReplayGet(t.Context(), "nonexistent")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "not found")
 		})
@@ -607,7 +725,7 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 	// Start proxy server in background
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	// Make request through proxy to seed history
 	proxyURL, err := url.Parse("http://" + backend.Addr())
@@ -626,8 +744,7 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 		t.Fatal("target server didn't receive initial request")
 	}
 
-	// Allow async storage
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // Allow async storage
 
 	// Start MCP server
 	flags := service.MCPServerFlags{
@@ -933,7 +1050,7 @@ func TestIntegration_ConcurrentOperations(t *testing.T) {
 
 			// Cleanup
 			for _, id := range sessionIDs {
-				_ = client.OastDelete(t.Context(), id)
+				_ = client.OastDelete(context.Background(), id)
 			}
 		})
 	})
@@ -964,7 +1081,7 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	// Get proxy's CA cert for client trust
 	caCertPool := x509.NewCertPool()
@@ -1003,8 +1120,7 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 		assert.Equal(t, 200, resp.StatusCode)
 	})
 
-	// Wait for history to populate
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // Wait for history to populate
 
 	// Start MCP server with the backend
 	flags := service.MCPServerFlags{
@@ -1055,7 +1171,7 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 			Limit:      1,
 		})
 		require.NoError(t, err)
-		require.NotEmpty(t, listResp.Flows)
+		require.Len(t, listResp.Flows, 1)
 
 		flowID := listResp.Flows[0].FlowID
 
@@ -1078,348 +1194,206 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 // =============================================================================
 
 func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	// Channel to capture received headers
 	receivedHeaders := make(chan http.Header, 10)
 
-	// Create test server that captures headers
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case receivedHeaders <- r.Header.Clone():
 		default:
 		}
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("ok"))
-	}))
-	t.Cleanup(testServer.Close)
-
-	// Setup custom backend
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	// Start MCP server
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		labelSuffix := strconv.FormatInt(rand.Int63(), 10)
 
-	t.Run("request_header_rule_adds_header", func(t *testing.T) {
-		// Add rule to inject header
-		rule, err := client.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
-			Type:    service.RuleTypeRequestHeader,
-			Label:   "test-add-header",
-			Replace: "X-Injected-By-Rule: rule-value-123",
+		t.Run("adds_header", func(t *testing.T) {
+			label := "test-add-header-" + labelSuffix
+			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+				Type:    service.RuleTypeRequestHeader,
+				Label:   label,
+				Replace: "X-Injected-By-Rule: rule-value-123",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+			for len(receivedHeaders) > 0 {
+				<-receivedHeaders
+			}
+
+			client := makeProxyClient(env.proxyAddr)
+			resp, err := client.Get(env.targetURL + "/test-rule")
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+
+			select {
+			case headers := <-receivedHeaders:
+				assert.Equal(t, "rule-value-123", headers.Get("X-Injected-By-Rule"))
+			case <-time.After(2 * time.Second):
+				t.Fatal("target server didn't receive request")
+			}
 		})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = client.ProxyRuleDelete(t.Context(), rule.RuleID) })
 
-		// Drain any existing headers
-		for len(receivedHeaders) > 0 {
-			<-receivedHeaders
-		}
+		t.Run("modifies_header", func(t *testing.T) {
+			label := "test-modify-ua-" + labelSuffix
+			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+				Type:    service.RuleTypeRequestHeader,
+				Label:   label,
+				IsRegex: true,
+				Match:   `User-Agent: .*`,
+				Replace: "User-Agent: Modified-By-Rule",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
-		// Make request through proxy
-		proxyURL, _ := url.Parse("http://" + backend.Addr())
-		proxyClient := &http.Client{
-			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		}
-		resp, err := proxyClient.Get(testServer.URL + "/test-rule")
-		require.NoError(t, err)
-		_ = resp.Body.Close()
+			for len(receivedHeaders) > 0 {
+				<-receivedHeaders
+			}
 
-		// Verify the header was injected
-		select {
-		case headers := <-receivedHeaders:
-			assert.Equal(t, "rule-value-123", headers.Get("X-Injected-By-Rule"),
-				"rule should inject X-Injected-By-Rule header")
-		case <-time.After(2 * time.Second):
-			t.Fatal("target server didn't receive request")
-		}
-	})
+			client := makeProxyClient(env.proxyAddr)
+			resp, err := client.Get(env.targetURL + "/test-ua")
+			require.NoError(t, err)
+			_ = resp.Body.Close()
 
-	t.Run("request_header_rule_modifies_header", func(t *testing.T) {
-		// Add rule to replace User-Agent
-		rule, err := client.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
-			Type:    service.RuleTypeRequestHeader,
-			Label:   "test-modify-ua",
-			IsRegex: true,
-			Match:   `User-Agent: .*`,
-			Replace: "User-Agent: Modified-By-Rule",
+			select {
+			case headers := <-receivedHeaders:
+				assert.Equal(t, "Modified-By-Rule", headers.Get("User-Agent"))
+			case <-time.After(2 * time.Second):
+				t.Fatal("target server didn't receive request")
+			}
 		})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = client.ProxyRuleDelete(t.Context(), rule.RuleID) })
-
-		// Drain channel
-		for len(receivedHeaders) > 0 {
-			<-receivedHeaders
-		}
-
-		// Make request
-		proxyURL, _ := url.Parse("http://" + backend.Addr())
-		proxyClient := &http.Client{
-			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		}
-		resp, err := proxyClient.Get(testServer.URL + "/test-ua")
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-
-		select {
-		case headers := <-receivedHeaders:
-			assert.Equal(t, "Modified-By-Rule", headers.Get("User-Agent"))
-		case <-time.After(2 * time.Second):
-			t.Fatal("target server didn't receive request")
-		}
 	})
 }
 
 func TestIntegration_RuleRequestBodyVerification(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	receivedBody := make(chan []byte, 10)
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		select {
 		case receivedBody <- body:
 		default:
 		}
 		w.WriteHeader(200)
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		label := "test-body-rule-" + strconv.FormatInt(rand.Int63(), 10)
 
-	t.Run("request_body_rule_modifies_body", func(t *testing.T) {
-		rule, err := client.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
-			Type:    service.RuleTypeRequestBody,
-			Label:   "test-body-rule",
-			Match:   "ORIGINAL_VALUE",
-			Replace: "MODIFIED_BY_RULE",
+		t.Run("modifies_body", func(t *testing.T) {
+			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+				Type:    service.RuleTypeRequestBody,
+				Label:   label,
+				Match:   "ORIGINAL_VALUE",
+				Replace: "MODIFIED_BY_RULE",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+			for len(receivedBody) > 0 {
+				<-receivedBody
+			}
+
+			client := makeProxyClient(env.proxyAddr)
+			resp, err := client.Post(env.targetURL+"/body-test", "text/plain",
+				strings.NewReader("data=ORIGINAL_VALUE&other=test"))
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+
+			select {
+			case body := <-receivedBody:
+				assert.Contains(t, string(body), "MODIFIED_BY_RULE")
+				assert.NotContains(t, string(body), "ORIGINAL_VALUE")
+			case <-time.After(2 * time.Second):
+				t.Fatal("target server didn't receive request")
+			}
 		})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = client.ProxyRuleDelete(t.Context(), rule.RuleID) })
-
-		for len(receivedBody) > 0 {
-			<-receivedBody
-		}
-
-		proxyURL, _ := url.Parse("http://" + backend.Addr())
-		proxyClient := &http.Client{
-			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		}
-		resp, err := proxyClient.Post(testServer.URL+"/body-test", "text/plain",
-			strings.NewReader("data=ORIGINAL_VALUE&other=test"))
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-
-		select {
-		case body := <-receivedBody:
-			assert.Contains(t, string(body), "MODIFIED_BY_RULE")
-			assert.NotContains(t, string(body), "ORIGINAL_VALUE")
-		case <-time.After(2 * time.Second):
-			t.Fatal("target server didn't receive request")
-		}
 	})
 }
 
 func TestIntegration_RuleResponseHeaderVerification(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Original-Header", "original-value")
 		w.Header().Set("X-Server-Token", "secret-token-abc")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("ok"))
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		labelSuffix := strconv.FormatInt(rand.Int63(), 10)
 
-	t.Run("response_header_rule_modifies_header", func(t *testing.T) {
-		rule, err := client.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
-			Type:    service.RuleTypeResponseHeader,
-			Label:   "test-resp-header",
-			Match:   "X-Original-Header: original-value",
-			Replace: "X-Original-Header: modified-by-rule",
+		t.Run("modifies_header", func(t *testing.T) {
+			label := "test-resp-header-" + labelSuffix
+			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+				Type:    service.RuleTypeResponseHeader,
+				Label:   label,
+				Match:   "X-Original-Header: original-value",
+				Replace: "X-Original-Header: modified-by-rule",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+			client := makeProxyClient(env.proxyAddr)
+			resp, err := client.Get(env.targetURL + "/resp-header-test")
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+
+			assert.Equal(t, "modified-by-rule", resp.Header.Get("X-Original-Header"))
 		})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = client.ProxyRuleDelete(t.Context(), rule.RuleID) })
 
-		proxyURL, _ := url.Parse("http://" + backend.Addr())
-		proxyClient := &http.Client{
-			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		}
-		resp, err := proxyClient.Get(testServer.URL + "/resp-header-test")
-		require.NoError(t, err)
-		_ = resp.Body.Close()
+		t.Run("adds_header", func(t *testing.T) {
+			label := "test-add-resp-header-" + labelSuffix
+			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+				Type:    service.RuleTypeResponseHeader,
+				Label:   label,
+				Replace: "X-Added-By-Proxy: injected",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
-		assert.Equal(t, "modified-by-rule", resp.Header.Get("X-Original-Header"))
-	})
+			client := makeProxyClient(env.proxyAddr)
+			resp, err := client.Get(env.targetURL + "/resp-add-test")
+			require.NoError(t, err)
+			_ = resp.Body.Close()
 
-	t.Run("response_header_rule_adds_header", func(t *testing.T) {
-		rule, err := client.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
-			Type:    service.RuleTypeResponseHeader,
-			Label:   "test-add-resp-header",
-			Replace: "X-Added-By-Proxy: injected",
+			assert.Equal(t, "injected", resp.Header.Get("X-Added-By-Proxy"))
 		})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = client.ProxyRuleDelete(t.Context(), rule.RuleID) })
-
-		proxyURL, _ := url.Parse("http://" + backend.Addr())
-		proxyClient := &http.Client{
-			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		}
-		resp, err := proxyClient.Get(testServer.URL + "/resp-add-test")
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-
-		assert.Equal(t, "injected", resp.Header.Get("X-Added-By-Proxy"))
 	})
 }
 
 func TestIntegration_RuleResponseBodyVerification(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("Response contains SECRET_DATA that should be modified"))
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		label := "test-resp-body-" + strconv.FormatInt(rand.Int63(), 10)
 
-	t.Run("response_body_rule_modifies_body", func(t *testing.T) {
-		rule, err := client.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
-			Type:    service.RuleTypeResponseBody,
-			Label:   "test-resp-body",
-			Match:   "SECRET_DATA",
-			Replace: "REDACTED",
+		t.Run("modifies_body", func(t *testing.T) {
+			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+				Type:    service.RuleTypeResponseBody,
+				Label:   label,
+				Match:   "SECRET_DATA",
+				Replace: "REDACTED",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+			client := makeProxyClient(env.proxyAddr)
+			resp, err := client.Get(env.targetURL + "/resp-body-test")
+			require.NoError(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			assert.Contains(t, string(body), "REDACTED")
+			assert.NotContains(t, string(body), "SECRET_DATA")
 		})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = client.ProxyRuleDelete(t.Context(), rule.RuleID) })
-
-		proxyURL, _ := url.Parse("http://" + backend.Addr())
-		proxyClient := &http.Client{
-			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		}
-		resp, err := proxyClient.Get(testServer.URL + "/resp-body-test")
-		require.NoError(t, err)
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-
-		assert.Contains(t, string(body), "REDACTED")
-		assert.NotContains(t, string(body), "SECRET_DATA")
 	})
 }
 
@@ -1428,13 +1402,9 @@ func TestIntegration_RuleResponseBodyVerification(t *testing.T) {
 // =============================================================================
 
 func TestIntegration_ReplayBodyReplacement(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	receivedBody := make(chan []byte, 10)
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		select {
 		case receivedBody <- body:
@@ -1442,337 +1412,251 @@ func TestIntegration_ReplayBodyReplacement(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("ok"))
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	// Seed with a POST request
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-	}
-	resp, err := proxyClient.Post(testServer.URL+"/body-test", "application/json",
-		strings.NewReader(`{"original": "body"}`))
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-
-	// Drain initial body
-	<-receivedBody
-
-	time.Sleep(100 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		// Seed with a POST request
+		client := makeProxyClient(env.proxyAddr)
+		resp, err := client.Post(env.targetURL+"/body-test", "application/json",
+			strings.NewReader(`{"original": "body"}`))
+		require.NoError(t, err)
+		_ = resp.Body.Close()
 
-	// Get flow ID
-	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-		OutputMode: "flows",
-		Method:     "POST",
-		Limit:      1,
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
-
-	flowID := listResp.Flows[0].FlowID
-
-	t.Run("replay_with_body_replacement", func(t *testing.T) {
-		for len(receivedBody) > 0 {
-			<-receivedBody
+		// Drain initial body
+		select {
+		case <-receivedBody:
+		case <-time.After(2 * time.Second):
+			t.Fatal("didn't receive initial request")
 		}
 
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID: flowID,
-			Body:   `{"replaced": "completely"}`,
+		time.Sleep(20 * time.Millisecond) // Wait for history to populate
+
+		// Get flow ID by filtering on target host
+		targetURL, _ := url.Parse(env.targetURL)
+		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Method:     "POST",
+			Host:       targetURL.Host,
+			Limit:      1,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		require.NotEmpty(t, listResp.Flows)
 
-		select {
-		case body := <-receivedBody:
-			assert.JSONEq(t, `{"replaced": "completely"}`, string(body))
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive replayed request")
-		}
+		flowID := listResp.Flows[0].FlowID
+
+		t.Run("body_replacement", func(t *testing.T) {
+			for len(receivedBody) > 0 {
+				<-receivedBody
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID: flowID,
+				Body:   `{"replaced": "completely"}`,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case body := <-receivedBody:
+				assert.JSONEq(t, `{"replaced": "completely"}`, string(body))
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive replayed request")
+			}
+		})
 	})
 }
 
 func TestIntegration_ReplayJSONModifications(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	receivedBody := make(chan []byte, 10)
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		select {
 		case receivedBody <- body:
 		default:
 		}
 		w.WriteHeader(200)
-		_, _ = w.Write(body) // Echo back
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	// Seed with JSON POST request
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-	}
-	resp, err := proxyClient.Post(testServer.URL+"/json-test", "application/json",
-		strings.NewReader(`{"user": "alice", "role": "viewer", "nested": {"key": "original"}}`))
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-
-	<-receivedBody
-	time.Sleep(100 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
+		_, _ = w.Write(body)
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
-	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-		OutputMode: "flows",
-		Method:     "POST",
-		Path:       "/json-test",
-		Limit:      1,
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
-
-	flowID := listResp.Flows[0].FlowID
-
-	t.Run("set_json_fields", func(t *testing.T) {
-		for len(receivedBody) > 0 {
-			<-receivedBody
-		}
-
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID: flowID,
-			SetJSON: map[string]interface{}{
-				"role":       "admin",
-				"nested.key": "modified",
-				"new_field":  "added",
-			},
-		})
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		// Seed with JSON POST request
+		client := makeProxyClient(env.proxyAddr)
+		resp, err := client.Post(env.targetURL+"/json-test", "application/json",
+			strings.NewReader(`{"user": "alice", "role": "viewer", "nested": {"key": "original"}}`))
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		_ = resp.Body.Close()
 
 		select {
-		case body := <-receivedBody:
-			var data map[string]interface{}
-			err := json.Unmarshal(body, &data)
-			require.NoError(t, err)
-
-			assert.Equal(t, "alice", data["user"]) // preserved
-			assert.Equal(t, "admin", data["role"]) // modified
-			assert.Equal(t, "added", data["new_field"])
-
-			nested, ok := data["nested"].(map[string]interface{})
-			require.True(t, ok)
-			assert.Equal(t, "modified", nested["key"])
+		case <-receivedBody:
 		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive replayed request")
-		}
-	})
-
-	t.Run("remove_json_fields", func(t *testing.T) {
-		for len(receivedBody) > 0 {
-			<-receivedBody
+			t.Fatal("didn't receive initial request")
 		}
 
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID:     flowID,
-			RemoveJSON: []string{"role", "nested"},
+		targetURL, _ := url.Parse(env.targetURL)
+		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Method:     "POST",
+			Host:       targetURL.Host,
+			Path:       "/json-test",
+			Limit:      1,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		require.Len(t, listResp.Flows, 1)
 
-		select {
-		case body := <-receivedBody:
-			var data map[string]interface{}
-			err := json.Unmarshal(body, &data)
+		flowID := listResp.Flows[0].FlowID
+
+		t.Run("set_json_fields", func(t *testing.T) {
+			for len(receivedBody) > 0 {
+				<-receivedBody
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID: flowID,
+				SetJSON: map[string]interface{}{
+					"role":       "admin",
+					"nested.key": "modified",
+					"new_field":  "added",
+				},
+			})
 			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
 
-			assert.Equal(t, "alice", data["user"])
-			_, hasRole := data["role"]
-			assert.False(t, hasRole, "role should be removed")
-			_, hasNested := data["nested"]
-			assert.False(t, hasNested, "nested should be removed")
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive replayed request")
-		}
+			select {
+			case body := <-receivedBody:
+				var data map[string]interface{}
+				err := json.Unmarshal(body, &data)
+				require.NoError(t, err)
+
+				assert.Equal(t, "alice", data["user"])
+				assert.Equal(t, "admin", data["role"])
+				assert.Equal(t, "added", data["new_field"])
+
+				nested, ok := data["nested"].(map[string]interface{})
+				require.True(t, ok)
+				assert.Equal(t, "modified", nested["key"])
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive replayed request")
+			}
+		})
+
+		t.Run("remove_json_fields", func(t *testing.T) {
+			for len(receivedBody) > 0 {
+				<-receivedBody
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID:     flowID,
+				RemoveJSON: []string{"role", "nested"},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case body := <-receivedBody:
+				var data map[string]interface{}
+				err := json.Unmarshal(body, &data)
+				require.NoError(t, err)
+
+				assert.Equal(t, "alice", data["user"])
+				_, hasRole := data["role"]
+				assert.False(t, hasRole, "role should be removed")
+				_, hasNested := data["nested"]
+				assert.False(t, hasNested, "nested should be removed")
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive replayed request")
+			}
+		})
 	})
 }
 
 func TestIntegration_ReplayMethodOverride(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	receivedMethod := make(chan string, 10)
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case receivedMethod <- r.Method:
 		default:
 		}
 		w.WriteHeader(200)
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-	}
-	resp, err := proxyClient.Get(testServer.URL + "/method-test")
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-
-	<-receivedMethod
-	time.Sleep(100 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
-	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-		OutputMode: "flows",
-		Method:     "GET",
-		Path:       "/method-test",
-		Limit:      1,
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
-
-	flowID := listResp.Flows[0].FlowID
-
-	t.Run("change_get_to_post", func(t *testing.T) {
-		for len(receivedMethod) > 0 {
-			<-receivedMethod
-		}
-
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID: flowID,
-			Method: "POST",
-			Body:   "test body",
-		})
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		client := makeProxyClient(env.proxyAddr)
+		resp, err := client.Get(env.targetURL + "/method-test")
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		_ = resp.Body.Close()
 
 		select {
-		case method := <-receivedMethod:
-			assert.Equal(t, "POST", method)
+		case <-receivedMethod:
 		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive replayed request")
-		}
-	})
-
-	t.Run("change_get_to_delete", func(t *testing.T) {
-		for len(receivedMethod) > 0 {
-			<-receivedMethod
+			t.Fatal("didn't receive initial request")
 		}
 
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID: flowID,
-			Method: "DELETE",
+		targetURL, _ := url.Parse(env.targetURL)
+		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Method:     "GET",
+			Host:       targetURL.Host,
+			Path:       "/method-test",
+			Limit:      1,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		require.Len(t, listResp.Flows, 1)
 
-		select {
-		case method := <-receivedMethod:
-			assert.Equal(t, "DELETE", method)
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive replayed request")
-		}
+		flowID := listResp.Flows[0].FlowID
+
+		t.Run("change_get_to_post", func(t *testing.T) {
+			for len(receivedMethod) > 0 {
+				<-receivedMethod
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID: flowID,
+				Method: "POST",
+				Body:   "test body",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case method := <-receivedMethod:
+				assert.Equal(t, "POST", method)
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive replayed request")
+			}
+		})
+
+		t.Run("change_get_to_delete", func(t *testing.T) {
+			for len(receivedMethod) > 0 {
+				<-receivedMethod
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID: flowID,
+				Method: "DELETE",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case method := <-receivedMethod:
+				assert.Equal(t, "DELETE", method)
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive replayed request")
+			}
+		})
 	})
 }
 
 func TestIntegration_ReplayFollowRedirects(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	redirectCount := 0
 	var mu sync.Mutex
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/redirect-start":
 			http.Redirect(w, r, "/redirect-middle", http.StatusFound)
@@ -1784,99 +1668,66 @@ func TestIntegration_ReplayFollowRedirects(t *testing.T) {
 			mu.Unlock()
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte("final destination reached"))
-		case "/redirect-307":
-			http.Redirect(w, r, "/echo-body", http.StatusTemporaryRedirect)
-		case "/echo-body":
-			body, _ := io.ReadAll(r.Body)
-			w.WriteHeader(200)
-			_, _ = w.Write(body)
 		default:
 			w.WriteHeader(404)
 		}
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	// Seed history (don't follow redirects in seeding client)
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	resp, err := proxyClient.Get(testServer.URL + "/redirect-start")
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-
-	time.Sleep(100 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		// Seed history (don't follow redirects in seeding client)
+		proxyURL, _ := url.Parse("http://" + env.proxyAddr)
+		proxyClient := &http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 
-	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-		OutputMode: "flows",
-		Path:       "/redirect-start",
-		Limit:      1,
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
+		resp, err := proxyClient.Get(env.targetURL + "/redirect-start")
+		require.NoError(t, err)
+		_ = resp.Body.Close()
 
-	flowID := listResp.Flows[0].FlowID
+		time.Sleep(20 * time.Millisecond) // Wait for history to populate
 
-	t.Run("follow_redirects_enabled", func(t *testing.T) {
-		mu.Lock()
-		redirectCount = 0
-		mu.Unlock()
-
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID:          flowID,
-			FollowRedirects: true,
+		targetURL, _ := url.Parse(env.targetURL)
+		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Host:       targetURL.Host,
+			Path:       "/redirect-start",
+			Limit:      1,
 		})
 		require.NoError(t, err)
+		require.Len(t, listResp.Flows, 1)
 
-		// Should reach final destination
-		assert.Equal(t, 200, replayResp.Status)
-		mu.Lock()
-		assert.Equal(t, 1, redirectCount)
-		mu.Unlock()
-	})
+		flowID := listResp.Flows[0].FlowID
 
-	t.Run("follow_redirects_disabled", func(t *testing.T) {
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID:          flowID,
-			FollowRedirects: false,
+		t.Run("follow_redirects_enabled", func(t *testing.T) {
+			mu.Lock()
+			redirectCount = 0
+			mu.Unlock()
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID:          flowID,
+				FollowRedirects: true,
+			})
+			require.NoError(t, err)
+
+			assert.Equal(t, 200, replayResp.Status)
+			mu.Lock()
+			assert.Equal(t, 1, redirectCount)
+			mu.Unlock()
 		})
-		require.NoError(t, err)
 
-		// Should return the redirect response
-		assert.Equal(t, 302, replayResp.Status)
+		t.Run("follow_redirects_disabled", func(t *testing.T) {
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID:          flowID,
+				FollowRedirects: false,
+			})
+			require.NoError(t, err)
+
+			assert.Equal(t, 302, replayResp.Status)
+		})
 	})
 }
 
@@ -1889,12 +1740,27 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// Create HTTP/2 enabled test server
+	// Channel to capture POST bodies received by server
+	receivedBody := make(chan []byte, 10)
+
+	// Create HTTP/2 enabled test server that echoes POST bodies
 	testServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Protocol", r.Proto)
 		w.Header().Set("X-H2-Test", "success")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("HTTP/2 response body"))
+
+		if r.Method == "POST" {
+			body, _ := io.ReadAll(r.Body)
+			select {
+			case receivedBody <- body:
+			default:
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			_, _ = w.Write(body) // Echo back the body
+		} else {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("HTTP/2 response body"))
+		}
 	}))
 	testServer.TLS = &tls.Config{
 		NextProtos: []string{"h2", "http/1.1"},
@@ -1908,7 +1774,7 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	caCertPool := x509.NewCertPool()
 	caCertPool.AddCert(backend.CACert())
@@ -1937,17 +1803,36 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 		assert.Equal(t, 2, resp.ProtoMajor, "response should be HTTP/2")
 	})
 
-	t.Run("h2_post_with_body", func(t *testing.T) {
+	t.Run("h2_post_body_preserved", func(t *testing.T) {
+		// Drain channel
+		for len(receivedBody) > 0 {
+			<-receivedBody
+		}
+
+		postBody := `{"h2":"post","data":"test-value-123"}`
 		resp, err := proxyClient.Post(testServer.URL+"/h2-post", "application/json",
-			strings.NewReader(`{"h2":"post"}`))
+			strings.NewReader(postBody))
 		require.NoError(t, err)
+
+		// Read echoed body from response
+		echoedBody, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		require.NoError(t, err)
 
 		assert.Equal(t, 200, resp.StatusCode)
 		assert.Equal(t, 2, resp.ProtoMajor)
+
+		select {
+		case serverReceived := <-receivedBody:
+			assert.JSONEq(t, postBody, string(serverReceived))
+		case <-time.After(2 * time.Second):
+			t.Fatal("server didn't receive POST body")
+		}
+
+		assert.JSONEq(t, postBody, string(echoedBody))
 	})
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 
 	flags := service.MCPServerFlags{
 		MCPPort:      findAvailablePort(t),
@@ -1977,7 +1862,7 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 			Limit:      1,
 		})
 		require.NoError(t, err)
-		require.NotEmpty(t, listResp.Flows)
+		require.Len(t, listResp.Flows, 1)
 
 		flow := listResp.Flows[0]
 		assert.Equal(t, "GET", flow.Method)
@@ -1990,7 +1875,7 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 			Limit:      1,
 		})
 		require.NoError(t, err)
-		require.NotEmpty(t, listResp.Flows)
+		require.Len(t, listResp.Flows, 1)
 
 		flowResp, err := client.ProxyGet(t.Context(), listResp.Flows[0].FlowID)
 		require.NoError(t, err)
@@ -1998,6 +1883,190 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 		assert.Equal(t, "GET", flowResp.Method)
 		assert.Contains(t, flowResp.URL, "/h2-test")
 		assert.Equal(t, 200, flowResp.Status)
+	})
+}
+
+// TestIntegration_HTTP2Rules tests that proxy rules are correctly applied to HTTP/2 traffic.
+// Rules should work on both request and response headers/bodies over H2 connections.
+func TestIntegration_HTTP2Rules(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	// Channels to capture what server receives
+	receivedHeaders := make(chan http.Header, 10)
+	receivedBody := make(chan []byte, 10)
+
+	// Create HTTP/2 enabled test server
+	testServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture request headers
+		select {
+		case receivedHeaders <- r.Header.Clone():
+		default:
+		}
+
+		// Capture request body for POST
+		if r.Method == "POST" {
+			body, _ := io.ReadAll(r.Body)
+			select {
+			case receivedBody <- body:
+			default:
+			}
+		}
+
+		// Send response with content that rules can modify
+		w.Header().Set("X-Server-Secret", "original-secret-value")
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("Response contains SENSITIVE_DATA that should be modified"))
+	}))
+	testServer.TLS = &tls.Config{
+		NextProtos: []string{"h2", "http/1.1"},
+	}
+	testServer.StartTLS()
+	t.Cleanup(testServer.Close)
+
+	configDir := t.TempDir()
+	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	go func() { _ = backend.Serve() }()
+	require.NoError(t, backend.WaitReady(t.Context()))
+
+	// Start MCP server for rule management
+	flags := service.MCPServerFlags{
+		MCPPort:      findAvailablePort(t),
+		WorkflowMode: service.WorkflowModeNone,
+	}
+	srv, err := service.NewServer(flags, backend, nil, nil)
+	require.NoError(t, err)
+
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- srv.Run(t.Context()) }()
+	srv.WaitTillStarted()
+	t.Cleanup(func() {
+		srv.RequestShutdown()
+		<-serverErr
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	mcpClient, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mcpClient.Close() })
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AddCert(backend.CACert())
+
+	proxyURL, _ := url.Parse("http://" + backend.Addr())
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+		TLSClientConfig: &tls.Config{
+			RootCAs:            caCertPool,
+			InsecureSkipVerify: true,
+		},
+		ForceAttemptHTTP2: true,
+	}
+	proxyClient := &http.Client{Transport: transport}
+
+	t.Run("h2_request_header_rule", func(t *testing.T) {
+		// Add rule to inject header into requests
+		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+			Type:    service.RuleTypeRequestHeader,
+			Label:   "h2-req-header-test",
+			Replace: "X-Injected-H2: injected-value",
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+		// Drain channel
+		for len(receivedHeaders) > 0 {
+			<-receivedHeaders
+		}
+
+		resp, err := proxyClient.Get(testServer.URL + "/h2-rule-test")
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+
+		assert.Equal(t, 2, resp.ProtoMajor)
+
+		select {
+		case headers := <-receivedHeaders:
+			assert.Equal(t, "injected-value", headers.Get("X-Injected-H2"))
+		case <-time.After(2 * time.Second):
+			t.Fatal("server didn't receive request")
+		}
+	})
+
+	t.Run("h2_request_body_rule", func(t *testing.T) {
+		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+			Type:    service.RuleTypeRequestBody,
+			Label:   "h2-req-body-test",
+			Match:   "ORIGINAL_VALUE",
+			Replace: "MODIFIED_BY_RULE",
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+		for len(receivedBody) > 0 {
+			<-receivedBody
+		}
+
+		resp, err := proxyClient.Post(testServer.URL+"/h2-body-rule", "text/plain",
+			strings.NewReader("data=ORIGINAL_VALUE&other=test"))
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+
+		assert.Equal(t, 2, resp.ProtoMajor)
+
+		select {
+		case body := <-receivedBody:
+			assert.Contains(t, string(body), "MODIFIED_BY_RULE")
+			assert.NotContains(t, string(body), "ORIGINAL_VALUE")
+		case <-time.After(2 * time.Second):
+			t.Fatal("server didn't receive request")
+		}
+	})
+
+	t.Run("h2_response_header_rule", func(t *testing.T) {
+		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+			Type:    service.RuleTypeResponseHeader,
+			Label:   "h2-resp-header-test",
+			Match:   "X-Server-Secret: original-secret-value",
+			Replace: "X-Server-Secret: modified-by-proxy",
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+		resp, err := proxyClient.Get(testServer.URL + "/h2-resp-header-test")
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+
+		assert.Equal(t, 2, resp.ProtoMajor)
+		assert.Equal(t, "modified-by-proxy", resp.Header.Get("X-Server-Secret"))
+	})
+
+	t.Run("h2_response_body_rule", func(t *testing.T) {
+		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
+			Type:    service.RuleTypeResponseBody,
+			Label:   "h2-resp-body-test",
+			Match:   "SENSITIVE_DATA",
+			Replace: "REDACTED",
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
+
+		resp, err := proxyClient.Get(testServer.URL + "/h2-resp-body-test")
+		require.NoError(t, err)
+
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		require.NoError(t, err)
+
+		assert.Equal(t, 2, resp.ProtoMajor)
+		assert.Contains(t, string(body), "REDACTED")
+		assert.NotContains(t, string(body), "SENSITIVE_DATA")
 	})
 }
 
@@ -2013,7 +2082,7 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 	// Create WebSocket echo server
 	wsMessages := make(chan string, 100)
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Upgrade") != "websocket" {
+		if r.Header.Get("Upgrade") != wsUpgradeHeader {
 			w.WriteHeader(400)
 			return
 		}
@@ -2022,7 +2091,7 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 		key := r.Header.Get("Sec-WebSocket-Key")
 		acceptKey := computeWebSocketAcceptKey(key)
 
-		w.Header().Set("Upgrade", "websocket")
+		w.Header().Set("Upgrade", wsUpgradeHeader)
 		w.Header().Set("Connection", "Upgrade")
 		w.Header().Set("Sec-WebSocket-Accept", acceptKey)
 		w.WriteHeader(101)
@@ -2067,7 +2136,7 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	t.Run("websocket_upgrade_through_proxy", func(t *testing.T) {
 		// Connect through proxy
@@ -2100,7 +2169,7 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, 101, resp.StatusCode)
-		assert.Equal(t, "websocket", strings.ToLower(resp.Header.Get("Upgrade")))
+		assert.Equal(t, wsUpgradeHeader, strings.ToLower(resp.Header.Get("Upgrade")))
 
 		// Send a text frame
 		message := "Hello WebSocket!"
@@ -2115,6 +2184,7 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("WebSocket message not received")
 		}
+		assert.Empty(t, wsMessages)
 
 		// Read echo response
 		responseFrame, err := readWebSocketFrame(conn)
@@ -2124,184 +2194,8 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Compression/Encoding Tests
-// =============================================================================
-
-func TestIntegration_GzipResponses(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-			w.Header().Set("Content-Encoding", "gzip")
-			gz := gzip.NewWriter(w)
-			defer func() { _ = gz.Close() }()
-			_, _ = gz.Write([]byte("This is gzip compressed content"))
-		} else {
-			_, _ = w.Write([]byte("This is uncompressed content"))
-		}
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	// Disable automatic decompression to test raw gzip handling
-	transport := &http.Transport{
-		Proxy:              http.ProxyURL(proxyURL),
-		DisableCompression: true,
-	}
-	proxyClient := &http.Client{Transport: transport}
-
-	t.Run("gzip_response_through_proxy", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", testServer.URL+"/gzip-test", nil)
-		req.Header.Set("Accept-Encoding", "gzip")
-		resp, err := proxyClient.Do(req)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = resp.Body.Close() })
-
-		assert.Equal(t, "gzip", resp.Header.Get("Content-Encoding"))
-
-		// Read and decompress
-		gz, err := gzip.NewReader(resp.Body)
-		require.NoError(t, err)
-		body, err := io.ReadAll(gz)
-		require.NoError(t, err)
-
-		assert.Equal(t, "This is gzip compressed content", string(body))
-	})
-
-	time.Sleep(100 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
-	t.Run("gzip_flow_captured", func(t *testing.T) {
-		listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-			OutputMode: "flows",
-			Path:       "/gzip-test",
-			Limit:      1,
-		})
-		require.NoError(t, err)
-		require.NotEmpty(t, listResp.Flows)
-	})
-}
-
-func TestIntegration_RulesOnCompressedBody(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Content-Type", "text/plain")
-		gz := gzip.NewWriter(w)
-		_, _ = gz.Write([]byte("Response contains SECRET_TOKEN_XYZ that should be modified"))
-		_ = gz.Close()
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
-	t.Run("response_body_rule_on_gzip", func(t *testing.T) {
-		rule, err := client.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
-			Type:    service.RuleTypeResponseBody,
-			Label:   "test-gzip-body-rule",
-			Match:   "SECRET_TOKEN_XYZ",
-			Replace: "REDACTED",
-		})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = client.ProxyRuleDelete(t.Context(), rule.RuleID) })
-
-		proxyURL, _ := url.Parse("http://" + backend.Addr())
-		transport := &http.Transport{
-			Proxy:              http.ProxyURL(proxyURL),
-			DisableCompression: true,
-		}
-		proxyClient := &http.Client{Transport: transport}
-
-		req, _ := http.NewRequest("GET", testServer.URL+"/gzip-rule-test", nil)
-		req.Header.Set("Accept-Encoding", "gzip")
-		resp, err := proxyClient.Do(req)
-		require.NoError(t, err)
-		defer func() { _ = resp.Body.Close() }()
-
-		// Body should still be gzip (recompressed after rule application)
-		var body []byte
-		if resp.Header.Get("Content-Encoding") == "gzip" {
-			gz, err := gzip.NewReader(resp.Body)
-			if err == nil {
-				body, _ = io.ReadAll(gz)
-			}
-		}
-		if body == nil {
-			body, _ = io.ReadAll(resp.Body)
-		}
-
-		assert.Contains(t, string(body), "REDACTED")
-		assert.NotContains(t, string(body), "SECRET_TOKEN_XYZ")
-	})
-}
-
 func TestIntegration_ChunkedEncoding(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			w.WriteHeader(500)
@@ -2316,69 +2210,41 @@ func TestIntegration_ChunkedEncoding(t *testing.T) {
 			_, _ = w.Write([]byte(chunk))
 			flusher.Flush()
 		}
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-	}
-
-	t.Run("chunked_response_through_proxy", func(t *testing.T) {
-		resp, err := proxyClient.Get(testServer.URL + "/chunked-test")
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = resp.Body.Close() })
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-
-		assert.Equal(t, 200, resp.StatusCode)
-		assert.Equal(t, "chunk1-chunk2-chunk3", string(body))
 	})
 
-	time.Sleep(100 * time.Millisecond)
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		client := makeProxyClient(env.proxyAddr)
 
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
+		t.Run("chunked_response_through_proxy", func(t *testing.T) {
+			resp, err := client.Get(env.targetURL + "/chunked-test")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = resp.Body.Close() })
 
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
-	t.Run("chunked_flow_captured", func(t *testing.T) {
-		listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-			OutputMode: "flows",
-			Path:       "/chunked-test",
-			Limit:      1,
+			assert.Equal(t, 200, resp.StatusCode)
+			assert.Equal(t, "chunk1-chunk2-chunk3", string(body))
 		})
-		require.NoError(t, err)
-		require.NotEmpty(t, listResp.Flows)
 
-		flowResp, err := client.ProxyGet(t.Context(), listResp.Flows[0].FlowID)
-		require.NoError(t, err)
-		assert.Equal(t, 200, flowResp.Status)
+		time.Sleep(20 * time.Millisecond) // Wait for history to populate
+
+		t.Run("chunked_flow_captured", func(t *testing.T) {
+			targetURL, _ := url.Parse(env.targetURL)
+			listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+				OutputMode: "flows",
+				Host:       targetURL.Host,
+				Path:       "/chunked-test",
+				Limit:      1,
+			})
+			require.NoError(t, err)
+			require.Len(t, listResp.Flows, 1)
+
+			flowResp, err := env.mcpClient.ProxyGet(t.Context(), listResp.Flows[0].FlowID)
+			require.NoError(t, err)
+			assert.Equal(t, 200, flowResp.Status)
+		})
 	})
 }
 
@@ -2409,7 +2275,7 @@ func TestIntegration_ForceFlag(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	// Seed with normal request
 	proxyURL, _ := url.Parse("http://" + backend.Addr())
@@ -2421,7 +2287,7 @@ func TestIntegration_ForceFlag(t *testing.T) {
 	_ = resp.Body.Close()
 
 	<-receivedRequests
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 
 	flags := service.MCPServerFlags{
 		MCPPort:      findAvailablePort(t),
@@ -2450,7 +2316,7 @@ func TestIntegration_ForceFlag(t *testing.T) {
 		Limit:      1,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
+	require.Len(t, listResp.Flows, 1)
 
 	flowID := listResp.Flows[0].FlowID
 
@@ -2535,7 +2401,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	// Seed with normal request
 	proxyURL, _ := url.Parse("http://" + backend.Addr())
@@ -2546,7 +2412,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 
 	flags := service.MCPServerFlags{
 		MCPPort:      findAvailablePort(t),
@@ -2575,7 +2441,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 		Limit:      1,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
+	require.Len(t, listResp.Flows, 1)
 
 	flowID := listResp.Flows[0].FlowID
 
@@ -2723,21 +2589,54 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 	})
 }
 
-func TestIntegration_LargeBodies(t *testing.T) {
+// TestIntegration_ContentLengthMismatch tests handling of requests where Content-Length
+// doesn't match the actual body size. This is important for security testing scenarios.
+func TestIntegration_ContentLengthMismatch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	const bodySize = 1024 * 1024 // 1MB
-	largeBody := strings.Repeat("X", bodySize)
+	// Raw TCP server to capture exact bytes received
+	receivedData := make(chan []byte, 10)
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		w.Header().Set("X-Body-Size", strconv.Itoa(len(body)))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	tcpAddr := listener.Addr().String()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+
+				buf := make([]byte, 8192)
+				n, err := c.Read(buf)
+				if err != nil {
+					return
+				}
+
+				select {
+				case receivedData <- buf[:n]:
+				default:
+				}
+
+				response := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+				_, _ = c.Write([]byte(response))
+			}(conn)
+		}
+	}()
+
+	// Normal server for seeding
+	normalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
-		_, _ = w.Write([]byte(largeBody))
+		_, _ = w.Write([]byte("ok"))
 	}))
-	t.Cleanup(testServer.Close)
+	t.Cleanup(normalServer.Close)
 
 	configDir := t.TempDir()
 	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
@@ -2745,39 +2644,168 @@ func TestIntegration_LargeBodies(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
+	// Seed with normal request
 	proxyURL, _ := url.Parse("http://" + backend.Addr())
 	proxyClient := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 	}
+	resp, err := proxyClient.Post(normalServer.URL+"/cl-test", "text/plain",
+		strings.NewReader("original body"))
+	require.NoError(t, err)
+	_ = resp.Body.Close()
 
-	t.Run("large_request_body", func(t *testing.T) {
-		resp, err := proxyClient.Post(testServer.URL+"/large-req", "application/octet-stream",
-			strings.NewReader(largeBody))
-		require.NoError(t, err)
-		defer func() { _ = resp.Body.Close() }()
+	time.Sleep(20 * time.Millisecond)
 
-		assert.Equal(t, 200, resp.StatusCode)
-		assert.Equal(t, strconv.Itoa(bodySize), resp.Header.Get("X-Body-Size"))
+	flags := service.MCPServerFlags{
+		MCPPort:      findAvailablePort(t),
+		WorkflowMode: service.WorkflowModeNone,
+	}
+	srv, err := service.NewServer(flags, backend, nil, nil)
+	require.NoError(t, err)
+
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- srv.Run(t.Context()) }()
+	srv.WaitTillStarted()
+	t.Cleanup(func() {
+		srv.RequestShutdown()
+		<-serverErr
 	})
 
-	t.Run("large_response_body", func(t *testing.T) {
-		resp, err := proxyClient.Get(testServer.URL + "/large-resp")
-		require.NoError(t, err)
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
 
-		assert.Equal(t, 200, resp.StatusCode)
-		assert.Len(t, body, bodySize)
+	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+		OutputMode: "flows",
+		Path:       "/cl-test",
+		Limit:      1,
+	})
+	require.NoError(t, err)
+	require.Len(t, listResp.Flows, 1)
+
+	flowID := listResp.Flows[0].FlowID
+
+	t.Run("content_length_less_than_body_rejected", func(t *testing.T) {
+		// Content-Length says 5, but body is longer - should be rejected
+		_, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+			FlowID:     flowID,
+			Body:       "this is a much longer body than content-length says",
+			AddHeaders: []string{"Content-Length: 5"},
+			Target:     "http://" + tcpAddr,
+			Force:      false,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "validation failed")
+	})
+
+	t.Run("content_length_mismatch_sent_with_force", func(t *testing.T) {
+		for len(receivedData) > 0 {
+			<-receivedData
+		}
+
+		// With force, Content-Length mismatch is allowed
+		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+			FlowID:     flowID,
+			Body:       "actual body content here",
+			AddHeaders: []string{"Content-Length: 5"},
+			Target:     "http://" + tcpAddr,
+			Force:      true,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 200, replayResp.Status)
+
+		select {
+		case data := <-receivedData:
+			// Verify Content-Length header says 5
+			assert.Contains(t, string(data), "Content-Length: 5")
+			// But actual body is longer
+			assert.Contains(t, string(data), "actual body content here")
+		case <-time.After(2 * time.Second):
+			t.Fatal("didn't receive request")
+		}
+	})
+
+	t.Run("content_length_greater_than_body_rejected", func(t *testing.T) {
+		// Content-Length says 1000, but body is only 10 bytes
+		_, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+			FlowID:     flowID,
+			Body:       "short body",
+			AddHeaders: []string{"Content-Length: 1000"},
+			Target:     "http://" + tcpAddr,
+			Force:      false,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "validation failed")
+	})
+
+	t.Run("zero_content_length_with_body_sent_with_force", func(t *testing.T) {
+		for len(receivedData) > 0 {
+			<-receivedData
+		}
+
+		// Content-Length: 0 but there's a body - useful for request smuggling tests
+		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+			FlowID:     flowID,
+			Body:       "hidden body",
+			AddHeaders: []string{"Content-Length: 0"},
+			Target:     "http://" + tcpAddr,
+			Force:      true,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 200, replayResp.Status)
+
+		select {
+		case data := <-receivedData:
+			assert.Contains(t, string(data), "Content-Length: 0")
+			assert.Contains(t, string(data), "hidden body")
+		case <-time.After(2 * time.Second):
+			t.Fatal("didn't receive request")
+		}
+	})
+}
+
+func TestIntegration_LargeBodies(t *testing.T) {
+	const bodySize = 1024 * 1024 // 1MB
+	largeBody := strings.Repeat("X", bodySize)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("X-Body-Size", strconv.Itoa(len(body)))
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(largeBody))
+	})
+
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		client := makeProxyClient(env.proxyAddr)
+
+		t.Run("large_request_body", func(t *testing.T) {
+			resp, err := client.Post(env.targetURL+"/large-req", "application/octet-stream",
+				strings.NewReader(largeBody))
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+
+			assert.Equal(t, 200, resp.StatusCode)
+			assert.Equal(t, strconv.Itoa(bodySize), resp.Header.Get("X-Body-Size"))
+		})
+
+		t.Run("large_response_body", func(t *testing.T) {
+			resp, err := client.Get(env.targetURL + "/large-resp")
+			require.NoError(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			assert.Equal(t, 200, resp.StatusCode)
+			assert.Len(t, body, bodySize)
+		})
 	})
 }
 
 func TestIntegration_BinaryContent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	// Create binary data with all byte values
 	binaryData := make([]byte, 256)
 	for i := range binaryData {
@@ -2786,7 +2814,7 @@ func TestIntegration_BinaryContent(t *testing.T) {
 
 	receivedData := make(chan []byte, 1)
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		select {
 		case receivedData <- body:
@@ -2795,43 +2823,39 @@ func TestIntegration_BinaryContent(t *testing.T) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(200)
 		_, _ = w.Write(binaryData)
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-	}
-
-	t.Run("binary_request_body", func(t *testing.T) {
-		resp, err := proxyClient.Post(testServer.URL+"/binary", "application/octet-stream",
-			strings.NewReader(string(binaryData)))
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-
-		select {
-		case received := <-receivedData:
-			assert.Equal(t, binaryData, received)
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive request")
-		}
 	})
 
-	t.Run("binary_response_body", func(t *testing.T) {
-		resp, err := proxyClient.Get(testServer.URL + "/binary-resp")
-		require.NoError(t, err)
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		client := makeProxyClient(env.proxyAddr)
 
-		assert.Equal(t, binaryData, body)
+		t.Run("binary_request_body", func(t *testing.T) {
+			// Drain channel from any previous test runs
+			for len(receivedData) > 0 {
+				<-receivedData
+			}
+
+			resp, err := client.Post(env.targetURL+"/binary", "application/octet-stream",
+				strings.NewReader(string(binaryData)))
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+
+			select {
+			case received := <-receivedData:
+				assert.Equal(t, binaryData, received)
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive request")
+			}
+		})
+
+		t.Run("binary_response_body", func(t *testing.T) {
+			resp, err := client.Get(env.targetURL + "/binary-resp")
+			require.NoError(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			assert.Equal(t, binaryData, body)
+		})
 	})
 }
 
@@ -2846,7 +2870,7 @@ func TestIntegration_ConnectionErrors(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	proxyURL, _ := url.Parse("http://" + backend.Addr())
 	proxyClient := &http.Client{
@@ -2884,9 +2908,9 @@ func TestIntegration_TimeoutHandling(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// Create slow server
+	// Create slow server (delay just needs to exceed client timeout of 500ms)
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second)
+		time.Sleep(1 * time.Second)
 		w.WriteHeader(200)
 	}))
 	t.Cleanup(testServer.Close)
@@ -2897,7 +2921,7 @@ func TestIntegration_TimeoutHandling(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	proxyURL, _ := url.Parse("http://" + backend.Addr())
 	proxyClient := &http.Client{
@@ -3031,112 +3055,82 @@ func encodeWebSocketFrame(payload []byte, opcode byte, masked bool) []byte {
 // =============================================================================
 
 func TestIntegration_ReplayPathModification(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	receivedPath := make(chan string, 10)
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case receivedPath <- r.URL.Path:
 		default:
 		}
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("path: " + r.URL.Path))
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	// Seed with request to /original-path
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-	}
-	resp, err := proxyClient.Get(testServer.URL + "/original-path")
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-
-	<-receivedPath
-	time.Sleep(100 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
-	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-		OutputMode: "flows",
-		Path:       "/original-path",
-		Limit:      1,
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
-
-	flowID := listResp.Flows[0].FlowID
-
-	t.Run("path_modification_works", func(t *testing.T) {
-		for len(receivedPath) > 0 {
-			<-receivedPath
-		}
-
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID: flowID,
-			Path:   "/modified-path",
-		})
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		client := makeProxyClient(env.proxyAddr)
+		resp, err := client.Get(env.targetURL + "/original-path")
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		_ = resp.Body.Close()
 
 		select {
-		case path := <-receivedPath:
-			assert.Equal(t, "/modified-path", path)
+		case <-receivedPath:
 		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive replayed request")
-		}
-	})
-
-	t.Run("path_with_query_preserved", func(t *testing.T) {
-		for len(receivedPath) > 0 {
-			<-receivedPath
+			t.Fatal("didn't receive initial request")
 		}
 
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID:   flowID,
-			Path:     "/new-path",
-			SetQuery: []string{"param=value"},
+		targetURL, _ := url.Parse(env.targetURL)
+		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Host:       targetURL.Host,
+			Path:       "/original-path",
+			Limit:      1,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		require.Len(t, listResp.Flows, 1)
 
-		select {
-		case path := <-receivedPath:
-			assert.Equal(t, "/new-path", path)
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive replayed request")
-		}
+		flowID := listResp.Flows[0].FlowID
+
+		t.Run("path_modification_works", func(t *testing.T) {
+			for len(receivedPath) > 0 {
+				<-receivedPath
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID: flowID,
+				Path:   "/modified-path",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case path := <-receivedPath:
+				assert.Equal(t, "/modified-path", path)
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive replayed request")
+			}
+		})
+
+		t.Run("path_with_query_preserved", func(t *testing.T) {
+			for len(receivedPath) > 0 {
+				<-receivedPath
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID:   flowID,
+				Path:     "/new-path",
+				SetQuery: []string{"param=value"},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case path := <-receivedPath:
+				assert.Equal(t, "/new-path", path)
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive replayed request")
+			}
+		})
 	})
 }
 
@@ -3150,7 +3144,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 
 	// Server that echoes messages with SERVER_SECRET prefix
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Upgrade") != "websocket" {
+		if r.Header.Get("Upgrade") != wsUpgradeHeader {
 			w.WriteHeader(400)
 			return
 		}
@@ -3158,7 +3152,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 		key := r.Header.Get("Sec-WebSocket-Key")
 		acceptKey := computeWebSocketAcceptKey(key)
 
-		w.Header().Set("Upgrade", "websocket")
+		w.Header().Set("Upgrade", wsUpgradeHeader)
 		w.Header().Set("Connection", "Upgrade")
 		w.Header().Set("Sec-WebSocket-Accept", acceptKey)
 		w.WriteHeader(101)
@@ -3200,7 +3194,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	// Start MCP server
 	flags := service.MCPServerFlags{
@@ -3233,7 +3227,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 			Replace: "CLIENT_MODIFIED",
 		})
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(t.Context(), rule.RuleID) })
+		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
 		// Drain any existing messages
 		for len(serverReceived) > 0 {
@@ -3283,6 +3277,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("server didn't receive message")
 		}
+		assert.Empty(t, serverReceived)
 	})
 
 	t.Run("ws_to_client_rule_modifies_server_message", func(t *testing.T) {
@@ -3294,7 +3289,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 			Replace: "SERVER_MODIFIED",
 		})
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(t.Context(), rule.RuleID) })
+		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
 		// Connect through proxy
 		proxyAddr := backend.Addr()
@@ -3342,14 +3337,10 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 }
 
 func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	receivedBody := make(chan []byte, 10)
 	receivedMethod := make(chan string, 10)
 
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/redirect-307":
 			http.Redirect(w, r, "/final-307", http.StatusTemporaryRedirect)
@@ -3370,148 +3361,122 @@ func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
 		default:
 			w.WriteHeader(404)
 		}
-	}))
-	t.Cleanup(testServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	// Seed with POST request (don't follow redirects when seeding)
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	resp, err := proxyClient.Post(testServer.URL+"/redirect-307", "application/json",
-		strings.NewReader(`{"important":"data"}`))
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-
-	resp, err = proxyClient.Post(testServer.URL+"/redirect-308", "application/json",
-		strings.NewReader(`{"critical":"payload"}`))
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-
-	time.Sleep(100 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
+		t.Helper()
+		// Seed with POST request (don't follow redirects when seeding)
+		proxyURL, _ := url.Parse("http://" + env.proxyAddr)
+		proxyClient := &http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 
-	t.Run("307_preserves_method_and_body", func(t *testing.T) {
-		listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-			OutputMode: "flows",
-			Path:       "/redirect-307",
-			Limit:      1,
-		})
+		resp, err := proxyClient.Post(env.targetURL+"/redirect-307", "application/json",
+			strings.NewReader(`{"important":"data"}`))
 		require.NoError(t, err)
-		require.NotEmpty(t, listResp.Flows)
+		_ = resp.Body.Close()
 
-		flowID := listResp.Flows[0].FlowID
-
-		for len(receivedBody) > 0 {
-			<-receivedBody
-		}
-		for len(receivedMethod) > 0 {
-			<-receivedMethod
-		}
-
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID:          flowID,
-			FollowRedirects: true,
-		})
+		resp, err = proxyClient.Post(env.targetURL+"/redirect-308", "application/json",
+			strings.NewReader(`{"critical":"payload"}`))
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		_ = resp.Body.Close()
 
-		select {
-		case method := <-receivedMethod:
-			assert.Equal(t, "POST", method, "307 should preserve POST method")
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive request")
-		}
+		time.Sleep(20 * time.Millisecond) // Wait for history to populate
 
-		select {
-		case body := <-receivedBody:
-			assert.Contains(t, string(body), "important")
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive body")
-		}
-	})
+		targetURL, _ := url.Parse(env.targetURL)
 
-	t.Run("308_preserves_method_and_body", func(t *testing.T) {
-		listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-			OutputMode: "flows",
-			Path:       "/redirect-308",
-			Limit:      1,
+		t.Run("307_preserves_method_and_body", func(t *testing.T) {
+			listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+				OutputMode: "flows",
+				Host:       targetURL.Host,
+				Path:       "/redirect-307",
+				Limit:      1,
+			})
+			require.NoError(t, err)
+			require.Len(t, listResp.Flows, 1)
+
+			flowID := listResp.Flows[0].FlowID
+
+			for len(receivedBody) > 0 {
+				<-receivedBody
+			}
+			for len(receivedMethod) > 0 {
+				<-receivedMethod
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID:          flowID,
+				FollowRedirects: true,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case method := <-receivedMethod:
+				assert.Equal(t, "POST", method, "307 should preserve POST method")
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive request")
+			}
+
+			select {
+			case body := <-receivedBody:
+				assert.Contains(t, string(body), "important")
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive body")
+			}
 		})
-		require.NoError(t, err)
-		require.NotEmpty(t, listResp.Flows)
 
-		flowID := listResp.Flows[0].FlowID
+		t.Run("308_preserves_method_and_body", func(t *testing.T) {
+			listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+				OutputMode: "flows",
+				Host:       targetURL.Host,
+				Path:       "/redirect-308",
+				Limit:      1,
+			})
+			require.NoError(t, err)
+			require.Len(t, listResp.Flows, 1)
 
-		for len(receivedBody) > 0 {
-			<-receivedBody
-		}
-		for len(receivedMethod) > 0 {
-			<-receivedMethod
-		}
+			flowID := listResp.Flows[0].FlowID
 
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID:          flowID,
-			FollowRedirects: true,
+			for len(receivedBody) > 0 {
+				<-receivedBody
+			}
+			for len(receivedMethod) > 0 {
+				<-receivedMethod
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID:          flowID,
+				FollowRedirects: true,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case method := <-receivedMethod:
+				assert.Equal(t, "POST", method, "308 should preserve POST method")
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive request")
+			}
+
+			select {
+			case body := <-receivedBody:
+				assert.Contains(t, string(body), "critical")
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive body")
+			}
 		})
-		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
-
-		select {
-		case method := <-receivedMethod:
-			assert.Equal(t, "POST", method, "308 should preserve POST method")
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive request")
-		}
-
-		select {
-		case body := <-receivedBody:
-			assert.Contains(t, string(body), "critical")
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive body")
-		}
 	})
 }
 
-func TestIntegration_CrossOriginRedirectAuthStrip(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
+// TestIntegration_CrossOriginRedirectAuthPreserved tests that Authorization headers are preserved on cross-origin redirects.
+func TestIntegration_CrossOriginRedirectAuthPreserved(t *testing.T) {
 	receivedAuth := make(chan string, 10)
 
-	// Create two servers to simulate cross-origin redirect
+	// Create target server that captures Authorization header
 	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case receivedAuth <- r.Header.Get("Authorization"):
@@ -3522,86 +3487,62 @@ func TestIntegration_CrossOriginRedirectAuthStrip(t *testing.T) {
 	}))
 	t.Cleanup(targetServer.Close)
 
-	originServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Redirect to different host (the target server)
+	// Create origin server that redirects to target (cross-origin)
+	originHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, targetServer.URL+"/cross-origin-target", http.StatusFound)
-	}))
-	t.Cleanup(originServer.Close)
-
-	configDir := t.TempDir()
-	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
-
-	// Seed with request containing Authorization header (don't follow redirect)
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	proxyClient := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	req, _ := http.NewRequest("GET", originServer.URL+"/start", nil)
-	req.Header.Set("Authorization", "Bearer secret-token-12345")
-	resp, err := proxyClient.Do(req)
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-
-	time.Sleep(100 * time.Millisecond)
-
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	runForAllBackendsWithHandler(t, originHandler, func(t *testing.T, env *testEnv) {
+		t.Helper()
 
-	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
-		OutputMode: "flows",
-		Path:       "/start",
-		Limit:      1,
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
-
-	flowID := listResp.Flows[0].FlowID
-
-	t.Run("authorization_stripped_on_cross_origin", func(t *testing.T) {
-		for len(receivedAuth) > 0 {
-			<-receivedAuth
+		// Seed with request containing Authorization header (don't follow redirect)
+		proxyURL, _ := url.Parse("http://" + env.proxyAddr)
+		proxyClient := &http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		}
 
-		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
-			FlowID:          flowID,
-			FollowRedirects: true,
+		req, _ := http.NewRequest("GET", env.targetURL+"/start", nil)
+		req.Header.Set("Authorization", "Bearer secret-token-12345")
+		resp, err := proxyClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+
+		time.Sleep(20 * time.Millisecond) // Wait for history to populate
+
+		originURL, _ := url.Parse(env.targetURL)
+		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Host:       originURL.Host,
+			Path:       "/start",
+			Limit:      1,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, 200, replayResp.Status)
+		require.Len(t, listResp.Flows, 1)
 
-		select {
-		case auth := <-receivedAuth:
-			assert.Empty(t, auth, "Authorization header should be stripped on cross-origin redirect")
-		case <-time.After(2 * time.Second):
-			t.Fatal("didn't receive request at target server")
-		}
+		flowID := listResp.Flows[0].FlowID
+
+		t.Run("authorization_preserved", func(t *testing.T) {
+			for len(receivedAuth) > 0 {
+				<-receivedAuth
+			}
+
+			replayResp, err := env.mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
+				FlowID:          flowID,
+				FollowRedirects: true,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 200, replayResp.Status)
+
+			select {
+			case auth := <-receivedAuth:
+				assert.Equal(t, "Bearer secret-token-12345", auth, "Authorization header should be preserved on cross-origin redirect")
+			case <-time.After(2 * time.Second):
+				t.Fatal("didn't receive request at target server")
+			}
+		})
 	})
 }
 
@@ -3618,7 +3559,7 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 
 	// Create TLS WebSocket server
 	testServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Upgrade") != "websocket" {
+		if r.Header.Get("Upgrade") != wsUpgradeHeader {
 			w.WriteHeader(400)
 			return
 		}
@@ -3626,7 +3567,7 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 		key := r.Header.Get("Sec-WebSocket-Key")
 		acceptKey := computeWebSocketAcceptKey(key)
 
-		w.Header().Set("Upgrade", "websocket")
+		w.Header().Set("Upgrade", wsUpgradeHeader)
 		w.Header().Set("Connection", "Upgrade")
 		w.Header().Set("Sec-WebSocket-Accept", acceptKey)
 		w.WriteHeader(101)
@@ -3669,7 +3610,7 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	// Get proxy CA cert for trust
 	caCertPool := x509.NewCertPool()
@@ -3727,7 +3668,7 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 		defer func() { _ = wsResp.Body.Close() }()
 
 		assert.Equal(t, 101, wsResp.StatusCode)
-		assert.Equal(t, "websocket", strings.ToLower(wsResp.Header.Get("Upgrade")))
+		assert.Equal(t, wsUpgradeHeader, strings.ToLower(wsResp.Header.Get("Upgrade")))
 
 		// Send a text frame
 		message := "Hello Secure WebSocket!"
@@ -3785,7 +3726,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	caCertPool := x509.NewCertPool()
 	caCertPool.AddCert(backend.CACert())
@@ -3810,7 +3751,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 	<-receivedProto
 	<-receivedPath
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 
 	flags := service.MCPServerFlags{
 		MCPPort:      findAvailablePort(t),
@@ -3839,7 +3780,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 		Limit:      1,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, listResp.Flows)
+	require.Len(t, listResp.Flows, 1)
 
 	flowID := listResp.Flows[0].FlowID
 
@@ -3847,7 +3788,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 	flowDetails, err := client.ProxyGet(t.Context(), flowID)
 	require.NoError(t, err)
 
-	t.Run("h2_request_replayed", func(t *testing.T) {
+	t.Run("h2_request_replayed_as_h2", func(t *testing.T) {
 		for len(receivedProto) > 0 {
 			<-receivedProto
 		}
@@ -3855,7 +3796,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 			<-receivedPath
 		}
 
-		// Replay the H2 request
+		// Replay the H2 request - should use H2 protocol
 		replayResp, err := client.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
 			FlowID: flowID,
 			Target: flowDetails.URL,
@@ -3863,7 +3804,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 200, replayResp.Status)
 
-		// Verify request was received
+		// Verify request was received with correct path
 		select {
 		case path := <-receivedPath:
 			assert.Equal(t, "/h2-replay-test", path)
@@ -3871,13 +3812,12 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 			t.Fatal("didn't receive replayed request")
 		}
 
-		// Note: The replay may use H1 or H2 depending on implementation
-		// The key is that the request was successfully replayed
+		// Verify H2 protocol was used for replay
 		select {
 		case proto := <-receivedProto:
-			t.Logf("Replay used protocol: %s", proto)
-		case <-time.After(100 * time.Millisecond):
-			// OK if no proto received (already drained)
+			assert.Equal(t, "HTTP/2.0", proto)
+		case <-time.After(2 * time.Second):
+			t.Fatal("didn't receive protocol info")
 		}
 	})
 
@@ -3901,5 +3841,290 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("didn't receive modified request")
 		}
+	})
+}
+
+// =============================================================================
+// WebSocket Binary Frame Tests
+// =============================================================================
+
+func TestIntegration_WebSocketBinaryFrames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	// Channel to capture binary messages received by server
+	wsBinaryMessages := make(chan []byte, 100)
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != wsUpgradeHeader {
+			w.WriteHeader(400)
+			return
+		}
+
+		key := r.Header.Get("Sec-WebSocket-Key")
+		acceptKey := computeWebSocketAcceptKey(key)
+
+		w.Header().Set("Upgrade", wsUpgradeHeader)
+		w.Header().Set("Connection", "Upgrade")
+		w.Header().Set("Sec-WebSocket-Accept", acceptKey)
+		w.WriteHeader(101)
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, bufrw, err := hijacker.Hijack()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = bufrw.Flush()
+
+		// Echo loop for binary frames
+		for {
+			frame, err := readWebSocketFrame(conn)
+			if err != nil {
+				return
+			}
+
+			if frame.opcode == 8 { // close
+				return
+			}
+
+			if frame.opcode == 2 { // binary
+				wsBinaryMessages <- frame.payload
+				// Echo back as binary
+				responseFrame := encodeWebSocketFrame(frame.payload, 2, false)
+				_, _ = conn.Write(responseFrame)
+			}
+		}
+	}))
+	t.Cleanup(testServer.Close)
+
+	configDir := t.TempDir()
+	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	go func() { _ = backend.Serve() }()
+	require.NoError(t, backend.WaitReady(t.Context()))
+
+	t.Run("binary_frame_through_proxy", func(t *testing.T) {
+		proxyAddr := backend.Addr()
+		conn, err := net.Dial("tcp", proxyAddr)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+
+		serverURL, _ := url.Parse(testServer.URL)
+
+		wsKey := base64.StdEncoding.EncodeToString([]byte("test-ws-binary-key"))
+		req := fmt.Sprintf(
+			"GET /ws-binary HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Upgrade: websocket\r\n"+
+				"Connection: Upgrade\r\n"+
+				"Sec-WebSocket-Key: %s\r\n"+
+				"Sec-WebSocket-Version: 13\r\n"+
+				"\r\n",
+			serverURL.Host, wsKey)
+
+		_, err = conn.Write([]byte(req))
+		require.NoError(t, err)
+
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, nil)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, 101, resp.StatusCode)
+
+		// Send a binary frame with all byte values 0-255
+		binaryData := make([]byte, 256)
+		for i := range binaryData {
+			binaryData[i] = byte(i)
+		}
+		frame := encodeWebSocketFrame(binaryData, 2, true) // opcode 2 = binary, masked
+		_, err = conn.Write(frame)
+		require.NoError(t, err)
+
+		// Verify message was received by server
+		select {
+		case received := <-wsBinaryMessages:
+			assert.Equal(t, binaryData, received)
+		case <-time.After(2 * time.Second):
+			t.Fatal("binary WebSocket message not received")
+		}
+		assert.Empty(t, wsBinaryMessages)
+
+		// Read echo response
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		responseFrame, err := readWebSocketFrame(conn)
+		require.NoError(t, err)
+		assert.Equal(t, byte(2), responseFrame.opcode)
+		assert.Equal(t, binaryData, responseFrame.payload)
+	})
+}
+
+// =============================================================================
+// WebSocket Ping/Pong Tests
+// =============================================================================
+
+func TestIntegration_WebSocketPingPong(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	// Channel to capture ping messages received by server
+	wsPings := make(chan []byte, 100)
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != wsUpgradeHeader {
+			w.WriteHeader(400)
+			return
+		}
+
+		key := r.Header.Get("Sec-WebSocket-Key")
+		acceptKey := computeWebSocketAcceptKey(key)
+
+		w.Header().Set("Upgrade", wsUpgradeHeader)
+		w.Header().Set("Connection", "Upgrade")
+		w.Header().Set("Sec-WebSocket-Accept", acceptKey)
+		w.WriteHeader(101)
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, bufrw, err := hijacker.Hijack()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = bufrw.Flush()
+
+		for {
+			frame, err := readWebSocketFrame(conn)
+			if err != nil {
+				return
+			}
+
+			switch frame.opcode {
+			case 8: // close
+				return
+			case 9: // ping
+				wsPings <- frame.payload
+				// Respond with pong (opcode 10) with same payload
+				pongFrame := encodeWebSocketFrame(frame.payload, 10, false)
+				_, _ = conn.Write(pongFrame)
+			case 1: // text - echo back
+				responseFrame := encodeWebSocketFrame(frame.payload, 1, false)
+				_, _ = conn.Write(responseFrame)
+			}
+		}
+	}))
+	t.Cleanup(testServer.Close)
+
+	configDir := t.TempDir()
+	backend, err := service.NewCustomProxyBackend(0, configDir, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+
+	go func() { _ = backend.Serve() }()
+	require.NoError(t, backend.WaitReady(t.Context()))
+
+	t.Run("ping_pong_through_proxy", func(t *testing.T) {
+		proxyAddr := backend.Addr()
+		conn, err := net.Dial("tcp", proxyAddr)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+
+		serverURL, _ := url.Parse(testServer.URL)
+
+		wsKey := base64.StdEncoding.EncodeToString([]byte("test-ws-ping-key1"))
+		req := fmt.Sprintf(
+			"GET /ws-ping HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Upgrade: websocket\r\n"+
+				"Connection: Upgrade\r\n"+
+				"Sec-WebSocket-Key: %s\r\n"+
+				"Sec-WebSocket-Version: 13\r\n"+
+				"\r\n",
+			serverURL.Host, wsKey)
+
+		_, err = conn.Write([]byte(req))
+		require.NoError(t, err)
+
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, nil)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, 101, resp.StatusCode)
+
+		// Send a ping frame (opcode 9)
+		pingPayload := []byte("ping-test-data")
+		pingFrame := encodeWebSocketFrame(pingPayload, 9, true)
+		_, err = conn.Write(pingFrame)
+		require.NoError(t, err)
+
+		// Verify ping was received by server
+		select {
+		case received := <-wsPings:
+			assert.Equal(t, pingPayload, received)
+		case <-time.After(2 * time.Second):
+			t.Fatal("ping not received by server")
+		}
+		assert.Empty(t, wsPings)
+
+		// Read pong response (opcode 10)
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		pongFrame, err := readWebSocketFrame(conn)
+		require.NoError(t, err)
+		assert.Equal(t, byte(10), pongFrame.opcode)
+		assert.Equal(t, pingPayload, pongFrame.payload)
+	})
+
+	t.Run("server_initiated_ping", func(t *testing.T) {
+		proxyAddr := backend.Addr()
+		conn, err := net.Dial("tcp", proxyAddr)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+
+		serverURL, _ := url.Parse(testServer.URL)
+
+		wsKey := base64.StdEncoding.EncodeToString([]byte("test-ws-ping-key2"))
+		req := fmt.Sprintf(
+			"GET /ws-ping2 HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Upgrade: websocket\r\n"+
+				"Connection: Upgrade\r\n"+
+				"Sec-WebSocket-Key: %s\r\n"+
+				"Sec-WebSocket-Version: 13\r\n"+
+				"\r\n",
+			serverURL.Host, wsKey)
+
+		_, err = conn.Write([]byte(req))
+		require.NoError(t, err)
+
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, nil)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, 101, resp.StatusCode)
+
+		// Send a text message to trigger echo (verifies connection works)
+		textMsg := []byte("hello")
+		textFrame := encodeWebSocketFrame(textMsg, 1, true)
+		_, err = conn.Write(textFrame)
+		require.NoError(t, err)
+
+		// Read echo response
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		echoFrame, err := readWebSocketFrame(conn)
+		require.NoError(t, err)
+		assert.Equal(t, byte(1), echoFrame.opcode)
+		assert.Equal(t, textMsg, echoFrame.payload)
 	})
 }

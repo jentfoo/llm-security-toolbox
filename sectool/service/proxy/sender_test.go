@@ -630,7 +630,7 @@ func TestBuildRedirectRequest(t *testing.T) {
 		assert.Equal(t, "other.com", newTarget.Hostname)
 		assert.Equal(t, 443, newTarget.Port)
 		assert.True(t, newTarget.UsesHTTPS)
-		assert.Empty(t, newReq.GetHeader("Authorization"))
+		assert.Equal(t, "Bearer token", newReq.GetHeader("Authorization"))
 		assert.Equal(t, "keep", newReq.GetHeader("X-Custom"))
 		assert.Equal(t, "other.com", newReq.GetHeader("Host"))
 	})
@@ -761,6 +761,288 @@ func TestSender_ValidationBypass(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 200, result.Response.StatusCode)
 		assert.Equal(t, "CUSTOMMETHOD", receivedMethod)
+	})
+}
+
+func TestApplyModifications(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil_mods_is_noop", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Host", Value: "example.com"}},
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, nil, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "GET", req.Method)
+		assert.Equal(t, "/test", req.Path)
+		assert.Equal(t, "example.com", req.GetHeader("Host"))
+	})
+
+	t.Run("method_override", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			Method: "POST",
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "POST", req.Method)
+	})
+
+	t.Run("set_headers_adds_new", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Host", Value: "example.com"}},
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			SetHeaders: map[string]string{"X-Custom": "value"},
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "value", req.GetHeader("X-Custom"))
+		assert.Equal(t, "example.com", req.GetHeader("Host"))
+	})
+
+	t.Run("set_headers_replaces_existing", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Authorization", Value: "Bearer old"}},
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			SetHeaders: map[string]string{"Authorization": "Bearer new"},
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "Bearer new", req.GetHeader("Authorization"))
+	})
+
+	t.Run("remove_headers", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "X-Remove-Me", Value: "gone"},
+			},
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			RemoveHeaders: []string{"X-Remove-Me"},
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "example.com", req.GetHeader("Host"))
+		assert.Empty(t, req.GetHeader("X-Remove-Me"))
+	})
+
+	t.Run("set_params", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Query:   "existing=value",
+			Version: "HTTP/1.1",
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			SetParams: map[string]string{"new": "param"},
+		}, false)
+
+		require.NoError(t, err)
+		assert.Contains(t, req.Query, "existing=value")
+		assert.Contains(t, req.Query, "new=param")
+	})
+
+	t.Run("remove_params", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Query:   "keep=yes&remove=me",
+			Version: "HTTP/1.1",
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			RemoveParams: []string{"remove"},
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "keep=yes", req.Query)
+	})
+
+	t.Run("body_replacement", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Content-Length", Value: "5"}},
+			Body:    []byte("hello"),
+		}
+
+		sender := &Sender{}
+		err := sender.applyModifications(req, &Modifications{
+			Body: []byte("new body"),
+		}, false)
+
+		require.NoError(t, err)
+		assert.Equal(t, "new body", string(req.Body))
+		assert.Equal(t, "8", req.GetHeader("Content-Length"))
+	})
+
+	t.Run("set_json", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Content-Length", Value: "13"}},
+			Body:    []byte(`{"key":"old"}`),
+		}
+
+		sender := &Sender{
+			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
+				return []byte(`{"key":"new"}`), nil
+			},
+		}
+		err := sender.applyModifications(req, &Modifications{
+			SetJSON: map[string]any{"key": "new"},
+		}, false)
+
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"key":"new"}`, string(req.Body))
+		assert.Equal(t, "13", req.GetHeader("Content-Length"))
+	})
+
+	t.Run("remove_json", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Content-Length", Value: "25"}},
+			Body:    []byte(`{"keep":"yes","drop":"no"}`),
+		}
+
+		sender := &Sender{
+			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
+				return []byte(`{"keep":"yes"}`), nil
+			},
+		}
+		err := sender.applyModifications(req, &Modifications{
+			RemoveJSON: []string{"drop"},
+		}, false)
+
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"keep":"yes"}`, string(req.Body))
+		assert.Equal(t, "14", req.GetHeader("Content-Length"))
+	})
+
+	t.Run("empty_body_with_set_json", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{},
+			Body:    nil,
+		}
+
+		sender := &Sender{
+			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
+				assert.Equal(t, []byte("{}"), body)
+				return []byte(`{"new":"value"}`), nil
+			},
+		}
+		err := sender.applyModifications(req, &Modifications{
+			SetJSON: map[string]any{"new": "value"},
+		}, false)
+
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"new":"value"}`, string(req.Body))
+	})
+
+	t.Run("force", func(t *testing.T) {
+		t.Run("force_skips_content_length_update_body", func(t *testing.T) {
+			req := &RawHTTP1Request{
+				Method:  "POST",
+				Path:    "/test",
+				Version: "HTTP/1.1",
+				Headers: []Header{{Name: "Content-Length", Value: "5"}},
+				Body:    []byte("hello"),
+			}
+
+			sender := &Sender{}
+			err := sender.applyModifications(req, &Modifications{
+				Body: []byte("longer body content"),
+			}, true) // force=true
+
+			require.NoError(t, err)
+			assert.Equal(t, "longer body content", string(req.Body))
+			// Content-Length should NOT be updated when force=true
+			assert.Equal(t, "5", req.GetHeader("Content-Length"))
+		})
+
+		t.Run("normal_updates_content_length_body", func(t *testing.T) {
+			req := &RawHTTP1Request{
+				Method:  "POST",
+				Path:    "/test",
+				Version: "HTTP/1.1",
+				Headers: []Header{{Name: "Content-Length", Value: "5"}},
+				Body:    []byte("hello"),
+			}
+
+			sender := &Sender{}
+			err := sender.applyModifications(req, &Modifications{
+				Body: []byte("longer body content"),
+			}, false) // force=false
+
+			require.NoError(t, err)
+			assert.Equal(t, "longer body content", string(req.Body))
+			// Content-Length should be updated when force=false
+			assert.Equal(t, "19", req.GetHeader("Content-Length"))
+		})
+
+		t.Run("force_skips_content_length_update_json", func(t *testing.T) {
+			req := &RawHTTP1Request{
+				Method:  "POST",
+				Path:    "/test",
+				Version: "HTTP/1.1",
+				Headers: []Header{{Name: "Content-Length", Value: "2"}},
+				Body:    []byte("{}"),
+			}
+
+			sender := &Sender{
+				JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
+					return []byte(`{"key":"value"}`), nil
+				},
+			}
+			err := sender.applyModifications(req, &Modifications{
+				SetJSON: map[string]any{"key": "value"},
+			}, true) // force=true
+
+			require.NoError(t, err)
+			assert.JSONEq(t, `{"key":"value"}`, string(req.Body))
+			// Content-Length should NOT be updated when force=true
+			assert.Equal(t, "2", req.GetHeader("Content-Length"))
+		})
 	})
 }
 

@@ -190,6 +190,41 @@ func readResponseBytes(resp []byte) (*http.Response, error) {
 	return http.ReadResponse(bufio.NewReader(bytes.NewReader(resp)), nil)
 }
 
+// extractHeader extracts a header value from raw HTTP headers (case-insensitive).
+// Returns empty string if not found.
+func extractHeader(headers string, name string) string {
+	for _, line := range strings.Split(headers, "\r\n") {
+		if idx := strings.Index(line, ":"); idx > 0 {
+			if strings.EqualFold(strings.TrimSpace(line[:idx]), name) {
+				return strings.TrimSpace(line[idx+1:])
+			}
+		}
+	}
+	return ""
+}
+
+// decompressForDisplay decompresses body based on Content-Encoding header.
+// Returns (decompressed body, wasDecompressed).
+// If decompression fails or encoding unsupported, returns original body unchanged.
+func decompressForDisplay(body []byte, headers string) ([]byte, bool) {
+	encoding := extractHeader(headers, "Content-Encoding")
+	if encoding == "" {
+		return body, false
+	}
+
+	normalized, ok := proxy.NormalizeEncoding(encoding)
+	if !ok {
+		return body, false
+	}
+
+	decompressed, wasCompressed := proxy.Decompress(body, normalized)
+	if decompressed == nil {
+		// Decompression failed, return original
+		return body, false
+	}
+	return decompressed, wasCompressed
+}
+
 // previewBody returns a UTF-8 safe preview of the body.
 // Returns "<BINARY:N Bytes>" for non-UTF-8 content, truncates at maxLen runes.
 func previewBody(body []byte, maxLen int) string {
@@ -553,6 +588,20 @@ func updateContentLength(headers []byte, length int) []byte {
 	return headers
 }
 
+// containsContentLengthHeader checks if any header string sets Content-Length.
+// Headers are in "Name: Value" format.
+func containsContentLengthHeader(headers []string) bool {
+	for _, h := range headers {
+		if idx := strings.Index(h, ":"); idx > 0 {
+			name := strings.TrimSpace(h[:idx])
+			if strings.EqualFold(name, "Content-Length") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // setHeader adds or replaces a header.
 func setHeader(headers []byte, name, value string) []byte {
 	re := regexp.MustCompile(`(?im)^` + regexp.QuoteMeta(name) + `:[ \t]*.*\r?\n`)
@@ -612,7 +661,7 @@ type validationIssue struct {
 func validateRequest(raw []byte) []validationIssue {
 	var issues []validationIssue
 
-	headers, _ := splitHeadersBody(raw)
+	headers, body := splitHeadersBody(raw)
 
 	// Check line endings FIRST - HTTP requires CRLF
 	if issue := proxy.CheckLineEndings(headers); issue != "" {
@@ -633,7 +682,36 @@ func validateRequest(raw []byte) []validationIssue {
 		})
 	}
 
+	// Check Content-Length vs actual body length
+	if clIssue := validateContentLength(headers, body); clIssue != "" {
+		issues = append(issues, validationIssue{
+			Check:  "content-length",
+			Detail: clIssue,
+		})
+	}
+
 	return issues
+}
+
+// validateContentLength checks if Content-Length header matches actual body length.
+func validateContentLength(headers, body []byte) string {
+	// Extract Content-Length header
+	clMatch := regexp.MustCompile(`(?im)^Content-Length:\s*(\d+)`).FindSubmatch(headers)
+	if clMatch == nil {
+		return "" // No Content-Length header, no validation needed
+	}
+
+	cl, err := strconv.Atoi(string(clMatch[1]))
+	if err != nil {
+		return "invalid Content-Length value"
+	}
+
+	bodyLen := len(body)
+	if cl != bodyLen {
+		return fmt.Sprintf("Content-Length (%d) does not match body length (%d)", cl, bodyLen)
+	}
+
+	return ""
 }
 
 // formatIssues formats validation issues as Markdown.
@@ -738,8 +816,8 @@ func extractRequestPath(raw []byte) string {
 }
 
 // buildRedirectRequest builds a new request for following a redirect.
-// Implements browser-like behavior: preserves headers (including cookies),
-// drops Authorization on cross-origin, handles method/body per status code.
+// Preserves headers (including cookies and Authorization),
+// handles method/body per status code.
 func buildRedirectRequest(originalReq []byte, location string, currentTarget Target, currentPath string, status int) ([]byte, Target, string, error) {
 	var preserveMethod, preserveBody bool
 	switch status {
@@ -753,8 +831,6 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget Tar
 		return nil, Target{}, "", err
 	}
 
-	isCrossOrigin := newTarget.Hostname != currentTarget.Hostname
-
 	method := extractMethod(originalReq)
 	if !preserveMethod {
 		method = "GET"
@@ -767,7 +843,7 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget Tar
 
 	var buf bytes.Buffer
 	buf.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", method, newPath))
-	copyHeadersForRedirect(originalReq, &buf, newTarget, isCrossOrigin, preserveBody)
+	copyHeadersForRedirect(originalReq, &buf, newTarget, preserveBody)
 
 	if len(body) > 0 {
 		buf.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(body)))
@@ -818,7 +894,7 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 
 // copyHeadersForRedirect copies headers from original request to buffer,
 // applying redirect-appropriate modifications.
-func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Target, isCrossOrigin, preserveBody bool) {
+func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Target, preserveBody bool) {
 	headers, _ := splitHeadersBody(originalReq)
 
 	newHost := newTarget.Hostname
@@ -855,8 +931,6 @@ func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Tar
 		if colonIdx := bytes.IndexByte(line, ':'); colonIdx < 0 {
 			continue
 		} else if name := strings.ToLower(string(bytes.TrimSpace(line[:colonIdx]))); skipHeaders[name] {
-			continue
-		} else if isCrossOrigin && name == "authorization" {
 			continue
 		}
 

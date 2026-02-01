@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -47,4 +48,13 @@ func ConnectBurpSSEOrSkip(t *testing.T) *mcpclient.Client {
 
 	t.Cleanup(func() { _ = burpClient.Close() })
 	return burpClient
+}
+
+// GetBurpProxyAddr returns the Burp proxy listener address for seeding traffic.
+// Uses SECTOOL_BURP_PROXY env var if set, otherwise default 127.0.0.1:8080.
+func GetBurpProxyAddr() string {
+	if addr := os.Getenv("SECTOOL_BURP_PROXY"); addr != "" {
+		return addr
+	}
+	return config.DefaultBurpProxyAddr
 }

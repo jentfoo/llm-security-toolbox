@@ -265,7 +265,8 @@ func (p *h2Proxy) exchangeSettings() error {
 		{ID: http2.SettingInitialWindowSize, Val: initialWindowSize},
 		{ID: http2.SettingEnablePush, Val: 0}, // disable server push
 	}
-	if err := p.writeSettingsFrame(p.upstream.conn, ourSettings); err != nil {
+	var buf bytes.Buffer
+	if err := p.writeSettingsFrame(&buf, p.upstream.conn, ourSettings); err != nil {
 		return err
 	}
 
@@ -285,18 +286,18 @@ func (p *h2Proxy) exchangeSettings() error {
 	}
 
 	// Send our SETTINGS to client (endpoint model: never relay peer SETTINGS across hops)
-	if err := p.writeSettingsFrame(p.client.conn, ourSettings); err != nil {
+	if err := p.writeSettingsFrame(&buf, p.client.conn, ourSettings); err != nil {
 		return err
 	}
 
 	// Send SETTINGS ACKs only if we received SETTINGS (per RFC 9113 Section 6.5)
 	if clientGotSettings {
-		if err := p.writeSettingsAck(p.client.conn); err != nil {
+		if err := p.writeSettingsAck(&buf, p.client.conn); err != nil {
 			return err
 		}
 	}
 	if upstreamGotSettings {
-		if err := p.writeSettingsAck(p.upstream.conn); err != nil {
+		if err := p.writeSettingsAck(&buf, p.upstream.conn); err != nil {
 			return err
 		}
 	}
@@ -323,7 +324,7 @@ func (p *h2Proxy) readSettingsFrame(h *h2Conn) ([]http2.Setting, bool, error) {
 		return nil, false, nil
 	}
 
-	var settings []http2.Setting
+	settings := make([]http2.Setting, 0, sf.NumSettings())
 	_ = sf.ForeachSetting(func(s http2.Setting) error {
 		settings = append(settings, s)
 		return nil
@@ -333,9 +334,9 @@ func (p *h2Proxy) readSettingsFrame(h *h2Conn) ([]http2.Setting, bool, error) {
 }
 
 // writeSettingsFrame writes a SETTINGS frame.
-func (p *h2Proxy) writeSettingsFrame(conn net.Conn, settings []http2.Setting) error {
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+func (p *h2Proxy) writeSettingsFrame(buf *bytes.Buffer, conn net.Conn, settings []http2.Setting) error {
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 
 	if err := framer.WriteSettings(settings...); err != nil {
 		return err
@@ -346,9 +347,9 @@ func (p *h2Proxy) writeSettingsFrame(conn net.Conn, settings []http2.Setting) er
 }
 
 // writeSettingsAck writes a SETTINGS ACK frame.
-func (p *h2Proxy) writeSettingsAck(conn net.Conn) error {
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+func (p *h2Proxy) writeSettingsAck(buf *bytes.Buffer, conn net.Conn) error {
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 
 	if err := framer.WriteSettingsAck(); err != nil {
 		return err
@@ -382,11 +383,17 @@ func (p *h2Proxy) readFrames(fromClient bool) {
 		headerEndStream = &p.upstreamHeaderEndStream
 	}
 
+	var buf bytes.Buffer
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
 		default:
+		}
+
+		// Release large buffers to avoid holding memory for connection lifetime
+		if buf.Cap() > 64*1024 {
+			buf = bytes.Buffer{}
 		}
 
 		frame, err := src.framer.ReadFrame()
@@ -399,32 +406,32 @@ func (p *h2Proxy) readFrames(fromClient bool) {
 
 		switch f := frame.(type) {
 		case *http2.HeadersFrame:
-			p.handleHeadersFrame(f, src, dst, fromClient, headerBuf, headerStream, headerEndStream)
+			p.handleHeadersFrame(&buf, f, src, dst, fromClient, headerBuf, headerStream, headerEndStream)
 
 		case *http2.ContinuationFrame:
-			p.handleContinuationFrame(f, src, dst, fromClient, headerBuf, headerStream, headerEndStream)
+			p.handleContinuationFrame(&buf, f, src, dst, fromClient, headerBuf, headerStream, headerEndStream)
 
 		case *http2.DataFrame:
-			p.handleDataFrame(f, src, dst, fromClient)
+			p.handleDataFrame(&buf, f, src, dst, fromClient)
 
 		case *http2.SettingsFrame:
-			p.handleSettingsFrame(f, src, dst)
+			p.handleSettingsFrame(&buf, f, src, dst)
 
 		case *http2.WindowUpdateFrame:
 			p.handleWindowUpdate(f, src)
 
 		case *http2.PingFrame:
-			p.handlePingFrame(f, src, dst)
+			p.handlePingFrame(&buf, f, src, dst)
 
 		case *http2.GoAwayFrame:
-			p.handleGoAwayFrame(f, dst)
+			p.handleGoAwayFrame(&buf, f, dst)
 			return
 
 		case *http2.RSTStreamFrame:
-			p.handleRSTStreamFrame(f, dst)
+			p.handleRSTStreamFrame(&buf, f, dst)
 
 		case *http2.PriorityFrame:
-			p.forwardPriorityFrame(f, dst)
+			p.forwardPriorityFrame(&buf, f, dst)
 
 		case *http2.PushPromiseFrame:
 			// Server push disabled; decode HPACK block to maintain compression state
@@ -434,13 +441,13 @@ func (p *h2Proxy) readFrames(fromClient bool) {
 
 		default:
 			// Forward unknown/extension frames transparently
-			p.forwardUnknownFrame(frame, dst)
+			p.forwardUnknownFrame(&buf, frame, dst)
 		}
 	}
 }
 
 // handleHeadersFrame processes a HEADERS frame.
-func (p *h2Proxy) handleHeadersFrame(f *http2.HeadersFrame, src, dst *h2Conn, fromClient bool, headerBuf *bytes.Buffer, headerStream *uint32, headerEndStream *bool) {
+func (p *h2Proxy) handleHeadersFrame(buf *bytes.Buffer, f *http2.HeadersFrame, src, dst *h2Conn, fromClient bool, headerBuf *bytes.Buffer, headerStream *uint32, headerEndStream *bool) {
 	streamID := f.StreamID
 
 	// Start accumulating header block
@@ -459,13 +466,13 @@ func (p *h2Proxy) handleHeadersFrame(f *http2.HeadersFrame, src, dst *h2Conn, fr
 	}
 
 	if f.HeadersEnded() {
-		p.processHeaders(streamID, headerBuf.Bytes(), src, dst, fromClient, *headerEndStream)
+		p.processHeaders(buf, streamID, headerBuf.Bytes(), src, dst, fromClient, *headerEndStream)
 		headerBuf.Reset()
 	}
 }
 
 // handleContinuationFrame processes a CONTINUATION frame.
-func (p *h2Proxy) handleContinuationFrame(f *http2.ContinuationFrame, src, dst *h2Conn, fromClient bool, headerBuf *bytes.Buffer, headerStream *uint32, headerEndStream *bool) {
+func (p *h2Proxy) handleContinuationFrame(buf *bytes.Buffer, f *http2.ContinuationFrame, src, dst *h2Conn, fromClient bool, headerBuf *bytes.Buffer, headerStream *uint32, headerEndStream *bool) {
 	// Check if this CONTINUATION is for a PUSH_PROMISE (upstream only)
 	if !fromClient && p.upstreamPushActive && f.StreamID == p.upstreamPushStream {
 		// This is a PUSH_PROMISE continuation
@@ -509,13 +516,13 @@ func (p *h2Proxy) handleContinuationFrame(f *http2.ContinuationFrame, src, dst *
 
 	if f.HeadersEnded() {
 		// Use the END_STREAM flag saved from the HEADERS frame
-		p.processHeaders(*headerStream, headerBuf.Bytes(), src, dst, fromClient, *headerEndStream)
+		p.processHeaders(buf, *headerStream, headerBuf.Bytes(), src, dst, fromClient, *headerEndStream)
 		headerBuf.Reset()
 	}
 }
 
 // processHeaders decodes, applies rules, re-encodes, and forwards headers.
-func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn, fromClient bool, endStream bool) {
+func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byte, src, dst *h2Conn, fromClient bool, endStream bool) {
 	// Decode HPACK
 	pseudos, headers, err := src.decodeHeaders(block)
 	if err != nil {
@@ -624,7 +631,7 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 				// Release lock for I/O operations
 				stream.mu.Unlock()
 				body := p.applyBodyRules(stream, bufferedBody, fromClient)
-				p.writeDataFrame(dst, streamID, body, false) // trailers carry END_STREAM, not DATA
+				p.writeDataFrame(buf, dst, streamID, body, false) // trailers carry END_STREAM, not DATA
 				stream.mu.Lock()
 				p.updateHistoryWithModifiedBodyLocked(stream, body, fromClient)
 			}
@@ -632,6 +639,7 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 	}
 
 	// Update stream state for END_STREAM
+	// TODO - de-duplicate with handleDataFrame condition checking
 	var isStreamClosed bool
 	if endStream {
 		if fromClient {
@@ -661,7 +669,7 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 	}
 
 	// Write HEADERS frame
-	p.writeHeadersFrame(dst, streamID, encoded, endStream)
+	p.writeHeadersFrame(buf, dst, streamID, encoded, endStream)
 
 	// Check if stream is complete (after unlock to avoid holding lock during history store)
 	if isStreamClosed {
@@ -671,7 +679,7 @@ func (p *h2Proxy) processHeaders(streamID uint32, block []byte, src, dst *h2Conn
 }
 
 // handleDataFrame processes a DATA frame.
-func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClient bool) {
+func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, dst *h2Conn, fromClient bool) {
 	streamID := f.StreamID
 	data := f.Data()
 	endStream := f.StreamEnded()
@@ -689,8 +697,8 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 			} else {
 				// Stream-level violation: send RST_STREAM
 				log.Printf("h2: flow control error (stream %d): %v", streamID, err)
-				var buf bytes.Buffer
-				framer := http2.NewFramer(&buf, nil)
+				buf.Reset()
+				framer := http2.NewFramer(buf, nil)
 				_ = framer.WriteRSTStream(streamID, http2.ErrCodeFlowControl)
 				src.enqueueWrite(p.ctx, buf.Bytes())
 				p.cleanupStream(streamID)
@@ -702,13 +710,13 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 	// Check if we need to send WINDOW_UPDATE back to sender to keep data flowing
 	// This is critical when buffering for body rules - sender needs window credits
 	if connUpdate, streamUpdate := src.needsWindowUpdate(streamID); connUpdate > 0 || streamUpdate > 0 {
-		p.sendWindowUpdates(src, streamID, connUpdate, streamUpdate)
+		p.sendWindowUpdates(buf, src, streamID, connUpdate, streamUpdate)
 	}
 
 	stream, exists := p.streams.get(streamID)
 	if !exists {
 		// Unknown stream, forward anyway
-		p.writeDataFrame(dst, streamID, data, endStream)
+		p.writeDataFrame(buf, dst, streamID, data, endStream)
 		return
 	}
 
@@ -794,7 +802,7 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 
 	// Perform write operations outside the lock
 	if len(flushBuffered) > 0 {
-		p.writeDataFrame(dst, streamID, flushBuffered, false)
+		p.writeDataFrame(buf, dst, streamID, flushBuffered, false)
 	}
 
 	if applyRules {
@@ -807,9 +815,9 @@ func (p *h2Proxy) handleDataFrame(f *http2.DataFrame, src, dst *h2Conn, fromClie
 		stream.mu.Unlock()
 
 		// Send modified body
-		p.writeDataFrame(dst, streamID, body, true)
+		p.writeDataFrame(buf, dst, streamID, body, true)
 	} else if writeData != nil {
-		p.writeDataFrame(dst, streamID, writeData, writeEndStream)
+		p.writeDataFrame(buf, dst, streamID, writeData, writeEndStream)
 	}
 
 	if isStreamClosed {
@@ -928,7 +936,7 @@ func (p *h2Proxy) updateHistoryWithModifiedBodyLocked(stream *h2Stream, body []b
 
 // handleSettingsFrame processes a SETTINGS frame.
 // Uses endpoint model: SETTINGS are hop-by-hop, not forwarded across connections.
-func (p *h2Proxy) handleSettingsFrame(f *http2.SettingsFrame, src, dst *h2Conn) {
+func (p *h2Proxy) handleSettingsFrame(buf *bytes.Buffer, f *http2.SettingsFrame, src, dst *h2Conn) {
 	if f.IsAck() {
 		// Absorb ACK - it acknowledges SETTINGS we sent to this peer.
 		return
@@ -945,7 +953,7 @@ func (p *h2Proxy) handleSettingsFrame(f *http2.SettingsFrame, src, dst *h2Conn) 
 	})
 
 	// Update local cache for this connection only
-	var settings []http2.Setting
+	settings := make([]http2.Setting, 0, f.NumSettings())
 	_ = f.ForeachSetting(func(s http2.Setting) error {
 		settings = append(settings, s)
 		return nil
@@ -953,13 +961,13 @@ func (p *h2Proxy) handleSettingsFrame(f *http2.SettingsFrame, src, dst *h2Conn) 
 	src.updateSettings(settings)
 
 	// Send ACK back to source (don't forward SETTINGS to other connection)
-	p.enqueueSettingsAck(src)
+	p.enqueueSettingsAck(buf, src)
 }
 
 // enqueueSettingsAck enqueues a SETTINGS ACK frame to be written.
-func (p *h2Proxy) enqueueSettingsAck(dst *h2Conn) {
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+func (p *h2Proxy) enqueueSettingsAck(buf *bytes.Buffer, dst *h2Conn) {
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 	_ = framer.WriteSettingsAck()
 	dst.enqueueWrite(p.ctx, buf.Bytes())
 }
@@ -972,9 +980,9 @@ func (p *h2Proxy) cleanupStream(streamID uint32) {
 }
 
 // sendWindowUpdates sends WINDOW_UPDATE frames back to sender to replenish receive windows.
-func (p *h2Proxy) sendWindowUpdates(dst *h2Conn, streamID uint32, connIncrement, streamIncrement uint32) {
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+func (p *h2Proxy) sendWindowUpdates(buf *bytes.Buffer, dst *h2Conn, streamID uint32, connIncrement, streamIncrement uint32) {
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 
 	// Connection-level WINDOW_UPDATE (stream ID 0)
 	if connIncrement > 0 {
@@ -1015,7 +1023,7 @@ func (p *h2Proxy) handleWindowUpdate(f *http2.WindowUpdateFrame, src *h2Conn) {
 // - Non-ACK PINGs: respond with ACK to the sender using same payload
 // - ACK PINGs: absorb (they're responses to PINGs we already echoed)
 // This maintains correct end-to-end semantics without protocol errors.
-func (p *h2Proxy) handlePingFrame(f *http2.PingFrame, src, dst *h2Conn) {
+func (p *h2Proxy) handlePingFrame(buf *bytes.Buffer, f *http2.PingFrame, src, dst *h2Conn) {
 	if f.IsAck() {
 		// ACK PINGs are responses to PINGs we already echoed locally.
 		// Absorb them - forwarding would cause unsolicited ACKs.
@@ -1023,24 +1031,24 @@ func (p *h2Proxy) handlePingFrame(f *http2.PingFrame, src, dst *h2Conn) {
 	}
 
 	// Echo back with ACK flag set using same payload (per spec)
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 	_ = framer.WritePing(true, f.Data)
 	src.enqueueWrite(p.ctx, buf.Bytes())
 }
 
 // handleGoAwayFrame forwards GOAWAY and initiates shutdown.
-func (p *h2Proxy) handleGoAwayFrame(f *http2.GoAwayFrame, dst *h2Conn) {
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+func (p *h2Proxy) handleGoAwayFrame(buf *bytes.Buffer, f *http2.GoAwayFrame, dst *h2Conn) {
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 	_ = framer.WriteGoAway(f.LastStreamID, f.ErrCode, f.DebugData())
 	dst.enqueueWrite(p.ctx, buf.Bytes())
 }
 
 // handleRSTStreamFrame forwards RST_STREAM and cleans up stream.
-func (p *h2Proxy) handleRSTStreamFrame(f *http2.RSTStreamFrame, dst *h2Conn) {
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+func (p *h2Proxy) handleRSTStreamFrame(buf *bytes.Buffer, f *http2.RSTStreamFrame, dst *h2Conn) {
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 	_ = framer.WriteRSTStream(f.StreamID, f.ErrCode)
 	dst.enqueueWrite(p.ctx, buf.Bytes())
 
@@ -1049,22 +1057,22 @@ func (p *h2Proxy) handleRSTStreamFrame(f *http2.RSTStreamFrame, dst *h2Conn) {
 }
 
 // forwardPriorityFrame forwards a PRIORITY frame.
-func (p *h2Proxy) forwardPriorityFrame(f *http2.PriorityFrame, dst *h2Conn) {
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+func (p *h2Proxy) forwardPriorityFrame(buf *bytes.Buffer, f *http2.PriorityFrame, dst *h2Conn) {
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 	_ = framer.WritePriority(f.StreamID, f.PriorityParam)
 	dst.enqueueWrite(p.ctx, buf.Bytes())
 }
 
 // forwardUnknownFrame forwards an unknown frame type transparently.
 // HTTP/2 extensions use frame types 0x0A-0xFF which arrive as UnknownFrame.
-func (p *h2Proxy) forwardUnknownFrame(f http2.Frame, dst *h2Conn) {
+func (p *h2Proxy) forwardUnknownFrame(buf *bytes.Buffer, f http2.Frame, dst *h2Conn) {
 	hdr := f.Header()
 
 	// Reconstruct raw frame bytes
 	// Frame format: 9-byte header + payload
 	// Header: Length (3) + Type (1) + Flags (1) + StreamID (4)
-	var buf bytes.Buffer
+	buf.Reset()
 
 	length := hdr.Length
 	buf.WriteByte(byte(length >> 16))
@@ -1150,15 +1158,15 @@ func (p *h2Proxy) writeFrames(h *h2Conn, conn net.Conn) {
 // Splits into HEADERS + CONTINUATION frames if block exceeds max frame size.
 // The entire header block sequence is built into a single buffer and enqueued
 // atomically to prevent interleaving with other frames (RFC 9113 §4.3).
-func (p *h2Proxy) writeHeadersFrame(dst *h2Conn, streamID uint32, block []byte, endStream bool) {
+func (p *h2Proxy) writeHeadersFrame(buf *bytes.Buffer, dst *h2Conn, streamID uint32, block []byte, endStream bool) {
 	maxFrame := int(dst.getMaxFrameSize())
 	if maxFrame == 0 {
 		maxFrame = 16384 // HTTP/2 default
 	}
 
 	// Build entire HEADERS + CONTINUATION sequence into one buffer
-	var buf bytes.Buffer
-	framer := http2.NewFramer(&buf, nil)
+	buf.Reset()
+	framer := http2.NewFramer(buf, nil)
 
 	// First chunk goes in HEADERS frame
 	first := block
@@ -1205,7 +1213,7 @@ const flowControlTimeout = 30 * time.Second
 // writeDataFrame writes a DATA frame, splitting if necessary.
 // Uses the destination h2Conn's max frame size setting and respects flow control.
 // Waits for WINDOW_UPDATE when flow control is blocked (never truncates data).
-func (p *h2Proxy) writeDataFrame(dst *h2Conn, streamID uint32, data []byte, endStream bool) {
+func (p *h2Proxy) writeDataFrame(buf *bytes.Buffer, dst *h2Conn, streamID uint32, data []byte, endStream bool) {
 	maxFrame := int(dst.getMaxFrameSize())
 	if maxFrame == 0 {
 		maxFrame = 16384 // HTTP/2 default
@@ -1263,8 +1271,8 @@ func (p *h2Proxy) writeDataFrame(dst *h2Conn, streamID uint32, data []byte, endS
 
 		data = data[len(chunk):]
 
-		var buf bytes.Buffer
-		framer := http2.NewFramer(&buf, nil)
+		buf.Reset()
+		framer := http2.NewFramer(buf, nil)
 
 		isLast := len(data) == 0 && endStream
 		_ = framer.WriteData(streamID, isLast, chunk)

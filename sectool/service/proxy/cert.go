@@ -168,6 +168,7 @@ func (m *CertManager) loadOrGenerateCA(configDir string) error {
 		m.caCert = cert
 		m.caKey = key
 		log.Printf("proxy: generated CA certificate at %s", certPath)
+		return nil
 	}
 
 	certPEM, err := os.ReadFile(certPath)

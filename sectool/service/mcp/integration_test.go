@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -492,7 +493,7 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			// Restore original rules
-			_ = client.SetMatchReplaceRules(t.Context(), original)
+			_ = client.SetMatchReplaceRules(context.Background(), original)
 		})
 
 		// Add a test rule
@@ -533,7 +534,7 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 		original, err := client.GetMatchReplaceRules(ctx)
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			_ = client.SetMatchReplaceRules(t.Context(), original)
+			_ = client.SetMatchReplaceRules(context.Background(), original)
 		})
 
 		// Add a regex rule
@@ -573,7 +574,7 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 		original, err := client.GetMatchReplaceRules(ctx)
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			_ = client.SetMatchReplaceRules(t.Context(), original)
+			_ = client.SetMatchReplaceRules(context.Background(), original)
 		})
 
 		// Test rule types that Burp MCP actually supports

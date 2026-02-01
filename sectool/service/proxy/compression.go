@@ -128,14 +128,11 @@ func Compress(data []byte, encoding string) ([]byte, error) {
 	case encodingDeflate:
 		// Use raw DEFLATE (most interoperable for recompression)
 		var buf bytes.Buffer
-		fw, err := flate.NewWriter(&buf, flate.DefaultCompression)
-		if err != nil {
+		if fw, err := flate.NewWriter(&buf, flate.DefaultCompression); err != nil {
 			return nil, err
-		}
-		if _, err := fw.Write(data); err != nil {
+		} else if _, err := fw.Write(data); err != nil {
 			return nil, err
-		}
-		if err := fw.Close(); err != nil {
+		} else if err := fw.Close(); err != nil {
 			return nil, err
 		}
 		return buf.Bytes(), nil

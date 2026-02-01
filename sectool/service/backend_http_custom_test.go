@@ -268,7 +268,7 @@ func TestCustomProxyBackend_Close(t *testing.T) {
 	require.NoError(t, err)
 
 	go func() { _ = backend.Serve() }()
-	time.Sleep(50 * time.Millisecond) // Let it start
+	require.NoError(t, backend.WaitReady(t.Context()))
 
 	// Close should succeed
 	err = backend.Close()
@@ -839,7 +839,7 @@ func TestApplyMatchReplaceRule_literal(t *testing.T) {
 	}
 
 	input := []byte("This old text has old values")
-	result := applyMatchReplaceRule(input, rule)
+	result := applyMatchReplaceRule(input, rule, false)
 
 	assert.Equal(t, "This new text has new values", string(result))
 }
@@ -860,7 +860,7 @@ func TestApplyMatchReplaceRule_regex(t *testing.T) {
 	}
 
 	input := []byte("Year 2024 and 1999 are mentioned")
-	result := applyMatchReplaceRule(input, rule)
+	result := applyMatchReplaceRule(input, rule, false)
 
 	assert.Equal(t, "Year YEAR and YEAR are mentioned", string(result))
 }
@@ -877,7 +877,7 @@ func TestApplyMatchReplaceRule_no_match(t *testing.T) {
 	}
 
 	input := []byte("This text has no matches")
-	result := applyMatchReplaceRule(input, rule)
+	result := applyMatchReplaceRule(input, rule, false)
 
 	assert.Equal(t, string(input), string(result))
 }
