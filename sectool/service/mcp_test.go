@@ -71,6 +71,7 @@ type TestMCPServer struct {
 	mu               sync.Mutex
 	proxyHistory     []testProxyEntry
 	sendResponses    []string // Stack of responses for send_http1_request
+	lastSentRequest  string   // Last raw request sent via send_http1_request
 	matchReplaceHTTP []testMatchReplaceRule
 	matchReplaceWS   []testMatchReplaceRule
 }
@@ -182,6 +183,9 @@ func NewTestMCPServer(t *testing.T) *TestMCPServer {
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			ts.mu.Lock()
 			defer ts.mu.Unlock()
+
+			// Capture the sent request content
+			ts.lastSentRequest = req.GetString("content", "")
 
 			// Pop from sendResponses stack if available
 			if len(ts.sendResponses) > 0 {
@@ -308,6 +312,13 @@ func (t *TestMCPServer) SetSendResponse(response string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sendResponses = append(t.sendResponses, response)
+}
+
+// LastSentRequest returns the last raw request sent via send_http1_request.
+func (t *TestMCPServer) LastSentRequest() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastSentRequest
 }
 
 // ClearProxyHistory clears all proxy history entries.

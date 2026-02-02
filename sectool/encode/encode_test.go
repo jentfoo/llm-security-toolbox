@@ -44,8 +44,7 @@ func TestRun(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var r *os.File
-			var w *os.File
+			var r, w *os.File
 			if tt.wantErr == nil {
 				var err error
 				r, w, err = os.Pipe()

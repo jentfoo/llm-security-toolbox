@@ -46,12 +46,20 @@ This starts an MCP server on port 9119 with two endpoints:
 | Option | Description |
 |--------|-------------|
 | (default) | Auto-detect: tries Burp MCP first, falls back to built-in proxy |
-| `--proxy-port 8080` | Force built-in proxy on specified port (goproxy-based) |
+| `--proxy-port 8080` | Force built-in proxy on specified port |
 | `--burp` | Force Burp MCP (fails if unavailable) |
 
-The built-in proxy supports HTTPS interception via auto-generated CA certificates, match/replace rules, and WebSocket proxying. To use HTTPS interception, install the generated CA certificate from `~/.sectool/ca.crt`.
+**Built-in proxy** - A wire-fidelity HTTP proxy designed for security testing:
+- HTTP/1.1 and HTTP/2 MITM with automatic ALPN negotiation
+- WebSocket interception at the frame level
+- Header order and casing preserved exactly (critical for smuggling/WAF bypass tests)
+- Protocol anomalies preserved (CL+TE, bare LF, obs-fold)
+- Match/replace rules for requests, responses, and WebSocket messages
+- Request replay with modifications (headers, body, query params)
+- Compression handled transparently (gzip, deflate)
+- CA certificate auto-generated at `~/.sectool/ca.pem`
 
-**Burp Suite setup (optional):** To use Burp Suite instead of the built-in proxy, install [Burp Suite Community](https://portswigger.net/burp/communitydownload) and add the MCP extension from the BApp Store. Start Burp and ensure the MCP server is running on `http://127.0.0.1:9876/sse`. By default sectool will auto-detect and prefer Burp when available.
+**Burp Suite (optional)** - Use your existing Burp setup instead of the built-in proxy. Install [Burp Suite Community](https://portswigger.net/burp/communitydownload), add the MCP extension from the BApp Store, and ensure the MCP server runs on `http://127.0.0.1:9876/sse`. Sectool auto-detects and prefers Burp when available.
 
 **Workflow modes:** Use `--workflow` to configure how the agent receives testing instructions:
 
@@ -73,7 +81,7 @@ Agents generally want to do everything for you (sometimes poorly), or step you t
 
 ### 3. Configure your browser (built-in proxy only)
 
-When using the built-in proxy, configure your browser to use `127.0.0.1:8080` (or your specified `--proxy-port`). For HTTPS interception, install the CA certificate from `~/.sectool/ca.crt`.
+When using the built-in proxy, configure your browser to use `127.0.0.1:8080` (or your specified `--proxy-port`). For HTTPS interception, install the CA certificate from `~/.sectool/ca.pem`.
 
 If using Burp Suite, configure your browser through Burp's proxy settings instead.
 
@@ -139,10 +147,11 @@ Use `sectool <command> --help` for detailed options.
 
 ## Key Features
 
-- **Proxy history access** - Query and filter HTTP traffic captured through built-in proxy or Burp Suite
-- **Proxy rules** - Add match/replace rules to modify requests and responses in transit
-- **Request export and replay** - Export requests to disk, edit them, and replay with modifications
+- **Wire-fidelity proxy** - HTTP/1.1 and HTTP/2 MITM preserving header order, casing, and protocol anomalies for security testing
+- **Proxy history** - Query and filter traffic captured through built-in proxy or Burp Suite
+- **Match/replace rules** - Modify requests, responses, and WebSocket messages in transit
+- **Request replay** - Replay requests with modifications to headers, body, query params, or JSON fields
 - **Web crawling** - Discover application structure, forms, and endpoints
 - **OAST testing** - Create out-of-band domains and poll for DNS/HTTP/SMTP interactions via Interactsh
 - **Encoding utilities** - URL, Base64, and HTML entity encoding/decoding
-- **LLM-optimized** - Interactions optimized for agent usage
+- **LLM-optimized** - Interactions and output formats designed for agent collaboration

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bytes"
+	"compress/gzip"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -347,78 +349,6 @@ func TestTransformRequestForValidation(t *testing.T) {
 	}
 }
 
-func TestParseRequestLine(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		line        string
-		wantMethod  string
-		wantPath    string
-		wantQuery   string
-		wantVersion string
-	}{
-		{
-			name:        "simple_get",
-			line:        "GET /api/users HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/api/users",
-			wantQuery:   "",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "get_with_query",
-			line:        "GET /api/users?id=123&role=admin HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/api/users",
-			wantQuery:   "id=123&role=admin",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "post_http_2",
-			line:        "POST /api/data HTTP/2",
-			wantMethod:  "POST",
-			wantPath:    "/api/data",
-			wantQuery:   "",
-			wantVersion: "HTTP/2",
-		},
-		{
-			name:        "root_path",
-			line:        "GET / HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/",
-			wantQuery:   "",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "empty_query_value",
-			line:        "GET /search?q= HTTP/1.1",
-			wantMethod:  "GET",
-			wantPath:    "/search",
-			wantQuery:   "q=",
-			wantVersion: "HTTP/1.1",
-		},
-		{
-			name:        "empty_input",
-			line:        "",
-			wantMethod:  "",
-			wantPath:    "",
-			wantQuery:   "",
-			wantVersion: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			method, path, query, version := parseRequestLine(tc.line)
-			assert.Equal(t, tc.wantMethod, method)
-			assert.Equal(t, tc.wantPath, path)
-			assert.Equal(t, tc.wantQuery, query)
-			assert.Equal(t, tc.wantVersion, version)
-		})
-	}
-}
-
 func TestModifyRequestLine(t *testing.T) {
 	t.Parallel()
 
@@ -516,7 +446,7 @@ func TestModifyRequestLine(t *testing.T) {
 			opts:     &PathQueryOpts{Method: "PUT"},
 			expected: "PUT /api/data HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\ntest",
 		},
-		// Proxy-form URL tests (what goproxy captures when client uses HTTP proxy)
+		// Proxy-form URL tests (what proxy captures when client uses HTTP proxy)
 		{
 			name:     "proxy_form_remove_query",
 			input:    []byte("GET http://127.0.0.1:8080/path?foo=bar&remove=this HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n"),
@@ -1182,28 +1112,6 @@ func TestParseStatusFilter(t *testing.T) {
 	})
 }
 
-func TestPathWithoutQuery(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		path string
-		want string
-	}{
-		{"/api/users", "/api/users"},
-		{"/search?q=test", "/search"},
-		{"/api?a=1&b=2", "/api"},
-		{"?query=only", ""},
-		{"/path/with/multiple?a=1?b=2", "/path/with/multiple"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			assert.Equal(t, tt.want, pathWithoutQuery(tt.path))
-		})
-	}
-}
-
 func TestUpdateContentLength(t *testing.T) {
 	t.Parallel()
 
@@ -1405,6 +1313,225 @@ func TestSetHeaderIfMissing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, string(setHeaderIfMissing([]byte(tt.headers), tt.hName, tt.hValue)))
+		})
+	}
+}
+
+func TestExtractHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers string
+		search  string
+		want    string
+	}{
+		{
+			name:    "content_encoding_gzip",
+			headers: "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "gzip",
+		},
+		{
+			name:    "case_insensitive",
+			headers: "HTTP/1.1 200 OK\r\ncontent-encoding: deflate\r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "deflate",
+		},
+		{
+			name:    "not_found",
+			headers: "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "",
+		},
+		{
+			name:    "with_whitespace",
+			headers: "HTTP/1.1 200 OK\r\nContent-Encoding:   gzip  \r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "gzip",
+		},
+		{
+			name:    "empty_headers",
+			headers: "",
+			search:  "Content-Encoding",
+			want:    "",
+		},
+		{
+			name:    "multiple_values",
+			headers: "HTTP/1.1 200 OK\r\nContent-Encoding: gzip, br\r\n\r\n",
+			search:  "Content-Encoding",
+			want:    "gzip, br",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, extractHeader(tt.headers, tt.search))
+		})
+	}
+}
+
+func TestDecompressForDisplay(t *testing.T) {
+	t.Parallel()
+
+	// Create gzip compressed content
+	gzipBody := compressGzip(t, []byte("Hello, World!"))
+
+	tests := []struct {
+		name             string
+		body             []byte
+		headers          string
+		wantBody         string
+		wantDecompressed bool
+	}{
+		{
+			name:             "gzip_decompressed",
+			body:             gzipBody,
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody:         "Hello, World!",
+			wantDecompressed: true,
+		},
+		{
+			name:             "no_encoding_passthrough",
+			body:             []byte("Plain text"),
+			headers:          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n",
+			wantBody:         "Plain text",
+			wantDecompressed: false,
+		},
+		{
+			name:             "unsupported_encoding_passthrough",
+			body:             []byte{0x1f, 0x8b}, // looks like gzip magic but invalid
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\n\r\n",
+			wantBody:         string([]byte{0x1f, 0x8b}),
+			wantDecompressed: false,
+		},
+		{
+			name:             "multiple_encodings_passthrough",
+			body:             gzipBody,
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip, br\r\n\r\n",
+			wantBody:         string(gzipBody),
+			wantDecompressed: false,
+		},
+		{
+			name:             "corrupted_gzip_passthrough",
+			body:             []byte{0x1f, 0x8b, 0x08, 0x00, 0x00}, // invalid gzip
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody:         string([]byte{0x1f, 0x8b, 0x08, 0x00, 0x00}),
+			wantDecompressed: false,
+		},
+		{
+			name:             "empty_body",
+			body:             []byte{},
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody:         "",
+			wantDecompressed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, wasDecompressed := decompressForDisplay(tt.body, tt.headers)
+			assert.Equal(t, tt.wantBody, string(result))
+			assert.Equal(t, tt.wantDecompressed, wasDecompressed)
+		})
+	}
+}
+
+// compressGzip is a test helper that compresses data with gzip
+func compressGzip(t *testing.T, data []byte) []byte {
+	t.Helper()
+	compressed, err := compressGzipBytes(data)
+	require.NoError(t, err)
+	return compressed
+}
+
+func compressGzipBytes(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func TestCompressBody(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		body         []byte
+		encoding     string
+		wantCompress bool
+		wantFailed   bool
+	}{
+		{
+			name:         "gzip_compress",
+			body:         []byte("Hello, World!"),
+			encoding:     "gzip",
+			wantCompress: true,
+			wantFailed:   false,
+		},
+		{
+			name:         "deflate_compress",
+			body:         []byte("Deflate test content"),
+			encoding:     "deflate",
+			wantCompress: true,
+			wantFailed:   false,
+		},
+		{
+			name:         "empty_encoding_passthrough",
+			body:         []byte("Plain text"),
+			encoding:     "",
+			wantCompress: false,
+			wantFailed:   false,
+		},
+		{
+			name:         "unsupported_encoding_passthrough",
+			body:         []byte("Plain text"),
+			encoding:     "br",
+			wantCompress: false,
+			wantFailed:   false,
+		},
+		{
+			name:         "multiple_encodings_passthrough",
+			body:         []byte("Plain text"),
+			encoding:     "gzip, br",
+			wantCompress: false,
+			wantFailed:   false,
+		},
+		{
+			name:         "empty_body_gzip",
+			body:         []byte{},
+			encoding:     "gzip",
+			wantCompress: true,
+			wantFailed:   false,
+		},
+		{
+			name:         "x-gzip_alias",
+			body:         []byte("Test content"),
+			encoding:     "x-gzip",
+			wantCompress: true,
+			wantFailed:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, failed := compressBody(tt.body, tt.encoding)
+			assert.Equal(t, tt.wantFailed, failed)
+			if tt.wantCompress {
+				assert.NotEqual(t, tt.body, result, "body should be compressed")
+				// Verify round-trip
+				headerStr := "Content-Encoding: " + tt.encoding + "\r\n"
+				decompressed, wasDecompressed := decompressForDisplay(result, headerStr)
+				assert.True(t, wasDecompressed || len(tt.body) == 0)
+				assert.Equal(t, string(tt.body), string(decompressed))
+			} else {
+				assert.Equal(t, string(tt.body), string(result), "body should be unchanged")
+			}
 		})
 	}
 }

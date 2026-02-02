@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -438,6 +439,46 @@ func TestMCP_ProxyGetValidation(t *testing.T) {
 		assert.Contains(t, ExtractMCPText(t, result), "not found")
 	})
 }
+
+func TestMCP_ProxyGetFullBodyReturnsBase64(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	// Add entry with uncompressed response (test full_body returns base64)
+	mockMCP.AddProxyEntry(
+		"GET /text HTTP/1.1\r\nHost: test.com\r\n\r\n",
+		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nplain text response body",
+		"",
+	)
+
+	// Get flow_id
+	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"host":        "test.com",
+	})
+	require.NotEmpty(t, listResp.Flows)
+	flowID := listResp.Flows[0].FlowID
+
+	// Test full_body=true returns base64-encoded content
+	getResult := CallMCPTool(t, mcpClient, "proxy_get", map[string]interface{}{
+		"flow_id":   flowID,
+		"full_body": true,
+	})
+	require.False(t, getResult.IsError)
+
+	var getResp protocol.ProxyGetResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, getResult)), &getResp))
+
+	// Decode base64 body and verify content
+	decodedBody, err := base64.StdEncoding.DecodeString(getResp.RespBody)
+	require.NoError(t, err)
+	assert.Equal(t, "plain text response body", string(decodedBody))
+}
+
+// Note: Gzip decompression for full_body is tested via TestMCP_CrawlGetDecompressesGzipBody
+// since the Burp mock server's JSON encoding corrupts binary data.
+// The decompression logic is also covered by TestDecompressForDisplay in httputil_test.go.
 
 func TestMCP_ProxyRuleValidation(t *testing.T) {
 	t.Parallel()

@@ -13,6 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
+	"github.com/go-harden/llm-security-toolbox/sectool/service/proxy"
 	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
 )
 
@@ -68,12 +69,12 @@ Types:
   HTTP:      request_header (default), request_body, response_header, response_body
   WebSocket: ws:to-server, ws:to-client, ws:both
 
-Regex: is_regex=true (Java regex). Labels must be unique.`),
+Regex: is_regex=true (RE2 regex). Labels must be unique.`),
 		mcp.WithString("type", mcp.Required(), mcp.Description("Rule type: request_header, request_body, response_header, response_body, ws:to-server, ws:to-client, ws:both")),
 		mcp.WithString("match", mcp.Description("Pattern to find")),
 		mcp.WithString("replace", mcp.Description("Replacement text")),
 		mcp.WithString("label", mcp.Description("Optional unique label (usable as rule_id)")),
-		mcp.WithBoolean("is_regex", mcp.Description("Treat match as regex pattern (Java regex syntax)")),
+		mcp.WithBoolean("is_regex", mcp.Description("Treat match as regex pattern (RE2 syntax)")),
 	)
 }
 
@@ -87,7 +88,7 @@ Requires at least match or replace. To rename label only, resend existing values
 		mcp.WithString("match", mcp.Description("Pattern to match")),
 		mcp.WithString("replace", mcp.Description("Replacement text")),
 		mcp.WithString("label", mcp.Description("Optional new label (unique); omit to keep existing")),
-		mcp.WithBoolean("is_regex", mcp.Description("Treat match as regex pattern (Java regex syntax)")),
+		mcp.WithBoolean("is_regex", mcp.Description("Treat match as regex pattern (RE2 syntax)")),
 	)
 }
 
@@ -239,14 +240,18 @@ func (m *mcpServer) handleProxyGet(ctx context.Context, req mcp.CallToolRequest)
 
 	log.Printf("mcp/proxy_get: flow=%s method=%s url=%s", flowID, method, fullURL)
 
+	// Decompress bodies for display (gzip/deflate) - applies to both modes
+	displayReqBody, _ := decompressForDisplay(reqBody, string(reqHeaders))
+	displayRespBody, _ := decompressForDisplay(respBody, string(respHeaders))
+
 	// Format bodies based on full_body flag
 	var reqBodyStr, respBodyStr string
-	if fullBody {
-		reqBodyStr = base64.StdEncoding.EncodeToString(reqBody)
-		respBodyStr = base64.StdEncoding.EncodeToString(respBody)
-	} else {
-		reqBodyStr = previewBody(reqBody, fullBodyMaxSize)
-		respBodyStr = previewBody(respBody, fullBodyMaxSize)
+	if fullBody { // Full body mode: base64-encode the decompressed content
+		reqBodyStr = base64.StdEncoding.EncodeToString(displayReqBody)
+		respBodyStr = base64.StdEncoding.EncodeToString(displayRespBody)
+	} else { // Preview mode: truncated text preview
+		reqBodyStr = previewBody(displayReqBody, fullBodyMaxSize)
+		respBodyStr = previewBody(displayRespBody, fullBodyMaxSize)
 	}
 
 	return jsonResult(protocol.ProxyGetResponse{
@@ -507,7 +512,7 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, flowStore *st
 			return false // Status filter
 		} else if req.Host != "" && !matchesGlob(e.host, req.Host) {
 			return false // Host filter (if using client-side filtering)
-		} else if req.Path != "" && !matchesGlob(e.path, req.Path) && !matchesGlob(pathWithoutQuery(e.path), req.Path) {
+		} else if req.Path != "" && !matchesGlob(e.path, req.Path) && !matchesGlob(proxy.PathWithoutQuery(e.path), req.Path) {
 			return false
 		} else if req.ExcludeHost != "" && matchesGlob(e.host, req.ExcludeHost) {
 			return false // Exclude host
@@ -543,9 +548,9 @@ var validRuleTypes = map[string]bool{
 	RuleTypeResponseHeader: true,
 	RuleTypeResponseBody:   true,
 	// WebSocket types
-	"ws:to-server": true,
-	"ws:to-client": true,
-	"ws:both":      true,
+	RuleTypeWSToServer: true,
+	RuleTypeWSToClient: true,
+	RuleTypeWSBoth:     true,
 }
 
 func validateRuleTypeAny(t string) error {

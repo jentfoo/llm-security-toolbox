@@ -465,14 +465,20 @@ func (m *mcpServer) handleCrawlGet(ctx context.Context, req mcp.CallToolRequest)
 	respHeaders, respBody := splitHeadersBody(flow.Response)
 	statusCode, statusLine := parseResponseStatus(respHeaders)
 
+	// Decompress bodies for display (gzip/deflate) - applies to both modes
+	displayReqBody, _ := decompressForDisplay(reqBody, string(reqHeaders))
+	displayRespBody, _ := decompressForDisplay(respBody, string(respHeaders))
+
 	// Format bodies based on full_body flag
 	var reqBodyStr, respBodyStr string
 	if fullBody {
-		reqBodyStr = base64.StdEncoding.EncodeToString(reqBody)
-		respBodyStr = base64.StdEncoding.EncodeToString(respBody)
+		// Full body mode: base64-encode the decompressed content
+		reqBodyStr = base64.StdEncoding.EncodeToString(displayReqBody)
+		respBodyStr = base64.StdEncoding.EncodeToString(displayRespBody)
 	} else {
-		reqBodyStr = previewBody(reqBody, fullBodyMaxSize)
-		respBodyStr = previewBody(respBody, fullBodyMaxSize)
+		// Preview mode: truncated text preview
+		reqBodyStr = previewBody(displayReqBody, fullBodyMaxSize)
+		respBodyStr = previewBody(displayRespBody, fullBodyMaxSize)
 	}
 
 	return jsonResult(protocol.CrawlGetResponse{

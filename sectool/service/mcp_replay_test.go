@@ -1,7 +1,9 @@
 package service
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -302,4 +304,243 @@ func TestMCP_ReplaySendModifications(t *testing.T) {
 			assert.NotEmpty(t, resp.ReplayID)
 		})
 	}
+}
+
+func TestMCP_ReplayGetFullBodyReturnsBase64(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	// Add proxy entry
+	mockMCP.AddProxyEntry(
+		"GET /api/replay HTTP/1.1\r\nHost: test.com\r\n\r\n",
+		"HTTP/1.1 200 OK\r\n\r\noriginal",
+		"",
+	)
+
+	// Set send response to return plain text body
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=GET /api/replay HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nreplay response body}",
+	)
+
+	// Get flow_id
+	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"host":        "test.com",
+	})
+	require.NotEmpty(t, listResp.Flows)
+	flowID := listResp.Flows[0].FlowID
+
+	// Send replay request
+	sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+		"flow_id": flowID,
+	})
+	require.NotEmpty(t, sendResp.ReplayID)
+
+	// Get replay result with full_body=true
+	getResult := CallMCPTool(t, mcpClient, "replay_get", map[string]interface{}{
+		"replay_id": sendResp.ReplayID,
+		"full_body": true,
+	})
+	require.False(t, getResult.IsError)
+
+	var getResp protocol.ReplayGetResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, getResult)), &getResp))
+
+	// Decode base64 body and verify content
+	decodedBody, err := base64.StdEncoding.DecodeString(getResp.RespBody)
+	require.NoError(t, err)
+	assert.Equal(t, "replay response body", string(decodedBody))
+}
+
+func TestMCP_ReplaySendCompressesBodyWhenModified(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	// Add proxy entry with Content-Encoding: gzip header
+	mockMCP.AddProxyEntry(
+		"POST /api/data HTTP/1.1\r\nHost: test.com\r\nContent-Encoding: gzip\r\nContent-Type: application/json\r\n\r\noriginal body",
+		"HTTP/1.1 200 OK\r\n\r\nok",
+		"",
+	)
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=POST /api/data HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nmodified}",
+	)
+
+	// Get flow_id
+	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"method":      "POST",
+	})
+	require.NotEmpty(t, listResp.Flows)
+	flowID := listResp.Flows[0].FlowID
+
+	// Send replay with new body - should compress since Content-Encoding: gzip is present
+	const newBody = "new body content that should be compressed"
+	sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+		"flow_id": flowID,
+		"body":    newBody,
+	})
+	require.NotEmpty(t, sendResp.ReplayID)
+
+	// Verify the sent request body was transformed (compressed).
+	// Note: Binary gzip bytes get corrupted when passed through the JSON/string-based MCP protocol,
+	// so we verify compression indirectly by checking the body differs from the uncompressed input.
+	// The actual compression logic is tested in TestCompressBody.
+	sentRequest := mockMCP.LastSentRequest()
+	require.NotEmpty(t, sentRequest)
+
+	parts := strings.SplitN(sentRequest, "\r\n\r\n", 2)
+	require.Len(t, parts, 2)
+	sentBody := parts[1]
+
+	// Body should be different from the uncompressed input (compression was applied)
+	assert.NotEqual(t, newBody, sentBody)
+
+	// Verify Content-Length header was updated to match compressed size
+	assert.Contains(t, parts[0], "Content-Length:")
+}
+
+func TestMCP_ReplaySendNoCompressionWhenBodyUnmodified(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	const originalBody = "original body unchanged"
+	mockMCP.AddProxyEntry(
+		"POST /api/data HTTP/1.1\r\nHost: test.com\r\nContent-Type: application/json\r\n\r\n"+originalBody,
+		"HTTP/1.1 200 OK\r\n\r\nok",
+		"",
+	)
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=POST /api/data HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok}",
+	)
+
+	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"method":      "POST",
+	})
+	require.NotEmpty(t, listResp.Flows)
+	flowID := listResp.Flows[0].FlowID
+
+	// Send replay WITHOUT modifying body
+	sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+		"flow_id": flowID,
+	})
+	require.NotEmpty(t, sendResp.ReplayID)
+
+	// Verify body was sent unchanged (no compression applied)
+	sentRequest := mockMCP.LastSentRequest()
+	parts := strings.SplitN(sentRequest, "\r\n\r\n", 2)
+	require.Len(t, parts, 2)
+	assert.Equal(t, originalBody, parts[1])
+}
+
+func TestMCP_ReplaySendSetJSONTriggersCompression(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	// Original JSON body (stored uncompressed, but request has Content-Encoding: gzip)
+	const originalJSON = `{"key":"value"}`
+	mockMCP.AddProxyEntry(
+		"POST /api/data HTTP/1.1\r\nHost: test.com\r\nContent-Encoding: gzip\r\nContent-Type: application/json\r\n\r\n"+originalJSON,
+		"HTTP/1.1 200 OK\r\n\r\nok",
+		"",
+	)
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=POST /api/data HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok}",
+	)
+
+	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"method":      "POST",
+	})
+	require.NotEmpty(t, listResp.Flows)
+	flowID := listResp.Flows[0].FlowID
+
+	// Send replay with set_json modification - should trigger compression
+	sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+		"flow_id":  flowID,
+		"set_json": map[string]interface{}{"key": "modified"},
+	})
+	require.NotEmpty(t, sendResp.ReplayID)
+
+	// Verify body was compressed (different from both original and modified JSON plaintext)
+	sentRequest := mockMCP.LastSentRequest()
+	parts := strings.SplitN(sentRequest, "\r\n\r\n", 2)
+	require.Len(t, parts, 2)
+	sentBody := parts[1]
+
+	// Body should not be plaintext JSON
+	assert.NotEqual(t, originalJSON, sentBody)
+	assert.NotContains(t, sentBody, `"key"`)
+}
+
+func TestMCP_RequestSendCompressesBody(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=POST /api/data HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok}",
+	)
+
+	// Send request with Content-Encoding: gzip header
+	const originalBody = "uncompressed body content for request_send"
+	sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
+		"url":    "https://test.com/api/data",
+		"method": "POST",
+		"headers": map[string]interface{}{
+			"Content-Encoding": "gzip",
+			"Content-Type":     "application/json",
+		},
+		"body": originalBody,
+	})
+	require.NotEmpty(t, sendResp.ReplayID)
+
+	// Verify the sent request body was transformed (compressed).
+	// Note: Binary gzip bytes get corrupted when passed through the JSON/string-based MCP protocol,
+	// so we verify compression indirectly. The actual compression is tested in TestCompressBody.
+	sentRequest := mockMCP.LastSentRequest()
+	require.NotEmpty(t, sentRequest)
+
+	parts := strings.SplitN(sentRequest, "\r\n\r\n", 2)
+	require.Len(t, parts, 2)
+	sentBody := parts[1]
+
+	// Body should be different from the uncompressed input
+	assert.NotEqual(t, originalBody, sentBody)
+
+	// Verify Content-Length header exists
+	assert.Contains(t, parts[0], "Content-Length:")
+}
+
+func TestMCP_RequestSendNoCompressionWithoutHeader(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=POST /api/data HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok}",
+	)
+
+	// Send request WITHOUT Content-Encoding header
+	originalBody := "plain body without compression"
+	sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
+		"url":    "https://test.com/api/data",
+		"method": "POST",
+		"headers": map[string]interface{}{
+			"Content-Type": "text/plain",
+		},
+		"body": originalBody,
+	})
+	require.NotEmpty(t, sendResp.ReplayID)
+
+	// Verify body was sent uncompressed
+	sentRequest := mockMCP.LastSentRequest()
+	parts := strings.SplitN(sentRequest, "\r\n\r\n", 2)
+	require.Len(t, parts, 2)
+	assert.Equal(t, originalBody, parts[1])
 }

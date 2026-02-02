@@ -17,7 +17,10 @@ import (
 	"github.com/go-harden/llm-security-toolbox/sectool/service/store"
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout = 10 * time.Second
+	caCertFile      = "ca.pem" // CA certificate filename in config directory
+)
 
 // Server is the sectool MCP server.
 type Server struct {
@@ -33,7 +36,7 @@ type Server struct {
 	mcpPort           int
 	mcpWorkflowMode   string
 	proxyPort         int  // resolved port for built-in proxy
-	usingBuiltinProxy bool // true if using goproxy instead of Burp
+	usingBuiltinProxy bool // true if using built-in proxy instead of Burp
 
 	// Runtime state
 	mcpServer *mcpServer
@@ -132,7 +135,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Setup Crawler backend
 	if s.crawlerBackend == nil {
-		s.crawlerBackend = NewCollyBackend(s.cfg.Crawler, s.crawlFlowStore, s.flowStore, s.httpBackend)
+		s.crawlerBackend = NewCollyBackend(s.cfg.Crawler, s.cfg.MaxBodyBytes, s.crawlFlowStore, s.flowStore, s.httpBackend)
 	}
 
 	// Start MCP server
@@ -296,14 +299,21 @@ func (s *Server) connectBurpMCP(ctx context.Context) error {
 	return nil
 }
 
-// startBuiltinProxy starts the goproxy-based built-in proxy.
+// startBuiltinProxy starts the native built-in proxy.
 func (s *Server) startBuiltinProxy() error {
 	configDir := filepath.Dir(s.configPath)
 
-	backend, err := NewGoProxyBackend(s.proxyPort, configDir)
+	backend, err := NewNativeProxyBackend(s.proxyPort, configDir, s.cfg.MaxBodyBytes)
 	if err != nil {
 		return fmt.Errorf("start built-in proxy: %w", err)
 	}
+
+	// Start proxy server in background
+	go func() {
+		if err := backend.Serve(); err != nil {
+			log.Printf("proxy: server error: %v", err)
+		}
+	}()
 
 	s.httpBackend = backend
 	s.usingBuiltinProxy = true
@@ -319,8 +329,8 @@ func (s *Server) printMCPConfig() {
 	_, _ = fmt.Fprintln(os.Stderr, "")
 	_, _ = fmt.Fprintln(os.Stderr, "================================================================================")
 	if s.usingBuiltinProxy {
-		if goproxyBackend, ok := s.httpBackend.(*GoProxyBackend); ok {
-			s.printBuiltinProxyConfig(goproxyBackend)
+		if backend, ok := s.httpBackend.(*NativeProxyBackend); ok {
+			s.printBuiltinProxyConfigAddr(backend.Addr())
 			_, _ = fmt.Fprintln(os.Stderr, "")
 			_, _ = fmt.Fprintln(os.Stderr, "----------------------------------------------------------------")
 			_, _ = fmt.Fprintln(os.Stderr, "")
@@ -339,12 +349,12 @@ func (s *Server) printMCPConfig() {
 	_, _ = fmt.Fprintln(os.Stderr, "")
 }
 
-// printBuiltinProxyConfig outputs browser proxy configuration instructions.
-func (s *Server) printBuiltinProxyConfig(backend *GoProxyBackend) {
+// printBuiltinProxyConfigAddr outputs browser proxy configuration instructions.
+func (s *Server) printBuiltinProxyConfigAddr(proxyAddr string) {
 	configDir := filepath.Dir(s.configPath)
 	caCertPath := filepath.Join(configDir, caCertFile)
 
 	_, _ = fmt.Fprintln(os.Stderr, "Built-in Proxy Configuration:")
-	_, _ = fmt.Fprintf(os.Stderr, "Proxy Address: %s\n", backend.Addr())
+	_, _ = fmt.Fprintf(os.Stderr, "Proxy Address: %s\n", proxyAddr)
 	_, _ = fmt.Fprintf(os.Stderr, "CA Certificate: %s\n", caCertPath)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -88,6 +89,7 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 
 	// Try proxy flowStore first, then crawler backend
 	var rawRequest []byte
+	var httpProtocol string // "http/1.1", "h2", or empty (defaults to http/1.1)
 	if entry, ok := m.service.flowStore.Lookup(flowID); ok {
 		proxyEntries, err := m.service.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)
 		if err != nil {
@@ -97,8 +99,10 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 			return errorResult("flow not found in proxy history"), nil
 		}
 		rawRequest = []byte(proxyEntries[0].Request)
+		httpProtocol = proxyEntries[0].Protocol
 	} else if flow, err := m.service.crawlerBackend.GetFlow(ctx, flowID); err == nil && flow != nil {
 		rawRequest = flow.Request
+		// Crawler uses HTTP/1.1
 	} else {
 		return errorResult("flow_id not found: run proxy_poll or crawl_poll to see available flows"), nil
 	}
@@ -121,8 +125,10 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	headers = applyHeaderModifications(headers, sendReq)
 	headers = setHeaderIfMissing(headers, "User-Agent", config.UserAgent())
 
+	var bodyModified bool // Track if user provided a new body (for recompression)
 	if body := req.GetString("body", ""); body != "" {
 		reqBody = []byte(body)
+		bodyModified = true
 	}
 
 	// Get set_json as a map (MCP format: {"path": value})
@@ -141,18 +147,53 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 			return errorResult("JSON body modification failed: " + err.Error()), nil
 		}
 		reqBody = modifiedBody
+		bodyModified = true
 	}
 
-	headers = updateContentLength(headers, len(reqBody))
+	// If user provided/modified body and Content-Encoding header is present, recompress
+	if bodyModified {
+		encoding := extractHeader(string(headers), "Content-Encoding")
+		var compressionFailed bool
+		reqBody, compressionFailed = compressBody(reqBody, encoding)
+		if compressionFailed {
+			// remove Content-Encoding to send uncompressed
+			headers = removeHeader(headers, "Content-Encoding")
+		}
+	}
+
+	force := req.GetBool("force", false)
+
+	// Check if user explicitly set Content-Length in add_headers
+	userSetContentLength := containsContentLengthHeader(sendReq.AddHeaders)
+
+	if !userSetContentLength {
+		// User didn't explicitly set Content-Length, so auto-update it to match body.
+		// This is the normal case for body replacement.
+		headers = updateContentLength(headers, len(reqBody))
+	}
+	// If user explicitly set Content-Length, preserve it for validation.
+
 	rawRequest = append(headers, reqBody...)
 
-	if !req.GetBool("force", false) {
+	if !force {
 		if issues := validateRequest(rawRequest); len(issues) > 0 {
 			return errorResult("validation failed:\n" + formatIssues(issues)), nil
 		}
 	}
+	// When force=true, skip validation and preserve user-specified Content-Length for security testing scenarios.
 
-	host, port, usesHTTPS := parseTarget(rawRequest, req.GetString("target", ""))
+	targetOverride := req.GetString("target", "")
+	host, port, usesHTTPS := parseTarget(rawRequest, targetOverride)
+
+	// HTTP/2 requires TLS.
+	// If replaying an H2 request and user explicitly specified http://, return error.
+	// Otherwise force HTTPS (handles non-443 ports where parseTarget can't infer scheme).
+	if httpProtocol == "h2" {
+		if targetOverride != "" && strings.HasPrefix(strings.ToLower(targetOverride), "http://") {
+			return errorResult("cannot replay HTTP/2 request to http:// target: HTTP/2 requires TLS. To replay as HTTP/1.1, use a flow captured as HTTP/1.1 or manually construct the request."), nil
+		}
+		usesHTTPS = true
+	}
 
 	replayID := ids.Generate(ids.DefaultLength)
 
@@ -180,6 +221,8 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		},
 		FollowRedirects: req.GetBool("follow_redirects", false),
 		Timeout:         timeout,
+		Force:           req.GetBool("force", false),
+		Protocol:        httpProtocol,
 	}
 
 	result, err := m.service.httpBackend.SendRequest(ctx, "sectool-"+replayID, sendInput)
@@ -232,12 +275,15 @@ func (m *mcpServer) handleReplayGet(ctx context.Context, req mcp.CallToolRequest
 
 	respCode, respStatusLine := parseResponseStatus(result.Headers)
 
+	// Decompress response for display (gzip/deflate) - applies to both modes
+	displayBody, _ := decompressForDisplay(result.Body, string(result.Headers))
+
 	// Format body based on full_body flag
 	var respBodyStr string
-	if fullBody {
-		respBodyStr = base64.StdEncoding.EncodeToString(result.Body)
-	} else {
-		respBodyStr = previewBody(result.Body, fullBodyMaxSize)
+	if fullBody { // Full body mode: base64-encode the decompressed content
+		respBodyStr = base64.StdEncoding.EncodeToString(displayBody)
+	} else { // Preview mode: truncated text preview
+		respBodyStr = previewBody(displayBody, fullBodyMaxSize)
 	}
 
 	return jsonResult(protocol.ReplayGetResponse{
@@ -280,6 +326,22 @@ func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolReque
 	}
 
 	body := []byte(req.GetString("body", ""))
+
+	// If Content-Encoding header is present, compress the body
+	// This handles the case where user exported a decompressed request
+	// (e.g., from proxy_get) and is sending it back with the original encoding
+	if len(body) > 0 {
+		for k, v := range headers {
+			if strings.EqualFold(k, "Content-Encoding") {
+				var compressionFailed bool
+				body, compressionFailed = compressBody(body, v)
+				if compressionFailed {
+					delete(headers, k)
+				}
+				break
+			}
+		}
+	}
 
 	parsedURL, err := parseURLWithDefaultHTTPS(urlStr)
 	if err != nil {

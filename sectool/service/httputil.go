@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-harden/llm-security-toolbox/sectool/config"
 	"github.com/go-harden/llm-security-toolbox/sectool/protocol"
+	"github.com/go-harden/llm-security-toolbox/sectool/service/proxy"
 )
 
 const (
@@ -189,6 +190,62 @@ func readResponseBytes(resp []byte) (*http.Response, error) {
 	return http.ReadResponse(bufio.NewReader(bytes.NewReader(resp)), nil)
 }
 
+// extractHeader extracts a header value from raw HTTP headers (case-insensitive).
+// Returns empty string if not found.
+func extractHeader(headers string, name string) string {
+	for _, line := range strings.Split(headers, "\r\n") {
+		if idx := strings.Index(line, ":"); idx > 0 {
+			if strings.EqualFold(strings.TrimSpace(line[:idx]), name) {
+				return strings.TrimSpace(line[idx+1:])
+			}
+		}
+	}
+	return ""
+}
+
+// decompressForDisplay decompresses body based on Content-Encoding header.
+// Returns (decompressed body, wasDecompressed).
+// If decompression fails or encoding unsupported, returns original body unchanged.
+func decompressForDisplay(body []byte, headers string) ([]byte, bool) {
+	encoding := extractHeader(headers, "Content-Encoding")
+	if encoding == "" {
+		return body, false
+	}
+
+	normalized, ok := proxy.NormalizeEncoding(encoding)
+	if !ok {
+		return body, false
+	}
+
+	decompressed, wasCompressed := proxy.Decompress(body, normalized)
+	if decompressed == nil {
+		// Decompression failed, return original
+		return body, false
+	}
+	return decompressed, wasCompressed
+}
+
+// compressBody compresses body based on Content-Encoding value.
+// Returns (compressed body, compression failed).
+// If encoding is empty or unsupported, returns (original body, false).
+// If compression fails, returns (original body, true) - caller should remove Content-Encoding.
+func compressBody(body []byte, encoding string) ([]byte, bool) {
+	if encoding == "" {
+		return body, false
+	}
+
+	normalized, ok := proxy.NormalizeEncoding(encoding)
+	if !ok {
+		return body, false // unsupported encoding, not a failure
+	}
+
+	compressed, err := proxy.Compress(body, normalized)
+	if err != nil {
+		return body, true // compression failed
+	}
+	return compressed, false
+}
+
 // previewBody returns a UTF-8 safe preview of the body.
 // Returns "<BINARY:N Bytes>" for non-UTF-8 content, truncates at maxLen runes.
 func previewBody(body []byte, maxLen int) string {
@@ -319,29 +376,6 @@ func (o *PathQueryOpts) HasModifications() bool {
 	return o.Method != "" || o.Path != "" || o.Query != "" || len(o.SetQuery) > 0 || len(o.RemoveQuery) > 0
 }
 
-// parseRequestLine parses the HTTP request line into method, path, query, and version.
-// Example: "GET /api/users?id=123 HTTP/1.1" -> "GET", "/api/users", "id=123", "HTTP/1.1"
-func parseRequestLine(line string) (method, path, query, version string) {
-	parts := strings.SplitN(line, " ", 3)
-	if len(parts) < 2 {
-		return "", "", "", ""
-	}
-	method = parts[0]
-	fullPath := parts[1]
-	if len(parts) >= 3 {
-		version = parts[2]
-	}
-
-	// Split path and query
-	if idx := strings.Index(fullPath, "?"); idx >= 0 {
-		path = fullPath[:idx]
-		query = fullPath[idx+1:]
-	} else {
-		path = fullPath
-	}
-	return method, path, query, version
-}
-
 // buildRequestLine reconstructs the request line from components.
 func buildRequestLine(method, path, query, version string) string {
 	if query != "" {
@@ -380,9 +414,8 @@ func modifyRequestLine(raw []byte, opts *PathQueryOpts) []byte {
 		return raw
 	}
 
-	firstLine := string(raw[:lineEnd])
-	method, path, query, version := parseRequestLine(firstLine)
-	if method == "" {
+	method, path, query, version, err := proxy.ParseRequestLine(raw[:lineEnd])
+	if err != nil {
 		return raw
 	}
 
@@ -481,14 +514,6 @@ func globToRegex(glob string) string {
 	return escaped
 }
 
-// pathWithoutQuery returns the path portion before any query string.
-func pathWithoutQuery(path string) string {
-	if idx := strings.Index(path, "?"); idx != -1 {
-		return path[:idx]
-	}
-	return path
-}
-
 // matchesGlob checks if s matches a simple glob pattern.
 func matchesGlob(s, pattern string) bool {
 	if pattern == "" {
@@ -584,6 +609,20 @@ func updateContentLength(headers []byte, length int) []byte {
 	return headers
 }
 
+// containsContentLengthHeader checks if any header string sets Content-Length.
+// Headers are in "Name: Value" format.
+func containsContentLengthHeader(headers []string) bool {
+	for _, h := range headers {
+		if idx := strings.Index(h, ":"); idx > 0 {
+			name := strings.TrimSpace(h[:idx])
+			if strings.EqualFold(name, "Content-Length") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // setHeader adds or replaces a header.
 func setHeader(headers []byte, name, value string) []byte {
 	re := regexp.MustCompile(`(?im)^` + regexp.QuoteMeta(name) + `:[ \t]*.*\r?\n`)
@@ -633,27 +672,6 @@ func applyHeaderModifications(headers []byte, req *ReplaySendRequest) []byte {
 	return headers
 }
 
-// checkLineEndings detects line ending issues in HTTP headers.
-func checkLineEndings(headers []byte) string {
-	hasCRLF := bytes.Contains(headers, []byte("\r\n"))
-	var hasBareLF bool
-	for i := 0; i < len(headers); i++ {
-		if headers[i] == '\n' {
-			if i == 0 || headers[i-1] != '\r' {
-				hasBareLF = true
-				break
-			}
-		}
-	}
-
-	if hasBareLF && hasCRLF {
-		return "mixed line endings (some CRLF, some bare LF)"
-	} else if hasBareLF {
-		return "using LF instead of CRLF line endings"
-	}
-	return ""
-}
-
 // validationIssue represents a single validation problem.
 type validationIssue struct {
 	Check  string
@@ -664,10 +682,10 @@ type validationIssue struct {
 func validateRequest(raw []byte) []validationIssue {
 	var issues []validationIssue
 
-	headers, _ := splitHeadersBody(raw)
+	headers, body := splitHeadersBody(raw)
 
 	// Check line endings FIRST - HTTP requires CRLF
-	if issue := checkLineEndings(headers); issue != "" {
+	if issue := proxy.CheckLineEndings(headers); issue != "" {
 		issues = append(issues, validationIssue{
 			Check:  "crlf",
 			Detail: issue + "; HTTP requires CRLF (\\r\\n) line endings, use --force to send anyway",
@@ -685,7 +703,36 @@ func validateRequest(raw []byte) []validationIssue {
 		})
 	}
 
+	// Check Content-Length vs actual body length
+	if clIssue := validateContentLength(headers, body); clIssue != "" {
+		issues = append(issues, validationIssue{
+			Check:  "content-length",
+			Detail: clIssue,
+		})
+	}
+
 	return issues
+}
+
+// validateContentLength checks if Content-Length header matches actual body length.
+func validateContentLength(headers, body []byte) string {
+	// Extract Content-Length header
+	clMatch := regexp.MustCompile(`(?im)^Content-Length:\s*(\d+)`).FindSubmatch(headers)
+	if clMatch == nil {
+		return "" // No Content-Length header, no validation needed
+	}
+
+	cl, err := strconv.Atoi(string(clMatch[1]))
+	if err != nil {
+		return "invalid Content-Length value"
+	}
+
+	bodyLen := len(body)
+	if cl != bodyLen {
+		return fmt.Sprintf("Content-Length (%d) does not match body length (%d)", cl, bodyLen)
+	}
+
+	return ""
 }
 
 // formatIssues formats validation issues as Markdown.
@@ -746,12 +793,13 @@ func parseTarget(raw []byte, targetOverride string) (host string, port int, uses
 		if p, err := strconv.Atoi(host[idx+1:]); err == nil {
 			port = p
 			host = host[:idx]
-			usesHTTPS = port != 80
+			// Port 443 implies HTTPS, port 80 implies HTTP, others default to HTTP
+			usesHTTPS = port == 443
 			return
 		}
 	}
 
-	// Default to HTTPS
+	// Default to HTTPS when no port is specified (common for web traffic)
 	port = 443
 	usesHTTPS = true
 	return
@@ -789,8 +837,8 @@ func extractRequestPath(raw []byte) string {
 }
 
 // buildRedirectRequest builds a new request for following a redirect.
-// Implements browser-like behavior: preserves headers (including cookies),
-// drops Authorization on cross-origin, handles method/body per status code.
+// Preserves headers (including cookies and Authorization),
+// handles method/body per status code.
 func buildRedirectRequest(originalReq []byte, location string, currentTarget Target, currentPath string, status int) ([]byte, Target, string, error) {
 	var preserveMethod, preserveBody bool
 	switch status {
@@ -804,8 +852,6 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget Tar
 		return nil, Target{}, "", err
 	}
 
-	isCrossOrigin := newTarget.Hostname != currentTarget.Hostname
-
 	method := extractMethod(originalReq)
 	if !preserveMethod {
 		method = "GET"
@@ -818,7 +864,7 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget Tar
 
 	var buf bytes.Buffer
 	buf.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", method, newPath))
-	copyHeadersForRedirect(originalReq, &buf, newTarget, isCrossOrigin, preserveBody)
+	copyHeadersForRedirect(originalReq, &buf, newTarget, preserveBody)
 
 	if len(body) > 0 {
 		buf.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(body)))
@@ -869,7 +915,7 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 
 // copyHeadersForRedirect copies headers from original request to buffer,
 // applying redirect-appropriate modifications.
-func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Target, isCrossOrigin, preserveBody bool) {
+func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Target, preserveBody bool) {
 	headers, _ := splitHeadersBody(originalReq)
 
 	newHost := newTarget.Hostname
@@ -907,8 +953,6 @@ func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Tar
 			continue
 		} else if name := strings.ToLower(string(bytes.TrimSpace(line[:colonIdx]))); skipHeaders[name] {
 			continue
-		} else if isCrossOrigin && name == "authorization" {
-			continue
 		}
 
 		buf.Write(line)
@@ -921,6 +965,7 @@ type RequestSender func(ctx context.Context, req SendRequestInput, start time.Ti
 
 // FollowRedirects sends a request and follows redirects up to maxRedirects times.
 // Uses sender to perform individual requests, allowing different backend implementations.
+// Used by BurpBackend which doesn't use the wire-fidelity sender.
 func FollowRedirects(ctx context.Context, req SendRequestInput, start time.Time, maxRedirects int, sender RequestSender) (*SendRequestResult, error) {
 	currentReq := req
 	currentPath := extractRequestPath(currentReq.RawRequest)

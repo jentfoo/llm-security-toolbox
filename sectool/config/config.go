@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	Version           = "0.0.1"
-	DefaultBurpMCPURL = "http://127.0.0.1:9876/sse"
-	DefaultMCPPort    = 9119
-	DefaultProxyPort  = 8080
+	Version              = "0.0.1"
+	DefaultBurpMCPURL    = "http://127.0.0.1:9876/sse"
+	DefaultBurpProxyAddr = "127.0.0.1:8080"
+	DefaultMCPPort       = 9119
+	DefaultProxyPort     = 8080
 )
 
 // RevNum is injected at build time via ldflags; defaults to "dev".
@@ -36,20 +37,20 @@ type Config struct {
 	MCPPort      int           `json:"mcp_port,omitempty"`
 	ProxyPort    int           `json:"proxy_port,omitempty"`
 	BurpRequired *bool         `json:"burp_required,omitempty"`
+	MaxBodyBytes int           `json:"max_body_bytes,omitempty"` // limits request/response body sizes
 	Crawler      CrawlerConfig `json:"crawler,omitempty"`
 }
 
 type CrawlerConfig struct {
-	MaxResponseBodyBytes int      `json:"max_response_body_bytes,omitempty"`
-	IncludeSubdomains    *bool    `json:"include_subdomains,omitempty"`
-	DisallowedPaths      []string `json:"disallowed_paths,omitempty"`
-	DelayMS              int      `json:"delay_ms,omitempty"`
-	Parallelism          int      `json:"parallelism,omitempty"`
-	MaxDepth             int      `json:"max_depth,omitempty"`
-	MaxRequests          int      `json:"max_requests,omitempty"`
-	ExtractForms         *bool    `json:"extract_forms,omitempty"`
-	SubmitForms          *bool    `json:"submit_forms,omitempty"`
-	Recon                *bool    `json:"recon,omitempty"`
+	IncludeSubdomains *bool    `json:"include_subdomains,omitempty"`
+	DisallowedPaths   []string `json:"disallowed_paths,omitempty"`
+	DelayMS           int      `json:"delay_ms,omitempty"`
+	Parallelism       int      `json:"parallelism,omitempty"`
+	MaxDepth          int      `json:"max_depth,omitempty"`
+	MaxRequests       int      `json:"max_requests,omitempty"`
+	ExtractForms      *bool    `json:"extract_forms,omitempty"`
+	SubmitForms       *bool    `json:"submit_forms,omitempty"`
+	Recon             *bool    `json:"recon,omitempty"`
 }
 
 // DefaultConfig returns a Config with default values.
@@ -61,9 +62,9 @@ func DefaultConfig() *Config {
 		MCPPort:      DefaultMCPPort,
 		ProxyPort:    DefaultProxyPort,
 		BurpRequired: &f,
+		MaxBodyBytes: 10485760, // 10MB
 		Crawler: CrawlerConfig{
-			MaxResponseBodyBytes: 1048576, // 1MB
-			IncludeSubdomains:    &t,
+			IncludeSubdomains: &t,
 			DisallowedPaths: []string{
 				"*logout*",
 				"*signout*",
@@ -105,13 +106,13 @@ func Load(path string) (*Config, error) {
 		cfg.ProxyPort = DefaultProxyPort
 	}
 
-	// Apply CrawlerConfig defaults for zero values
+	// Apply defaults for zero values
 	defaults := DefaultConfig()
 	if cfg.BurpRequired == nil {
 		cfg.BurpRequired = defaults.BurpRequired
 	}
-	if cfg.Crawler.MaxResponseBodyBytes == 0 {
-		cfg.Crawler.MaxResponseBodyBytes = defaults.Crawler.MaxResponseBodyBytes
+	if cfg.MaxBodyBytes == 0 {
+		cfg.MaxBodyBytes = defaults.MaxBodyBytes
 	}
 	if cfg.Crawler.IncludeSubdomains == nil {
 		cfg.Crawler.IncludeSubdomains = defaults.Crawler.IncludeSubdomains

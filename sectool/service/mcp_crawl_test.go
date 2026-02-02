@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -236,6 +237,53 @@ func TestMCP_CrawlSeedWithMock(t *testing.T) {
 	statusAfter, err := mockCrawler.GetStatus(t.Context(), createResp.SessionID)
 	require.NoError(t, err)
 	assert.Equal(t, queuedBefore+2, statusAfter.URLsQueued)
+}
+
+func TestMCP_CrawlGetDecompressesGzipBody(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, _, _, mockCrawler := setupMCPServerWithMock(t)
+
+	// Create crawl session
+	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
+		"seed_urls": "https://example.com",
+	})
+
+	// Create gzip compressed response body
+	const originalBody = "This is the decompressed crawl response"
+	compressedBody := compressGzip(t, []byte(originalBody))
+
+	const respHeaders = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"
+
+	const flowID = "crawl-compressed-flow"
+	err := mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
+		ID:             flowID,
+		SessionID:      createResp.SessionID,
+		URL:            "https://example.com/compressed",
+		Host:           "example.com",
+		Path:           "/compressed",
+		Method:         "GET",
+		StatusCode:     200,
+		ResponseLength: len(compressedBody),
+		Request:        []byte("GET /compressed HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+		Response:       append([]byte(respHeaders), compressedBody...),
+	})
+	require.NoError(t, err)
+
+	// Test full_body=true returns decompressed content
+	getResult := CallMCPTool(t, mcpClient, "crawl_get", map[string]interface{}{
+		"flow_id":   flowID,
+		"full_body": true,
+	})
+	require.False(t, getResult.IsError)
+
+	var getResp protocol.CrawlGetResponse
+	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, getResult)), &getResp))
+
+	// Decode base64 body and verify it's decompressed
+	decodedBody, err := base64.StdEncoding.DecodeString(getResp.RespBody)
+	require.NoError(t, err)
+	assert.Equal(t, originalBody, string(decodedBody))
 }
 
 func TestMCP_CrawlValidation(t *testing.T) {
