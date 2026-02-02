@@ -31,19 +31,16 @@ func NewBurpBackend(url string, opts ...mcp.Option) *BurpBackend {
 }
 
 func (b *BurpBackend) Connect(ctx context.Context) error {
-	log.Printf("burp: connecting to MCP at %s", b.client.URL())
 	b.client.OnConnectionLost(func(err error) {
 		log.Printf("Burp MCP connection lost: %v", err)
 	})
 	if err := b.client.Connect(ctx); err != nil {
-		log.Printf("burp: connection failed: %v", err)
 		return err
 	}
 	return nil
 }
 
 func (b *BurpBackend) Close() error {
-	log.Printf("burp: closing connection")
 	return b.client.Close()
 }
 

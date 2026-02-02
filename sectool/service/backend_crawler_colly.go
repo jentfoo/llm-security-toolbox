@@ -843,8 +843,6 @@ func (b *CollyBackend) Close() error {
 	for _, sess := range sessions {
 		sess.cancel()
 	}
-
-	log.Printf("crawler: closed backend with %d sessions", len(sessions))
 	return nil
 }
 

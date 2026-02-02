@@ -104,8 +104,6 @@ func (c *BurpClient) Connect(ctx context.Context) error {
 
 // connectLocked performs the actual connection. Caller must hold c.mu.
 func (c *BurpClient) connectLocked(ctx context.Context) error {
-	log.Printf("mcp: connecting to %s", c.url)
-
 	// Use provided HTTP client or create one suitable for SSE
 	httpClient := c.httpClient
 	if httpClient == nil {
@@ -241,7 +239,6 @@ func (c *BurpClient) closeLocked() error {
 	if c.mcpClient == nil {
 		return nil
 	}
-	log.Printf("mcp: closing connection")
 	err := c.mcpClient.Close()
 	c.mcpClient = nil
 	return err

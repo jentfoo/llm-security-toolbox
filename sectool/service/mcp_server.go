@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -107,11 +108,23 @@ func (m *mcpServer) Addr() string {
 // Close stops the MCP server.
 func (m *mcpServer) Close(ctx context.Context) error {
 	var errs []error
+
+	// Close HTTP server - use short timeout then force close.
+	// Streaming connections (SSE, MCP) never become idle, so Shutdown blocks.
 	if m.httpServer != nil {
-		if err := m.httpServer.Shutdown(ctx); err != nil {
+		shortCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		err := m.httpServer.Shutdown(shortCtx)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Force close - active connections won't drain gracefully
+			if closeErr := m.httpServer.Close(); closeErr != nil {
+				errs = append(errs, closeErr)
+			}
+		} else if err != nil {
 			errs = append(errs, err)
 		}
 	}
+
 	if m.sseServer != nil {
 		if err := m.sseServer.Shutdown(ctx); err != nil {
 			errs = append(errs, err)
