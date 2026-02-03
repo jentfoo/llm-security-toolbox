@@ -12,6 +12,9 @@ func (c *Client) ProxyPoll(ctx context.Context, opts ProxyPollOpts) (*protocol.P
 	if opts.OutputMode != "" {
 		args["output_mode"] = opts.OutputMode
 	}
+	if opts.Source != "" {
+		args["source"] = opts.Source
+	}
 	if opts.Host != "" {
 		args["host"] = opts.Host
 	}

@@ -544,3 +544,120 @@ func TestMCP_RequestSendNoCompressionWithoutHeader(t *testing.T) {
 	require.Len(t, parts, 2)
 	assert.Equal(t, originalBody, parts[1])
 }
+
+func TestMCP_ProxyPollSinceReplayFlowID(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	// Add proxy entries
+	mockMCP.AddProxyEntry(
+		"GET /api/1 HTTP/1.1\r\nHost: test.com\r\n\r\n",
+		"HTTP/1.1 200 OK\r\n\r\nresponse1",
+		"",
+	)
+	mockMCP.AddProxyEntry(
+		"GET /api/2 HTTP/1.1\r\nHost: test.com\r\n\r\n",
+		"HTTP/1.1 200 OK\r\n\r\nresponse2",
+		"",
+	)
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=GET /api/1 HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nreplayed}",
+	)
+
+	// Get initial flows to register them
+	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"host":        "test.com",
+	})
+	require.Len(t, listResp.Flows, 2)
+	flowID1 := listResp.Flows[0].FlowID
+
+	// Send a replay
+	sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+		"flow_id": flowID1,
+	})
+	replayFlowID := sendResp.ReplayID
+
+	// Add another proxy entry after the replay
+	mockMCP.AddProxyEntry(
+		"GET /api/3 HTTP/1.1\r\nHost: test.com\r\n\r\n",
+		"HTTP/1.1 200 OK\r\n\r\nresponse3",
+		"",
+	)
+
+	// Use since with the replay flow_id - should return the new proxy entry
+	sinceResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"host":        "test.com",
+		"since":       replayFlowID,
+	})
+
+	// Should return at least the new proxy entry (offset 2)
+	require.NotEmpty(t, sinceResp.Flows)
+
+	// Verify we got the new proxy entry
+	var foundNewProxy bool
+	for _, flow := range sinceResp.Flows {
+		if flow.Path == "/api/3" {
+			foundNewProxy = true
+			break
+		}
+	}
+	assert.True(t, foundNewProxy)
+}
+
+func TestMCP_ProxyPollSinceMultipleReplays(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMCPServerWithMock(t)
+
+	// Add a proxy entry
+	mockMCP.AddProxyEntry(
+		"GET /api/test HTTP/1.1\r\nHost: test.com\r\n\r\n",
+		"HTTP/1.1 200 OK\r\n\r\noriginal",
+		"",
+	)
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=GET /api/test HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nreplayed}",
+	)
+
+	// Get the flow
+	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"host":        "test.com",
+	})
+	require.NotEmpty(t, listResp.Flows)
+	flowID := listResp.Flows[0].FlowID
+
+	// Send first replay
+	replay1 := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+		"flow_id": flowID,
+	})
+
+	// Send second replay
+	replay2 := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+		"flow_id": flowID,
+	})
+
+	// Use since with first replay - should return the second replay
+	sinceResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"source":      "replay",
+		"since":       replay1.ReplayID,
+	})
+
+	// Should return at least the second replay
+	require.NotEmpty(t, sinceResp.Flows)
+
+	// Verify we got the second replay, not the first
+	var foundReplay2 bool
+	for _, flow := range sinceResp.Flows {
+		if flow.FlowID == replay2.ReplayID {
+			foundReplay2 = true
+		}
+		// Should NOT include the first replay
+		assert.NotEqual(t, replay1.ReplayID, flow.FlowID)
+	}
+	assert.True(t, foundReplay2)
+}

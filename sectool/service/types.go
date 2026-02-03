@@ -9,6 +9,12 @@ import (
 	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
 )
 
+// Flow source constants for flowStore and replay history.
+const (
+	SourceProxy  = "proxy"
+	SourceReplay = "replay"
+)
+
 // HealthMetricProvider is a function that returns a metric value for a given key.
 type HealthMetricProvider func() string
 
@@ -45,13 +51,15 @@ type ProxyListRequest struct {
 	ExcludePath  string `json:"exclude_path,omitempty"`
 	Limit        int    `json:"limit,omitempty"`
 	Offset       int    `json:"offset,omitempty"`
+	Source       string `json:"source,omitempty"`
 }
 
 // HasFilters returns true if any filter is set.
 func (r *ProxyListRequest) HasFilters() bool {
 	return r.Host != "" || r.Path != "" || r.Method != "" || r.Status != "" ||
 		r.Contains != "" || r.ContainsBody != "" || r.Since != "" ||
-		r.ExcludeHost != "" || r.ExcludePath != "" || r.Limit > 0
+		r.ExcludeHost != "" || r.ExcludePath != "" || r.Limit > 0 ||
+		r.Source != ""
 }
 
 // =============================================================================

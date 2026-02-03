@@ -667,7 +667,7 @@ func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts Cra
 	var useSinceTime bool
 
 	if opts.Since != "" {
-		if opts.Since == "last" {
+		if opts.Since == sinceLast {
 			// Use the last returned index (exclusive - start after it)
 			startIdx = sess.lastReturnedIdx
 		} else if t, ok := parseSinceTimestamp(opts.Since); ok {

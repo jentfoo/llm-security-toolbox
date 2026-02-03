@@ -246,7 +246,7 @@ func (s *oastSession) filterEvents(since, eventType string) []OastEventInfo {
 	switch since {
 	case "":
 		events = s.events
-	case "last":
+	case sinceLast:
 		if s.lastPollIdx >= len(s.events) {
 			events = nil
 		} else {

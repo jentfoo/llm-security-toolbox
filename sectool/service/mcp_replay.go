@@ -87,19 +87,30 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		return errorResult("flow_id is required"), nil
 	}
 
-	// Try proxy flowStore first, then crawler backend
+	// Try flowStore (proxy or replay), then crawler backend
 	var rawRequest []byte
 	var httpProtocol string // "http/1.1", "h2", or empty (defaults to http/1.1)
 	if entry, ok := m.service.flowStore.Lookup(flowID); ok {
-		proxyEntries, err := m.service.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)
-		if err != nil {
-			return errorResultFromErr("failed to fetch flow: ", err), nil
+		if entry.Source == SourceReplay {
+			// Fetch from replay history store
+			replayEntry, ok := m.service.replayHistoryStore.Get(flowID)
+			if !ok {
+				return errorResult("replay flow not found in history"), nil
+			}
+			rawRequest = replayEntry.RawRequest
+			httpProtocol = replayEntry.Protocol
+		} else {
+			// Fetch from proxy history
+			proxyEntries, err := m.service.httpBackend.GetProxyHistory(ctx, 1, entry.Offset)
+			if err != nil {
+				return errorResultFromErr("failed to fetch flow: ", err), nil
+			}
+			if len(proxyEntries) == 0 {
+				return errorResult("flow not found in proxy history"), nil
+			}
+			rawRequest = []byte(proxyEntries[0].Request)
+			httpProtocol = proxyEntries[0].Protocol
 		}
-		if len(proxyEntries) == 0 {
-			return errorResult("flow not found in proxy history"), nil
-		}
-		rawRequest = []byte(proxyEntries[0].Request)
-		httpProtocol = proxyEntries[0].Protocol
 	} else if flow, err := m.service.crawlerBackend.GetFlow(ctx, flowID); err == nil && flow != nil {
 		rawRequest = flow.Request
 		// Crawler uses HTTP/1.1
@@ -240,6 +251,25 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		Body:     respBody,
 		Duration: result.Duration,
 	})
+
+	// Store in replay history for proxy_poll visibility
+	method, replayHost, replayPath := extractRequestMeta(string(rawRequest))
+	refOffset := m.service.replayHistoryStore.UpdateReferenceOffset(m.service.proxyLastOffset.Load())
+	m.service.replayHistoryStore.Store(&store.ReplayHistoryEntry{
+		FlowID:          replayID,
+		ReferenceOffset: refOffset,
+		RawRequest:      rawRequest,
+		Method:          method,
+		Host:            replayHost,
+		Path:            replayPath,
+		Protocol:        httpProtocol,
+		RespHeaders:     respHeaders,
+		RespBody:        respBody,
+		RespStatus:      respCode,
+		Duration:        result.Duration,
+		SourceFlowID:    flowID,
+	})
+	m.service.flowStore.RegisterKnown(replayID, SourceReplay)
 
 	return jsonResult(protocol.ReplaySendResponse{
 		ReplayID: replayID,
@@ -386,6 +416,24 @@ func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolReque
 		Body:     result.Body,
 		Duration: result.Duration,
 	})
+
+	// Store in replay history for proxy_poll visibility
+	refOffset := m.service.replayHistoryStore.UpdateReferenceOffset(m.service.proxyLastOffset.Load())
+	m.service.replayHistoryStore.Store(&store.ReplayHistoryEntry{
+		FlowID:          replayID,
+		ReferenceOffset: refOffset,
+		RawRequest:      rawRequest,
+		Method:          method,
+		Host:            target.Hostname,
+		Path:            parsedURL.Path,
+		Protocol:        "http/1.1",
+		RespHeaders:     result.Headers,
+		RespBody:        result.Body,
+		RespStatus:      respCode,
+		Duration:        result.Duration,
+		SourceFlowID:    "", // No source for request_send
+	})
+	m.service.flowStore.RegisterKnown(replayID, SourceReplay)
 
 	return jsonResult(protocol.ReplaySendResponse{
 		ReplayID: replayID,

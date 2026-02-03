@@ -14,7 +14,7 @@ func TestStore(t *testing.T) {
 	t.Run("register_and_lookup", func(t *testing.T) {
 		store := NewFlowStore()
 
-		flowID := store.Register(0, "hash1")
+		flowID := store.Register(0, "hash1", "proxy")
 		assert.NotEmpty(t, flowID)
 		assert.Len(t, flowID, 6) // default ID length
 
@@ -22,6 +22,60 @@ func TestStore(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, uint32(0), entry.Offset)
 		assert.Equal(t, "hash1", entry.Hash)
+		assert.Equal(t, "proxy", entry.Source)
+	})
+
+	t.Run("register_with_source", func(t *testing.T) {
+		store := NewFlowStore()
+
+		proxyID := store.Register(0, "hash1", "proxy")
+		replayID := store.Register(1, "hash2", "replay")
+
+		proxyEntry, _ := store.Lookup(proxyID)
+		assert.Equal(t, "proxy", proxyEntry.Source)
+
+		replayEntry, _ := store.Lookup(replayID)
+		assert.Equal(t, "replay", replayEntry.Source)
+	})
+
+	t.Run("register_known", func(t *testing.T) {
+		store := NewFlowStore()
+
+		// Register a known flowID (like from replay)
+		store.RegisterKnown("replay123", "replay")
+
+		entry, ok := store.Lookup("replay123")
+		require.True(t, ok)
+		assert.Equal(t, "replay", entry.Source)
+		assert.Equal(t, uint32(0), entry.Offset) // replays don't have offsets
+	})
+
+	t.Run("register_known_idempotent", func(t *testing.T) {
+		store := NewFlowStore()
+
+		// Register same ID twice
+		store.RegisterKnown("replay456", "replay")
+		store.RegisterKnown("replay456", "replay")
+
+		assert.Equal(t, 1, store.Count())
+	})
+
+	t.Run("register_known_no_offset_collision", func(t *testing.T) {
+		store := NewFlowStore()
+
+		// Multiple replays should not collide (unlike offset-based Register)
+		store.RegisterKnown("replayA", "replay")
+		store.RegisterKnown("replayB", "replay")
+		store.RegisterKnown("replayC", "replay")
+
+		assert.Equal(t, 3, store.Count())
+
+		_, ok := store.Lookup("replayA")
+		assert.True(t, ok)
+		_, ok = store.Lookup("replayB")
+		assert.True(t, ok)
+		_, ok = store.Lookup("replayC")
+		assert.True(t, ok)
 	})
 
 	t.Run("lookup_not_found", func(t *testing.T) {
@@ -35,8 +89,8 @@ func TestStore(t *testing.T) {
 	t.Run("register_same_offset_returns_same_id", func(t *testing.T) {
 		store := NewFlowStore()
 
-		id1 := store.Register(5, "hash1")
-		id2 := store.Register(5, "hash2") // different hash, same offset
+		id1 := store.Register(5, "hash1", "proxy")
+		id2 := store.Register(5, "hash2", "proxy") // different hash, same offset
 
 		assert.Equal(t, id1, id2)
 	})
@@ -44,7 +98,7 @@ func TestStore(t *testing.T) {
 	t.Run("lookup_by_hash", func(t *testing.T) {
 		store := NewFlowStore()
 
-		flowID := store.Register(0, "unique_hash")
+		flowID := store.Register(0, "unique_hash", "proxy")
 		flowIDs := store.LookupByHash("unique_hash")
 
 		require.Len(t, flowIDs, 1)
@@ -62,8 +116,8 @@ func TestStore(t *testing.T) {
 		store := NewFlowStore()
 
 		// Register two entries with the same hash (simulating collision)
-		id1 := store.Register(0, "same_hash")
-		id2 := store.Register(1, "same_hash")
+		id1 := store.Register(0, "same_hash", "proxy")
+		id2 := store.Register(1, "same_hash", "proxy")
 
 		flowIDs := store.LookupByHash("same_hash")
 		require.Len(t, flowIDs, 2)
@@ -74,7 +128,7 @@ func TestStore(t *testing.T) {
 	t.Run("lookup_by_offset", func(t *testing.T) {
 		store := NewFlowStore()
 
-		flowID := store.Register(42, "hash")
+		flowID := store.Register(42, "hash", "proxy")
 		foundID, ok := store.LookupByOffset(42)
 
 		assert.True(t, ok)
@@ -92,7 +146,7 @@ func TestStore(t *testing.T) {
 	t.Run("update_offset", func(t *testing.T) {
 		store := NewFlowStore()
 
-		flowID := store.Register(0, "hash")
+		flowID := store.Register(0, "hash", "proxy")
 
 		ok := store.UpdateOffset(flowID, 100)
 		assert.True(t, ok)
@@ -118,9 +172,9 @@ func TestStore(t *testing.T) {
 	t.Run("clear", func(t *testing.T) {
 		store := NewFlowStore()
 
-		store.Register(0, "hash1")
-		store.Register(1, "hash2")
-		store.Register(2, "hash3")
+		store.Register(0, "hash1", "proxy")
+		store.Register(1, "hash2", "proxy")
+		store.Register(2, "hash3", "proxy")
 
 		assert.Equal(t, 3, store.Count())
 
@@ -134,23 +188,23 @@ func TestStore(t *testing.T) {
 
 		assert.Equal(t, 0, store.Count())
 
-		store.Register(0, "hash1")
+		store.Register(0, "hash1", "proxy")
 		assert.Equal(t, 1, store.Count())
 
-		store.Register(1, "hash2")
+		store.Register(1, "hash2", "proxy")
 		assert.Equal(t, 2, store.Count())
 
 		// Same offset should not increase count
-		store.Register(0, "hash3")
+		store.Register(0, "hash3", "proxy")
 		assert.Equal(t, 2, store.Count())
 	})
 
 	t.Run("all_flow_ids", func(t *testing.T) {
 		store := NewFlowStore()
 
-		id1 := store.Register(0, "hash1")
-		id2 := store.Register(1, "hash2")
-		id3 := store.Register(2, "hash3")
+		id1 := store.Register(0, "hash1", "proxy")
+		id2 := store.Register(1, "hash2", "proxy")
+		id3 := store.Register(2, "hash3", "proxy")
 
 		allIDs := store.AllFlowIDs()
 		assert.Len(t, allIDs, 3)
@@ -162,7 +216,7 @@ func TestStore(t *testing.T) {
 	t.Run("empty_hash", func(t *testing.T) {
 		store := NewFlowStore()
 
-		flowID := store.Register(0, "")
+		flowID := store.Register(0, "", "proxy")
 
 		// Should still work
 		entry, ok := store.Lookup(flowID)
@@ -186,7 +240,7 @@ func TestStoreConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(offset uint32) {
 			defer wg.Done()
-			store.Register(offset, "hash")
+			store.Register(offset, "hash", "proxy")
 		}(uint32(i))
 	}
 

@@ -22,7 +22,7 @@ func TestParseSinceTimestamp(t *testing.T) {
 		{"datetime_no_tz", "2024-01-15T10:30:00", true, ""}, // local TZ, can't compare directly
 		{"time_only", "10:30:00", true, ""},                 // assumes today's date, local TZ
 		{"flow_id", "abc123", false, ""},
-		{"last_keyword", "last", false, ""},
+		{"last_keyword", sinceLast, false, ""},
 		{"invalid_format", "2024/01/15", false, ""},
 		{"empty", "", false, ""},
 		{"partial_date", "2024-01", false, ""},

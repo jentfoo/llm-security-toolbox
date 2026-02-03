@@ -23,6 +23,7 @@ type FlowEntry struct {
 	Path           string `json:"path"`
 	Status         int    `json:"status"`
 	ResponseLength int    `json:"response_length"`
+	Source         string `json:"source,omitempty"` // "proxy" or "replay"
 }
 
 // RequestLine contains path and version from the HTTP request line.

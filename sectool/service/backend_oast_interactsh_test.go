@@ -106,14 +106,14 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 		assert.Len(t, result.Events, 3)
 
 		// Poll with "last" should return nothing (we just polled)
-		result, err = backend.PollSession(t.Context(), "test123", "last", "", 0, 0)
+		result, err = backend.PollSession(t.Context(), "test123", sinceLast, "", 0, 0)
 		require.NoError(t, err)
 		assert.Empty(t, result.Events)
 
 		sess.events = append(sess.events, OastEventInfo{ID: "e4", Time: time.Now(), Type: "smtp"})
 
 		// Poll with "last" should return the new event
-		result, err = backend.PollSession(t.Context(), "test123", "last", "", 0, 0)
+		result, err = backend.PollSession(t.Context(), "test123", sinceLast, "", 0, 0)
 		require.NoError(t, err)
 		assert.Len(t, result.Events, 1)
 		assert.Equal(t, "e4", result.Events[0].ID)
@@ -326,7 +326,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 		sess.events = append(sess.events, OastEventInfo{ID: "e3", Time: time.Now(), Type: "dns"})
 		sess.mu.Unlock()
 
-		_, err = backend.PollSession(t.Context(), "testidx", "last", "", 0, 0)
+		_, err = backend.PollSession(t.Context(), "testidx", sinceLast, "", 0, 0)
 		require.NoError(t, err)
 		assert.Equal(t, 3, sess.lastPollIdx)
 	})
@@ -392,7 +392,7 @@ func TestOastSession_FilterEvents(t *testing.T) {
 			events:      makeEvents("e1", "e2", "e3", "e4"),
 			lastPollIdx: 2,
 		}
-		result := sess.filterEvents("last", "")
+		result := sess.filterEvents(sinceLast, "")
 		require.Len(t, result, 2)
 		assert.Equal(t, "e3", result[0].ID)
 		assert.Equal(t, "e4", result[1].ID)
@@ -403,7 +403,7 @@ func TestOastSession_FilterEvents(t *testing.T) {
 			events:      makeEvents("e1", "e2"),
 			lastPollIdx: 2,
 		}
-		result := sess.filterEvents("last", "")
+		result := sess.filterEvents(sinceLast, "")
 		assert.Empty(t, result)
 	})
 
@@ -412,7 +412,7 @@ func TestOastSession_FilterEvents(t *testing.T) {
 			events:      makeEvents("e1"),
 			lastPollIdx: 5,
 		}
-		result := sess.filterEvents("last", "")
+		result := sess.filterEvents(sinceLast, "")
 		assert.Empty(t, result)
 	})
 
@@ -485,7 +485,7 @@ func TestOastSession_FilterEvents(t *testing.T) {
 			},
 			lastPollIdx: 2,
 		}
-		result := sess.filterEvents("last", "dns")
+		result := sess.filterEvents(sinceLast, "dns")
 		require.Len(t, result, 1)
 		assert.Equal(t, "e3", result[0].ID)
 	})
@@ -565,7 +565,7 @@ func TestOastSession_BufferRotation(t *testing.T) {
 		assert.Equal(t, MaxOastEventsPerSession-10, sess.lastPollIdx)
 
 		// "last" filter should return only the new events
-		result = sess.filterEvents("last", "")
+		result = sess.filterEvents(sinceLast, "")
 		assert.Len(t, result, 10)
 		assert.Equal(t, "new0", result[0].ID)
 	})

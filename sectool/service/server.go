@@ -59,9 +59,16 @@ type Server struct {
 	// Request/response results store (ephemeral)
 	requestStore *store.RequestStore
 
+	// Replay history store (shared by both backends)
+	replayHistoryStore *store.ReplayHistoryStore
+
 	// proxyLastOffset tracks the highest offset seen across all proxy list queries.
 	// Enables "since=last" to show only new traffic since the last query.
 	proxyLastOffset atomic.Uint32
+
+	// lastFlowID tracks the last flow_id returned from proxy_poll flows mode.
+	// Used for "since=last" cursor to support both proxy and replay entries.
+	lastFlowID atomic.Value // stores string
 
 	// Shutdown coordination
 	shutdownCh chan struct{}
@@ -72,27 +79,29 @@ type Server struct {
 // If a backend is nil, Run initializes the default implementation.
 func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerBackend) (*Server, error) {
 	s := &Server{
-		flagBurpMCPURL:  flags.BurpMCPURL,
-		flagConfigPath:  flags.ConfigPath,
-		flagMCPPort:     flags.MCPPort,
-		flagProxyPort:   flags.ProxyPort,
-		flagRequireBurp: flags.RequireBurp,
-		mcpWorkflowMode: flags.WorkflowMode,
-		metricProvider:  make(map[string]HealthMetricProvider),
-		started:         make(chan struct{}),
-		shutdownCh:      make(chan struct{}),
-		flowStore:       store.NewFlowStore(),
-		crawlFlowStore:  store.NewCrawlFlowStore(),
-		requestStore:    store.NewRequestStore(),
-		httpBackend:     hb,
-		oastBackend:     ob,
-		crawlerBackend:  cb,
+		flagBurpMCPURL:     flags.BurpMCPURL,
+		flagConfigPath:     flags.ConfigPath,
+		flagMCPPort:        flags.MCPPort,
+		flagProxyPort:      flags.ProxyPort,
+		flagRequireBurp:    flags.RequireBurp,
+		mcpWorkflowMode:    flags.WorkflowMode,
+		metricProvider:     make(map[string]HealthMetricProvider),
+		started:            make(chan struct{}),
+		shutdownCh:         make(chan struct{}),
+		flowStore:          store.NewFlowStore(),
+		crawlFlowStore:     store.NewCrawlFlowStore(),
+		requestStore:       store.NewRequestStore(),
+		replayHistoryStore: store.NewReplayHistoryStore(),
+		httpBackend:        hb,
+		oastBackend:        ob,
+		crawlerBackend:     cb,
 	}
 
 	// Register health metrics for store counts
 	s.RegisterHealthMetric("flows", func() string { return strconv.Itoa(s.flowStore.Count()) })
 	s.RegisterHealthMetric("crawl_flows", func() string { return strconv.Itoa(s.crawlFlowStore.Count()) })
 	s.RegisterHealthMetric("requests", func() string { return strconv.Itoa(s.requestStore.Count()) })
+	s.RegisterHealthMetric("replay_history", func() string { return strconv.Itoa(s.replayHistoryStore.Count()) })
 
 	return s, nil
 }
@@ -104,7 +113,7 @@ func (s *Server) WaitTillStarted() {
 
 // Run starts the MCP server and blocks until shutdown.
 func (s *Server) Run(ctx context.Context) error {
-	log.Printf("sectool MCP server starting (version=%s)", config.Version)
+	log.Printf("sectool MCP server starting (version=%s-%s)", config.Version, config.RevNum)
 
 	markStarted := sync.OnceFunc(func() {
 		s.startedAt = time.Now()

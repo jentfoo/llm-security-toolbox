@@ -51,6 +51,7 @@ proxy summary [options]
   Use this first to understand available traffic before using proxy list.
 
   Options:
+    --source <type>         filter by source: 'proxy', 'replay', or empty for both
     --host <pattern>        host glob pattern (*, ?)
     --path <pattern>        path glob pattern (*, ?)
     --method <list>         comma-separated methods (POST,PUT)
@@ -64,6 +65,7 @@ proxy summary [options]
     sectool proxy summary                                 # full summary
     sectool proxy summary --host api.example.com          # summary for host
     sectool proxy summary --exclude-host "*.google.com"   # filter out noise
+    sectool proxy summary --source replay                 # only replay-sent traffic
 
   Output: Markdown table with host, path, method, status, count
 
@@ -75,6 +77,7 @@ proxy list [options]
   At least one filter or --limit is REQUIRED. Use 'proxy summary' first.
 
   Options:
+    --source <type>         filter by source: 'proxy', 'replay', or empty for both
     --host <pattern>        host glob pattern (*, ?)
     --path <pattern>        path glob pattern (*, ?)
     --method <list>         comma-separated methods (POST,PUT)
@@ -91,7 +94,8 @@ proxy list [options]
     sectool proxy list --host api.example.com             # flows for host
     sectool proxy list --host "*.example.com" --method POST,PUT
     sectool proxy list --path "/api/*" --status 200,201
-    sectool proxy list --since f7k2x --limit 10            # flows after specific ID
+    sectool proxy list --since f7k2x --limit 10           # flows after specific ID
+    sectool proxy list --source replay --limit 10         # recent replay requests
 
   Output: Markdown table with flow_id, method, host, path, status, size
 
@@ -190,9 +194,10 @@ func parseSummary(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy summary", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var timeout time.Duration
-	var host, path, method, status, contains, containsBody, excludeHost, excludePath string
+	var host, path, method, status, contains, containsBody, excludeHost, excludePath, source string
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
+	fs.StringVar(&source, "source", "", "filter by source: 'proxy', 'replay', or empty for both")
 	fs.StringVar(&host, "host", "", "filter by host pattern (glob: *, ?)")
 	fs.StringVar(&path, "path", "", "filter by path pattern (glob: *, ?)")
 	fs.StringVar(&method, "method", "", "filter by HTTP method (comma-separated)")
@@ -212,6 +217,8 @@ Filter examples:
   --host api.example.com          Exact host match
   --host "*.example.com"          Glob pattern (subdomains)
   --exclude-host "*.google.com"   Filter out noise
+  --source proxy                  Only proxy-captured traffic
+  --source replay                 Only replay-sent traffic
 
 Options:
 `)
@@ -222,7 +229,7 @@ Options:
 		return err
 	}
 
-	return summary(mcpURL, timeout, host, path, method, status, contains, containsBody, excludeHost, excludePath)
+	return summary(mcpURL, timeout, source, host, path, method, status, contains, containsBody, excludeHost, excludePath)
 }
 
 func parseList(args []string, mcpURL string) error {
@@ -230,9 +237,10 @@ func parseList(args []string, mcpURL string) error {
 	fs.SetInterspersed(true)
 	var timeout time.Duration
 	var limit, offset int
-	var host, path, method, status, contains, containsBody, since, excludeHost, excludePath string
+	var host, path, method, status, contains, containsBody, since, excludeHost, excludePath, source string
 
 	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
+	fs.StringVar(&source, "source", "", "filter by source: 'proxy', 'replay', or empty for both")
 	fs.StringVar(&host, "host", "", "filter by host pattern (glob: *, ?)")
 	fs.StringVar(&path, "path", "", "filter by path pattern (glob: *, ?)")
 	fs.StringVar(&method, "method", "", "filter by HTTP method (comma-separated)")
@@ -260,6 +268,8 @@ Filter examples:
   --method POST,PUT               Multiple methods
   --status 200,201                Multiple status codes
   --limit 10                      Return at most 10 flows
+  --source proxy                  Only proxy-captured traffic
+  --source replay                 Only replay-sent traffic
 
 Options:
 `)
@@ -273,13 +283,13 @@ Options:
 	// Require at least one filter or limit
 	hasFilters := host != "" || path != "" || method != "" || status != "" ||
 		contains != "" || containsBody != "" || since != "" ||
-		excludeHost != "" || excludePath != "" || limit > 0
+		excludeHost != "" || excludePath != "" || limit > 0 || source != ""
 	if !hasFilters {
 		fs.Usage()
 		return errors.New("at least one filter or --limit is required; use 'sectool proxy summary' first to see available traffic")
 	}
 
-	return list(mcpURL, timeout, host, path, method, status, contains, containsBody, since, excludeHost, excludePath, limit, offset)
+	return list(mcpURL, timeout, source, host, path, method, status, contains, containsBody, since, excludeHost, excludePath, limit, offset)
 }
 
 func parseExport(args []string, mcpURL string) error {

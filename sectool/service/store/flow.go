@@ -13,6 +13,7 @@ import (
 type FlowEntry struct {
 	Offset uint32 // Burp history offset
 	Hash   string // Content hash for re-identification
+	Source string // "proxy" or "replay"
 }
 
 // FlowStore manages the mapping between short flow IDs and Burp history offsets. Thread-safe.
@@ -32,9 +33,10 @@ func NewFlowStore() *FlowStore {
 	}
 }
 
-// Register creates a new flow_id for the given offset and hash.
+// Register creates a new flow_id for the given offset, hash, and source.
 // If an entry with the same offset already exists, it returns the existing flow_id.
-func (s *FlowStore) Register(offset uint32, hash string) string {
+// Source should be "proxy" or "replay".
+func (s *FlowStore) Register(offset uint32, hash string, source string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -50,6 +52,7 @@ func (s *FlowStore) Register(offset uint32, hash string) string {
 	s.byID[flowID] = &FlowEntry{
 		Offset: offset,
 		Hash:   hash,
+		Source: source,
 	}
 	s.byOffset[offset] = flowID
 
@@ -58,6 +61,22 @@ func (s *FlowStore) Register(offset uint32, hash string) string {
 	}
 
 	return flowID
+}
+
+// RegisterKnown registers a pre-assigned flow_id (e.g., from replay history).
+// Does not use offset-based deduplication. Idempotent for the same flowID.
+func (s *FlowStore) RegisterKnown(flowID, source string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.byID[flowID]; ok {
+		return // already registered
+	}
+
+	s.byID[flowID] = &FlowEntry{
+		Offset: 0, // not applicable for replays
+		Source: source,
+	}
 }
 
 // Lookup retrieves a FlowEntry by flow_id.

@@ -114,8 +114,6 @@ func TestMCP_ListTools(t *testing.T) {
 	}
 }
 
-const sinceLast = "last"
-
 type mockOastBackend struct {
 	sessions map[string]*OastSessionInfo
 	byLabel  map[string]string

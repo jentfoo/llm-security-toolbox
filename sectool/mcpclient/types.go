@@ -7,6 +7,7 @@ package mcpclient
 // ProxyPollOpts are options for ProxyPoll.
 type ProxyPollOpts struct {
 	OutputMode   string // "summary" or "flows"
+	Source       string // "proxy", "replay", or empty for both
 	Host         string
 	Path         string
 	Method       string

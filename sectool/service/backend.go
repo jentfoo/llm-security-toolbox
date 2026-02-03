@@ -28,6 +28,8 @@ const (
 	RuleTypeWSBoth     = "ws:both"
 )
 
+const sinceLast = "last"
+
 // isWSType returns true if the type is a WebSocket type (ws: prefix).
 func isWSType(t string) bool {
 	return strings.HasPrefix(t, "ws:")

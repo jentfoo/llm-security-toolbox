@@ -10,7 +10,7 @@ import (
 	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
 )
 
-func summary(mcpURL string, timeout time.Duration, host, path, method, status, contains, containsBody, excludeHost, excludePath string) error {
+func summary(mcpURL string, timeout time.Duration, source, host, path, method, status, contains, containsBody, excludeHost, excludePath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -22,6 +22,7 @@ func summary(mcpURL string, timeout time.Duration, host, path, method, status, c
 
 	resp, err := client.ProxyPoll(ctx, mcpclient.ProxyPollOpts{
 		OutputMode:   "summary",
+		Source:       source,
 		Host:         host,
 		Path:         path,
 		Method:       method,
@@ -44,7 +45,7 @@ func summary(mcpURL string, timeout time.Duration, host, path, method, status, c
 	return nil
 }
 
-func list(mcpURL string, timeout time.Duration, host, path, method, status, contains, containsBody, since, excludeHost, excludePath string, limit, offset int) error {
+func list(mcpURL string, timeout time.Duration, source, host, path, method, status, contains, containsBody, since, excludeHost, excludePath string, limit, offset int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -56,6 +57,7 @@ func list(mcpURL string, timeout time.Duration, host, path, method, status, cont
 
 	resp, err := client.ProxyPoll(ctx, mcpclient.ProxyPollOpts{
 		OutputMode:   "flows",
+		Source:       source,
 		Host:         host,
 		Path:         path,
 		Method:       method,
@@ -93,14 +95,14 @@ func printAggregateTable(agg []protocol.SummaryEntry) {
 }
 
 func printFlowTable(flows []protocol.FlowEntry) {
-	fmt.Println("| flow_id | method | host | path | status | size |")
-	fmt.Println("|---------|--------|------|------|--------|------|")
+	fmt.Println("| flow_id | method | host | path | status | size | source |")
+	fmt.Println("|---------|--------|------|------|--------|------|--------|")
 	for _, f := range flows {
-		fmt.Printf("| %s | %s | %s | %s | %d | %d |\n",
+		fmt.Printf("| %s | %s | %s | %s | %d | %d | %s |\n",
 			f.FlowID, f.Method,
 			cliutil.EscapeMarkdown(f.Host),
 			cliutil.EscapeMarkdown(f.Path),
-			f.Status, f.ResponseLength)
+			f.Status, f.ResponseLength, f.Source)
 	}
 	fmt.Printf("\n*%d flows*\n", len(flows))
 
