@@ -5,18 +5,6 @@
 
 An LLM-first security testing toolkit that enables coding agents to collaborate with you on security testing. Sectool exposes security testing tools via MCP (Model Context Protocol), letting you brainstorm with an agent, validate security reports together, or have the agent probe vulnerabilities in parallel with your own testing.
 
-## Project Status
-
-Early development, but usable! Current plans:
-
-1. **Stabilize the MCP interface** — Active iteration based on agent feedback.
-2. **Refactor once the agent interface is well-designed** — The current code design is an artifact of prototype iterations.
-3. **Pre-compiled binaries after stabilization** — Until then, `make build` is required to use this project.
-
-We will keep adding features (see [Issues](https://github.com/go-appsec/llm-security-toolbox/issues) for planned work) with the goal of enabling a highly collaborative security agent experience.
-
-Questions or recommendations? Please [open an Issue](https://github.com/go-appsec/llm-security-toolbox/issues)!
-
 ## Getting Started
 
 ### 1. Install sectool
