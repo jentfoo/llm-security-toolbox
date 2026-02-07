@@ -278,6 +278,11 @@ Options:
 		return err
 	}
 
+	// Auto-set large limit if no filters provided (MCP refuses list with no limits or filters)
+	if limit == 0 && source == "" && host == "" && path == "" && method == "" && status == "" && contains == "" && containsBody == "" && since == "" && excludeHost == "" && excludePath == "" {
+		limit = 1_000_000_000
+	}
+
 	return list(mcpURL, timeout, source, host, path, method, status, contains, containsBody, since, excludeHost, excludePath, limit, offset)
 }
 

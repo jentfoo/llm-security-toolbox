@@ -358,6 +358,11 @@ Options:
 		return errors.New("session_id required")
 	}
 
+	// Auto-set large limit if no filters provided (MCP refuses list with no limits or filters)
+	if limit == 0 && host == "" && path == "" && method == "" && status == "" && contains == "" && containsBody == "" && excludeHost == "" && excludePath == "" && since == "" {
+		limit = 1_000_000_000
+	}
+
 	return list(mcpURL, timeout, fs.Args()[0], "urls", host, path, method, status, contains, containsBody, excludeHost, excludePath, since, limit, offset)
 }
 
