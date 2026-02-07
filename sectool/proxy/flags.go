@@ -126,7 +126,7 @@ proxy export <flow_id>
 proxy rule <command> [options]
 
   Manage match and replace rules for request/response modification.
-  Rules are applied by Burp's proxy to all traffic flowing through it.
+  Rules are applied by the proxy to all traffic flowing through it.
 
   Commands:
     list       List configured rules

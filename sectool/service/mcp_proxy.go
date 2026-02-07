@@ -645,7 +645,7 @@ func effectivePosition(e flowEntry) float64 {
 	return float64(e.referenceOffset) + 0.5
 }
 
-// applyProxyFilters applies filters that can't be expressed in Burp regex.
+// applyProxyFilters applies client-side filters to proxy history entries.
 func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, proxyIndex *store.ProxyIndex, replayHistoryStore *store.ReplayHistoryStore, lastFlowID string) []flowEntry {
 	if !req.HasFilters() {
 		return entries

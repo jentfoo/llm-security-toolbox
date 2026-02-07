@@ -266,7 +266,7 @@ func previewBody(body []byte, maxLen int) string {
 
 // transformRequestForValidation converts HTTP/2 request lines to HTTP/1.1 for Go's parser.
 // "POST /path HTTP/2\r\n" -> "POST /path HTTP/1.1\r\n"
-// The original request should still be sent to Burp (which handles HTTP/2 natively).
+// The original request is sent unmodified to the backend (both handle HTTP/2 natively).
 func transformRequestForValidation(raw []byte) []byte {
 	firstLineEnd := bytes.Index(raw, []byte("\r\n"))
 	if firstLineEnd < 0 {

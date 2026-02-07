@@ -36,7 +36,7 @@ func isWSType(t string) bool {
 }
 
 // HttpBackend defines the interface for proxy history and request sending.
-// This abstraction allows switching between Burp MCP and future built-in proxies.
+// This abstraction allows switching between the built-in proxy and Burp MCP.
 type HttpBackend interface {
 	// Close shuts down the HttpBackend.
 	Close() error
