@@ -110,7 +110,6 @@ Global config at `~/.sectool/config.json` (auto-created with defaults):
 
 ```json
 {
-  "version": "0.0.1",
   "mcp_port": 9119,
   "burp_required": false,
   "max_body_bytes": 10485760,
@@ -131,120 +130,60 @@ Global config at `~/.sectool/config.json` (auto-created with defaults):
 
 ### Export Bundle Layout
 
-Bundles exported to `./sectool-requests/<flow_id>/`:
-
-```
-./sectool-requests/<flow_id>/
-├── request.http       # HTTP headers with body placeholder
-├── body               # Raw request body (binary-safe)
-├── request.meta.json  # Metadata (method, URL, timestamps)
-├── response.http      # Response headers (if available)
-└── response.body      # Response body (if available)
-```
+Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body placeholder), `body` (raw binary-safe), `request.meta.json` (method/URL/timestamps), `response.http`, `response.body`
 
 ## Key Types
 
-**Backend Interfaces (service/backend.go):**
-```go
-// HttpBackend abstracts proxy history, request sending, and rules
-type HttpBackend interface {
-    GetProxyHistory(ctx context.Context, count, offset int) ([]ProxyHistoryEntry, error)
-    GetProxyHistoryRegex(ctx context.Context, regex string, count, offset int) ([]ProxyHistoryEntry, error)
-    SendRequest(ctx context.Context, req SendRequestParams) (*SendRequestResult, error)
-    ListRules(ctx context.Context, websocket bool) ([]RuleEntry, error)
-    AddRule(ctx context.Context, input ProxyRuleInput) (*RuleEntry, error)
-    UpdateRule(ctx context.Context, idOrLabel string, input ProxyRuleInput) (*RuleEntry, error)
-    DeleteRule(ctx context.Context, idOrLabel string) error
-    Close() error
-}
+**Backend Interfaces (`sectool/service/backend.go`):**
+- `HttpBackend` - proxy history (get/regex), request sending, match/replace rules CRUD
+- `OastBackend` - OAST session create/delete, event polling, session listing
+- `CrawlerBackend` - crawl session lifecycle and result retrieval
 
-// OastBackend abstracts out-of-band testing
-type OastBackend interface {
-    CreateSession(ctx context.Context) (*OastSession, error)
-    PollEvents(ctx context.Context, sessionID string, since string, wait time.Duration) ([]OastEvent, error)
-    ListSessions(ctx context.Context) ([]*OastSession, error)
-    DeleteSession(ctx context.Context, sessionID string) error
-    Close() error
-}
-```
-
-**Store Types (service/store/):**
-- `Storage`: Key-value blob interface with `memStorage` and `SpillStore` (disk-paging) implementations
-- `ProxyIndex`: Bidirectional flow_id ↔ proxy history offset mapping
-- `ReplayHistoryStore`: Replay request/response storage with meta/payload split for efficient listing
-
-## CLI Commands
-
-Start MCP server:
-```bash
-sectool mcp                    # MCP server on port 9119, auto-detect proxy backend
-sectool mcp --proxy-port 8080  # Force built-in proxy on port 8080
-sectool mcp --burp             # Force Burp MCP (fails if unavailable)
-sectool mcp --port 8080        # Custom MCP server port
-sectool mcp --workflow explore # Pre-set workflow mode
-```
-
-CLI commands (requires running MCP server):
-```bash
-sectool proxy summary        # Aggregated traffic summary by host/path/method
-sectool proxy list           # List individual flows (requires filters)
-sectool proxy export         # Export flow to editable bundle on disk
-
-sectool crawl create         # Start new crawl session from URLs or proxy flows
-sectool crawl status         # Check crawl session progress
-sectool crawl summary        # Aggregated crawl results by host/path
-sectool crawl list           # List crawled flows, forms, or errors
-sectool crawl export         # Export crawled flow to editable bundle
-sectool crawl sessions       # List all crawl sessions
-sectool crawl stop           # Stop running crawl session
-
-sectool replay send          # Send request (from flow, bundle, or file)
-sectool replay get           # Retrieve replay result by ID
-
-sectool oast create          # Create OAST session, returns domain
-sectool oast summary         # Aggregated OAST events by subdomain/source_ip/type
-sectool oast poll            # Poll for out-of-band interactions
-sectool oast list            # List active OAST sessions
-sectool oast delete          # Delete OAST session
-
-sectool encode url           # URL encode/decode
-sectool encode base64        # Base64 encode/decode
-sectool encode html          # HTML entity encode/decode
-
-sectool version              # Show version
-```
+**Store (`sectool/service/store/`):**
+- `Storage` - key-value blob interface (`memStorage`, `SpillStore` disk-paging)
+- `ProxyIndex` - bidirectional flow_id ↔ proxy offset mapping
+- `ReplayHistoryStore` - replay storage with meta/payload split
 
 ## MCP Tools
 
-When running in MCP mode, the following tools are exposed:
+**MCP server:** `sectool mcp [--proxy-port PORT] [--burp] [--port PORT] [--workflow MODE]` (default port 9119, auto-detects backend)
 
-| Tool | Description |
-|------|-------------|
-| `workflow` | Select workflow mode (explore/test-report) to receive task-specific instructions |
-| `proxy_poll` | Query proxy history: summary (default) or list mode with filters |
-| `proxy_get` | Get full request/response for a flow |
-| `proxy_rule_list` | List proxy match/replace rules |
-| `proxy_rule_add` | Add proxy match/replace rule |
-| `proxy_rule_update` | Update existing proxy rule |
-| `proxy_rule_delete` | Delete proxy rule |
-| `crawl_create` | Start crawl session from URLs or proxy flow seeds |
-| `crawl_seed` | Add additional seed URLs or proxy flows to a running crawl session |
-| `crawl_status` | Get crawl session progress metrics |
-| `crawl_poll` | Query crawl results: summary (default), flows, forms, or errors |
-| `crawl_get` | Get full request/response for a crawled flow |
-| `crawl_sessions` | List all crawl sessions |
-| `crawl_stop` | Stop a running crawl session |
-| `replay_send` | Send request with modifications (headers, body, JSON fields, query params) |
-| `replay_get` | Retrieve full response from previous replay |
-| `request_send` | Send a new HTTP request from scratch |
-| `oast_create` | Create OAST session for out-of-band testing |
-| `oast_poll` | Poll for OAST events: summary (default) or list mode |
-| `oast_get` | Get full details of specific OAST event |
-| `oast_list` | List active OAST sessions |
-| `oast_delete` | Delete OAST session |
-| `encode_url` | URL encode/decode |
-| `encode_base64` | Base64 encode/decode |
-| `encode_html` | HTML entity encode/decode |
+- `workflow` - select mode (explore/test-report) for task-specific instructions
+- `proxy_poll` - query proxy history: summary or list with filters
+- `proxy_get` - full request/response for a flow
+- `proxy_rule_list` - list match/replace rules
+- `proxy_rule_add` - add match/replace rule
+- `proxy_rule_update` - update existing rule
+- `proxy_rule_delete` - delete rule
+- `crawl_create` - start crawl from URLs or proxy flow seeds
+- `crawl_seed` - add seeds to running crawl
+- `crawl_status` - crawl progress metrics
+- `crawl_poll` - query results: summary, flows, forms, or errors
+- `crawl_get` - full request/response for crawled flow
+- `crawl_sessions` - list all crawl sessions
+- `crawl_stop` - stop a running crawl session
+- `replay_send` - send with modifications (headers, body, JSON, query params)
+- `replay_get` - retrieve replay response
+- `request_send` - send new HTTP request from scratch
+- `oast_create` - create OAST session for out-of-band testing
+- `oast_poll` - poll events: summary or list
+- `oast_get` - full details of specific OAST event
+- `oast_list` - list active OAST sessions
+- `oast_delete` - delete OAST session
+- `encode_url` - URL encode/decode
+- `encode_base64` - base64 encode/decode
+- `encode_html` - HTML entity encode/decode
+
+## CLI Commands
+
+CLI requires a running MCP server. Maps to MCP tools via `sectool <module> <sub>` pattern.
+
+- `proxy`: `summary`, `list`, `export`, `rule {add,update,delete,list}`
+- `crawl`: `create`, `seed`, `status`, `summary`, `list`, `export`, `sessions`, `stop`
+- `replay`: `send`, `get`
+- `oast`: `create`, `summary`, `poll`, `list`, `delete`
+- `encode`: `url`, `base64`, `html`
+- `version`
 
 ## Development Guidelines
 
