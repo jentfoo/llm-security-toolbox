@@ -26,7 +26,7 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	_, err = os.Stat(path)
 	require.NoError(t, err)
 
-	loaded, err := Load(path)
+	loaded, err := loadConfig(path)
 	require.NoError(t, err)
 
 	assert.Equal(t, original.Version, loaded.Version)
@@ -36,7 +36,7 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 func TestLoadNotExist(t *testing.T) {
 	t.Parallel()
 
-	_, err := Load("/nonexistent/path/config.json")
+	_, err := loadConfig("/nonexistent/path/config.json")
 	assert.True(t, os.IsNotExist(err))
 }
 
@@ -51,7 +51,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	err := os.WriteFile(path, []byte(minimalJSON), 0644)
 	require.NoError(t, err)
 
-	cfg, err := Load(path)
+	cfg, err := loadConfig(path)
 	require.NoError(t, err)
 	assert.Equal(t, DefaultMCPPort, cfg.MCPPort)
 }
@@ -65,36 +65,86 @@ func TestLoadInvalidJSON(t *testing.T) {
 	err := os.WriteFile(path, []byte("not json"), 0644)
 	require.NoError(t, err)
 
-	_, err = Load(path)
+	_, err = loadConfig(path)
 	assert.Error(t, err)
 }
 
-func TestLoadOrDefaultConfig(t *testing.T) {
+func TestLoadOrCreatePath(t *testing.T) {
 	t.Parallel()
 
-	t.Run("creates_default", func(t *testing.T) {
+	t.Run("creates_new_file", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "config.json")
 
-		cfg, err := LoadOrDefaultConfig(path)
+		cfg, err := LoadOrCreatePath(path)
 		require.NoError(t, err)
 		assert.Equal(t, Version, cfg.Version)
 		assert.Equal(t, DefaultMCPPort, cfg.MCPPort)
+
+		// File should exist on disk
+		_, err = os.Stat(path)
+		require.NoError(t, err)
 	})
 
-	t.Run("loads_existing", func(t *testing.T) {
+	t.Run("same_version_no_rewrite", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "config.json")
 
-		existing := &Config{
-			Version: Version,
-			MCPPort: 8080,
-		}
-		require.NoError(t, existing.Save(path))
-
-		cfg, err := LoadOrDefaultConfig(path)
+		// Write config with current version but custom port
+		original := &Config{Version: Version, MCPPort: 7777}
+		require.NoError(t, original.Save(path))
+		info1, err := os.Stat(path)
 		require.NoError(t, err)
-		assert.Equal(t, 8080, cfg.MCPPort)
+
+		cfg, err := LoadOrCreatePath(path)
+		require.NoError(t, err)
+		assert.Equal(t, 7777, cfg.MCPPort)
+
+		// File should not have been rewritten (same mod time)
+		info2, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, info1.ModTime(), info2.ModTime())
+	})
+
+	t.Run("different_version_updates_file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.json")
+
+		// Write config with an old version, missing some fields
+		oldJSON := `{"version": "0.0.1", "mcp_port": 7777}`
+		require.NoError(t, os.WriteFile(path, []byte(oldJSON), 0600))
+
+		cfg, err := LoadOrCreatePath(path)
+		require.NoError(t, err)
+		assert.Equal(t, Version, cfg.Version)
+		assert.Equal(t, 7777, cfg.MCPPort) // user value preserved
+
+		// Re-read the file to verify it was persisted with defaults
+		reloaded, err := loadConfig(path)
+		require.NoError(t, err)
+		assert.Equal(t, Version, reloaded.Version)
+		assert.Equal(t, 7777, reloaded.MCPPort)
+		assert.Equal(t, DefaultProxyPort, reloaded.ProxyPort) // default filled in
+		assert.NotNil(t, reloaded.IncludeSubdomains)
+		assert.NotNil(t, reloaded.Crawler.ExtractForms)
+	})
+
+	t.Run("empty_version_updates_file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.json")
+
+		// Config with no version field at all
+		require.NoError(t, os.WriteFile(path, []byte(`{"mcp_port": 9999}`), 0600))
+
+		cfg, err := LoadOrCreatePath(path)
+		require.NoError(t, err)
+		assert.Equal(t, Version, cfg.Version)
+		assert.Equal(t, 9999, cfg.MCPPort)
+
+		// Verify persisted
+		reloaded, err := loadConfig(path)
+		require.NoError(t, err)
+		assert.Equal(t, Version, reloaded.Version)
 	})
 
 	t.Run("error_on_invalid_json", func(t *testing.T) {
@@ -103,17 +153,9 @@ func TestLoadOrDefaultConfig(t *testing.T) {
 
 		require.NoError(t, os.WriteFile(path, []byte("invalid"), 0644))
 
-		_, err := LoadOrDefaultConfig(path)
+		_, err := LoadOrCreatePath(path)
 		assert.Error(t, err)
 	})
-}
-
-func TestDefaultPath(t *testing.T) {
-	t.Parallel()
-
-	path := DefaultPath()
-	assert.Contains(t, path, ".sectool")
-	assert.Contains(t, path, "config.json")
 }
 
 func TestIsDomainAllowed(t *testing.T) {

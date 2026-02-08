@@ -35,25 +35,25 @@ func DefaultPath() string {
 
 type Config struct {
 	Version           string        `json:"version"`
-	MCPPort           int           `json:"mcp_port,omitempty"`
-	ProxyPort         int           `json:"proxy_port,omitempty"`
-	BurpRequired      *bool         `json:"burp_required,omitempty"`
-	MaxBodyBytes      int           `json:"max_body_bytes,omitempty"` // limits request/response body sizes
-	IncludeSubdomains *bool         `json:"include_subdomains,omitempty"`
-	AllowedDomains    []string      `json:"allowed_domains,omitempty"`
-	ExcludeDomains    []string      `json:"exclude_domains,omitempty"`
-	Crawler           CrawlerConfig `json:"crawler,omitempty"`
+	MCPPort           int           `json:"mcp_port"`
+	ProxyPort         int           `json:"proxy_port"`
+	BurpRequired      *bool         `json:"burp_required"`
+	MaxBodyBytes      int           `json:"max_body_bytes"` // limits request/response body sizes
+	IncludeSubdomains *bool         `json:"include_subdomains"`
+	AllowedDomains    []string      `json:"allowed_domains"`
+	ExcludeDomains    []string      `json:"exclude_domains"`
+	Crawler           CrawlerConfig `json:"crawler"`
 }
 
 type CrawlerConfig struct {
-	DisallowedPaths []string `json:"disallowed_paths,omitempty"`
-	DelayMS         int      `json:"delay_ms,omitempty"`
-	Parallelism     int      `json:"parallelism,omitempty"`
-	MaxDepth        int      `json:"max_depth,omitempty"`
-	MaxRequests     int      `json:"max_requests,omitempty"`
-	ExtractForms    *bool    `json:"extract_forms,omitempty"`
-	SubmitForms     *bool    `json:"submit_forms,omitempty"`
-	Recon           *bool    `json:"recon,omitempty"`
+	DisallowedPaths []string `json:"disallowed_paths"`
+	DelayMS         int      `json:"delay_ms"`
+	Parallelism     int      `json:"parallelism"`
+	MaxDepth        int      `json:"max_depth"`
+	MaxRequests     int      `json:"max_requests"`
+	ExtractForms    *bool    `json:"extract_forms"`
+	SubmitForms     *bool    `json:"submit_forms"`
+	Recon           *bool    `json:"recon"`
 }
 
 // DefaultConfig returns a Config with default values.
@@ -67,6 +67,8 @@ func DefaultConfig() *Config {
 		BurpRequired:      &f,
 		MaxBodyBytes:      10485760, // 10MB
 		IncludeSubdomains: &t,
+		AllowedDomains:    []string{},
+		ExcludeDomains:    []string{},
 		Crawler: CrawlerConfig{
 			DisallowedPaths: []string{
 				"*logout*",
@@ -86,31 +88,25 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load reads config from path. Returns os.ErrNotExist if file is missing.
-func Load(path string) (*Config, error) {
+// loadConfig reads config from path. Returns os.ErrNotExist if file is missing.
+func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
 
-	// Apply defaults for missing fields
-	if cfg.Version == "" {
-		cfg.Version = Version
-	}
+	// Apply defaults for zero values
+	defaults := DefaultConfig()
 	if cfg.MCPPort == 0 {
 		cfg.MCPPort = DefaultMCPPort
 	}
 	if cfg.ProxyPort == 0 {
 		cfg.ProxyPort = DefaultProxyPort
 	}
-
-	// Apply defaults for zero values
-	defaults := DefaultConfig()
 	if cfg.BurpRequired == nil {
 		cfg.BurpRequired = defaults.BurpRequired
 	}
@@ -148,25 +144,11 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func LoadOrDefaultConfig(path string) (*Config, error) {
-	cfg, err := Load(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return DefaultConfig(), nil
-		}
-		return nil, fmt.Errorf("failed to load config: %w", err)
-	}
-
-	return cfg, nil
-}
-
 // Save writes config to path, creating parent directory if needed.
 func (c *Config) Save(path string) error {
 	if c == nil {
 		return errors.New("config is nil")
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	} else if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
 
@@ -174,18 +156,15 @@ func (c *Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-
 	return os.WriteFile(path, data, 0600)
 }
 
-// LoadOrCreate loads config from default path, creating with defaults if missing.
-func LoadOrCreate() (*Config, error) {
-	return LoadOrCreatePath(DefaultPath())
-}
-
 // LoadOrCreatePath loads config from path, creating with defaults if missing.
+// When the on-disk version differs from the running binary version, any
+// missing fields are filled from defaults and the file is re-saved so that
+// new configuration options are persisted for future runs.
 func LoadOrCreatePath(path string) (*Config, error) {
-	cfg, err := Load(path)
+	cfg, err := loadConfig(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			cfg = DefaultConfig()
@@ -196,6 +175,16 @@ func LoadOrCreatePath(path string) (*Config, error) {
 		}
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+
+	// loadConfig already applied defaults for missing fields in-memory
+	// Persist them when the version changed so new options are on disk
+	if cfg.Version != Version {
+		cfg.Version = Version
+		if err := cfg.Save(path); err != nil {
+			return nil, fmt.Errorf("update config: %w", err)
+		}
+	}
+
 	return cfg, nil
 }
 

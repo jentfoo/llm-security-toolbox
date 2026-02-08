@@ -160,7 +160,7 @@ func getMCPURL(flags globalFlags) (string, error) {
 		configPath = config.DefaultPath()
 	}
 
-	cfg, err := config.LoadOrDefaultConfig(configPath)
+	cfg, err := config.LoadOrCreatePath(configPath)
 	if err != nil {
 		return "", fmt.Errorf("load config: %w", err)
 	}
