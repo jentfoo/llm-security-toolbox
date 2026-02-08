@@ -12,8 +12,7 @@ import (
 func TestLoadSaveRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(t.TempDir(), "config.json")
 
 	original := &Config{
 		Version: Version,
@@ -43,8 +42,7 @@ func TestLoadNotExist(t *testing.T) {
 func TestLoadAppliesDefaults(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(t.TempDir(), "config.json")
 
 	// Write minimal config (missing optional fields)
 	const minimalJSON = `{"version": "0.1.0"}`
@@ -59,8 +57,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 func TestLoadInvalidJSON(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(t.TempDir(), "config.json")
 
 	err := os.WriteFile(path, []byte("not json"), 0644)
 	require.NoError(t, err)
@@ -73,8 +70,7 @@ func TestLoadOrCreatePath(t *testing.T) {
 	t.Parallel()
 
 	t.Run("creates_new_file", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "config.json")
+		path := filepath.Join(t.TempDir(), "config.json")
 
 		cfg, err := LoadOrCreatePath(path)
 		require.NoError(t, err)
@@ -87,8 +83,7 @@ func TestLoadOrCreatePath(t *testing.T) {
 	})
 
 	t.Run("same_version_no_rewrite", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "config.json")
+		path := filepath.Join(t.TempDir(), "config.json")
 
 		// Write config with current version but custom port
 		original := &Config{Version: Version, MCPPort: 7777}
@@ -107,8 +102,7 @@ func TestLoadOrCreatePath(t *testing.T) {
 	})
 
 	t.Run("different_version_updates_file", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "config.json")
+		path := filepath.Join(t.TempDir(), "config.json")
 
 		// Write config with an old version, missing some fields
 		oldJSON := `{"version": "0.0.1", "mcp_port": 7777}`
@@ -130,8 +124,7 @@ func TestLoadOrCreatePath(t *testing.T) {
 	})
 
 	t.Run("empty_version_updates_file", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "config.json")
+		path := filepath.Join(t.TempDir(), "config.json")
 
 		// Config with no version field at all
 		require.NoError(t, os.WriteFile(path, []byte(`{"mcp_port": 9999}`), 0600))
@@ -148,13 +141,38 @@ func TestLoadOrCreatePath(t *testing.T) {
 	})
 
 	t.Run("error_on_invalid_json", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "config.json")
+		path := filepath.Join(t.TempDir(), "config.json")
 
 		require.NoError(t, os.WriteFile(path, []byte("invalid"), 0644))
 
 		_, err := LoadOrCreatePath(path)
 		assert.Error(t, err)
+	})
+}
+
+func TestLoadInteractshServerURL(t *testing.T) {
+	t.Parallel()
+
+	t.Run("present", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+
+		cfgJSON := `{"interactsh_server_url": "oast.internal.com"}`
+		require.NoError(t, os.WriteFile(path, []byte(cfgJSON), 0644))
+
+		cfg, err := loadConfig(path)
+		require.NoError(t, err)
+		assert.Equal(t, "oast.internal.com", cfg.InteractshServerURL)
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+
+		cfgJSON := `{"mcp_port": 9119}`
+		require.NoError(t, os.WriteFile(path, []byte(cfgJSON), 0644))
+
+		cfg, err := loadConfig(path)
+		require.NoError(t, err)
+		assert.Empty(t, cfg.InteractshServerURL)
 	})
 }
 

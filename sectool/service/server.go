@@ -168,7 +168,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Setup OAST backend
 	if s.oastBackend == nil {
-		s.oastBackend = NewInteractshBackend()
+		s.oastBackend = NewInteractshBackend(s.cfg.InteractshServerURL)
 	}
 
 	// Setup Crawler backend

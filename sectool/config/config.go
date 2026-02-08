@@ -34,15 +34,16 @@ func DefaultPath() string {
 }
 
 type Config struct {
-	Version           string        `json:"version"`
-	MCPPort           int           `json:"mcp_port"`
-	ProxyPort         int           `json:"proxy_port"`
-	BurpRequired      *bool         `json:"burp_required"`
-	MaxBodyBytes      int           `json:"max_body_bytes"` // limits request/response body sizes
-	IncludeSubdomains *bool         `json:"include_subdomains"`
-	AllowedDomains    []string      `json:"allowed_domains"`
-	ExcludeDomains    []string      `json:"exclude_domains"`
-	Crawler           CrawlerConfig `json:"crawler"`
+	Version             string        `json:"version"`
+	MCPPort             int           `json:"mcp_port"`
+	ProxyPort           int           `json:"proxy_port"`
+	BurpRequired        *bool         `json:"burp_required"`
+	MaxBodyBytes        int           `json:"max_body_bytes"` // limits request/response body sizes
+	IncludeSubdomains   *bool         `json:"include_subdomains"`
+	AllowedDomains      []string      `json:"allowed_domains"`
+	ExcludeDomains      []string      `json:"exclude_domains"`
+	InteractshServerURL string        `json:"interactsh_server_url"` // empty = use default public servers
+	Crawler             CrawlerConfig `json:"crawler"`
 }
 
 type CrawlerConfig struct {

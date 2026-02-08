@@ -24,11 +24,12 @@ const (
 
 // InteractshBackend implements OastBackend using Interactsh.
 type InteractshBackend struct {
-	mu       sync.RWMutex
-	sessions map[string]*oastSession // by domain (canonical key)
-	byID     map[string]string       // short ID -> domain
-	byLabel  map[string]string       // label -> domain (only non-empty labels)
-	closed   bool
+	serverURL string // custom server URL, empty = use defaults
+	mu        sync.RWMutex
+	sessions  map[string]*oastSession // by domain (canonical key)
+	byID      map[string]string       // short ID -> domain
+	byLabel   map[string]string       // label -> domain (only non-empty labels)
+	closed    bool
 }
 
 // Compile-time check that InteractshBackend implements OastBackend
@@ -50,11 +51,12 @@ type oastSession struct {
 }
 
 // NewInteractshBackend creates a new Interactsh-backed OastBackend.
-func NewInteractshBackend() *InteractshBackend {
+func NewInteractshBackend(serverURL string) *InteractshBackend {
 	return &InteractshBackend{
-		sessions: make(map[string]*oastSession),
-		byID:     make(map[string]string),
-		byLabel:  make(map[string]string),
+		serverURL: serverURL,
+		sessions:  make(map[string]*oastSession),
+		byID:      make(map[string]string),
+		byLabel:   make(map[string]string),
 	}
 }
 
@@ -75,7 +77,11 @@ func (b *InteractshBackend) CreateSession(ctx context.Context, label string) (*O
 	}
 	b.mu.Unlock()
 
-	c, err := oobclient.New(ctx, nil)
+	var opts oobclient.Options
+	if b.serverURL != "" {
+		opts.ServerURLs = []string{b.serverURL}
+	}
+	c, err := oobclient.New(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create interactsh client: %w", err)
 	}

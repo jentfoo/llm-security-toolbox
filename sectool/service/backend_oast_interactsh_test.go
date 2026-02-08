@@ -15,7 +15,7 @@ func TestInteractshBackend_CreateAndClose(t *testing.T) {
 	}
 	t.Parallel()
 
-	backend := NewInteractshBackend()
+	backend := NewInteractshBackend("")
 	t.Cleanup(func() { _ = backend.Close() })
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -48,7 +48,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	t.Parallel()
 
 	t.Run("nonexistent", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		_, err := backend.PollSession(t.Context(), "nonexistent", "", "", 0, 0)
@@ -62,7 +62,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 		}
 		t.Parallel()
 
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -82,7 +82,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	})
 
 	t.Run("since_last", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        "test123",
@@ -120,7 +120,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	})
 
 	t.Run("since_id", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        "test456",
@@ -158,7 +158,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	})
 
 	t.Run("buffer_limit", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        "testlimit",
@@ -194,7 +194,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 
 	// Helper to create a backend with a mock session
 	setupBackend := func(id, domain string) (*InteractshBackend, *oastSession, func()) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        id,
@@ -333,7 +333,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 func TestInteractshBackend_CloseWhileClosed(t *testing.T) {
 	t.Parallel()
 
-	backend := NewInteractshBackend()
+	backend := NewInteractshBackend("")
 
 	// Close once
 	err := backend.Close()
@@ -347,7 +347,7 @@ func TestInteractshBackend_CloseWhileClosed(t *testing.T) {
 func TestInteractshBackend_CreateAfterClose(t *testing.T) {
 	t.Parallel()
 
-	backend := NewInteractshBackend()
+	backend := NewInteractshBackend("")
 	require.NoError(t, backend.Close())
 
 	_, err := backend.CreateSession(t.Context(), "")
@@ -588,7 +588,7 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 	t.Parallel()
 
 	t.Run("session_not_found", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		_, err := backend.GetEvent(t.Context(), "nonexistent", "event1")
@@ -597,7 +597,7 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 	})
 
 	t.Run("event_not_found", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		sess := &oastSession{
@@ -620,7 +620,7 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 	})
 
 	t.Run("returns_event_by_id", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		eventTime := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
@@ -657,7 +657,7 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 	})
 
 	t.Run("by_domain", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		sess := &oastSession{
@@ -680,7 +680,7 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 	})
 
 	t.Run("stopped_session_returns_error", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		notify := make(chan struct{})
@@ -706,11 +706,25 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 	})
 }
 
+func TestNewInteractshBackend(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_server_url", func(t *testing.T) {
+		backend := NewInteractshBackend("")
+		assert.Empty(t, backend.serverURL)
+	})
+
+	t.Run("custom_server_url", func(t *testing.T) {
+		backend := NewInteractshBackend("oast.internal.example.com")
+		assert.Equal(t, "oast.internal.example.com", backend.serverURL)
+	})
+}
+
 func TestInteractshBackend_DeleteSession(t *testing.T) {
 	t.Parallel()
 
 	t.Run("second_delete_returns_not_found", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		sess := &oastSession{
@@ -733,7 +747,7 @@ func TestInteractshBackend_DeleteSession(t *testing.T) {
 	})
 
 	t.Run("delete_by_domain", func(t *testing.T) {
-		backend := NewInteractshBackend()
+		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		sess := &oastSession{
