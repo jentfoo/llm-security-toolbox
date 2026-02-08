@@ -130,6 +130,8 @@ func (s *ProxyServer) WaitReady(ctx context.Context) error {
 
 // Serve starts accepting connections. Blocks until shutdown.
 func (s *ProxyServer) Serve() error {
+	s.wg.Add(1) // keep counter > 0 so inner wg.Add is safe vs wg.Wait
+	defer s.wg.Done()
 	s.running.Store(true)
 	for {
 		conn, err := s.listener.Accept()

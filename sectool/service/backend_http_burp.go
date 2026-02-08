@@ -24,10 +24,16 @@ type BurpBackend struct {
 // Compile-time check that BurpBackend implements HttpBackend
 var _ HttpBackend = (*BurpBackend)(nil)
 
-// NewBurpBackend creates a new Burp HttpBackend with the given MCP URL.
-func NewBurpBackend(url string, opts ...mcp.Option) *BurpBackend {
+// ConnectBurpBackend creates a new Burp HttpBackend with the given MCP URL.
+func ConnectBurpBackend(ctx context.Context, url string, opts ...mcp.Option) (*BurpBackend, error) {
+	backend := NewBurpBackend(mcp.New(url, opts...))
+	return backend, backend.Connect(ctx)
+}
+
+// NewBurpBackend creates a new Burp HttpBackend with the given MCP client.
+func NewBurpBackend(client *mcp.BurpClient) *BurpBackend {
 	return &BurpBackend{
-		client: mcp.New(url, opts...),
+		client: client,
 	}
 }
 

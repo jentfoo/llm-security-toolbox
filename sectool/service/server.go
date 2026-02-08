@@ -337,12 +337,9 @@ func (s *Server) connectBurpMCP(ctx context.Context) error {
 		burpURL = config.DefaultBurpMCPURL
 	}
 
-	burpBackend := NewBurpBackend(burpURL)
-	if err := burpBackend.Connect(ctx); err != nil {
-		return err
-	}
-	s.httpBackend = burpBackend
-	return nil
+	var err error
+	s.httpBackend, err = ConnectBurpBackend(ctx, burpURL)
+	return err
 }
 
 // startBuiltinProxy starts the native built-in proxy.

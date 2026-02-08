@@ -233,7 +233,6 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 			done <- pollResult{result, err}
 		}()
 
-		time.Sleep(50 * time.Millisecond)
 		cancel()
 
 		select {
@@ -260,7 +259,6 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 			done <- pollResult{result, err}
 		}()
 
-		time.Sleep(20 * time.Millisecond)
 		sess.mu.Lock()
 		sess.events = append(sess.events, OastEventInfo{
 			ID:   "new_event",

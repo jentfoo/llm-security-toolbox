@@ -2,7 +2,6 @@ package service
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,17 +12,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/proxy"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/go-appsec/llm-security-toolbox/sectool/service/proxy"
+	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/llm-security-toolbox/sectool/service/testutil"
 )
 
 func TestNativeProxyBackend_CreateAndServe(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 
 	go func() { _ = backend.Serve() }()
@@ -45,8 +45,7 @@ func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	// Start native proxy backend
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	go func() { _ = backend.Serve() }()
 	t.Cleanup(func() { _ = backend.Close() })
@@ -64,12 +63,9 @@ func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 
-	// Wait for history to be recorded
-	time.Sleep(100 * time.Millisecond)
+	testutil.WaitForCount(t, func() int { return backend.server.History().Count() }, 1)
 
-	// Get history
-	ctx := context.Background()
-	entries, err := backend.GetProxyHistory(ctx, 10, 0)
+	entries, err := backend.GetProxyHistory(t.Context(), 10, 0)
 	require.NoError(t, err)
 
 	assert.Len(t, entries, 1)
@@ -89,8 +85,7 @@ func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	// Start native proxy backend
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	go func() { _ = backend.Serve() }()
 	t.Cleanup(func() { _ = backend.Close() })
@@ -108,12 +103,9 @@ func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 
-	// Wait for history to be recorded
-	time.Sleep(100 * time.Millisecond)
+	testutil.WaitForCount(t, func() int { return backend.server.History().Count() }, 1)
 
-	// Get metadata
-	ctx := context.Background()
-	metas, err := backend.GetProxyHistoryMeta(ctx, 10, 0)
+	metas, err := backend.GetProxyHistoryMeta(t.Context(), 10, 0)
 	require.NoError(t, err)
 
 	assert.Len(t, metas, 1)
@@ -127,16 +119,13 @@ func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
 func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
-	ctx := context.Background()
-
 	// Add rule
-	isRegex := false
-	rule, err := backend.AddRule(ctx, ProxyRuleInput{
+	var isRegex bool
+	rule, err := backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "test-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -149,12 +138,12 @@ func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
 	assert.Equal(t, "old-value", rule.Match)
 
 	// List rules
-	rules, err := backend.ListRules(ctx, false)
+	rules, err := backend.ListRules(t.Context(), false)
 	require.NoError(t, err)
 	assert.Len(t, rules, 1)
 
 	// Update rule
-	updated, err := backend.UpdateRule(ctx, "test-rule", ProxyRuleInput{
+	updated, err := backend.UpdateRule(t.Context(), "test-rule", ProxyRuleInput{
 		Label:   "test-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -165,11 +154,11 @@ func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
 	assert.Equal(t, "updated-value", updated.Match)
 
 	// Delete rule
-	err = backend.DeleteRule(ctx, "test-rule")
+	err = backend.DeleteRule(t.Context(), "test-rule")
 	require.NoError(t, err)
 
 	// Verify deleted
-	rules, err = backend.ListRules(ctx, false)
+	rules, err = backend.ListRules(t.Context(), false)
 	require.NoError(t, err)
 	assert.Empty(t, rules)
 }
@@ -177,18 +166,15 @@ func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
 func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
 	ruleStorage := store.NewMemStorage()
-
-	ctx := context.Background()
 	isRegex := false
 	isRegexTrue := true
 
 	// Create backend and add rules
-	backend1, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), ruleStorage)
+	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), ruleStorage)
 	require.NoError(t, err)
 
-	_, err = backend1.AddRule(ctx, ProxyRuleInput{
+	_, err = backend1.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "http-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -197,7 +183,7 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = backend1.AddRule(ctx, ProxyRuleInput{
+	_, err = backend1.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "ws-rule",
 		Type:    "ws:both",
 		IsRegex: &isRegexTrue,
@@ -209,17 +195,17 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 	_ = backend1.Close()
 
 	// Create new backend with same ruleStorage — rules should be loaded
-	backend2, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), ruleStorage)
+	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), ruleStorage)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend2.Close() })
 
-	httpRules, err := backend2.ListRules(ctx, false)
+	httpRules, err := backend2.ListRules(t.Context(), false)
 	require.NoError(t, err)
 	require.Len(t, httpRules, 1)
 	assert.Equal(t, "http-rule", httpRules[0].Label)
 	assert.Equal(t, "old", httpRules[0].Match)
 
-	wsRules, err := backend2.ListRules(ctx, true)
+	wsRules, err := backend2.ListRules(t.Context(), true)
 	require.NoError(t, err)
 	require.Len(t, wsRules, 1)
 	assert.Equal(t, "ws-rule", wsRules[0].Label)
@@ -233,35 +219,33 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 func TestNativeProxyBackend_Rules_DeletePersists(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
 	ruleStorage := store.NewMemStorage()
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
-	backend1, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), ruleStorage)
+	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), ruleStorage)
 	require.NoError(t, err)
 
-	_, err = backend1.AddRule(ctx, ProxyRuleInput{
+	_, err = backend1.AddRule(t.Context(), ProxyRuleInput{
 		Label: "to-delete", Type: RuleTypeRequestHeader,
 		IsRegex: &isRegex, Match: "a", Replace: "b",
 	})
 	require.NoError(t, err)
-	_, err = backend1.AddRule(ctx, ProxyRuleInput{
+	_, err = backend1.AddRule(t.Context(), ProxyRuleInput{
 		Label: "to-keep", Type: RuleTypeRequestBody,
 		IsRegex: &isRegex, Match: "c", Replace: "d",
 	})
 	require.NoError(t, err)
 
-	err = backend1.DeleteRule(ctx, "to-delete")
+	err = backend1.DeleteRule(t.Context(), "to-delete")
 	require.NoError(t, err)
 	_ = backend1.Close()
 
 	// New backend should only see the surviving rule
-	backend2, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), ruleStorage)
+	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), ruleStorage)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend2.Close() })
 
-	rules, err := backend2.ListRules(ctx, false)
+	rules, err := backend2.ListRules(t.Context(), false)
 	require.NoError(t, err)
 	require.Len(t, rules, 1)
 	assert.Equal(t, "to-keep", rules[0].Label)
@@ -270,16 +254,13 @@ func TestNativeProxyBackend_Rules_DeletePersists(t *testing.T) {
 func TestNativeProxyBackend_Rules_LabelUniqueness(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add first rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "unique-label",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -289,7 +270,7 @@ func TestNativeProxyBackend_Rules_LabelUniqueness(t *testing.T) {
 	require.NoError(t, err)
 
 	// Try to add duplicate label
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "unique-label",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -303,15 +284,12 @@ func TestNativeProxyBackend_Rules_LabelUniqueness(t *testing.T) {
 func TestNativeProxyBackend_Rules_InvalidType(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
+	var isRegex bool
 
-	ctx := context.Background()
-	isRegex := false
-
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Type:    "invalid_type",
 		IsRegex: &isRegex,
 		Match:   "a",
@@ -324,16 +302,13 @@ func TestNativeProxyBackend_Rules_InvalidType(t *testing.T) {
 func TestNativeProxyBackend_Rules_Regex(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
 	isRegex := true
 
 	// Valid regex
-	rule, err := backend.AddRule(ctx, ProxyRuleInput{
+	rule, err := backend.AddRule(t.Context(), ProxyRuleInput{
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
 		Match:   `\d+`,
@@ -343,7 +318,7 @@ func TestNativeProxyBackend_Rules_Regex(t *testing.T) {
 	assert.True(t, rule.IsRegex)
 
 	// Invalid regex
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
 		Match:   `[invalid`,
@@ -369,16 +344,13 @@ func TestNativeProxyBackend_SendRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create backend (doesn't need to serve for SendRequest)
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
-	ctx := context.Background()
-
 	// Send request directly (not through proxy)
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
-	result, err := backend.SendRequest(ctx, "test", SendRequestInput{
+	result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
 		RawRequest: rawReq,
 		Target: Target{
 			Hostname:  serverURL.Hostname(),
@@ -394,20 +366,16 @@ func TestNativeProxyBackend_SendRequest(t *testing.T) {
 	assert.Equal(t, "Hello from server", string(result.Body))
 
 	// Verify Headers does NOT contain the body (regression test)
-	assert.NotContains(t, string(result.Headers), "Hello from server",
-		"Headers field should not contain response body")
+	assert.NotContains(t, string(result.Headers), "Hello from server")
 	// Headers should end with header terminator
-	assert.True(t, bytes.HasSuffix(result.Headers, []byte("\r\n\r\n")),
-		"Headers should end with CRLF CRLF")
+	assert.True(t, bytes.HasSuffix(result.Headers, []byte("\r\n\r\n")))
 }
 
 func TestNativeProxyBackend_Close(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
-
 	go func() { _ = backend.Serve() }()
 	require.NoError(t, backend.WaitReady(t.Context()))
 
@@ -418,18 +386,6 @@ func TestNativeProxyBackend_Close(t *testing.T) {
 	// Double close should be safe
 	err = backend.Close()
 	require.NoError(t, err)
-}
-
-func TestNativeProxyBackend_ImplementsHttpBackend(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Compile-time check is in the source file, but we verify here too
-	var _ HttpBackend = backend
 }
 
 func TestNativeProxyBackend_HTTPS_Proxy(t *testing.T) {
@@ -444,8 +400,7 @@ func TestNativeProxyBackend_HTTPS_Proxy(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	// Start native proxy backend
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	go func() { _ = backend.Serve() }()
 	t.Cleanup(func() { _ = backend.Close() })
@@ -493,16 +448,13 @@ func mustParsePort(t *testing.T, portStr string) int {
 func TestApplyRequestRules_header_literal(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add header rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "header-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -531,16 +483,13 @@ func TestApplyRequestRules_header_literal(t *testing.T) {
 func TestApplyRequestRules_header_regex(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
 	isRegex := true
 
 	// Add regex header rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "regex-header-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -567,16 +516,13 @@ func TestApplyRequestRules_header_regex(t *testing.T) {
 func TestApplyRequestRules_body_literal(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add body rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: &isRegex,
@@ -606,16 +552,13 @@ func TestApplyRequestRules_body_literal(t *testing.T) {
 func TestApplyRequestRules_no_matching_rules(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add rule that won't match
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "no-match-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -642,16 +585,13 @@ func TestApplyRequestRules_no_matching_rules(t *testing.T) {
 func TestApplyResponseRules_header_literal(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add response header rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "resp-header-rule",
 		Type:    RuleTypeResponseHeader,
 		IsRegex: &isRegex,
@@ -678,16 +618,13 @@ func TestApplyResponseRules_header_literal(t *testing.T) {
 func TestApplyResponseRules_body_literal(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add response body rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "resp-body-rule",
 		Type:    RuleTypeResponseBody,
 		IsRegex: &isRegex,
@@ -716,16 +653,13 @@ func TestApplyResponseRules_body_literal(t *testing.T) {
 func TestApplyResponseRules_compressed_body(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add response body rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "compressed-body-rule",
 		Type:    RuleTypeResponseBody,
 		IsRegex: &isRegex,
@@ -761,16 +695,13 @@ func TestApplyResponseRules_compressed_body(t *testing.T) {
 func TestApplyResponseRules_unsupported_encoding_skips_rules(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add response body rule that would corrupt brotli if applied
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "body-rule",
 		Type:    RuleTypeResponseBody,
 		IsRegex: &isRegex,
@@ -806,16 +737,13 @@ func TestApplyResponseRules_unsupported_encoding_skips_rules(t *testing.T) {
 func TestApplyResponseRules_multiple_encoding_skips_rules(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add response body rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "body-rule",
 		Type:    RuleTypeResponseBody,
 		IsRegex: &isRegex,
@@ -849,16 +777,13 @@ func TestApplyResponseRules_multiple_encoding_skips_rules(t *testing.T) {
 func TestApplyWSRules_to_server(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add WebSocket rule for to-server direction
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "ws-to-server-rule",
 		Type:    "ws:to-server",
 		IsRegex: &isRegex,
@@ -881,16 +806,13 @@ func TestApplyWSRules_to_server(t *testing.T) {
 func TestApplyWSRules_to_client(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add WebSocket rule for to-client direction
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "ws-to-client-rule",
 		Type:    "ws:to-client",
 		IsRegex: &isRegex,
@@ -913,16 +835,13 @@ func TestApplyWSRules_to_client(t *testing.T) {
 func TestApplyWSRules_both_directions(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add WebSocket rule for both directions
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "ws-both-rule",
 		Type:    "ws:both",
 		IsRegex: &isRegex,
@@ -944,16 +863,13 @@ func TestApplyWSRules_both_directions(t *testing.T) {
 func TestApplyWSRules_regex(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
 	isRegex := true
 
 	// Add regex WebSocket rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "ws-regex-rule",
 		Type:    "ws:both",
 		IsRegex: &isRegex,
@@ -1077,8 +993,7 @@ func TestParseHeadersFromText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parseHeadersFromText([]byte(tt.input))
-			assert.Equal(t, tt.want, result)
+			assert.Equal(t, tt.want, parseHeadersFromText([]byte(tt.input)))
 		})
 	}
 }
@@ -1086,16 +1001,13 @@ func TestParseHeadersFromText(t *testing.T) {
 func TestApplyRequestRules_multiple_rules(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add multiple rules - they should apply in order
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "rule1",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -1104,7 +1016,7 @@ func TestApplyRequestRules_multiple_rules(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "rule2",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
@@ -1131,16 +1043,13 @@ func TestApplyRequestRules_multiple_rules(t *testing.T) {
 func TestApplyRequestRules_empty_body(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add body rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: &isRegex,
@@ -1168,16 +1077,13 @@ func TestApplyRequestRules_empty_body(t *testing.T) {
 func TestApplyRequestRules_compressed_body(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add body rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: &isRegex,
@@ -1215,16 +1121,13 @@ func TestApplyRequestRules_compressed_body(t *testing.T) {
 func TestApplyRequestBodyOnlyRules_compression(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add body rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: &isRegex,
@@ -1254,16 +1157,13 @@ func TestApplyRequestBodyOnlyRules_compression(t *testing.T) {
 func TestApplyRequestBodyOnlyRules_unsupported_encoding(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add body rule that would corrupt brotli if applied
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: &isRegex,
@@ -1291,16 +1191,13 @@ func TestApplyRequestBodyOnlyRules_unsupported_encoding(t *testing.T) {
 func TestApplyRequestBodyOnlyRules_no_encoding(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	backend, err := NewNativeProxyBackend(0, tempDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
-
-	ctx := context.Background()
-	isRegex := false
+	var isRegex bool
 
 	// Add body rule
-	_, err = backend.AddRule(ctx, ProxyRuleInput{
+	_, err = backend.AddRule(t.Context(), ProxyRuleInput{
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: &isRegex,

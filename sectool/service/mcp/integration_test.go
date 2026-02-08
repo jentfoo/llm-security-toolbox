@@ -18,9 +18,9 @@ import (
 //
 // Skip automatically if Burp is not available or if running with -short flag.
 
+// connectOrSkip connects to Burp MCP and skips if unavailable.
 func connectOrSkip(t *testing.T) *BurpClient {
 	t.Helper()
-
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -491,8 +491,7 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 		// Get original rules to restore later
 		original, err := client.GetMatchReplaceRules(ctx)
 		require.NoError(t, err)
-		t.Cleanup(func() {
-			// Restore original rules
+		t.Cleanup(func() { // Restore original rules
 			_ = client.SetMatchReplaceRules(context.Background(), original)
 		})
 
@@ -533,9 +532,7 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 
 		original, err := client.GetMatchReplaceRules(ctx)
 		require.NoError(t, err)
-		t.Cleanup(func() {
-			_ = client.SetMatchReplaceRules(context.Background(), original)
-		})
+		t.Cleanup(func() { _ = client.SetMatchReplaceRules(context.Background(), original) })
 
 		// Add a regex rule
 		testRule := MatchReplaceRule{
@@ -573,9 +570,7 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 
 		original, err := client.GetMatchReplaceRules(ctx)
 		require.NoError(t, err)
-		t.Cleanup(func() {
-			_ = client.SetMatchReplaceRules(context.Background(), original)
-		})
+		t.Cleanup(func() { _ = client.SetMatchReplaceRules(context.Background(), original) })
 
 		// Test rule types that Burp MCP actually supports
 		ruleTypes := []string{

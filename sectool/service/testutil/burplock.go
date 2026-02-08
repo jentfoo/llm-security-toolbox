@@ -11,7 +11,6 @@ import (
 
 // AcquireBurpLock acquires an exclusive lock on Burp MCP.
 // The lock is automatically released when the test completes.
-// If the lock cannot be acquired within 60 seconds, the test fails.
 func AcquireBurpLock(t *testing.T) {
 	t.Helper()
 
@@ -22,20 +21,15 @@ func AcquireBurpLock(t *testing.T) {
 		t.Fatalf("failed to open lock file: %v", err)
 	}
 
-	// Try to acquire lock with timeout
 	deadline := time.Now().Add(60 * time.Second)
 	for {
-		err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
+		if err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
 			break
-		}
-
-		if time.Now().After(deadline) {
+		} else if time.Now().After(deadline) {
 			_ = file.Close()
 			t.Fatalf("timeout waiting for Burp MCP lock")
 		}
-
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	t.Cleanup(func() {

@@ -30,6 +30,7 @@ import (
 	"github.com/go-appsec/llm-security-toolbox/sectool/config"
 	"github.com/go-appsec/llm-security-toolbox/sectool/mcpclient"
 	"github.com/go-appsec/llm-security-toolbox/sectool/service"
+	servicemcp "github.com/go-appsec/llm-security-toolbox/sectool/service/mcp"
 	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
 	"github.com/go-appsec/llm-security-toolbox/sectool/service/testutil"
 )
@@ -55,113 +56,93 @@ const (
 
 var httpBackendTypes = []httpBackendType{backendBurp, backendNative}
 
-// setupIntegrationEnv creates the MCP server with the specified backend and returns a connected client.
-// Skips if Burp is unavailable (for burp backend) or if running in short mode.
-func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.Client {
+// createBackend creates and starts the HTTP backend for the given type.
+// Returns the backend and its proxy address. Skips if short mode or Burp unavailable.
+func createBackend(t *testing.T, backendType httpBackendType) (service.HttpBackend, string) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	var httpBackend service.HttpBackend
-	var flags service.MCPServerFlags
-
 	switch backendType {
 	case backendBurp:
-		// Verify Burp connectivity before starting server (also acquires exclusive lock)
-		burpClient := testutil.ConnectBurpSSEOrSkip(t)
-		_ = burpClient.Close()
-
-		flags = service.MCPServerFlags{
-			RequireBurp:  true,
-			BurpMCPURL:   config.DefaultBurpMCPURL,
-			MCPPort:      findAvailablePort(t),
-			WorkflowMode: service.WorkflowModeNone,
-			ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-		}
+		burpClient := connectBurpOrSkip(t)
+		return service.NewBurpBackend(burpClient), config.DefaultBurpProxyAddr
 
 	case backendNative:
-		// Create native backend and seed with test data
-		configDir := t.TempDir()
-		backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage())
+		backend, err := service.NewNativeProxyBackend(0, t.TempDir(), 0, store.NewMemStorage(), store.NewMemStorage())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
-
-		// Start proxy server in background
 		go func() { _ = backend.Serve() }()
 		require.NoError(t, backend.WaitReady(t.Context()))
-
-		seedProxyHistory(t, backend)
-		httpBackend = backend
-
-		flags = service.MCPServerFlags{
-			MCPPort:      findAvailablePort(t),
-			WorkflowMode: service.WorkflowModeNone,
-			ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-		}
+		return backend, backend.Addr()
 	}
 
-	// Start MCP server
-	srv, err := service.NewServer(flags, httpBackend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-
-	// Connect mcpclient
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		_ = client.Close()
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	return client
+	return nil, ""
 }
 
-// seedProxyHistory populates the native backend with test traffic.
-func seedProxyHistory(t *testing.T, backend *service.NativeProxyBackend) {
+// setupIntegrationEnv creates the MCP server with the specified backend, seeds proxy history,
+// and returns a connected client.
+func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.Client {
 	t.Helper()
 
-	// Create a local test server
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "POST":
-			body, _ := io.ReadAll(r.Body)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
-		default:
-			w.Header().Set("X-Test-Header", "test-value")
-			_, _ = io.WriteString(w, "test response")
+	httpBackend, _ := createBackend(t, backendType)
+
+	// seed backend with some dummy requests
+	if nb, ok := httpBackend.(*service.NativeProxyBackend); ok {
+		// Create a local test server
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case "POST":
+				body, _ := io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			default:
+				w.Header().Set("X-Test-Header", "test-value")
+				_, _ = io.WriteString(w, "test response")
+			}
+		}))
+		t.Cleanup(ts.Close)
+
+		// Configure client to use proxy
+		proxyURL, err := url.Parse("http://" + nb.Addr())
+		require.NoError(t, err)
+		client := &http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 		}
-	}))
-	t.Cleanup(ts.Close)
 
-	// Configure client to use proxy
-	proxyURL, err := url.Parse("http://" + backend.Addr())
-	require.NoError(t, err)
-	client := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-	}
+		// Seed with GET requests
+		for i := 0; i < 3; i++ {
+			resp, err := client.Get(ts.URL + fmt.Sprintf("/path%d?param=value%d", i, i))
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+		}
 
-	// Seed with GET requests
-	for i := 0; i < 3; i++ {
-		resp, err := client.Get(ts.URL + fmt.Sprintf("/path%d?param=value%d", i, i))
+		// Seed with POST request
+		resp, err := client.Post(ts.URL+"/post", "application/json", strings.NewReader(`{"test":"data"}`))
 		require.NoError(t, err)
 		_ = resp.Body.Close()
+
+		testutil.WaitForCount(t, func() int {
+			history, _ := nb.GetProxyHistory(t.Context(), 1, 0)
+			return len(history)
+		}, 1)
 	}
 
-	// Seed with POST request
-	resp, err := client.Post(ts.URL+"/post", "application/json", strings.NewReader(`{"test":"data"}`))
-	require.NoError(t, err)
-	_ = resp.Body.Close()
+	return startMCPServerAndClient(t, backendType, httpBackend)
+}
 
-	time.Sleep(20 * time.Millisecond) // Allow async storage
+func connectBurpOrSkip(t *testing.T) *servicemcp.BurpClient {
+	t.Helper()
+
+	testutil.AcquireBurpLock(t)
+
+	client := servicemcp.New(config.DefaultBurpMCPURL)
+	if err := client.Connect(t.Context()); err != nil {
+		t.Skipf("Burp MCP not available at %s: %v", config.DefaultBurpMCPURL, err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return client
 }
 
 // runForAllBackends runs a test function for each backend type.
@@ -180,8 +161,9 @@ type testEnv struct {
 	t           *testing.T
 	backendType httpBackendType
 	mcpClient   *mcpclient.Client
-	proxyAddr   string // proxy to route traffic through
-	targetURL   string // test server URL (unique per test)
+	backend     service.HttpBackend
+	proxyAddr   string
+	targetURL   string
 }
 
 // makeProxyClient returns an HTTP client configured to use the given proxy.
@@ -200,65 +182,18 @@ func runForAllBackendsWithHandler(t *testing.T, handler http.HandlerFunc, testFn
 
 	for _, backendType := range httpBackendTypes {
 		t.Run(string(backendType), func(t *testing.T) {
-			if testing.Short() {
-				t.Skip("skipping integration test in short mode")
-			}
+			httpBackend, proxyAddr := createBackend(t, backendType)
 
-			// Create test server with unique port
 			testServer := httptest.NewServer(handler)
 			t.Cleanup(testServer.Close)
 
-			var proxyAddr string
-			var httpBackend service.HttpBackend
-
-			switch backendType {
-			case backendBurp:
-				testutil.ConnectBurpSSEOrSkip(t)
-				proxyAddr = testutil.GetBurpProxyAddr()
-
-			case backendNative:
-				backend, err := service.NewNativeProxyBackend(0, t.TempDir(), 0, store.NewMemStorage(), store.NewMemStorage())
-				require.NoError(t, err)
-				t.Cleanup(func() { _ = backend.Close() })
-				go func() { _ = backend.Serve() }()
-				require.NoError(t, backend.WaitReady(t.Context()))
-				proxyAddr = backend.Addr()
-				httpBackend = backend
-			}
-
-			// Start MCP server
-			flags := service.MCPServerFlags{
-				MCPPort:      findAvailablePort(t),
-				WorkflowMode: service.WorkflowModeNone,
-				ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-			}
-			if backendType == backendBurp {
-				flags.RequireBurp = true
-				flags.BurpMCPURL = config.DefaultBurpMCPURL
-			}
-
-			srv, err := service.NewServer(flags, httpBackend, nil, nil)
-			require.NoError(t, err)
-
-			serverErr := make(chan error, 1)
-			go func() { serverErr <- srv.Run(t.Context()) }()
-			srv.WaitTillStarted()
-
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			mcpClient, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-			cancel()
-			require.NoError(t, err)
-
-			t.Cleanup(func() {
-				_ = mcpClient.Close()
-				srv.RequestShutdown()
-				<-serverErr
-			})
+			mcpClient := startMCPServerAndClient(t, backendType, httpBackend)
 
 			env := &testEnv{
 				t:           t,
 				backendType: backendType,
 				mcpClient:   mcpClient,
+				backend:     httpBackend,
 				proxyAddr:   proxyAddr,
 				targetURL:   testServer.URL,
 			}
@@ -278,9 +213,40 @@ func findAvailablePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// =============================================================================
-// Proxy Tests
-// =============================================================================
+// startMCPServerAndClient creates an MCP server with the given backend, starts it, and returns a connected client.
+func startMCPServerAndClient(t *testing.T, backendType httpBackendType, httpBackend service.HttpBackend) *mcpclient.Client {
+	t.Helper()
+
+	flags := service.MCPServerFlags{
+		MCPPort:      findAvailablePort(t),
+		WorkflowMode: service.WorkflowModeNone,
+		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
+	}
+	if backendType == backendBurp {
+		flags.RequireBurp = true
+		flags.BurpMCPURL = config.DefaultBurpMCPURL
+	}
+
+	srv, err := service.NewServer(flags, httpBackend, nil, nil)
+	require.NoError(t, err)
+
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- srv.Run(t.Context()) }()
+	srv.WaitTillStarted()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = client.Close()
+		srv.RequestShutdown()
+		<-serverErr
+	})
+
+	return client
+}
 
 func TestIntegration_ProxySummary(t *testing.T) {
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
@@ -445,10 +411,6 @@ func TestIntegration_ProxyGet(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Proxy Rules
-// =============================================================================
-
 func TestIntegration_ProxyRules(t *testing.T) {
 	t.Parallel()
 
@@ -485,9 +447,7 @@ func TestIntegration_ProxyRules(t *testing.T) {
 
 		// Ensure cleanup even if later subtests fail
 		if createdRuleID != "" {
-			t.Cleanup(func() {
-				_ = client.ProxyRuleDelete(context.Background(), createdRuleID)
-			})
+			t.Cleanup(func() { _ = client.ProxyRuleDelete(context.Background(), createdRuleID) })
 		}
 
 		t.Run("list_after_add", func(t *testing.T) {
@@ -546,9 +506,7 @@ func TestIntegration_ProxyRules(t *testing.T) {
 			assert.True(t, rule.IsRegex)
 			assert.Equal(t, "^X-Old:.*$", rule.Match)
 
-			t.Cleanup(func() {
-				_ = client.ProxyRuleDelete(context.Background(), rule.RuleID)
-			})
+			t.Cleanup(func() { _ = client.ProxyRuleDelete(context.Background(), rule.RuleID) })
 		})
 
 		t.Run("delete_rule", func(t *testing.T) {
@@ -573,10 +531,6 @@ func TestIntegration_ProxyRules(t *testing.T) {
 	test(t, client) // run directly so easily composed
 }
 
-// =============================================================================
-// Replay Tests
-// =============================================================================
-
 func TestIntegration_Replay(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Test-Header", "test-value")
@@ -591,7 +545,10 @@ func TestIntegration_Replay(t *testing.T) {
 		resp, err := client.Get(env.targetURL + "/replay-test")
 		require.NoError(t, err)
 		_ = resp.Body.Close()
-		time.Sleep(50 * time.Millisecond) // Allow proxy to record
+		testutil.WaitForCount(t, func() int {
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			return len(history)
+		}, 1)
 
 		// Parse host from target URL to filter flows
 		targetURL, err := url.Parse(env.targetURL)
@@ -703,9 +660,7 @@ func TestIntegration_ReplayWithQueryMods(t *testing.T) {
 }
 
 func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Channel to capture received query params
 	receivedQuery := make(chan url.Values, 1)
@@ -749,31 +704,12 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 		t.Fatal("target server didn't receive initial request")
 	}
 
-	time.Sleep(20 * time.Millisecond) // Allow async storage
+	testutil.WaitForCount(t, func() int {
+		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		return len(history)
+	}, 1)
 
-	// Start MCP server
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	// Connect client
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	client := startMCPServerAndClient(t, backendNative, backend)
 
 	// Get flow ID
 	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
@@ -840,10 +776,6 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Request Send Tests (new requests from scratch)
-// =============================================================================
-
 func TestIntegration_RequestSend(t *testing.T) {
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
@@ -889,11 +821,12 @@ func TestIntegration_RequestSend(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// OAST Tests
-// =============================================================================
-
 func TestIntegration_OAST(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	t.Parallel()
+
 	client := setupIntegrationEnv(t, backendNative) // only native since only one OAST backend
 	testLabel := fmt.Sprintf("integ-test-%d", time.Now().UnixNano())
 	var oastID string
@@ -986,14 +919,8 @@ func TestIntegration_OAST(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// HTTPS Proxy Tests
-// =============================================================================
-
 func TestIntegration_HTTPSProxy(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Create HTTPS test server
 	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1050,30 +977,12 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 		assert.Equal(t, 200, resp.StatusCode)
 	})
 
-	time.Sleep(20 * time.Millisecond) // Wait for history to populate
+	testutil.WaitForCount(t, func() int {
+		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		return len(history)
+	}, 1)
 
-	// Start MCP server with the backend
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	mcpClient, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
+	mcpClient := startMCPServerAndClient(t, backendNative, backend)
 
 	t.Run("https_traffic_captured", func(t *testing.T) {
 		listResp, err := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
@@ -1119,10 +1028,6 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 		assert.Equal(t, 200, replayResp.Status)
 	})
 }
-
-// =============================================================================
-// Rule Application Verification Tests
-// =============================================================================
 
 func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
 	receivedHeaders := make(chan http.Header, 10)
@@ -1340,10 +1245,6 @@ func TestIntegration_RuleResponseBodyVerification(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Replay Modification Tests
-// =============================================================================
-
 func TestIntegration_ReplayBodyReplacement(t *testing.T) {
 	receivedBody := make(chan []byte, 10)
 
@@ -1373,7 +1274,10 @@ func TestIntegration_ReplayBodyReplacement(t *testing.T) {
 			t.Fatal("didn't receive initial request")
 		}
 
-		time.Sleep(20 * time.Millisecond) // Wait for history to populate
+		testutil.WaitForCount(t, func() int {
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			return len(history)
+		}, 1)
 
 		// Get flow ID by filtering on target host
 		targetURL, _ := url.Parse(env.targetURL)
@@ -1596,7 +1500,7 @@ func TestIntegration_ReplayMethodOverride(t *testing.T) {
 }
 
 func TestIntegration_ReplayFollowRedirects(t *testing.T) {
-	redirectCount := 0
+	var redirectCount int
 	var mu sync.Mutex
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1631,7 +1535,10 @@ func TestIntegration_ReplayFollowRedirects(t *testing.T) {
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 
-		time.Sleep(20 * time.Millisecond) // Wait for history to populate
+		testutil.WaitForCount(t, func() int {
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			return len(history)
+		}, 1)
 
 		targetURL, _ := url.Parse(env.targetURL)
 		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
@@ -1674,14 +1581,8 @@ func TestIntegration_ReplayFollowRedirects(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// HTTP/2 Proxy Tests (Native Backend Only)
-// =============================================================================
-
 func TestIntegration_HTTP2Proxy(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Channel to capture POST bodies received by server
 	receivedBody := make(chan []byte, 10)
@@ -1775,29 +1676,12 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 		assert.JSONEq(t, postBody, string(echoedBody))
 	})
 
-	time.Sleep(20 * time.Millisecond)
+	testutil.WaitForCount(t, func() int {
+		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		return len(history)
+	}, 1)
 
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	client := startMCPServerAndClient(t, backendNative, backend)
 
 	t.Run("h2_traffic_captured_in_history", func(t *testing.T) {
 		listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
@@ -1833,9 +1717,7 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 // TestIntegration_HTTP2Rules tests that proxy rules are correctly applied to HTTP/2 traffic.
 // Rules should work on both request and response headers/bodies over H2 connections.
 func TestIntegration_HTTP2Rules(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Channels to capture what server receives
 	receivedHeaders := make(chan http.Header, 10)
@@ -1878,28 +1760,7 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 	go func() { _ = backend.Serve() }()
 	require.NoError(t, backend.WaitReady(t.Context()))
 
-	// Start MCP server for rule management
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	mcpClient, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
+	mcpClient := startMCPServerAndClient(t, backendNative, backend)
 
 	caCertPool := x509.NewCertPool()
 	caCertPool.AddCert(backend.CACert())
@@ -2015,14 +1876,8 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// WebSocket Proxy Tests
-// =============================================================================
-
 func TestIntegration_WebSocketProxy(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Create WebSocket echo server
 	wsMessages := make(chan string, 100)
@@ -2173,7 +2028,10 @@ func TestIntegration_ChunkedEncoding(t *testing.T) {
 			assert.Equal(t, "chunk1-chunk2-chunk3", string(body))
 		})
 
-		time.Sleep(20 * time.Millisecond) // Wait for history to populate
+		testutil.WaitForCount(t, func() int {
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			return len(history)
+		}, 1)
 
 		t.Run("chunked_flow_captured", func(t *testing.T) {
 			targetURL, _ := url.Parse(env.targetURL)
@@ -2193,14 +2051,8 @@ func TestIntegration_ChunkedEncoding(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Edge Case / Malformed Request Tests
-// =============================================================================
-
 func TestIntegration_ForceFlag(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	receivedRequests := make(chan *http.Request, 10)
 
@@ -2232,29 +2084,12 @@ func TestIntegration_ForceFlag(t *testing.T) {
 	_ = resp.Body.Close()
 
 	<-receivedRequests
-	time.Sleep(20 * time.Millisecond)
+	testutil.WaitForCount(t, func() int {
+		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		return len(history)
+	}, 1)
 
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	client := startMCPServerAndClient(t, backendNative, backend)
 
 	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
 		OutputMode: "flows",
@@ -2291,9 +2126,7 @@ func TestIntegration_ForceFlag(t *testing.T) {
 }
 
 func TestIntegration_MalformedRequests(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Use raw TCP server to receive malformed requests without HTTP parsing
 	receivedData := make(chan []byte, 10)
@@ -2358,29 +2191,12 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 
-	time.Sleep(20 * time.Millisecond)
+	testutil.WaitForCount(t, func() int {
+		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		return len(history)
+	}, 1)
 
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	client := startMCPServerAndClient(t, backendNative, backend)
 
 	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
 		OutputMode: "flows",
@@ -2539,9 +2355,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 // TestIntegration_ContentLengthMismatch tests handling of requests where Content-Length
 // doesn't match the actual body size. This is important for security testing scenarios.
 func TestIntegration_ContentLengthMismatch(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Raw TCP server to capture exact bytes received
 	receivedData := make(chan []byte, 10)
@@ -2603,29 +2417,12 @@ func TestIntegration_ContentLengthMismatch(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 
-	time.Sleep(20 * time.Millisecond)
+	testutil.WaitForCount(t, func() int {
+		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		return len(history)
+	}, 1)
 
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	client := startMCPServerAndClient(t, backendNative, backend)
 
 	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
 		OutputMode: "flows",
@@ -2808,9 +2605,7 @@ func TestIntegration_BinaryContent(t *testing.T) {
 }
 
 func TestIntegration_ConnectionErrors(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	configDir := t.TempDir()
 	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage())
@@ -2852,9 +2647,7 @@ func TestIntegration_ConnectionErrors(t *testing.T) {
 }
 
 func TestIntegration_TimeoutHandling(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Create slow server (delay just needs to exceed client timeout of 500ms)
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2886,10 +2679,6 @@ func TestIntegration_TimeoutHandling(t *testing.T) {
 			strings.Contains(err.Error(), "canceled"))
 	})
 }
-
-// =============================================================================
-// WebSocket Helper Functions
-// =============================================================================
 
 func computeWebSocketAcceptKey(key string) string {
 	const magicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2998,10 +2787,6 @@ func encodeWebSocketFrame(payload []byte, opcode byte, masked bool) []byte {
 	return frame
 }
 
-// =============================================================================
-// Additional High Priority Tests
-// =============================================================================
-
 func TestIntegration_ReplayPathModification(t *testing.T) {
 	receivedPath := make(chan string, 10)
 
@@ -3083,9 +2868,7 @@ func TestIntegration_ReplayPathModification(t *testing.T) {
 }
 
 func TestIntegration_WebSocketRules(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Channel to capture messages received by server
 	serverReceived := make(chan string, 100)
@@ -3144,28 +2927,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 	go func() { _ = backend.Serve() }()
 	require.NoError(t, backend.WaitReady(t.Context()))
 
-	// Start MCP server
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	mcpClient, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
+	mcpClient := startMCPServerAndClient(t, backendNative, backend)
 
 	t.Run("ws_to_server_rule_modifies_client_message", func(t *testing.T) {
 		// Add rule to modify client→server messages
@@ -3333,7 +3095,10 @@ func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 
-		time.Sleep(20 * time.Millisecond) // Wait for history to populate
+		testutil.WaitForCount(t, func() int {
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			return len(history)
+		}, 1)
 
 		targetURL, _ := url.Parse(env.targetURL)
 
@@ -3459,7 +3224,10 @@ func TestIntegration_CrossOriginRedirectAuthPreserved(t *testing.T) {
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 
-		time.Sleep(20 * time.Millisecond) // Wait for history to populate
+		testutil.WaitForCount(t, func() int {
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			return len(history)
+		}, 1)
 
 		originURL, _ := url.Parse(env.targetURL)
 		listResp, err := env.mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
@@ -3495,14 +3263,8 @@ func TestIntegration_CrossOriginRedirectAuthPreserved(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Medium Priority Tests
-// =============================================================================
-
 func TestIntegration_SecureWebSocket(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	wsMessages := make(chan string, 100)
 
@@ -3642,9 +3404,7 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 }
 
 func TestIntegration_HTTP2Replay(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	receivedProto := make(chan string, 10)
 	receivedPath := make(chan string, 10)
@@ -3700,29 +3460,12 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 	<-receivedProto
 	<-receivedPath
 
-	time.Sleep(20 * time.Millisecond)
+	testutil.WaitForCount(t, func() int {
+		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		return len(history)
+	}, 1)
 
-	flags := service.MCPServerFlags{
-		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}
-	srv, err := service.NewServer(flags, backend, nil, nil)
-	require.NoError(t, err)
-
-	serverErr := make(chan error, 1)
-	go func() { serverErr <- srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-		<-serverErr
-	})
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	client, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	client := startMCPServerAndClient(t, backendNative, backend)
 
 	listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
 		OutputMode: "flows",
@@ -3794,14 +3537,8 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// WebSocket Binary Frame Tests
-// =============================================================================
-
 func TestIntegration_WebSocketBinaryFrames(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Channel to capture binary messages received by server
 	wsBinaryMessages := make(chan []byte, 100)
@@ -3916,14 +3653,8 @@ func TestIntegration_WebSocketBinaryFrames(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// WebSocket Ping/Pong Tests
-// =============================================================================
-
 func TestIntegration_WebSocketPingPong(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	// Channel to capture ping messages received by server
 	wsPings := make(chan []byte, 100)
@@ -4082,9 +3813,7 @@ func TestIntegration_WebSocketPingPong(t *testing.T) {
 // TestIntegration_CompressedRequestBodyRule tests that proxy rules correctly
 // handle compressed request bodies by decompressing, applying rules, and recompressing.
 func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	t.Parallel()
 
 	receivedBody := make(chan []byte, 10)
 	receivedEncoding := make(chan string, 10)
@@ -4117,29 +3846,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 		testServer := httptest.NewServer(handler)
 		t.Cleanup(testServer.Close)
 
-		// Start MCP server
-		flags := service.MCPServerFlags{
-			MCPPort:      findAvailablePort(t),
-			WorkflowMode: service.WorkflowModeNone,
-			ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-		}
-		srv, err := service.NewServer(flags, backend, nil, nil)
-		require.NoError(t, err)
-
-		serverErr := make(chan error, 1)
-		go func() { serverErr <- srv.Run(t.Context()) }()
-		srv.WaitTillStarted()
-
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		defer cancel()
-		mcpClient, err := mcpclient.New(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", flags.MCPPort))
-		require.NoError(t, err)
-
-		t.Cleanup(func() {
-			_ = mcpClient.Close()
-			srv.RequestShutdown()
-			<-serverErr
-		})
+		mcpClient := startMCPServerAndClient(t, backendNative, backend)
 
 		t.Run("gzip_request_body_rule", func(t *testing.T) {
 			label := "gzip-req-body-test-" + strconv.FormatInt(rand.Int63(), 10)

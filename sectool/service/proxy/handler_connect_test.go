@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/llm-security-toolbox/sectool/service/testutil"
 )
 
 func TestParseConnectRequest(t *testing.T) {
@@ -220,8 +221,7 @@ func TestHandle(t *testing.T) {
 		assert.Equal(t, "success", resp.Header.Get("X-Test-Response"))
 		assert.Equal(t, "Hello from HTTPS server", string(body))
 
-		time.Sleep(100 * time.Millisecond) // TODO - replace with notify
-		assert.GreaterOrEqual(t, proxy.History().Count(), 1)
+		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 
 		entry, ok := proxy.History().Get(0)
 		require.True(t, ok)

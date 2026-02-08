@@ -52,11 +52,10 @@ func TestReplayHistoryStore(t *testing.T) {
 		t.Cleanup(func() { _ = storage.Close() })
 		store := NewReplayHistoryStore(storage)
 
-		store.Store(&ReplayHistoryEntry{FlowID: "first", CreatedAt: time.Now()})
-		time.Sleep(time.Millisecond)
-		store.Store(&ReplayHistoryEntry{FlowID: "second", CreatedAt: time.Now()})
-		time.Sleep(time.Millisecond)
-		store.Store(&ReplayHistoryEntry{FlowID: "third", CreatedAt: time.Now()})
+		baseTime := time.Now()
+		store.Store(&ReplayHistoryEntry{FlowID: "first", CreatedAt: baseTime})
+		store.Store(&ReplayHistoryEntry{FlowID: "second", CreatedAt: baseTime.Add(time.Millisecond)})
+		store.Store(&ReplayHistoryEntry{FlowID: "third", CreatedAt: baseTime.Add(2 * time.Millisecond)})
 
 		list := store.List()
 		require.Len(t, list, 3)
@@ -205,6 +204,7 @@ func TestReplayHistoryListMeta(t *testing.T) {
 		t.Cleanup(func() { _ = storage.Close() })
 		store := NewReplayHistoryStore(storage)
 
+		baseTime := time.Now()
 		store.Store(&ReplayHistoryEntry{
 			FlowID:     "r1",
 			Method:     "POST",
@@ -214,9 +214,8 @@ func TestReplayHistoryListMeta(t *testing.T) {
 			RespStatus: 200,
 			RespBody:   []byte("body-data"),
 			RawRequest: []byte("POST /api HTTP/1.1\r\n\r\n"),
-			CreatedAt:  time.Now(),
+			CreatedAt:  baseTime,
 		})
-		time.Sleep(time.Millisecond)
 		store.Store(&ReplayHistoryEntry{
 			FlowID:       "r2",
 			Method:       "GET",
@@ -225,7 +224,7 @@ func TestReplayHistoryListMeta(t *testing.T) {
 			RespStatus:   404,
 			RespBody:     []byte("not found"),
 			SourceFlowID: "p1",
-			CreatedAt:    time.Now(),
+			CreatedAt:    baseTime.Add(time.Millisecond),
 		})
 
 		metas := store.ListMeta()
@@ -248,9 +247,9 @@ func TestReplayHistoryListMeta(t *testing.T) {
 		t.Cleanup(func() { _ = storage.Close() })
 		store := NewReplayHistoryStore(storage)
 
-		store.Store(&ReplayHistoryEntry{FlowID: "first", CreatedAt: time.Now()})
-		time.Sleep(time.Millisecond)
-		store.Store(&ReplayHistoryEntry{FlowID: "second", CreatedAt: time.Now()})
+		baseTime := time.Now()
+		store.Store(&ReplayHistoryEntry{FlowID: "first", CreatedAt: baseTime})
+		store.Store(&ReplayHistoryEntry{FlowID: "second", CreatedAt: baseTime.Add(time.Millisecond)})
 
 		metas := store.ListMeta()
 		require.Len(t, metas, 2)

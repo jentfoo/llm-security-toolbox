@@ -522,9 +522,8 @@ func TestEnqueueWrite(t *testing.T) {
 		})
 
 		h := newH2Conn(serverConn)
-		ctx := context.Background()
 
-		ok := h.enqueueWrite(ctx, []byte("test"))
+		ok := h.enqueueWrite(t.Context(), []byte("test"))
 		assert.True(t, ok)
 	})
 
@@ -560,9 +559,8 @@ func TestEnqueueWrite(t *testing.T) {
 			h.writeCh <- []byte{}
 		}
 		h.close()
-		ctx := context.Background()
 
-		ok := h.enqueueWrite(ctx, []byte("test"))
+		ok := h.enqueueWrite(t.Context(), []byte("test"))
 		assert.False(t, ok)
 	})
 }

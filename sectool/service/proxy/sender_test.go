@@ -215,7 +215,7 @@ func TestSender_Send(t *testing.T) {
 
 	t.Run("timeout", func(t *testing.T) {
 		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			w.WriteHeader(200)
 		}))
 		t.Cleanup(testServer.Close)
@@ -233,7 +233,7 @@ func TestSender_Send(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: false,
 			},
-			Timeout: 20 * time.Millisecond,
+			Timeout: 10 * time.Millisecond,
 		})
 
 		require.Error(t, err)

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/llm-security-toolbox/sectool/service/testutil"
 )
 
 func TestStreamTracker(t *testing.T) {
@@ -427,7 +428,7 @@ func TestH2ConnEnqueueWrite(t *testing.T) {
 
 		h.close()
 
-		ok := h.enqueueWrite(context.Background(), []byte("test"))
+		ok := h.enqueueWrite(t.Context(), []byte("test"))
 		assert.False(t, ok)
 	})
 
@@ -437,7 +438,7 @@ func TestH2ConnEnqueueWrite(t *testing.T) {
 			closeCh: make(chan struct{}),
 		}
 
-		ok := h.enqueueWrite(context.Background(), []byte("test"))
+		ok := h.enqueueWrite(t.Context(), []byte("test"))
 		assert.True(t, ok)
 
 		data := <-h.writeCh
@@ -567,8 +568,7 @@ func TestHTTP2ProxyEndToEnd(t *testing.T) {
 
 	assert.Equal(t, 2, resp.ProtoMajor)
 
-	time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
-	require.GreaterOrEqual(t, proxy.History().Count(), 1)
+	testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 
 	entry, ok := proxy.History().Get(0)
 	require.True(t, ok)
@@ -651,10 +651,9 @@ func TestH2StreamTimestamps(t *testing.T) {
 	assert.WithinDuration(t, now, stream.startTime, 100*time.Millisecond)
 	assert.WithinDuration(t, now, stream.lastActivity, 100*time.Millisecond)
 
-	// Update last activity
-	time.Sleep(10 * time.Millisecond)
+	// Update last activity slightly in the future
 	stream.mu.Lock()
-	stream.lastActivity = time.Now()
+	stream.lastActivity = stream.startTime.Add(10 * time.Millisecond)
 	stream.mu.Unlock()
 
 	assert.True(t, stream.lastActivity.After(stream.startTime))

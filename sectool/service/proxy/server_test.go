@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/llm-security-toolbox/sectool/service/testutil"
 )
 
 func TestServe(t *testing.T) {
@@ -45,8 +46,7 @@ func TestServe(t *testing.T) {
 		assert.Equal(t, "success", resp.Header.Get("X-Test-Response"))
 		assert.Equal(t, "Hello from server", string(body))
 
-		time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
-		assert.Equal(t, 1, proxy.History().Count())
+		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 
 		entry, ok := proxy.History().Get(0)
 		require.True(t, ok)
@@ -99,8 +99,7 @@ func TestServe(t *testing.T) {
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 
-		time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
-		assert.GreaterOrEqual(t, proxy.History().Count(), 1)
+		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 	})
 
 	t.Run("upstream_connection_refused", func(t *testing.T) {
@@ -140,38 +139,6 @@ func TestServe(t *testing.T) {
 		response := string(buf[:n])
 		assert.Contains(t, response, "200 Connection Established")
 	})
-}
-
-func TestShutdown(t *testing.T) {
-	t.Parallel()
-
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage())
-	require.NoError(t, err)
-
-	go func() { _ = proxy.Serve() }()
-
-	t.Run("graceful_shutdown", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		t.Cleanup(cancel)
-
-		err = proxy.Shutdown(ctx)
-		require.NoError(t, err)
-
-		_, err = net.Dial("tcp", proxy.Addr())
-		assert.Error(t, err)
-	})
-
-	t.Run("double_shutdown_safe", func(t *testing.T) {
-		err = proxy.Shutdown(t.Context())
-		require.NoError(t, err)
-
-		err = proxy.Shutdown(t.Context())
-		assert.NoError(t, err)
-	})
-}
-
-func TestServeEdgeCases(t *testing.T) {
-	t.Parallel()
 
 	t.Run("malformed_request_line", func(t *testing.T) {
 		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage())
@@ -212,7 +179,7 @@ func TestServeEdgeCases(t *testing.T) {
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 
-		time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
+		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 		countBefore := proxy.History().Count()
 
 		_ = proxy.Shutdown(context.Background())
@@ -220,6 +187,34 @@ func TestServeEdgeCases(t *testing.T) {
 		// History should still be accessible
 		countAfter := proxy.History().Count()
 		assert.Equal(t, countBefore, countAfter)
+	})
+}
+
+func TestShutdown(t *testing.T) {
+	t.Parallel()
+
+	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage())
+	require.NoError(t, err)
+
+	go func() { _ = proxy.Serve() }()
+
+	t.Run("graceful_shutdown", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		t.Cleanup(cancel)
+
+		err = proxy.Shutdown(ctx)
+		require.NoError(t, err)
+
+		_, err = net.Dial("tcp", proxy.Addr())
+		assert.Error(t, err)
+	})
+
+	t.Run("double_shutdown_safe", func(t *testing.T) {
+		err = proxy.Shutdown(t.Context())
+		require.NoError(t, err)
+
+		err = proxy.Shutdown(t.Context())
+		assert.NoError(t, err)
 	})
 }
 
@@ -329,9 +324,7 @@ func TestConcurrentConnections(t *testing.T) {
 
 	assert.Empty(t, errors)
 
-	// Wait for history to be recorded
-	time.Sleep(200 * time.Millisecond) // TODO - avoid the sleep with push / notify
-	assert.Equal(t, numRequests, proxy.History().Count())
+	testutil.WaitForCount(t, func() int { return proxy.History().Count() }, numRequests)
 }
 
 func TestProxyServerDifferentPorts(t *testing.T) {
@@ -387,8 +380,7 @@ func TestLargeRequestBody(t *testing.T) {
 	assert.Equal(t, len(largeBody), receivedBodySize)
 
 	// Verify history records the request (body may be truncated based on maxBodyBytes)
-	time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
-	assert.GreaterOrEqual(t, proxy.History().Count(), 1)
+	testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 }
 
 func TestProxyServerRuleApplier(t *testing.T) {
@@ -422,9 +414,9 @@ func TestProxyServerRuleApplier(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	time.Sleep(100 * time.Millisecond) // TODO - avoid the sleep with push / notify
-	assert.True(t, applier.requestCalled.Load(), "ApplyRequestRules should be invoked")
-	assert.True(t, applier.responseCalled.Load(), "ApplyResponseRules should be invoked")
+	testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
+	assert.True(t, applier.requestCalled.Load())
+	assert.True(t, applier.responseCalled.Load())
 }
 
 type trackingRuleApplier struct {
@@ -540,7 +532,7 @@ func TestShutdownForceClose(t *testing.T) {
 
 	// Shutdown with very short timeout - should force-close the connection
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -619,8 +611,7 @@ func TestHTTP11KeepAlive(t *testing.T) {
 		}
 
 		// Wait for history to be recorded
-		time.Sleep(20 * time.Millisecond)
-		assert.Equal(t, 3, proxy.History().Count())
+		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 3)
 
 		// Verify each request was recorded correctly
 		for i := 0; i < 3; i++ {
@@ -690,8 +681,7 @@ func TestHTTP11KeepAlive(t *testing.T) {
 		}
 
 		// Only 1 request should be in history (the second should not have been processed)
-		time.Sleep(20 * time.Millisecond)
-		assert.Equal(t, 1, proxy.History().Count())
+		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 	})
 
 	t.Run("different_hosts_same_connection", func(t *testing.T) {
@@ -755,7 +745,6 @@ func TestHTTP11KeepAlive(t *testing.T) {
 		assert.Contains(t, string(buf[:n]), "server2")
 
 		// Both requests should be in history
-		time.Sleep(100 * time.Millisecond)
-		assert.Equal(t, 2, proxy.History().Count())
+		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 2)
 	})
 }
