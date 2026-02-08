@@ -126,10 +126,8 @@ oast delete <oast_id|label|domain>
 func parseCreate(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast create", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var label, name string
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&label, "label", "", "optional label for easier reference")
 	fs.StringVar(&name, "name", "", "alias for --label")
 
@@ -151,17 +149,16 @@ Options:
 		label = name
 	}
 
-	return create(mcpURL, timeout, label)
+	return create(mcpURL, label)
 }
 
 func parseSummary(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast summary", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout, wait time.Duration
+	var wait time.Duration
 	var since, eventType string
 	var limit int
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&since, "since", "", "filter events since event_id or timestamp")
 	fs.StringVar(&eventType, "type", "", "filter by event type (dns, http, smtp, ftp, ldap, smb, responder)")
 	fs.DurationVar(&wait, "wait", 120*time.Second, "max wait time for events (max 120s)")
@@ -189,17 +186,16 @@ Options:
 		return errors.New("oast_id required (get from 'sectool oast create' or 'sectool oast list')")
 	}
 
-	return summary(mcpURL, timeout, fs.Args()[0], since, eventType, wait, limit)
+	return summary(mcpURL, fs.Args()[0], since, eventType, wait, limit)
 }
 
 func parsePoll(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast poll", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout, wait time.Duration
+	var wait time.Duration
 	var since, eventType string
 	var limit int
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&since, "since", "", "filter events since event_id or timestamp")
 	fs.StringVar(&eventType, "type", "", "filter by event type (dns, http, smtp, ftp, ldap, smb, responder)")
 	fs.DurationVar(&wait, "wait", 120*time.Second, "max wait time for events (max 120s)")
@@ -229,15 +225,12 @@ Options:
 		return errors.New("oast_id required (get from 'sectool oast create' or 'sectool oast list')")
 	}
 
-	return poll(mcpURL, timeout, fs.Args()[0], since, eventType, wait, limit)
+	return poll(mcpURL, fs.Args()[0], since, eventType, wait, limit)
 }
 
 func parseGet(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast get", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool oast get <oast_id> <event_id> [options]
@@ -262,16 +255,14 @@ Options:
 		return errors.New("oast_id and event_id required (get event_id from 'sectool oast poll')")
 	}
 
-	return get(mcpURL, timeout, fs.Args()[0], fs.Args()[1])
+	return get(mcpURL, fs.Args()[0], fs.Args()[1])
 }
 
 func parseList(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast list", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var limit int
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.IntVar(&limit, "limit", 0, "maximum number of sessions to return (most recent first)")
 	fs.IntVar(&limit, "count", 0, "alias for --limit")
 	_ = fs.MarkHidden("count")
@@ -290,15 +281,12 @@ Options:
 		return err
 	}
 
-	return list(mcpURL, timeout, limit)
+	return list(mcpURL, limit)
 }
 
 func parseDelete(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast delete", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool oast delete <oast_id> [options]
@@ -317,5 +305,5 @@ Options:
 		return errors.New("oast_id required (get from 'sectool oast list')")
 	}
 
-	return del(mcpURL, timeout, fs.Args()[0])
+	return del(mcpURL, fs.Args()[0])
 }

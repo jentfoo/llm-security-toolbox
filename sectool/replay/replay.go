@@ -22,10 +22,10 @@ import (
 	"github.com/go-appsec/llm-security-toolbox/sectool/service"
 )
 
-func send(mcpURL string, timeout time.Duration, flow, bundleArg, file, body, target string, headers, removeHeaders []string,
+func send(mcpURL string, flow, bundleArg, file, body, target string, headers, removeHeaders []string,
 	path, query string, setQuery, removeQuery []string,
 	setJSON, removeJSON []string,
-	followRedirects bool, requestTimeout time.Duration, force bool) error {
+	followRedirects bool, force bool) error {
 	if flow == "" && bundleArg == "" && file == "" {
 		return errors.New("one of --flow, --bundle, or --file is required")
 	}
@@ -70,26 +70,20 @@ func send(mcpURL string, timeout time.Duration, flow, bundleArg, file, body, tar
 	}
 
 	if bundleArg != "" {
-		return sendFromBundle(mcpURL, timeout, bundleArg, target, headers, removeHeaders, path, query, setQuery, removeQuery, setJSONMap, removeJSON, bodyOverride, hasBodyOverride, followRedirects, requestTimeout)
+		return sendFromBundle(mcpURL, bundleArg, target, headers, removeHeaders, path, query, setQuery, removeQuery, setJSONMap, removeJSON, bodyOverride, hasBodyOverride, followRedirects)
 	}
 
 	if file != "" {
-		return sendFromFile(mcpURL, timeout, file, target, headers, removeHeaders, path, query, setQuery, removeQuery, setJSONMap, removeJSON, bodyOverride, hasBodyOverride, followRedirects, requestTimeout)
+		return sendFromFile(mcpURL, file, target, headers, removeHeaders, path, query, setQuery, removeQuery, setJSONMap, removeJSON, bodyOverride, hasBodyOverride, followRedirects)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = client.Close() }()
-
-	var timeoutStr string
-	if requestTimeout > 0 {
-		timeoutStr = requestTimeout.String()
-	}
 
 	var bodyContent string
 	if hasBodyOverride {
@@ -109,7 +103,6 @@ func send(mcpURL string, timeout time.Duration, flow, bundleArg, file, body, tar
 		SetJSON:         setJSONMap,
 		RemoveJSON:      removeJSON,
 		FollowRedirects: followRedirects,
-		Timeout:         timeoutStr,
 		Force:           force,
 	})
 	if err != nil {
@@ -133,9 +126,8 @@ func send(mcpURL string, timeout time.Duration, flow, bundleArg, file, body, tar
 	return nil
 }
 
-func get(mcpURL string, timeout time.Duration, replayID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func get(mcpURL string, replayID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -169,7 +161,7 @@ func get(mcpURL string, timeout time.Duration, replayID string) error {
 	return nil
 }
 
-func create(_ string, _ time.Duration, urlArg, method string, headers []string, bodyPath string) error {
+func create(urlArg, method string, headers []string, bodyPath string) error {
 	// Parse and normalize URL
 	if !strings.Contains(urlArg, "://") {
 		urlArg = "https://" + urlArg
@@ -242,11 +234,11 @@ func create(_ string, _ time.Duration, urlArg, method string, headers []string, 
 	return nil
 }
 
-func sendFromBundle(mcpURL string, timeout time.Duration, bundleArg, target string, addHeaders, removeHeaders []string,
+func sendFromBundle(mcpURL string, bundleArg, target string, addHeaders, removeHeaders []string,
 	path, query string, setQuery, removeQuery []string,
 	setJSON map[string]interface{}, removeJSON []string,
 	bodyOverride []byte, hasBodyOverride bool,
-	followRedirects bool, requestTimeout time.Duration) error {
+	followRedirects bool) error {
 	bundlePath, err := bundle.ResolvePath(bundleArg)
 	if err != nil {
 		return err
@@ -281,8 +273,7 @@ func sendFromBundle(mcpURL string, timeout time.Duration, bundleArg, target stri
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -290,18 +281,12 @@ func sendFromBundle(mcpURL string, timeout time.Duration, bundleArg, target stri
 	}
 	defer func() { _ = client.Close() }()
 
-	var timeoutStr string
-	if requestTimeout > 0 {
-		timeoutStr = requestTimeout.String()
-	}
-
 	resp, err := client.RequestSend(ctx, mcpclient.RequestSendOpts{
 		URL:             urlStr,
 		Method:          meta.Method,
 		Headers:         headerMap,
 		Body:            string(body),
 		FollowRedirects: followRedirects,
-		Timeout:         timeoutStr,
 	})
 	if err != nil {
 		return fmt.Errorf("request send: %w", err)
@@ -311,11 +296,11 @@ func sendFromBundle(mcpURL string, timeout time.Duration, bundleArg, target stri
 	return nil
 }
 
-func sendFromFile(mcpURL string, timeout time.Duration, file, target string, addHeaders, removeHeaders []string,
+func sendFromFile(mcpURL string, file, target string, addHeaders, removeHeaders []string,
 	path, query string, setQuery, removeQuery []string,
 	setJSON map[string]interface{}, removeJSON []string,
 	bodyOverride []byte, hasBodyOverride bool,
-	followRedirects bool, requestTimeout time.Duration) error {
+	followRedirects bool) error {
 	data, err := readRequestData(file)
 	if err != nil {
 		return err
@@ -363,8 +348,7 @@ func sendFromFile(mcpURL string, timeout time.Duration, file, target string, add
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -372,18 +356,12 @@ func sendFromFile(mcpURL string, timeout time.Duration, file, target string, add
 	}
 	defer func() { _ = client.Close() }()
 
-	var timeoutStr string
-	if requestTimeout > 0 {
-		timeoutStr = requestTimeout.String()
-	}
-
 	resp, err := client.RequestSend(ctx, mcpclient.RequestSendOpts{
 		URL:             urlStr,
 		Method:          req.Method,
 		Headers:         headerMap,
 		Body:            string(body),
 		FollowRedirects: followRedirects,
-		Timeout:         timeoutStr,
 	})
 	if err != nil {
 		return fmt.Errorf("request send: %w", err)

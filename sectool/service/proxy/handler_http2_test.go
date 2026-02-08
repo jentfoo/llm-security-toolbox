@@ -149,7 +149,7 @@ func TestApplyBodyRules(t *testing.T) {
 	t.Parallel()
 
 	t.Run("request_with_headers", func(t *testing.T) {
-		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024)
+		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024, TimeoutConfig{})
 		applier := &h2MockRuleApplier{
 			reqBodyMod: func(body []byte) []byte {
 				return append(body, []byte("-modified")...)
@@ -173,7 +173,7 @@ func TestApplyBodyRules(t *testing.T) {
 	})
 
 	t.Run("response_uses_body_only", func(t *testing.T) {
-		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024)
+		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024, TimeoutConfig{})
 
 		var bodyOnlyCalled, fullMethodCalled bool
 		applier := &h2MockRuleApplier{
@@ -207,7 +207,7 @@ func TestApplyBodyRules(t *testing.T) {
 }
 
 func TestCopyToHistoryBuffer(t *testing.T) {
-	handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 10)
+	handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 10, TimeoutConfig{})
 	stream := &h2Stream{id: 1}
 	p := &h2Proxy{handler: handler}
 
@@ -222,7 +222,7 @@ func TestCopyToFullBuffer(t *testing.T) {
 	t.Parallel()
 
 	t.Run("no_overflow", func(t *testing.T) {
-		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024)
+		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024, TimeoutConfig{})
 		stream := &h2Stream{id: 1}
 		p := &h2Proxy{handler: handler}
 
@@ -233,7 +233,7 @@ func TestCopyToFullBuffer(t *testing.T) {
 	})
 
 	t.Run("overflow", func(t *testing.T) {
-		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024)
+		handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 1024, TimeoutConfig{})
 		stream := &h2Stream{id: 1}
 		stream.reqBodyOverflow = true
 		p := &h2Proxy{handler: handler}
@@ -246,7 +246,7 @@ func TestCopyToFullBuffer(t *testing.T) {
 func TestUpdateHistoryWithModifiedBody(t *testing.T) {
 	t.Parallel()
 
-	handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 5)
+	handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 5, TimeoutConfig{})
 	stream := &h2Stream{id: 1}
 	stream.reqBody.WriteString("original")
 	p := &h2Proxy{handler: handler}
@@ -261,7 +261,7 @@ func TestStoreStreamInHistory(t *testing.T) {
 	t.Parallel()
 
 	history := newHistoryStore(store.NewMemStorage())
-	handler := newHTTP2Handler(history, 1024)
+	handler := newHTTP2Handler(history, 1024, TimeoutConfig{})
 	stream := &h2Stream{
 		id:          1,
 		state:       streamClosed,
@@ -535,7 +535,7 @@ func TestHTTP2ProxyEndToEnd(t *testing.T) {
 	})
 	t.Cleanup(testServer.Close)
 
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage())
+	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{})
 	require.NoError(t, err)
 	go func() { _ = proxy.Serve() }()
 	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
@@ -591,7 +591,7 @@ func TestHTTP2ProxyHeaderRules(t *testing.T) {
 	})
 	t.Cleanup(testServer.Close)
 
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage())
+	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{})
 	require.NoError(t, err)
 	go func() { _ = proxy.Serve() }()
 	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })

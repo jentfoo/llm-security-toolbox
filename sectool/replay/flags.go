@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/pflag"
 
@@ -25,7 +24,7 @@ func Parse(args []string, mcpURL string) error {
 	case "get":
 		return parseGet(args[1:], mcpURL)
 	case "create":
-		return parseCreate(args[1:], mcpURL)
+		return parseCreate(args[1:])
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
@@ -71,7 +70,6 @@ replay send [options]
 
   Other options:
     --follow-redirects             follow 3xx redirects
-    --request-timeout <dur>        HTTP timeout (0 = no timeout)
     --force                        send even if validation fails
     --body <path>                  body file (with --file)
 
@@ -123,12 +121,10 @@ replay create <url> [options]
 func parseSend(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("replay send", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout, requestTimeout time.Duration
 	var flow, bundle, file, body, target, path, query string
 	var followRedirects, force bool
 	var headers, removeHeaders, setQuery, removeQuery, setJSON, removeJSON []string
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&flow, "flow", "", "flow_id to replay from proxy history")
 	fs.StringVar(&bundle, "bundle", "", "bundle_id from proxy export")
 	fs.StringVar(&file, "file", "", "path to request.http file (- for stdin)")
@@ -143,7 +139,6 @@ func parseSend(args []string, mcpURL string) error {
 	fs.StringArrayVar(&setJSON, "set-json", nil, "set JSON key (repeatable, e.g., user.role=admin)")
 	fs.StringArrayVar(&removeJSON, "remove-json", nil, "remove JSON key (repeatable)")
 	fs.BoolVar(&followRedirects, "follow-redirects", false, "follow 3xx redirects")
-	fs.DurationVar(&requestTimeout, "request-timeout", 0, "HTTP request timeout (0 = no timeout)")
 	fs.BoolVar(&force, "force", false, "send request even if validation fails")
 
 	fs.Usage = func() {
@@ -236,18 +231,15 @@ Options:
 		return errors.New("only one of --flow, --bundle, or --file can be specified")
 	}
 
-	return send(mcpURL, timeout, flow, bundle, file, body, target, headers, removeHeaders,
+	return send(mcpURL, flow, bundle, file, body, target, headers, removeHeaders,
 		path, query, setQuery, removeQuery,
 		setJSON, removeJSON,
-		followRedirects, requestTimeout, force)
+		followRedirects, force)
 }
 
 func parseGet(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("replay get", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool replay get <replay_id> [options]
@@ -266,18 +258,16 @@ Options:
 		return errors.New("replay_id required (get from 'sectool replay send' output)")
 	}
 
-	return get(mcpURL, timeout, fs.Args()[0])
+	return get(mcpURL, fs.Args()[0])
 }
 
-func parseCreate(args []string, mcpURL string) error {
+func parseCreate(args []string) error {
 	fs := pflag.NewFlagSet("replay create", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 
-	var timeout time.Duration
 	var method, bodyPath string
 	var headers []string
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&method, "method", "GET", "HTTP method")
 	fs.StringArrayVar(&headers, "header", nil, "header in 'Name: Value' format (repeatable)")
 	fs.StringVar(&bodyPath, "body", "", "path to body file (- for stdin)")
@@ -310,5 +300,5 @@ Output: Bundle path that can be used with 'sectool replay send --bundle'
 		return errors.New("url argument is required")
 	}
 
-	return create(mcpURL, timeout, fs.Args()[0], method, headers, bodyPath)
+	return create(fs.Args()[0], method, headers, bodyPath)
 }

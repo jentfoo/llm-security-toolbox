@@ -163,7 +163,7 @@ func TestHandle(t *testing.T) {
 	t.Parallel()
 
 	t.Run("connection_established", func(t *testing.T) {
-		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage())
+		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{})
 		require.NoError(t, err)
 		go func() { _ = proxy.Serve() }()
 		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
@@ -191,7 +191,7 @@ func TestHandle(t *testing.T) {
 		}))
 		t.Cleanup(testServer.Close)
 
-		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage())
+		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{})
 		require.NoError(t, err)
 		go func() { _ = proxy.Serve() }()
 		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
@@ -239,7 +239,7 @@ func TestHandle(t *testing.T) {
 		}))
 		t.Cleanup(testServer.Close)
 
-		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage())
+		proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{})
 		require.NoError(t, err)
 		go func() { _ = proxy.Serve() }()
 		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })

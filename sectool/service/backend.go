@@ -109,7 +109,6 @@ type SendRequestInput struct {
 	RawRequest      []byte
 	Target          Target
 	FollowRedirects bool
-	Timeout         time.Duration
 	Force           bool // Skip validation for protocol-level tests
 
 	// Protocol from the original history entry ("http/1.1" or "h2")

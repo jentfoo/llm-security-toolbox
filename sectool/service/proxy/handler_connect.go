@@ -27,10 +27,12 @@ type connectHandler struct {
 	// TODO - Consider adding a 30-minute TTL on cache entries for long-running sessions
 	capsMu     sync.RWMutex
 	serverCaps map[string]string
+
+	timeouts TimeoutConfig
 }
 
 // newConnectHandler creates a new CONNECT handler.
-func newConnectHandler(certManager *CertManager, http1Handler *http1Handler, http2Handler *http2Handler, history *HistoryStore, maxBodyBytes int) *connectHandler {
+func newConnectHandler(certManager *CertManager, http1Handler *http1Handler, http2Handler *http2Handler, history *HistoryStore, maxBodyBytes int, timeouts TimeoutConfig) *connectHandler {
 	return &connectHandler{
 		certManager:  certManager,
 		http1Handler: http1Handler,
@@ -38,6 +40,7 @@ func newConnectHandler(certManager *CertManager, http1Handler *http1Handler, htt
 		history:      history,
 		maxBodyBytes: maxBodyBytes,
 		serverCaps:   make(map[string]string),
+		timeouts:     timeouts,
 	}
 }
 
@@ -241,7 +244,7 @@ func (h *connectHandler) probeUpstream(ctx context.Context, targetAddr, sni stri
 func (h *connectHandler) dialUpstream(ctx context.Context, targetAddr, sni string, alpn []string) (net.Conn, error) {
 	tlsDialer := &tls.Dialer{
 		NetDialer: &net.Dialer{
-			Timeout: dialTimeout,
+			Timeout: h.timeouts.DialTimeout,
 		},
 		Config: &tls.Config{
 			ServerName:         sni,

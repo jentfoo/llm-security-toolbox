@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 
@@ -13,9 +12,8 @@ import (
 	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
 )
 
-func summary(mcpURL string, timeout time.Duration, source, host, path, method, status, contains, containsBody, excludeHost, excludePath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func summary(mcpURL string, source, host, path, method, status, contains, containsBody, excludeHost, excludePath string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -48,9 +46,8 @@ func summary(mcpURL string, timeout time.Duration, source, host, path, method, s
 	return nil
 }
 
-func list(mcpURL string, timeout time.Duration, source, host, path, method, status, contains, containsBody, since, excludeHost, excludePath string, limit, offset int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func list(mcpURL string, source, host, path, method, status, contains, containsBody, since, excludeHost, excludePath string, limit, offset int) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {

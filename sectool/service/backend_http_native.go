@@ -28,7 +28,8 @@ const (
 // This backend provides wire-level fidelity for security testing including
 // HTTP/1.1 and HTTP/2 support with header order preservation.
 type NativeProxyBackend struct {
-	server *proxy.ProxyServer
+	server   *proxy.ProxyServer
+	timeouts proxy.TimeoutConfig
 
 	// Rules: cached from ruleStorage for hot path access
 	rulesMu     sync.RWMutex
@@ -60,14 +61,15 @@ var _ proxy.RuleApplier = (*NativeProxyBackend)(nil)
 // Does NOT start serving - call Serve() separately (typically in a goroutine).
 // historyStorage is the storage backend for proxy history entries.
 // ruleStorage is the storage backend for persisting match/replace rules.
-func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, historyStorage store.Storage, ruleStorage store.Storage) (*NativeProxyBackend, error) {
-	server, err := proxy.NewProxyServer(port, configDir, maxBodyBytes, historyStorage)
+func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, historyStorage store.Storage, ruleStorage store.Storage, timeouts proxy.TimeoutConfig) (*NativeProxyBackend, error) {
+	server, err := proxy.NewProxyServer(port, configDir, maxBodyBytes, historyStorage, timeouts)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy server: %w", err)
 	}
 
 	b := &NativeProxyBackend{
 		server:      server,
+		timeouts:    timeouts,
 		ruleStorage: ruleStorage,
 	}
 
@@ -205,12 +207,12 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 			UsesHTTPS: req.Target.UsesHTTPS,
 		},
 		Force:    req.Force,
-		Timeout:  req.Timeout,
 		Protocol: protocol,
 	}
 
 	sender := &proxy.Sender{
 		JSONModifier: ModifyJSONBodyMap,
+		Timeouts:     b.timeouts,
 	}
 
 	var result *proxy.SendResult

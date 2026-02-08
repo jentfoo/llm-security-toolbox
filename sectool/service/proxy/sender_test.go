@@ -38,7 +38,6 @@ func TestSender_Send(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: false,
 			},
-			Timeout: 10 * time.Second,
 		})
 
 		require.NoError(t, err)
@@ -70,7 +69,6 @@ func TestSender_Send(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: false,
 			},
-			Timeout: 10 * time.Second,
 		})
 
 		require.NoError(t, err)
@@ -106,8 +104,7 @@ func TestSender_Send(t *testing.T) {
 				RemoveHeaders: []string{"X-Old"},
 				Body:          []byte("new body"),
 			},
-			Timeout: 10 * time.Second,
-			Force:   true,
+			Force: true,
 		})
 
 		require.NoError(t, err)
@@ -141,8 +138,7 @@ func TestSender_Send(t *testing.T) {
 				SetParams:    map[string]string{"new": "param"},
 				RemoveParams: []string{"old"},
 			},
-			Timeout: 10 * time.Second,
-			Force:   true,
+			Force: true,
 		})
 
 		require.NoError(t, err)
@@ -169,8 +165,7 @@ func TestSender_Send(t *testing.T) {
 			Modifications: &Modifications{
 				SetJSON: map[string]any{"key": "value"},
 			},
-			Timeout: 10 * time.Second,
-			Force:   true,
+			Force: true,
 		})
 
 		require.Error(t, err)
@@ -205,8 +200,7 @@ func TestSender_Send(t *testing.T) {
 			Modifications: &Modifications{
 				SetJSON: map[string]any{"key": "value"},
 			},
-			Timeout: 10 * time.Second,
-			Force:   false, // Content-Length should auto-update to match modified body
+			Force: false, // Content-Length should auto-update to match modified body
 		})
 
 		require.NoError(t, err)
@@ -223,7 +217,9 @@ func TestSender_Send(t *testing.T) {
 		serverURL, _ := url.Parse(testServer.URL)
 		port, _ := strconv.Atoi(serverURL.Port())
 
-		sender := &Sender{}
+		sender := &Sender{
+			Timeouts: TimeoutConfig{ReadTimeout: 10 * time.Millisecond},
+		}
 
 		rawReq := []byte("GET / HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
 		_, err := sender.Send(t.Context(), SendOptions{
@@ -233,7 +229,6 @@ func TestSender_Send(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: false,
 			},
-			Timeout: 10 * time.Millisecond,
 		})
 
 		require.Error(t, err)
@@ -266,8 +261,7 @@ func TestSender_Send(t *testing.T) {
 				Port:      1, // Port 1 typically not listening
 				UsesHTTPS: false,
 			},
-			Timeout: 1 * time.Second,
-			Force:   true,
+			Force: true,
 		})
 
 		require.Error(t, err)
@@ -324,8 +318,7 @@ func TestSender_SendWithRedirects(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: false,
 			},
-			Timeout: 10 * time.Second,
-			Force:   true,
+			Force: true,
 		})
 
 		require.NoError(t, err)
@@ -356,8 +349,7 @@ func TestSender_SendWithRedirects(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: false,
 			},
-			Timeout: 10 * time.Second,
-			Force:   true,
+			Force: true,
 		})
 
 		require.Error(t, err)
@@ -754,8 +746,7 @@ func TestSender_ValidationBypass(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: false,
 			},
-			Timeout: 10 * time.Second,
-			Force:   true,
+			Force: true,
 		})
 
 		require.NoError(t, err)
@@ -1095,7 +1086,6 @@ func TestSender_Send_H2(t *testing.T) {
 				UsesHTTPS: true,
 			},
 			Protocol: "h2",
-			Timeout:  10 * time.Second,
 			Force:    true,
 		})
 
@@ -1130,7 +1120,6 @@ func TestSender_Send_H2(t *testing.T) {
 				UsesHTTPS: true,
 			},
 			Protocol: "h2",
-			Timeout:  10 * time.Second,
 			Force:    true,
 		})
 
@@ -1159,7 +1148,6 @@ func TestSender_Send_H2(t *testing.T) {
 				UsesHTTPS: true,
 			},
 			Protocol: "h2",
-			Timeout:  10 * time.Second,
 			Force:    true,
 		})
 
@@ -1180,7 +1168,6 @@ func TestSender_Send_H2(t *testing.T) {
 				UsesHTTPS: false,
 			},
 			Protocol: "h2",
-			Timeout:  10 * time.Second,
 			Force:    true,
 		})
 
@@ -1220,7 +1207,6 @@ func TestSender_Send_H2(t *testing.T) {
 				UsesHTTPS: true,
 			},
 			Protocol: "h2",
-			Timeout:  10 * time.Second,
 			Force:    true,
 		})
 
@@ -1270,8 +1256,7 @@ func TestSender_Send_H2(t *testing.T) {
 				RemoveHeaders: []string{"X-Remove"},
 				Body:          []byte("modified body"),
 			},
-			Timeout: 10 * time.Second,
-			Force:   true,
+			Force: true,
 		})
 
 		require.NoError(t, err)
@@ -1313,7 +1298,6 @@ func TestSender_Send_H2(t *testing.T) {
 				UsesHTTPS: true,
 			},
 			Protocol: "h2",
-			Timeout:  30 * time.Second,
 			Force:    true,
 		})
 
@@ -1353,7 +1337,6 @@ func TestSender_Send_H2(t *testing.T) {
 				UsesHTTPS: true,
 			},
 			Protocol: "h2",
-			Timeout:  30 * time.Second,
 			Force:    true,
 		})
 
@@ -1395,7 +1378,6 @@ func TestSender_SendWithRedirects_H2(t *testing.T) {
 				UsesHTTPS: true,
 			},
 			Protocol: "h2",
-			Timeout:  10 * time.Second,
 			Force:    true,
 		})
 
@@ -1526,7 +1508,6 @@ func TestSendOptions_Custom_Method(t *testing.T) {
 					Port:      port,
 					UsesHTTPS: false,
 				},
-				Timeout: 10 * time.Second,
 			})
 
 			require.NoError(t, err)

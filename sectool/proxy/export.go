@@ -3,15 +3,13 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/go-appsec/llm-security-toolbox/sectool/bundle"
 	"github.com/go-appsec/llm-security-toolbox/sectool/mcpclient"
 )
 
-func export(mcpURL string, timeout time.Duration, flowID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func export(mcpURL string, flowID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {

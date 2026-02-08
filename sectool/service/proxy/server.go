@@ -10,9 +10,17 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
 )
+
+// TimeoutConfig holds configurable timeout values for proxy operations.
+type TimeoutConfig struct {
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+}
 
 // ProxyServer is an HTTP proxy server that captures request/response pairs.
 type ProxyServer struct {
@@ -47,7 +55,7 @@ type ProxyServer struct {
 // configDir is the directory for CA certificates (e.g., ~/.sectool).
 // maxBodyBytes limits request and response body sizes stored in history.
 // historyStorage is the storage backend for proxy history entries.
-func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage store.Storage) (*ProxyServer, error) {
+func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage store.Storage, timeouts TimeoutConfig) (*ProxyServer, error) {
 	certManager, err := newCertManager(configDir)
 	if err != nil {
 		return nil, fmt.Errorf("create cert manager: %w", err)
@@ -62,17 +70,18 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage
 	ctx, cancel := context.WithCancel(context.Background())
 	history := newHistoryStore(historyStorage)
 
-	wsHandler := newWebSocketHandler(history, certManager)
+	wsHandler := newWebSocketHandler(history, certManager, timeouts)
 
 	http1Handler := &http1Handler{
 		history:      history,
 		maxBodyBytes: maxBodyBytes,
 		wsHandler:    wsHandler,
+		timeouts:     timeouts,
 	}
 
-	http2Handler := newHTTP2Handler(history, maxBodyBytes)
+	http2Handler := newHTTP2Handler(history, maxBodyBytes, timeouts)
 
-	connectHandler := newConnectHandler(certManager, http1Handler, http2Handler, history, maxBodyBytes)
+	connectHandler := newConnectHandler(certManager, http1Handler, http2Handler, history, maxBodyBytes, timeouts)
 
 	s := &ProxyServer{
 		listener:       listener,

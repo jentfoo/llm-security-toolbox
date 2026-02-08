@@ -181,9 +181,6 @@ func (c *Client) ReplaySend(ctx context.Context, opts ReplaySendOpts) (*protocol
 	if opts.FollowRedirects {
 		args["follow_redirects"] = opts.FollowRedirects
 	}
-	if opts.Timeout != "" {
-		args["timeout"] = opts.Timeout
-	}
 	if opts.Force {
 		args["force"] = opts.Force
 	}
@@ -221,9 +218,6 @@ func (c *Client) RequestSend(ctx context.Context, opts RequestSendOpts) (*protoc
 	}
 	if opts.FollowRedirects {
 		args["follow_redirects"] = opts.FollowRedirects
-	}
-	if opts.Timeout != "" {
-		args["timeout"] = opts.Timeout
 	}
 
 	var resp protocol.ReplaySendResponse

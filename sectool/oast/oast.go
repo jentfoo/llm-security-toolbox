@@ -15,9 +15,8 @@ import (
 	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
 )
 
-func create(mcpURL string, timeout time.Duration, label string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func create(mcpURL string, label string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -49,10 +48,8 @@ func create(mcpURL string, timeout time.Duration, label string) error {
 	return nil
 }
 
-func summary(mcpURL string, timeout time.Duration, oastID, since, eventType string, wait time.Duration, limit int) error {
-	totalTimeout := timeout + wait
-	ctx, cancel := context.WithTimeout(context.Background(), totalTimeout)
-	defer cancel()
+func summary(mcpURL string, oastID, since, eventType string, wait time.Duration, limit int) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -94,10 +91,8 @@ func summary(mcpURL string, timeout time.Duration, oastID, since, eventType stri
 	return nil
 }
 
-func poll(mcpURL string, timeout time.Duration, oastID, since, eventType string, wait time.Duration, limit int) error {
-	totalTimeout := timeout + wait
-	ctx, cancel := context.WithTimeout(context.Background(), totalTimeout)
-	defer cancel()
+func poll(mcpURL string, oastID, since, eventType string, wait time.Duration, limit int) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -146,9 +141,8 @@ func poll(mcpURL string, timeout time.Duration, oastID, since, eventType string,
 	return nil
 }
 
-func get(mcpURL string, timeout time.Duration, oastID, eventID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func get(mcpURL string, oastID, eventID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -194,9 +188,8 @@ func get(mcpURL string, timeout time.Duration, oastID, eventID string) error {
 	return nil
 }
 
-func list(mcpURL string, timeout time.Duration, limit int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func list(mcpURL string, limit int) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -237,9 +230,8 @@ func list(mcpURL string, timeout time.Duration, limit int) error {
 	return nil
 }
 
-func del(mcpURL string, timeout time.Duration, oastID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func del(mcpURL string, oastID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {

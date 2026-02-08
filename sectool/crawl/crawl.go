@@ -17,9 +17,8 @@ import (
 	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
 )
 
-func create(mcpURL string, timeout time.Duration, urls, flows, domains []string, label string, maxDepth, maxRequests int, delay time.Duration, parallelism int, submitForms, ignoreRobots bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func create(mcpURL string, urls, flows, domains []string, label string, maxDepth, maxRequests int, delay time.Duration, parallelism int, submitForms, ignoreRobots bool) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -70,9 +69,8 @@ func create(mcpURL string, timeout time.Duration, urls, flows, domains []string,
 	return nil
 }
 
-func seed(mcpURL string, timeout time.Duration, sessionID string, urls, flows []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func seed(mcpURL string, sessionID string, urls, flows []string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -90,9 +88,8 @@ func seed(mcpURL string, timeout time.Duration, sessionID string, urls, flows []
 	return nil
 }
 
-func status(mcpURL string, timeout time.Duration, sessionID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func status(mcpURL string, sessionID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -121,9 +118,8 @@ func status(mcpURL string, timeout time.Duration, sessionID string) error {
 	return nil
 }
 
-func summary(mcpURL string, timeout time.Duration, sessionID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func summary(mcpURL string, sessionID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -161,9 +157,8 @@ func summary(mcpURL string, timeout time.Duration, sessionID string) error {
 	return nil
 }
 
-func list(mcpURL string, timeout time.Duration, sessionID, listType, host, path, method, status, contains, containsBody, excludeHost, excludePath, since string, limit, offset int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func list(mcpURL string, sessionID, listType, host, path, method, status, contains, containsBody, excludeHost, excludePath, since string, limit, offset int) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -273,9 +268,8 @@ func list(mcpURL string, timeout time.Duration, sessionID, listType, host, path,
 	return nil
 }
 
-func sessions(mcpURL string, timeout time.Duration, limit int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func sessions(mcpURL string, limit int) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -317,9 +311,8 @@ func sessions(mcpURL string, timeout time.Duration, limit int) error {
 	return nil
 }
 
-func stop(mcpURL string, timeout time.Duration, sessionID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func stop(mcpURL string, sessionID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -336,9 +329,8 @@ func stop(mcpURL string, timeout time.Duration, sessionID string) error {
 	return nil
 }
 
-func export(mcpURL string, timeout time.Duration, flowID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func export(mcpURL string, flowID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {

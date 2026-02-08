@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -48,7 +47,6 @@ Validation: fix issues or use force=true for protocol testing.`),
 		mcp.WithObject("set_json", mcp.Description("JSON fields to set as object: {\"path\": value} (e.g., {\"user.email\": \"x\", \"items[0].id\": 5})")),
 		mcp.WithArray("remove_json", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("JSON fields to remove (dot path: 'user.temp', 'items[2]')")),
 		mcp.WithBoolean("follow_redirects", mcp.Description("Follow HTTP redirects (default: false)")),
-		mcp.WithString("timeout", mcp.Description("Request timeout (e.g., '30s', '1m')")),
 		mcp.WithBoolean("force", mcp.Description("Skip validation for protocol-level tests (smuggling, CRLF injection)")),
 	)
 }
@@ -74,7 +72,6 @@ Returns: replay_id, status, headers, response_preview. Full body via replay_get.
 		mcp.WithObject("headers", mcp.Description("Headers as object: {\"Name\": \"Value\"}")),
 		mcp.WithString("body", mcp.Description("Request body content")),
 		mcp.WithBoolean("follow_redirects", mcp.Description("Follow HTTP redirects (default: false)")),
-		mcp.WithString("timeout", mcp.Description("Request timeout (e.g., '30s', '1m')")),
 	)
 }
 func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -211,15 +208,6 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	}
 	log.Printf("mcp/replay_send: %s sending to %s://%s:%d (flow=%s)", replayID, scheme, host, port, flowID)
 
-	var timeout time.Duration
-	if timeoutStr := req.GetString("timeout", ""); timeoutStr != "" {
-		parsed, err := time.ParseDuration(timeoutStr)
-		if err != nil {
-			return errorResult("invalid timeout duration: " + err.Error()), nil
-		}
-		timeout = parsed
-	}
-
 	sendInput := SendRequestInput{
 		RawRequest: rawRequest,
 		Target: Target{
@@ -228,7 +216,6 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 			UsesHTTPS: usesHTTPS,
 		},
 		FollowRedirects: req.GetBool("follow_redirects", false),
-		Timeout:         timeout,
 		Force:           req.GetBool("force", false),
 		Protocol:        httpProtocol,
 	}
@@ -382,20 +369,10 @@ func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolReque
 
 	log.Printf("mcp/request_send: %s sending to %s", replayID, parsedURL)
 
-	var timeout time.Duration
-	if timeoutStr := req.GetString("timeout", ""); timeoutStr != "" {
-		parsed, err := time.ParseDuration(timeoutStr)
-		if err != nil {
-			return errorResult("invalid timeout duration: " + err.Error()), nil
-		}
-		timeout = parsed
-	}
-
 	sendInput := SendRequestInput{
 		RawRequest:      rawRequest,
 		Target:          target,
 		FollowRedirects: req.GetBool("follow_redirects", false),
-		Timeout:         timeout,
 	}
 
 	result, err := m.service.httpBackend.SendRequest(ctx, "sectool-"+replayID, sendInput)

@@ -58,7 +58,6 @@ type ReplaySendOpts struct {
 	SetJSON         map[string]interface{}
 	RemoveJSON      []string
 	FollowRedirects bool
-	Timeout         string
 	Force           bool
 }
 
@@ -69,7 +68,6 @@ type RequestSendOpts struct {
 	Headers         map[string]string
 	Body            string
 	FollowRedirects bool
-	Timeout         string
 }
 
 // =============================================================================

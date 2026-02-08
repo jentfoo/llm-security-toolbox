@@ -43,7 +43,14 @@ type Config struct {
 	AllowedDomains      []string      `json:"allowed_domains"`
 	ExcludeDomains      []string      `json:"exclude_domains"`
 	InteractshServerURL string        `json:"interactsh_server_url"` // empty = use default public servers
+	Proxy               ProxyConfig   `json:"proxy"`
 	Crawler             CrawlerConfig `json:"crawler"`
+}
+
+type ProxyConfig struct {
+	DialTimeoutSecs  int `json:"dial_timeout_secs"`
+	ReadTimeoutSecs  int `json:"read_timeout_secs"`
+	WriteTimeoutSecs int `json:"write_timeout_secs"`
 }
 
 type CrawlerConfig struct {
@@ -70,6 +77,11 @@ func DefaultConfig() *Config {
 		IncludeSubdomains: &t,
 		AllowedDomains:    []string{},
 		ExcludeDomains:    []string{},
+		Proxy: ProxyConfig{
+			DialTimeoutSecs:  20,
+			ReadTimeoutSecs:  240,
+			WriteTimeoutSecs: 60,
+		},
 		Crawler: CrawlerConfig{
 			DisallowedPaths: []string{
 				"*logout*",
@@ -116,6 +128,15 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.IncludeSubdomains == nil {
 		cfg.IncludeSubdomains = defaults.IncludeSubdomains
+	}
+	if cfg.Proxy.DialTimeoutSecs == 0 {
+		cfg.Proxy.DialTimeoutSecs = defaults.Proxy.DialTimeoutSecs
+	}
+	if cfg.Proxy.ReadTimeoutSecs == 0 {
+		cfg.Proxy.ReadTimeoutSecs = defaults.Proxy.ReadTimeoutSecs
+	}
+	if cfg.Proxy.WriteTimeoutSecs == 0 {
+		cfg.Proxy.WriteTimeoutSecs = defaults.Proxy.WriteTimeoutSecs
 	}
 	if cfg.Crawler.DisallowedPaths == nil {
 		cfg.Crawler.DisallowedPaths = defaults.Crawler.DisallowedPaths

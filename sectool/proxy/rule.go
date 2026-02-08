@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"time"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 
@@ -14,9 +13,8 @@ import (
 	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
 )
 
-func ruleList(mcpURL string, timeout time.Duration, websocket bool, limit int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func ruleList(mcpURL string, websocket bool, limit int) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -84,9 +82,8 @@ func truncate(s string, max int) string {
 	return s[:max-2] + ".."
 }
 
-func ruleAdd(mcpURL string, timeout time.Duration, ruleType, match, replace, label string, isRegex bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func ruleAdd(mcpURL string, ruleType, match, replace, label string, isRegex bool) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -122,9 +119,8 @@ func ruleAdd(mcpURL string, timeout time.Duration, ruleType, match, replace, lab
 	return nil
 }
 
-func ruleUpdate(mcpURL string, timeout time.Duration, ruleID, ruleType, match, replace, label string, isRegex *bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func ruleUpdate(mcpURL string, ruleID, ruleType, match, replace, label string, isRegex *bool) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {
@@ -160,9 +156,8 @@ func ruleUpdate(mcpURL string, timeout time.Duration, ruleID, ruleType, match, r
 	return nil
 }
 
-func ruleDelete(mcpURL string, timeout time.Duration, ruleID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func ruleDelete(mcpURL string, ruleID string) error {
+	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
 	if err != nil {

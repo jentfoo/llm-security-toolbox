@@ -79,7 +79,6 @@ type ReplaySendRequest struct {
 	SetJSON         []string `json:"set_json,omitempty"`
 	RemoveJSON      []string `json:"remove_json,omitempty"`
 	FollowRedirects bool     `json:"follow_redirects,omitempty"`
-	Timeout         string   `json:"timeout,omitempty"`
 	Force           bool     `json:"force,omitempty"`
 }
 

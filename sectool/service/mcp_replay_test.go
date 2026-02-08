@@ -140,15 +140,6 @@ func TestMCP_RequestSendValidation(t *testing.T) {
 		assert.True(t, result.IsError)
 		assert.Contains(t, ExtractMCPText(t, result), "invalid URL")
 	})
-
-	t.Run("invalid_timeout", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "request_send", map[string]interface{}{
-			"url":     "https://example.com",
-			"timeout": "not-a-duration",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "invalid timeout")
-	})
 }
 
 func TestMCP_ReplayValidation(t *testing.T) {
@@ -182,29 +173,6 @@ func TestMCP_ReplayValidation(t *testing.T) {
 		})
 		assert.True(t, result.IsError)
 		assert.Contains(t, ExtractMCPText(t, result), "not found")
-	})
-
-	t.Run("invalid_timeout", func(t *testing.T) {
-		mockMCP.AddProxyEntry(
-			"GET /timeout-test HTTP/1.1\r\nHost: test.com\r\n\r\n",
-			"HTTP/1.1 200 OK\r\n\r\nok",
-			"",
-		)
-		listResult := CallMCPTool(t, mcpClient, "proxy_poll", map[string]interface{}{
-			"output_mode": "flows",
-			"host":        "test.com",
-		})
-		require.False(t, listResult.IsError)
-		var listResp protocol.ProxyPollResponse
-		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, listResult)), &listResp))
-		require.NotEmpty(t, listResp.Flows)
-
-		result := CallMCPTool(t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id": listResp.Flows[0].FlowID,
-			"timeout": "invalid",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "invalid timeout")
 	})
 
 	t.Run("from_crawler_flow", func(t *testing.T) {
@@ -290,7 +258,6 @@ func TestMCP_ReplaySendModifications(t *testing.T) {
 				"remove_json": []interface{}{"temp"},
 			},
 		},
-		{name: "with_timeout", args: map[string]interface{}{"timeout": "5s"}},
 		{name: "with_follow_redirects", args: map[string]interface{}{"follow_redirects": true}},
 	}
 

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/pflag"
 
@@ -192,10 +191,8 @@ proxy rule delete <rule_id>
 func parseSummary(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy summary", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var host, path, method, status, contains, containsBody, excludeHost, excludePath, source string
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&source, "source", "", "filter by source: 'proxy', 'replay', or empty for both")
 	fs.StringVar(&host, "host", "", "filter by host pattern (glob: *, ?)")
 	fs.StringVar(&path, "path", "", "filter by path pattern (glob: *, ?)")
@@ -228,17 +225,15 @@ Options:
 		return err
 	}
 
-	return summary(mcpURL, timeout, source, host, path, method, status, contains, containsBody, excludeHost, excludePath)
+	return summary(mcpURL, source, host, path, method, status, contains, containsBody, excludeHost, excludePath)
 }
 
 func parseList(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy list", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var limit, offset int
 	var host, path, method, status, contains, containsBody, since, excludeHost, excludePath, source string
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&source, "source", "", "filter by source: 'proxy', 'replay', or empty for both")
 	fs.StringVar(&host, "host", "", "filter by host pattern (glob: *, ?)")
 	fs.StringVar(&path, "path", "", "filter by path pattern (glob: *, ?)")
@@ -283,15 +278,12 @@ Options:
 		limit = 1_000_000_000
 	}
 
-	return list(mcpURL, timeout, source, host, path, method, status, contains, containsBody, since, excludeHost, excludePath, limit, offset)
+	return list(mcpURL, source, host, path, method, status, contains, containsBody, since, excludeHost, excludePath, limit, offset)
 }
 
 func parseExport(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy export", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool proxy export <flow_id> [options]
@@ -329,7 +321,7 @@ Options:
 		return errors.New("flow_id required (get from 'sectool proxy list' with filters)")
 	}
 
-	return export(mcpURL, timeout, fs.Args()[0])
+	return export(mcpURL, fs.Args()[0])
 }
 
 var ruleSubcommands = []string{"list", "add", "update", "delete", "help"}
@@ -375,11 +367,9 @@ Use "sectool proxy rule <command> --help" for more information.
 func parseRuleList(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule list", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var websocket bool
 	var limit int
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.BoolVar(&websocket, "websocket", false, "list WebSocket rules")
 	fs.IntVar(&limit, "limit", 0, "maximum rules to display")
 
@@ -397,17 +387,15 @@ Options:
 		return err
 	}
 
-	return ruleList(mcpURL, timeout, websocket, limit)
+	return ruleList(mcpURL, websocket, limit)
 }
 
 func parseRuleAdd(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule add", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var isRegex bool
 	var ruleType, label, name, match, replace string
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&ruleType, "type", "request_header", "rule type")
 	fs.BoolVar(&isRegex, "regex", false, "treat match as regex pattern")
 	fs.StringVar(&label, "label", "", "optional label for easier reference")
@@ -458,17 +446,15 @@ Options:
 		}
 	}
 
-	return ruleAdd(mcpURL, timeout, ruleType, match, replace, label, isRegex)
+	return ruleAdd(mcpURL, ruleType, match, replace, label, isRegex)
 }
 
 func parseRuleUpdate(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule update", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var isRegex bool
 	var ruleType, label, name, match, replace string
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&ruleType, "type", "", "rule type (required)")
 	fs.BoolVar(&isRegex, "regex", false, "treat match as regex pattern")
 	fs.StringVar(&label, "label", "", "new label for the rule")
@@ -523,15 +509,13 @@ Options:
 		isRegexPtr = &isRegex
 	}
 
-	return ruleUpdate(mcpURL, timeout, ruleID, ruleType, match, replace, label, isRegexPtr)
+	return ruleUpdate(mcpURL, ruleID, ruleType, match, replace, label, isRegexPtr)
 }
 
 func parseRuleDelete(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule delete", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	// Accept --websocket for tolerance but ignore it (searches both sets automatically)
 	fs.Bool("websocket", false, "")
 	_ = fs.MarkHidden("websocket")
@@ -554,5 +538,5 @@ Options:
 		return errors.New("rule_id required")
 	}
 
-	return ruleDelete(mcpURL, timeout, fs.Args()[0])
+	return ruleDelete(mcpURL, fs.Args()[0])
 }

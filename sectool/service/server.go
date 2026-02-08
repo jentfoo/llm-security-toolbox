@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-appsec/llm-security-toolbox/sectool/config"
+	"github.com/go-appsec/llm-security-toolbox/sectool/service/proxy"
 	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
 )
 
@@ -345,8 +346,13 @@ func (s *Server) connectBurpMCP(ctx context.Context) error {
 // startBuiltinProxy starts the native built-in proxy.
 func (s *Server) startBuiltinProxy() error {
 	configDir := filepath.Dir(s.configPath)
+	timeouts := proxy.TimeoutConfig{
+		DialTimeout:  time.Duration(s.cfg.Proxy.DialTimeoutSecs) * time.Second,
+		ReadTimeout:  time.Duration(s.cfg.Proxy.ReadTimeoutSecs) * time.Second,
+		WriteTimeout: time.Duration(s.cfg.Proxy.WriteTimeoutSecs) * time.Second,
+	}
 
-	backend, err := NewNativeProxyBackend(s.proxyPort, configDir, s.cfg.MaxBodyBytes, s.historyStorage, s.ruleStorage)
+	backend, err := NewNativeProxyBackend(s.proxyPort, configDir, s.cfg.MaxBodyBytes, s.historyStorage, s.ruleStorage, timeouts)
 	if err != nil {
 		return fmt.Errorf("start built-in proxy: %w", err)
 	}

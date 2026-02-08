@@ -182,13 +182,12 @@ crawl export <flow_id>
 func parseCreate(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl create", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout, delay time.Duration
+	var delay time.Duration
 	var urls, flows, domains []string
 	var label string
 	var maxDepth, maxRequests, parallelism int
 	var submitForms, ignoreRobots bool
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringArrayVar(&urls, "url", nil, "seed URL (can specify multiple times)")
 	fs.StringArrayVar(&flows, "flow", nil, "seed from proxy flow_id (can specify multiple times)")
 	fs.StringArrayVar(&domains, "domain", nil, "additional allowed domain (can specify multiple times)")
@@ -219,16 +218,14 @@ Options:
 		return errors.New("at least one --url or --flow is required")
 	}
 
-	return create(mcpURL, timeout, urls, flows, domains, label, maxDepth, maxRequests, delay, parallelism, submitForms, ignoreRobots)
+	return create(mcpURL, urls, flows, domains, label, maxDepth, maxRequests, delay, parallelism, submitForms, ignoreRobots)
 }
 
 func parseSeed(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl seed", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var urls, flows []string
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringArrayVar(&urls, "url", nil, "seed URL (can specify multiple times)")
 	fs.StringArrayVar(&flows, "flow", nil, "seed from proxy flow_id (can specify multiple times)")
 
@@ -256,15 +253,12 @@ Options:
 		return errors.New("at least one --url or --flow is required")
 	}
 
-	return seed(mcpURL, timeout, fs.Args()[0], urls, flows)
+	return seed(mcpURL, fs.Args()[0], urls, flows)
 }
 
 func parseStatus(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl status", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool crawl status <session_id> [options]
@@ -285,15 +279,12 @@ Options:
 		return errors.New("session_id required")
 	}
 
-	return status(mcpURL, timeout, fs.Args()[0])
+	return status(mcpURL, fs.Args()[0])
 }
 
 func parseSummary(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl summary", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool crawl summary <session_id> [options]
@@ -314,17 +305,15 @@ Options:
 		return errors.New("session_id required")
 	}
 
-	return summary(mcpURL, timeout, fs.Args()[0])
+	return summary(mcpURL, fs.Args()[0])
 }
 
 func parseList(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl list", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var host, path, method, status, contains, containsBody, excludeHost, excludePath, since string
 	var limit, offset int
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.StringVar(&host, "host", "", "filter by host pattern (glob: *, ?)")
 	fs.StringVar(&path, "path", "", "filter by path pattern (glob: *, ?)")
 	fs.StringVar(&method, "method", "", "filter by HTTP method (comma-separated)")
@@ -361,16 +350,14 @@ Options:
 		limit = 1_000_000_000
 	}
 
-	return list(mcpURL, timeout, fs.Args()[0], "urls", host, path, method, status, contains, containsBody, excludeHost, excludePath, since, limit, offset)
+	return list(mcpURL, fs.Args()[0], "urls", host, path, method, status, contains, containsBody, excludeHost, excludePath, since, limit, offset)
 }
 
 func parseForms(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl forms", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var limit int
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.IntVar(&limit, "limit", 0, "maximum result count")
 
 	fs.Usage = func() {
@@ -392,16 +379,14 @@ Options:
 		return errors.New("session_id required")
 	}
 
-	return list(mcpURL, timeout, fs.Args()[0], "forms", "", "", "", "", "", "", "", "", "", limit, 0)
+	return list(mcpURL, fs.Args()[0], "forms", "", "", "", "", "", "", "", "", "", limit, 0)
 }
 
 func parseErrors(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl errors", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var limit int
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.IntVar(&limit, "limit", 0, "maximum result count")
 
 	fs.Usage = func() {
@@ -423,16 +408,14 @@ Options:
 		return errors.New("session_id required")
 	}
 
-	return list(mcpURL, timeout, fs.Args()[0], "errors", "", "", "", "", "", "", "", "", "", limit, 0)
+	return list(mcpURL, fs.Args()[0], "errors", "", "", "", "", "", "", "", "", "", limit, 0)
 }
 
 func parseSessions(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl sessions", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
 	var limit int
 
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 	fs.IntVar(&limit, "limit", 0, "maximum sessions to return")
 
 	fs.Usage = func() {
@@ -449,15 +432,12 @@ Options:
 		return err
 	}
 
-	return sessions(mcpURL, timeout, limit)
+	return sessions(mcpURL, limit)
 }
 
 func parseStop(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl stop", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool crawl stop <session_id> [options]
@@ -478,15 +458,12 @@ Options:
 		return errors.New("session_id required")
 	}
 
-	return stop(mcpURL, timeout, fs.Args()[0])
+	return stop(mcpURL, fs.Args()[0])
 }
 
 func parseExport(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("crawl export", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var timeout time.Duration
-
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "client-side timeout")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool crawl export <flow_id> [options]
@@ -507,5 +484,5 @@ Options:
 		return errors.New("flow_id required (get from 'sectool crawl list')")
 	}
 
-	return export(mcpURL, timeout, fs.Args()[0])
+	return export(mcpURL, fs.Args()[0])
 }

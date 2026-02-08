@@ -100,12 +100,6 @@ func (b *BurpBackend) SendRequest(ctx context.Context, name string, req SendRequ
 	log.Printf("burp: sending request %s to %s://%s:%d (follow_redirects=%v)",
 		name, scheme, req.Target.Hostname, req.Target.Port, req.FollowRedirects)
 
-	if req.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
-		defer cancel()
-	}
-
 	return b.doSendRequest(ctx, name, req)
 }
 

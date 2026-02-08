@@ -15,12 +15,7 @@ import (
 	"time"
 )
 
-// TODO - make timeout constants configurable
 const (
-	dialTimeout  = 30 * time.Second
-	readTimeout  = 10 * time.Minute
-	writeTimeout = 10 * time.Minute
-
 	protocolHTTP11 = "http/1.1"
 
 	schemeHTTP  = "http"
@@ -32,6 +27,7 @@ type http1Handler struct {
 	maxBodyBytes int
 	ruleApplier  RuleApplier       // optional, nil means no rules applied
 	wsHandler    *webSocketHandler // optional, for WebSocket upgrade handling
+	timeouts     TimeoutConfig
 }
 
 // Handle processes HTTP/1.1 proxy requests with keep-alive support.
@@ -94,7 +90,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	}
 
 	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
-	dialer := net.Dialer{Timeout: dialTimeout}
+	dialer := net.Dialer{Timeout: h.timeouts.DialTimeout}
 	upstreamConn, err := dialer.DialContext(ctx, "tcp", upstreamAddr)
 	if err != nil {
 		log.Printf("proxy: failed to connect to %s: %v", upstreamAddr, err)
@@ -108,7 +104,9 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	}
 	defer func() { _ = upstreamConn.Close() }()
 
-	_ = upstreamConn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if h.timeouts.WriteTimeout > 0 {
+		_ = upstreamConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
+	}
 
 	// TODO - preserveChunked=false converts chunked to Content-Length
 	//        future we should retain chunked encoding forfull wire fidelity
@@ -123,7 +121,9 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		return false
 	}
 
-	_ = upstreamConn.SetReadDeadline(time.Now().Add(readTimeout))
+	if h.timeouts.ReadTimeout > 0 {
+		_ = upstreamConn.SetReadDeadline(time.Now().Add(h.timeouts.ReadTimeout))
+	}
 
 	upstreamReader := bufio.NewReader(upstreamConn)
 	resp, err := parseResponse(upstreamReader, req.Method)
@@ -143,7 +143,9 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	}
 
 	// Forward response to client
-	_ = clientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if h.timeouts.WriteTimeout > 0 {
+		_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
+	}
 	if _, err := clientConn.Write(resp.SerializeRaw(&buf, false)); err != nil {
 		log.Printf("proxy: failed to send response to client: %v", err)
 		return false
@@ -327,7 +329,9 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		return false // WebSocket takes over, don't continue loop
 	}
 
-	_ = upstreamConn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if h.timeouts.WriteTimeout > 0 {
+		_ = upstreamConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
+	}
 
 	if _, err := upstreamConn.Write(req.SerializeRaw(&buf, false)); err != nil {
 		log.Printf("proxy: failed to send TLS request: %v", err)
@@ -340,7 +344,9 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		return false
 	}
 
-	_ = upstreamConn.SetReadDeadline(time.Now().Add(readTimeout))
+	if h.timeouts.ReadTimeout > 0 {
+		_ = upstreamConn.SetReadDeadline(time.Now().Add(h.timeouts.ReadTimeout))
+	}
 
 	resp, err := parseResponse(upstreamReader, req.Method)
 	if err != nil {
@@ -360,7 +366,9 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 	}
 
 	// Forward response to client
-	_ = clientConn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if h.timeouts.WriteTimeout > 0 {
+		_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
+	}
 	if _, err := clientConn.Write(resp.SerializeRaw(&buf, false)); err != nil {
 		log.Printf("proxy: failed to send TLS response to client: %v", err)
 		return false

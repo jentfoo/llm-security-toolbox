@@ -21,10 +21,7 @@ import (
 	"golang.org/x/net/http2"
 )
 
-const (
-	sendDialTimeout = 30 * time.Second
-	maxRedirects    = 10
-)
+const maxRedirects = 10
 
 // JSONModifier modifies JSON body with set/remove operations.
 // Provided by service layer to avoid circular imports.
@@ -35,6 +32,10 @@ type Sender struct {
 	// JSONModifier is called to apply JSON modifications to request body.
 	// If nil, SetJSON/RemoveJSON modifications are ignored.
 	JSONModifier JSONModifier
+
+	// Timeouts holds configurable timeout values for dial, read, and write.
+	// Zero values mean no timeout.
+	Timeouts TimeoutConfig
 }
 
 // SendOptions configures request sending.
@@ -43,7 +44,6 @@ type SendOptions struct {
 	Target        Target         // Where to send
 	Modifications *Modifications // Optional changes
 	Force         bool           // Bypass validation
-	Timeout       time.Duration
 
 	// Protocol specifies the original request's protocol.
 	// Values: "http/1.1", "h2", or "" (defaults to http/1.1)
@@ -122,7 +122,7 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 	}
 
 	// Send request and get response
-	resp, err := s.sendRequestWithProtocol(ctx, req, opts.Target, opts.Timeout, opts.Protocol)
+	resp, err := s.sendRequestWithProtocol(ctx, req, opts.Target, opts.Protocol)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 	}
 
 	for i := 0; i < maxRedirects; i++ {
-		resp, err := s.sendRequestWithProtocol(ctx, currentReq, currentTarget, opts.Timeout, currentProtocol)
+		resp, err := s.sendRequestWithProtocol(ctx, currentReq, currentTarget, currentProtocol)
 		if err != nil {
 			return nil, err
 		}
@@ -204,7 +204,7 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 }
 
 // sendRequestWithProtocol sends a single request with protocol preference.
-func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Request, target Target, timeout time.Duration, protocol string) (*RawHTTP1Response, error) {
+func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Request, target Target, protocol string) (*RawHTTP1Response, error) {
 	// Validate protocol value
 	switch protocol {
 	case "", protocolHTTP11, protocolH2:
@@ -216,11 +216,6 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 	// HTTP/2 requires HTTPS
 	if protocol == "h2" && !target.UsesHTTPS {
 		return nil, errors.New("HTTP/2 requires HTTPS; cannot send h2 request to non-TLS target")
-	}
-
-	dialTimeout := sendDialTimeout
-	if timeout > 0 && timeout < dialTimeout {
-		dialTimeout = timeout
 	}
 
 	targetAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
@@ -242,7 +237,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 		}
 
 		tlsDialer := &tls.Dialer{
-			NetDialer: &net.Dialer{Timeout: dialTimeout},
+			NetDialer: &net.Dialer{Timeout: s.Timeouts.DialTimeout},
 			Config: &tls.Config{
 				ServerName:         target.Hostname,
 				InsecureSkipVerify: true, // Required for security testing
@@ -261,10 +256,13 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 
 		if protocol == "h2" {
 			if negotiated == "h2" {
-				// Send as HTTP/2
+				// Send as HTTP/2 — set combined deadline since H2 multiplexes reads/writes
 				defer func() { _ = conn.Close() }()
-				if timeout > 0 {
-					_ = conn.SetDeadline(time.Now().Add(timeout))
+				if s.Timeouts.ReadTimeout > 0 {
+					_ = conn.SetReadDeadline(time.Now().Add(s.Timeouts.ReadTimeout))
+				}
+				if s.Timeouts.WriteTimeout > 0 {
+					_ = conn.SetWriteDeadline(time.Now().Add(s.Timeouts.WriteTimeout))
 				}
 				return s.sendH2Request(ctx, conn, req, target)
 			}
@@ -273,7 +271,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 			return nil, fmt.Errorf("server does not support HTTP/2 (negotiated %q); original request was HTTP/2, replay as HTTP/1.1 manually if desired", negotiated)
 		}
 	} else {
-		dialer := &net.Dialer{Timeout: dialTimeout}
+		dialer := &net.Dialer{Timeout: s.Timeouts.DialTimeout}
 		conn, err = dialer.DialContext(ctx, "tcp", targetAddr)
 	}
 	if err != nil {
@@ -281,17 +279,18 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Set deadline from timeout
-	if timeout > 0 {
-		_ = conn.SetDeadline(time.Now().Add(timeout))
-	}
-
 	// Send request as HTTP/1.1
+	if s.Timeouts.WriteTimeout > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(s.Timeouts.WriteTimeout))
+	}
 	var buf bytes.Buffer
 	if _, err := conn.Write(req.SerializeRaw(&buf, false)); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 
+	if s.Timeouts.ReadTimeout > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(s.Timeouts.ReadTimeout))
+	}
 	resp, err := parseResponse(bufio.NewReader(conn), req.Method)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
@@ -394,17 +393,12 @@ func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*RawHTTP
 	}
 	method := req.Method
 
-	dialTimeout := sendDialTimeout
-	if opts.Timeout > 0 && opts.Timeout < dialTimeout {
-		dialTimeout = opts.Timeout
-	}
-
 	targetAddr := fmt.Sprintf("%s:%d", opts.Target.Hostname, opts.Target.Port)
 	var conn net.Conn
 
 	if opts.Target.UsesHTTPS {
 		tlsDialer := &tls.Dialer{
-			NetDialer: &net.Dialer{Timeout: dialTimeout},
+			NetDialer: &net.Dialer{Timeout: s.Timeouts.DialTimeout},
 			Config: &tls.Config{
 				ServerName:         opts.Target.Hostname,
 				InsecureSkipVerify: true,
@@ -414,7 +408,7 @@ func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*RawHTTP
 		}
 		conn, err = tlsDialer.DialContext(ctx, "tcp", targetAddr)
 	} else {
-		dialer := &net.Dialer{Timeout: dialTimeout}
+		dialer := &net.Dialer{Timeout: s.Timeouts.DialTimeout}
 		conn, err = dialer.DialContext(ctx, "tcp", targetAddr)
 	}
 	if err != nil {
@@ -422,15 +416,17 @@ func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*RawHTTP
 	}
 	defer func() { _ = conn.Close() }()
 
-	if opts.Timeout > 0 {
-		_ = conn.SetDeadline(time.Now().Add(opts.Timeout))
-	}
-
 	// Send raw request bytes directly
+	if s.Timeouts.WriteTimeout > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(s.Timeouts.WriteTimeout))
+	}
 	if _, err := conn.Write(opts.RawRequest); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 
+	if s.Timeouts.ReadTimeout > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(s.Timeouts.ReadTimeout))
+	}
 	resp, err := parseResponse(bufio.NewReader(conn), method)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)

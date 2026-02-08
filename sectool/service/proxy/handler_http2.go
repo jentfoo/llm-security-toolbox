@@ -43,13 +43,15 @@ type http2Handler struct {
 	history      *HistoryStore
 	ruleApplier  RuleApplier
 	maxBodyBytes int
+	timeouts     TimeoutConfig
 }
 
 // newHTTP2Handler creates a new HTTP/2 handler.
-func newHTTP2Handler(history *HistoryStore, maxBodyBytes int) *http2Handler {
+func newHTTP2Handler(history *HistoryStore, maxBodyBytes int, timeouts TimeoutConfig) *http2Handler {
 	return &http2Handler{
 		history:      history,
 		maxBodyBytes: maxBodyBytes,
+		timeouts:     timeouts,
 	}
 }
 
@@ -1148,6 +1150,9 @@ func (p *h2Proxy) writeFrames(h *h2Conn, conn net.Conn) {
 		case data, ok := <-h.writeCh:
 			if !ok {
 				return
+			}
+			if p.handler.timeouts.WriteTimeout > 0 {
+				_ = conn.SetWriteDeadline(time.Now().Add(p.handler.timeouts.WriteTimeout))
 			}
 			if _, err := conn.Write(data); err != nil {
 				log.Printf("h2: write error: %v", err)

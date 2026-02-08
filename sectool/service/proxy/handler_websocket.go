@@ -23,13 +23,15 @@ type webSocketHandler struct {
 	history     *HistoryStore
 	ruleApplier RuleApplier
 	certManager *CertManager
+	timeouts    TimeoutConfig
 }
 
 // newWebSocketHandler creates a new WebSocket handler.
-func newWebSocketHandler(history *HistoryStore, certManager *CertManager) *webSocketHandler {
+func newWebSocketHandler(history *HistoryStore, certManager *CertManager, timeouts TimeoutConfig) *webSocketHandler {
 	return &webSocketHandler{
 		history:     history,
 		certManager: certManager,
+		timeouts:    timeouts,
 	}
 }
 
@@ -60,7 +62,7 @@ func (h *webSocketHandler) Handle(
 	h.stripExtensions(req)
 
 	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
-	dialer := net.Dialer{Timeout: dialTimeout}
+	dialer := net.Dialer{Timeout: h.timeouts.DialTimeout}
 	upstreamConn, err := dialer.DialContext(ctx, "tcp", upstreamAddr)
 	if err != nil {
 		log.Printf("proxy: websocket dial failed: %v", err)
@@ -86,7 +88,7 @@ func (h *webSocketHandler) HandleTLS(
 
 	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
 	tlsDialer := &tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: dialTimeout},
+		NetDialer: &net.Dialer{Timeout: h.timeouts.DialTimeout},
 		Config: &tls.Config{
 			ServerName:         target.Hostname,
 			InsecureSkipVerify: true,
