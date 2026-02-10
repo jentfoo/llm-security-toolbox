@@ -112,7 +112,6 @@ func (c *Client) ProxyRuleAdd(ctx context.Context, opts RuleAddOpts) (*protocol.
 func (c *Client) ProxyRuleUpdate(ctx context.Context, ruleID string, opts RuleUpdateOpts) (*protocol.RuleEntry, error) {
 	args := map[string]interface{}{
 		"rule_id": ruleID,
-		"type":    opts.Type,
 	}
 	if opts.Match != "" {
 		args["match"] = opts.Match

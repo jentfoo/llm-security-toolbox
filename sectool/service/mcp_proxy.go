@@ -88,7 +88,6 @@ func (m *mcpServer) proxyRuleUpdateTool() mcp.Tool {
 
 Requires at least match or replace. To rename label only, resend existing values with new label.`),
 		mcp.WithString("rule_id", mcp.Required(), mcp.Description("Rule ID or label to update")),
-		mcp.WithString("type", mcp.Required(), mcp.Description("Rule type: HTTP uses request_header/request_body/response_header/response_body; WebSocket uses ws:to-server/ws:to-client/ws:both")),
 		mcp.WithString("match", mcp.Description("Pattern to match")),
 		mcp.WithString("replace", mcp.Description("Replacement text")),
 		mcp.WithString("label", mcp.Description("Optional new label (unique); omit to keep existing")),
@@ -401,14 +400,6 @@ func (m *mcpServer) handleProxyRuleUpdate(ctx context.Context, req mcp.CallToolR
 		return errorResult("rule_id is required"), nil
 	}
 
-	ruleType := req.GetString("type", "")
-	if ruleType == "" {
-		return errorResult("type is required"), nil
-	}
-	if err := validateRuleTypeAny(ruleType); err != nil {
-		return errorResult(err.Error()), nil
-	}
-
 	match := req.GetString("match", "")
 	replace := req.GetString("replace", "")
 	if match == "" && replace == "" {
@@ -426,7 +417,6 @@ func (m *mcpServer) handleProxyRuleUpdate(ctx context.Context, req mcp.CallToolR
 
 	rule, err := m.service.httpBackend.UpdateRule(ctx, ruleID, ProxyRuleInput{
 		Label:   req.GetString("label", ""),
-		Type:    ruleType,
 		IsRegex: isRegex,
 		Match:   match,
 		Replace: replace,

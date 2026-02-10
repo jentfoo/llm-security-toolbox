@@ -426,21 +426,22 @@ func (b *BurpBackend) updateRuleInSet(ctx context.Context, websocket bool, rules
 		}
 	}
 
-	// Validate type matches rule category (ws:* for WebSocket, HTTP types for HTTP)
-	ruleType := input.Type
-	if websocket {
-		if !isWSType(input.Type) {
-			return nil, fmt.Errorf("cannot update WebSocket rule with HTTP type %q: use ws:to-server, ws:to-client, or ws:both", input.Type)
-		}
-		ruleType = wsToBurpType(input.Type)
-	} else {
-		if isWSType(input.Type) {
-			return nil, fmt.Errorf("cannot update HTTP rule with WebSocket type %q", input.Type)
+	// Validate type if explicitly provided (type is immutable via MCP)
+	if input.Type != "" {
+		if websocket {
+			if !isWSType(input.Type) {
+				return nil, fmt.Errorf("cannot update WebSocket rule with HTTP type %q: use ws:to-server, ws:to-client, or ws:both", input.Type)
+			}
+			rules[idx].RuleType = wsToBurpType(input.Type)
+		} else {
+			if isWSType(input.Type) {
+				return nil, fmt.Errorf("cannot update HTTP rule with WebSocket type %q", input.Type)
+			}
+			rules[idx].RuleType = input.Type
 		}
 	}
 
 	rules[idx].Comment = formatSectoolComment(id, label)
-	rules[idx].RuleType = ruleType
 	rules[idx].StringMatch = input.Match
 	rules[idx].StringReplace = input.Replace
 	// Only change category if IsRegex was explicitly provided
@@ -456,10 +457,16 @@ func (b *BurpBackend) updateRuleInSet(ctx context.Context, websocket bool, rules
 		return nil, fmt.Errorf("update rule: %w", err)
 	}
 
+	// Resolve type from the rule for the response
+	responseType := rules[idx].RuleType
+	if websocket {
+		responseType = burpToWSType(responseType)
+	}
+
 	return &protocol.RuleEntry{
 		RuleID:  id,
 		Label:   label,
-		Type:    input.Type,
+		Type:    responseType,
 		IsRegex: rules[idx].Category == mcp.RuleCategoryRegex,
 		Match:   input.Match,
 		Replace: input.Replace,

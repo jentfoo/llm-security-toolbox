@@ -119,7 +119,7 @@ func ruleAdd(mcpURL string, ruleType, match, replace, label string, isRegex bool
 	return nil
 }
 
-func ruleUpdate(mcpURL string, ruleID, ruleType, match, replace, label string, isRegex *bool) error {
+func ruleUpdate(mcpURL string, ruleID, match, replace, label string, isRegex *bool) error {
 	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
@@ -130,7 +130,6 @@ func ruleUpdate(mcpURL string, ruleID, ruleType, match, replace, label string, i
 
 	resp, err := client.ProxyRuleUpdate(ctx, ruleID, mcpclient.RuleUpdateOpts{
 		Label:   label,
-		Type:    ruleType,
 		IsRegex: isRegex,
 		Match:   match,
 		Replace: replace,

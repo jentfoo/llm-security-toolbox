@@ -86,7 +86,7 @@ type ProxyEntryMeta struct {
 // ProxyRuleInput contains parameters for creating/updating a rule.
 type ProxyRuleInput struct {
 	Label   string // Optional label for easier reference
-	Type    string // Required: rule type
+	Type    string // Required on add; ignored on update (type is immutable)
 	IsRegex *bool  // nil = preserve existing, non-nil = set to value
 	Match   string
 	Replace string

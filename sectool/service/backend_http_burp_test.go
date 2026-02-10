@@ -87,14 +87,13 @@ func TestBurpBackendRules(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name       string
-		websocket  bool
-		ruleType1  string // primary type for add tests
-		ruleType2  string // secondary type for regex tests
-		updateType string // type for update tests
+		name      string
+		websocket bool
+		ruleType1 string // primary type for add tests
+		ruleType2 string // secondary type for regex tests
 	}{
-		{"http_rules", false, mcp.RuleTypeRequestHeader, mcp.RuleTypeResponseHeader, mcp.RuleTypeRequestBody},
-		{"ws_rules", true, "ws:to-server", "ws:to-client", "ws:both"},
+		{"http_rules", false, mcp.RuleTypeRequestHeader, mcp.RuleTypeResponseHeader},
+		{"ws_rules", true, "ws:to-server", "ws:to-client"},
 	}
 
 	for _, tc := range testCases {
@@ -166,7 +165,6 @@ func TestBurpBackendRules(t *testing.T) {
 				// Try to update test-regex rule to have test-add's label
 				_, err := backend.UpdateRule(t.Context(), createdRuleIDs[1], ProxyRuleInput{
 					Label: "test-add",
-					Type:  tc.ruleType1,
 				})
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "already exists")
@@ -175,7 +173,6 @@ func TestBurpBackendRules(t *testing.T) {
 			t.Run("update_by_id", func(t *testing.T) {
 				updated, err := backend.UpdateRule(t.Context(), createdRuleIDs[0], ProxyRuleInput{
 					Label:   "test-updated",
-					Type:    tc.updateType,
 					IsRegex: boolPtr(true),
 					Match:   "old",
 					Replace: "new",
@@ -184,14 +181,13 @@ func TestBurpBackendRules(t *testing.T) {
 
 				assert.Equal(t, createdRuleIDs[0], updated.RuleID)
 				assert.Equal(t, "test-updated", updated.Label)
-				assert.Equal(t, tc.updateType, updated.Type)
+				assert.Equal(t, tc.ruleType1, updated.Type)
 				assert.True(t, updated.IsRegex)
 			})
 
 			t.Run("update_by_label", func(t *testing.T) {
 				updated, err := backend.UpdateRule(t.Context(), "test-regex", ProxyRuleInput{
 					Label:   "test-regex-updated",
-					Type:    tc.ruleType2,
 					IsRegex: boolPtr(false),
 					Match:   "find",
 					Replace: "replace",
@@ -211,7 +207,6 @@ func TestBurpBackendRules(t *testing.T) {
 
 				// Update the rule without providing a label (empty string)
 				updated, err := backend.UpdateRule(t.Context(), rule.RuleID, ProxyRuleInput{
-					Type:    tc.ruleType1,
 					Replace: "X-Updated: value",
 				})
 				require.NoError(t, err)
@@ -240,7 +235,6 @@ func TestBurpBackendRules(t *testing.T) {
 
 			t.Run("update_not_found", func(t *testing.T) {
 				_, err := backend.UpdateRule(t.Context(), "nonexistent", ProxyRuleInput{
-					Type:    tc.ruleType1,
 					Replace: "X-Test: value",
 				})
 				require.Error(t, err)

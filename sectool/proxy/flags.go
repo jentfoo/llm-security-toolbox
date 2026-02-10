@@ -453,9 +453,8 @@ func parseRuleUpdate(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule update", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var isRegex bool
-	var ruleType, label, name, match, replace string
+	var label, name, match, replace string
 
-	fs.StringVar(&ruleType, "type", "", "rule type (required)")
 	fs.BoolVar(&isRegex, "regex", false, "treat match as regex pattern")
 	fs.StringVar(&label, "label", "", "new label for the rule")
 	fs.StringVar(&name, "name", "", "alias for --label")
@@ -468,10 +467,6 @@ func parseRuleUpdate(args []string, mcpURL string) error {
 
 Update an existing rule. Lookup by rule_id or label.
 Searches both HTTP and WebSocket rules automatically.
-
-Types:
-  HTTP:      request_header, request_body, response_header, response_body
-  WebSocket: ws:to-server, ws:to-client, ws:both
 
 Options:
 `)
@@ -509,7 +504,7 @@ Options:
 		isRegexPtr = &isRegex
 	}
 
-	return ruleUpdate(mcpURL, ruleID, ruleType, match, replace, label, isRegexPtr)
+	return ruleUpdate(mcpURL, ruleID, match, replace, label, isRegexPtr)
 }
 
 func parseRuleDelete(args []string, mcpURL string) error {

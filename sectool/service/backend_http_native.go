@@ -334,17 +334,17 @@ func (b *NativeProxyBackend) UpdateRule(ctx context.Context, idOrLabel string, i
 	}
 	current := (*target)[idx]
 
-	// Validate type matches websocket category
-	if isWSType(input.Type) != isWS {
-		if isWS {
-			return nil, fmt.Errorf("cannot update WebSocket rule with HTTP type %q", input.Type)
+	// Validate type if explicitly provided (type is immutable via MCP)
+	if input.Type != "" {
+		if isWSType(input.Type) != isWS {
+			if isWS {
+				return nil, fmt.Errorf("cannot update WebSocket rule with HTTP type %q", input.Type)
+			}
+			return nil, fmt.Errorf("cannot update HTTP rule with WebSocket type %q", input.Type)
 		}
-		return nil, fmt.Errorf("cannot update HTTP rule with WebSocket type %q", input.Type)
-	}
-
-	// Validate rule type is known
-	if !validRuleTypes[input.Type] {
-		return nil, fmt.Errorf("invalid rule type: %q", input.Type)
+		if !validRuleTypes[input.Type] {
+			return nil, fmt.Errorf("invalid rule type: %q", input.Type)
+		}
 	}
 
 	// Check label uniqueness if changing
@@ -375,7 +375,9 @@ func (b *NativeProxyBackend) UpdateRule(ctx context.Context, idOrLabel string, i
 	if input.Label != "" && input.Label != current.Label {
 		rule.Label = input.Label
 	}
-	rule.Type = input.Type
+	if input.Type != "" {
+		rule.Type = input.Type
+	}
 	rule.Match = input.Match
 	rule.Replace = input.Replace
 	rule.IsRegex = newIsRegex

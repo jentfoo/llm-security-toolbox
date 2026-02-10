@@ -141,16 +141,16 @@ func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, rules, 1)
 
-	// Update rule
+	// Update rule (type omitted, should be preserved)
 	updated, err := backend.UpdateRule(t.Context(), "test-rule", ProxyRuleInput{
 		Label:   "test-rule",
-		Type:    RuleTypeRequestHeader,
 		IsRegex: &isRegex,
 		Match:   "updated-value",
 		Replace: "new-replacement",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "updated-value", updated.Match)
+	assert.Equal(t, RuleTypeRequestHeader, updated.Type)
 
 	// Delete rule
 	err = backend.DeleteRule(t.Context(), "test-rule")

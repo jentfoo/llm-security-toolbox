@@ -32,7 +32,6 @@ type RuleAddOpts struct {
 
 // RuleUpdateOpts are options for ProxyRuleUpdate.
 type RuleUpdateOpts struct {
-	Type    string
 	Match   string
 	Replace string
 	Label   string

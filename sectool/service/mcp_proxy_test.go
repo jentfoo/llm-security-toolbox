@@ -388,13 +388,12 @@ func TestMCP_ProxyRulesCRUDWithMock(t *testing.T) {
 	t.Run("update_rule", func(t *testing.T) {
 		rule := CallMCPToolJSONOK[protocol.RuleEntry](t, mcpClient, "proxy_rule_update", map[string]interface{}{
 			"rule_id": ruleID,
-			"type":    RuleTypeRequestBody,
 			"label":   "mock-test-updated",
 			"match":   "old",
 			"replace": "new",
 		})
 		assert.Equal(t, "mock-test-updated", rule.Label)
-		assert.Equal(t, RuleTypeRequestBody, rule.Type)
+		assert.Equal(t, RuleTypeRequestHeader, rule.Type)
 	})
 
 	t.Run("delete_rule", func(t *testing.T) {
@@ -546,27 +545,9 @@ func TestMCP_ProxyRuleValidation(t *testing.T) {
 		assert.Contains(t, ExtractMCPText(t, result), "rule_id is required")
 	})
 
-	t.Run("update_missing_type", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
-			"rule_id": "some-id",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "type is required")
-	})
-
-	t.Run("update_invalid_type", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
-			"rule_id": "some-id",
-			"type":    "invalid_type",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "invalid rule type")
-	})
-
 	t.Run("update_missing_match_and_replace", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
 			"rule_id": "some-id",
-			"type":    RuleTypeRequestHeader,
 		})
 		assert.True(t, result.IsError)
 		assert.Contains(t, ExtractMCPText(t, result), "match or replace is required")
@@ -575,7 +556,6 @@ func TestMCP_ProxyRuleValidation(t *testing.T) {
 	t.Run("update_invalid_rule_id", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "proxy_rule_update", map[string]interface{}{
 			"rule_id": "nonexistent",
-			"type":    RuleTypeRequestHeader,
 			"replace": "X-Test: value",
 		})
 		assert.True(t, result.IsError)
