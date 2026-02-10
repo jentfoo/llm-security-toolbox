@@ -322,6 +322,34 @@ func readResponseStatusCode(resp []byte) int {
 	return code
 }
 
+// parseHeaderArg extracts headers from an MCP argument that may be either:
+//   - an object {"Name": "Value"} (documented for request_send)
+//   - an array ["Name: Value"] (documented for replay_send add_headers)
+//
+// Returns headers as "Name: Value" strings regardless of input format.
+func parseHeaderArg(raw interface{}) []string {
+	switch v := raw.(type) {
+	case map[string]interface{}:
+		result := make([]string, 0, len(v))
+		for k, val := range v {
+			if vs, ok := val.(string); ok {
+				result = append(result, k+": "+vs)
+			}
+		}
+		return result
+	case []interface{}:
+		result := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
 // extractHeaderLines extracts header lines from raw HTTP request.
 // Skips the request line and returns each header as "Name: Value".
 func extractHeaderLines(raw string) []string {

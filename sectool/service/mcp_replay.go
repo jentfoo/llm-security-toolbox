@@ -117,8 +117,16 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 
 	headers, reqBody := splitHeadersBody(rawRequest)
 
+	// Parse add_headers flexibly: array ["Name: Value"] or object {"Name":"Value"}
+	var addHeaders []string
+	if args := req.GetArguments(); args != nil {
+		if raw, ok := args["add_headers"]; ok && raw != nil {
+			addHeaders = parseHeaderArg(raw)
+		}
+	}
+
 	sendReq := &ReplaySendRequest{
-		AddHeaders:    req.GetStringSlice("add_headers", nil),
+		AddHeaders:    addHeaders,
 		RemoveHeaders: req.GetStringSlice("remove_headers", nil),
 		Target:        req.GetString("target", ""),
 	}
@@ -317,15 +325,16 @@ func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolReque
 
 	method := req.GetString("method", "GET")
 
-	// Parse headers from object
+	// Parse headers from object {"Name":"Value"} or array ["Name: Value"]
 	var headers map[string]string
 	if args := req.GetArguments(); args != nil {
 		if headersRaw, ok := args["headers"]; ok && headersRaw != nil {
-			if headersMap, ok := headersRaw.(map[string]interface{}); ok {
-				headers = make(map[string]string)
-				for k, v := range headersMap {
-					if vs, ok := v.(string); ok {
-						headers[k] = vs
+			headerSlice := parseHeaderArg(headersRaw)
+			if len(headerSlice) > 0 {
+				headers = make(map[string]string, len(headerSlice))
+				for _, h := range headerSlice {
+					if parts := strings.SplitN(h, ":", 2); len(parts) == 2 {
+						headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 					}
 				}
 			}

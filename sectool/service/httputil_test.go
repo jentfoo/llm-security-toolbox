@@ -63,6 +63,74 @@ func TestAggregateByTuple(t *testing.T) {
 	})
 }
 
+func TestParseHeaderArg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  interface{}
+		want []string
+	}{
+		{
+			name: "object_format",
+			raw: map[string]interface{}{
+				"X-Custom": "value",
+				"Accept":   "application/json",
+			},
+			want: []string{"X-Custom: value", "Accept: application/json"},
+		},
+		{
+			name: "array_format",
+			raw:  []interface{}{"X-Custom: value", "Accept: application/json"},
+			want: []string{"X-Custom: value", "Accept: application/json"},
+		},
+		{
+			name: "nil_input",
+			raw:  nil,
+			want: nil,
+		},
+		{
+			name: "wrong_type",
+			raw:  "not a map or slice",
+			want: nil,
+		},
+		{
+			name: "empty_object",
+			raw:  map[string]interface{}{},
+			want: []string{},
+		},
+		{
+			name: "empty_array",
+			raw:  []interface{}{},
+			want: []string{},
+		},
+		{
+			name: "object_non_string_values_skipped",
+			raw: map[string]interface{}{
+				"X-Good": "value",
+				"X-Bad":  42,
+			},
+			want: []string{"X-Good: value"},
+		},
+		{
+			name: "array_non_string_items_skipped",
+			raw:  []interface{}{"X-Good: value", 42, true},
+			want: []string{"X-Good: value"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseHeaderArg(tt.raw)
+			if tt.want == nil {
+				assert.Nil(t, got)
+				return
+			}
+			assert.ElementsMatch(t, tt.want, got)
+		})
+	}
+}
+
 func TestExtractRequestMeta(t *testing.T) {
 	t.Parallel()
 

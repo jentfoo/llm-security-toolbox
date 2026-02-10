@@ -110,6 +110,92 @@ func TestMCP_RequestSendWithMock(t *testing.T) {
 	}
 }
 
+func TestMCP_RequestSendHeaderFormats(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=GET /test HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok}",
+	)
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=GET /test HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok}",
+	)
+
+	t.Run("object_format", func(t *testing.T) {
+		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
+			"url":    "https://example.com/test",
+			"method": "GET",
+			"headers": map[string]interface{}{
+				"X-Test-Header": "ObjectFormat",
+			},
+		})
+		assert.NotEmpty(t, resp.ReplayID)
+		sent := mockMCP.LastSentRequest()
+		assert.Contains(t, sent, "X-Test-Header: ObjectFormat")
+	})
+
+	t.Run("array_format", func(t *testing.T) {
+		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
+			"url":    "https://example.com/test",
+			"method": "GET",
+			"headers": []interface{}{
+				"X-Test-Header: ArrayFormat",
+			},
+		})
+		assert.NotEmpty(t, resp.ReplayID)
+		sent := mockMCP.LastSentRequest()
+		assert.Contains(t, sent, "X-Test-Header: ArrayFormat")
+	})
+}
+
+func TestMCP_ReplaySendAddHeaderFormats(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+
+	mockMCP.AddProxyEntry(
+		"GET /header-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
+		"HTTP/1.1 200 OK\r\n\r\noriginal",
+		"",
+	)
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=GET /header-test HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok}",
+	)
+	mockMCP.SetSendResponse(
+		"HttpRequestResponse{httpRequest=GET /header-test HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok}",
+	)
+
+	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+		"output_mode": "flows",
+		"method":      "GET",
+	})
+	require.NotEmpty(t, listResp.Flows)
+	flowID := listResp.Flows[0].FlowID
+
+	t.Run("array_format", func(t *testing.T) {
+		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id":     flowID,
+			"add_headers": []interface{}{"X-Test-Header: ArrayFormat"},
+		})
+		assert.NotEmpty(t, resp.ReplayID)
+		sent := mockMCP.LastSentRequest()
+		assert.Contains(t, sent, "X-Test-Header: ArrayFormat")
+	})
+
+	t.Run("object_format", func(t *testing.T) {
+		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id": flowID,
+			"add_headers": map[string]interface{}{
+				"X-Test-Header": "ObjectFormat",
+			},
+		})
+		assert.NotEmpty(t, resp.ReplayID)
+		sent := mockMCP.LastSentRequest()
+		assert.Contains(t, sent, "X-Test-Header: ObjectFormat")
+	})
+}
+
 func TestMCP_RequestSendValidation(t *testing.T) {
 	t.Parallel()
 
