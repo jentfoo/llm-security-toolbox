@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -33,10 +34,25 @@ type mcpServer struct {
 	// "test-report" - test-report instructions, no crawl tools
 	workflowMode        string
 	workflowInitialized atomic.Bool
+
+	// Enriched workflow content (base templates + detected system tools)
+	workflowExplore    string
+	workflowTestReport string
 }
 
 // newMCPServer creates a new MCP server instance.
 func newMCPServer(svc *Server, workflowMode string) *mcpServer {
+	// Detect system security tools once at startup
+	sysTools := detectSystemTools()
+	exploreContent, testReportContent := workflowExploreContent, workflowTestReportContent
+	if len(sysTools) > 0 {
+		suffix :=
+			"\nIn addition to these MCP tools the following system commands are available (see --help for usage): " +
+				strings.Join(sysTools, ", ")
+		exploreContent += suffix
+		testReportContent += suffix
+	}
+
 	opts := []server.ServerOption{
 		server.WithToolCapabilities(false),
 		server.WithLogging(),
@@ -45,22 +61,32 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 	// Add instructions based on workflow mode
 	switch workflowMode {
 	case WorkflowModeExplore:
-		opts = append(opts, server.WithInstructions(workflowExploreContent))
+		opts = append(opts, server.WithInstructions(exploreContent))
 	case WorkflowModeTestReport:
-		opts = append(opts, server.WithInstructions(workflowTestReportContent))
+		opts = append(opts, server.WithInstructions(testReportContent))
 	}
 
 	mcpSrv := server.NewMCPServer("sectool", config.Version, opts...)
 
 	m := &mcpServer{
-		server:       mcpSrv,
-		service:      svc,
-		workflowMode: workflowMode,
+		server:             mcpSrv,
+		service:            svc,
+		workflowMode:       workflowMode,
+		workflowExplore:    exploreContent,
+		workflowTestReport: testReportContent,
 	}
 
 	m.registerTools()
 
 	return m
+}
+
+// enrichWorkflowContent appends a system tools notice to workflow content.
+func enrichWorkflowContent(base string, tools []string) string {
+	if len(tools) == 0 {
+		return base
+	}
+	return base + "\nIn addition to these MCP tools the following system commands are available (see --help text for usage): " + strings.Join(tools, ", ") + "\n"
 }
 
 func (m *mcpServer) Start(port int) error {
@@ -232,9 +258,9 @@ func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest)
 	var content string
 	switch task {
 	case WorkflowModeExplore:
-		content = workflowExploreContent
+		content = m.workflowExplore
 	case WorkflowModeTestReport:
-		content = workflowTestReportContent
+		content = m.workflowTestReport
 	case WorkflowModeCLI:
 		m.workflowInitialized.Store(true)
 		return mcp.NewToolResultText("Tools enabled for CLI usage"), nil
