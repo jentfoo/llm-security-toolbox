@@ -20,9 +20,9 @@ import (
 	"github.com/go-appsec/scout"
 	"github.com/gocolly/colly/v2"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/config"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/ids"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/service/ids"
+	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
 const (

@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/config"
 )
 
 // Unit tests for MCP server functionality using mock backends.

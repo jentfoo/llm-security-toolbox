@@ -11,10 +11,10 @@ import (
 
 	"github.com/jedib0t/go-pretty/v6/table"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/bundle"
-	"github.com/go-appsec/llm-security-toolbox/sectool/cliutil"
-	"github.com/go-appsec/llm-security-toolbox/sectool/mcpclient"
-	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/bundle"
+	"github.com/go-appsec/toolbox/sectool/cliutil"
+	"github.com/go-appsec/toolbox/sectool/mcpclient"
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 func create(mcpURL string, urls, flows, domains []string, label string, maxDepth, maxRequests int, delay time.Duration, parallelism int, submitForms, ignoreRobots bool) error {

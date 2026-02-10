@@ -27,13 +27,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/config"
-	"github.com/go-appsec/llm-security-toolbox/sectool/mcpclient"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service"
-	servicemcp "github.com/go-appsec/llm-security-toolbox/sectool/service/mcp"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/proxy"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/testutil"
+	"github.com/go-appsec/toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/mcpclient"
+	"github.com/go-appsec/toolbox/sectool/service"
+	servicemcp "github.com/go-appsec/toolbox/sectool/service/mcp"
+	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sectool/service/testutil"
 )
 
 // Integration tests for sectool MCP client → MCP server → real backends.

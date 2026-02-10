@@ -10,7 +10,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 func (m *mcpServer) oastCreateTool() mcp.Tool {

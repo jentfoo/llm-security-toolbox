@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/cliutil"
+	"github.com/go-appsec/toolbox/sectool/cliutil"
 )
 
 var encodeSubcommands = []string{"url", "base64", "html", "help"}

@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
 // TimeoutConfig holds configurable timeout values for proxy operations.

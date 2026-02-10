@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/bundle"
-	"github.com/go-appsec/llm-security-toolbox/sectool/mcpclient"
+	"github.com/go-appsec/toolbox/sectool/bundle"
+	"github.com/go-appsec/toolbox/sectool/mcpclient"
 )
 
 func export(mcpURL string, flowID string) error {

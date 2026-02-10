@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/config"
-	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 func TestMCP_ReplayWithMock(t *testing.T) {

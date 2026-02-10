@@ -9,14 +9,14 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/cliutil"
-	"github.com/go-appsec/llm-security-toolbox/sectool/config"
-	"github.com/go-appsec/llm-security-toolbox/sectool/crawl"
-	"github.com/go-appsec/llm-security-toolbox/sectool/encode"
-	"github.com/go-appsec/llm-security-toolbox/sectool/oast"
-	"github.com/go-appsec/llm-security-toolbox/sectool/proxy"
-	"github.com/go-appsec/llm-security-toolbox/sectool/replay"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service"
+	"github.com/go-appsec/toolbox/sectool/cliutil"
+	"github.com/go-appsec/toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/crawl"
+	"github.com/go-appsec/toolbox/sectool/encode"
+	"github.com/go-appsec/toolbox/sectool/oast"
+	"github.com/go-appsec/toolbox/sectool/proxy"
+	"github.com/go-appsec/toolbox/sectool/replay"
+	"github.com/go-appsec/toolbox/sectool/service"
 )
 
 func main() {

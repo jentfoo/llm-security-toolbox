@@ -8,10 +8,10 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/config"
-	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/ids"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/service/ids"
+	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
 func (m *mcpServer) replaySendTool() mcp.Tool {

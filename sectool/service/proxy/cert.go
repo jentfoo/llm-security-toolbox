@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
 const (

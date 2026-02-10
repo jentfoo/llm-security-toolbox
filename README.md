@@ -1,7 +1,7 @@
-# go-appsec/llm-security-toolbox
+# go-appsec/toolbox
 
-[![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/go-appsec/llm-security-toolbox/blob/main/LICENSE)
-[![Build Status](https://github.com/go-appsec/llm-security-toolbox/actions/workflows/tests-main.yml/badge.svg)](https://github.com/go-appsec/llm-security-toolbox/actions/workflows/tests-main.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/go-appsec/toolbox/blob/main/LICENSE)
+[![Build Status](https://github.com/go-appsec/toolbox/actions/workflows/tests-main.yml/badge.svg)](https://github.com/go-appsec/toolbox/actions/workflows/tests-main.yml)
 
 Collaborative application security testing with coding agents. Sectool gives your agent the same tools you use — proxy history, request replay, crawling, out-of-band testing — via MCP (Model Context Protocol), allowing you to work together. You handle authentication or interact with the UI, the agent probes targets and analyzes responses, and attempts other permutations. Combining your abilities makes routine tasks easier, junior security engineers more capable, hidden indicators less likely to be missed, and complex testing more thorough.
 
@@ -9,11 +9,17 @@ Collaborative application security testing with coding agents. Sectool gives you
 
 ### 1. Install sectool
 
-Download the binary for your platform (Linux, macOS, Windows — amd64 and arm64) from the [latest release](https://github.com/go-appsec/llm-security-toolbox/releases), or build from source:
+Download the binary for your platform (Linux, macOS, Windows — amd64 and arm64) from the [latest release](https://github.com/go-appsec/toolbox/releases), install with `go install`:
 
 ```bash
-git clone https://github.com/go-appsec/llm-security-toolbox.git
-cd llm-security-toolbox
+go install github.com/go-appsec/toolbox/sectool@latest
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/go-appsec/toolbox.git
+cd toolbox
 make build
 ```
 
@@ -84,7 +90,7 @@ sectool mcp --workflow none        # No workflow instructions
 | `test-report` | Validating a specific vulnerability report; token-optimized, crawl tools excluded |
 | `none` | No workflow instructions, all tools available immediately |
 
-Workflow instructions guide agents toward collaborative testing rather than trying to do everything autonomously or stepping you through a process without adding value. If you have ideas for improving agent collaboration, [open an issue](https://github.com/go-appsec/llm-security-toolbox/issues).
+Workflow instructions guide agents toward collaborative testing rather than trying to do everything autonomously or stepping you through a process without adding value. If you have ideas for improving agent collaboration, [open an issue](https://github.com/go-appsec/toolbox/issues).
 
 ### MCP transports
 

@@ -1,4 +1,4 @@
-module github.com/go-appsec/llm-security-toolbox
+module github.com/go-appsec/toolbox
 
 go 1.24.0
 

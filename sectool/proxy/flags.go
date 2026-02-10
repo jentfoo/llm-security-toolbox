@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/cliutil"
+	"github.com/go-appsec/toolbox/sectool/cliutil"
 )
 
 var proxySubcommands = []string{"summary", "list", "export", "rule", "help"}

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/ids"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/mcp"
+	"github.com/go-appsec/toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/service/ids"
+	"github.com/go-appsec/toolbox/sectool/service/mcp"
 )
 
 // BurpBackend implements HttpBackend using Burp Suite via MCP.

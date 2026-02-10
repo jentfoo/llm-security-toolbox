@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/ids"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/proxy"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/service/ids"
+	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
 const (

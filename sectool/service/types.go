@@ -6,7 +6,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 // Flow source constants for display and sorting.

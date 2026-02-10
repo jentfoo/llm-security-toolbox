@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/proxy"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/store"
-	"github.com/go-appsec/llm-security-toolbox/sectool/service/testutil"
+	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sectool/service/testutil"
 )
 
 func TestNativeProxyBackend_CreateAndServe(t *testing.T) {

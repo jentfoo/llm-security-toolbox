@@ -1,7 +1,7 @@
 export GO111MODULE = on
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS := -ldflags "-s -w -X github.com/go-appsec/llm-security-toolbox/sectool/config.Version=$(VERSION)"
+LDFLAGS := -ldflags "-s -w -X github.com/go-appsec/toolbox/sectool/config.Version=$(VERSION)"
 
 .PHONY: build build-cross clean test test-all test-cover bench lint
 

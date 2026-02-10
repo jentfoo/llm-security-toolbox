@@ -1,11 +1,11 @@
 ## Project Overview
 
-**llm-security-toolbox (sectool)** is an LLM-first CLI toolkit for application security testing. It enables humans and agentic coding tools to collaborate on security testing via MCP (Model Context Protocol). Supports a built-in HTTP/HTTPS proxy or Burp Suite integration.
+**go-appsec/toolbox (sectool)** is a CLI and MCP toolkit for human and LLM agent collaboration for application security testing.
 
 Key characteristics:
 - MCP-primary architecture: single API serves both agents and CLI
 - CLI is a thin client over MCP for human interaction
-- Global config at `~/.sectool/config.json` (auto-created on first run)
+- Global config at `~/.sectool/config.json` (auto-created)
 - All output in markdown format for LLM consumption
 - Pluggable backend architecture (native built-in proxy or Burp MCP for HTTP, Interactsh for OAST, Colly for crawling)
 

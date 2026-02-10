@@ -14,7 +14,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/go-appsec/llm-security-toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/config"
 )
 
 // mcpServer wraps the MCP server and its dependencies.
