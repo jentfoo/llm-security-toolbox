@@ -5,27 +5,21 @@
 
 **MCP-based application security testing tools for your coding agent.**
 
-Collaborative application security testing with coding agents. Sectool gives your agent the same tools you use — proxy history, request replay, crawling, out-of-band testing — via MCP (Model Context Protocol), allowing you to work together. You handle authentication or interact with the UI, the agent probes targets and analyzes responses, and attempts other permutations. Combining your abilities makes routine tasks easier, junior security engineers more capable, hidden indicators less likely to be missed, and complex testing more thorough.
+Not a scanner — a collaborative workbench. Agents struggle with UI and stateful APIs; you're good at both. Sectool bridges the gap by exposing stable primitives — proxy history, replay, crawling, OAST, diffing — so AppSec engineers and pentesters can explore apps and validate reports augmented by an agent.
+
+You handle auth and UI interactions, the agent queries flows, mutates requests, finds reflections, and attempts other permutations. Combining your abilities makes routine tasks easier, hidden indicators less likely to be missed, and complex testing more thorough.
 
 ## Getting Started
 
 ### 1. Install sectool
 
-Download the binary for your platform (Linux, macOS, Windows — amd64 and arm64) from the [latest release](https://github.com/go-appsec/toolbox/releases), install with `go install`:
-
 ```bash
 go install github.com/go-appsec/toolbox/sectool@latest
 ```
 
-Or build from source:
+**No Go?** Download the binary for your platform (Linux, macOS, Windows — amd64 and arm64) from the [latest release](https://github.com/go-appsec/toolbox/releases).
 
-```bash
-git clone https://github.com/go-appsec/toolbox.git
-cd toolbox
-make build
-```
-
-### 2. Start the MCP server
+### 2. Start the MCP (Model Context Protocol) server
 
 ```bash
 sectool mcp
@@ -35,11 +29,11 @@ This starts an MCP server on port 9119 with a built-in HTTP proxy on port 8080.
 
 ### 3. Configure your browser
 
-Note: These instructions are for the built-in proxy. If using [Burp Suite](https://portswigger.net/burp/communitydownload), follow [Burp's proxy configuration](https://portswigger.net/burp/documentation/desktop/external-browser-config) instead.
-
 Point your browser's proxy settings at `127.0.0.1:8080` (or the port specified with `--proxy-port`).
 
-For HTTPS interception, install the CA certificate from `~/.sectool/ca.pem`. The certificate is auto-generated on first run. Most browsers accept it through their certificate settings; on macOS you can also add it to the system keychain.
+For HTTPS interception, install the CA certificate from `~/.sectool/ca.pem` (auto-generated on first run). Most browsers accept it through their certificate settings; on macOS you can also add it to the system keychain.
+
+**Using Burp?** Follow [Burp's proxy configuration](https://portswigger.net/burp/documentation/desktop/external-browser-config) instead, then start sectool with `sectool mcp --burp`.
 
 ### 4. Connect your agent
 
@@ -62,17 +56,15 @@ Work with the agent to build a test plan and execute it together. The agent can 
 
 ### Proxy backends
 
+**Native (default):** Built-in proxy with wire-fidelity and HTTP/1.1, HTTP/2, and WebSocket support. Designed to be as capable as Burp for MITM testing. A single binary provides the MCP server, proxy, and CLI — fully self-contained and usable in headless environments.
+
+**Burp (optional):** If you prefer a GUI to review the agent's actions or already have Burp running, install the MCP extension from the BApp Store and ensure the MCP server runs on `http://127.0.0.1:9876/sse`.
+
 | Option | Description |
 |--------|-------------|
-| (default) | Auto-detect: tries Burp MCP first, falls back to built-in proxy |
-| `--proxy-port 8080` | Force built-in proxy on specified port |
+| (default) | Auto-detect: tries Burp MCP first, falls back to native proxy |
+| `--proxy-port 8080` | Force native proxy on specified port |
 | `--burp` | Force Burp MCP (fails if unavailable) |
-
-**Burp Suite (optional):** If you prefer your existing Burp setup or want a GUI to review the agent's actions, install the MCP extension from the BApp Store and ensure the MCP server runs on `http://127.0.0.1:9876/sse`.
-
-**Native:** The native proxy is designed to be as capable (and in some cases more capable) than Burp for MITM testing, with precise wire-fidelity and HTTP/1.1, HTTP/2, and WebSocket support.
-
-Both backends can also be reviewed and utilized through the CLI. With the native backend, the CLI is the only way to interact with proxy history directly.
 
 ### Workflow modes
 
@@ -102,7 +94,7 @@ The server exposes two endpoints:
 
 ## CLI Usage
 
-The CLI provides a human-friendly interface to the same tools that agents use. Most CLI commands require the MCP server to be running (`sectool mcp`); encode, decode, hash, and jwt run locally.
+The CLI works with both backends and provides a human-friendly interface for reviewing, replaying, and scripting against the same state the agent operates on.
 
 ```bash
 # Proxy history
@@ -165,13 +157,13 @@ Use `sectool <command> --help` for detailed options.
 
 ## Key Features
 
-- **Burp Suite integration** - Use your existing Burp setup instead of the built-in proxy
-- **Wire-fidelity proxy** - HTTP/1.1 and HTTP/2 MITM preserving header order, casing, and protocol anomalies for security testing
-- **WebSocket interception** - Frame-level proxying and match/replace for WebSocket messages
-- **Match/replace rules** - Modify requests, responses, and WebSocket messages in transit
-- **Request replay** - Replay captured requests with modifications to headers, body, query params, or JSON fields
-- **Web crawling** - Discover application structure, forms, and endpoints
-- **OAST testing** - Create out-of-band domains and poll for DNS/HTTP/SMTP interactions via Interactsh
-- **Flow diffing** - Compare two captured flows with structured, content-type-aware diffs (JSON path-level, unified text, binary size)
-- **Reflection detection** - Find request parameter values reflected in responses across multiple encoding variants
+- **Wire-fidelity proxy** - HTTP/1.1 and HTTP/2 MITM preserving header order, casing, and protocol anomalies — security testing needs exact bytes, not normalized rewrites
+- **Replay with mutation** - Resend captured requests with selective edits to headers, body, query params, or JSON fields; pair with match/replace rules for iterative testing
+- **Flow diffing** - Structured, content-type-aware comparison of two flows (JSON path-level, unified text, binary size) for fast report validation
+- **Reflection detection** - Find request parameter values reflected in responses across multiple encoding variants to surface injection points
+- **OAST** - Out-of-band interaction testing via Interactsh; create domains, poll for DNS/HTTP/SMTP callbacks
+- **Crawling** - Discover endpoints, forms, and application structure; seed from proxy history or URLs
+- **WebSocket support** - Frame-level interception, proxying, and match/replace for WebSocket messages
+- **Workflow modes** - Task-specific agent guidance (explore, test-report) to improve collaboration quality and reduce token waste
 - **Encoding utilities** - URL, Base64, HTML encoding/decoding, hashing (MD5/SHA/HMAC), JWT inspection
+- **Burp Suite integration** - Optional GUI frontend via Burp MCP extension; or run fully headless with the native proxy
