@@ -284,7 +284,7 @@ func findReflections(params []protocol.Reflection, rawResp []byte) []protocol.Re
 	// Content-Type-based default context for non-HTML responses
 	baseContext := inferBaseContext(respHeaderMap)
 
-	var reflections []protocol.Reflection
+	reflections := []protocol.Reflection{}
 	for _, p := range params {
 		if len(p.Value) < minReflectionValueLen {
 			continue

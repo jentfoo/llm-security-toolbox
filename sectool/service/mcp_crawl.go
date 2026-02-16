@@ -210,7 +210,7 @@ Search: search_header/search_body use regex; literal if invalid.
 Incremental (summary/flows): since accepts flow_id or "last" (cursor). Flows mode only: pagination with limit/offset.`),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID or label")),
 		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default), 'flows', 'forms', or 'errors'")),
-		mcp.WithString("host", mcp.Description("Filter by host glob pattern (e.g., '*.example.com')")),
+		mcp.WithString("host", mcp.Description("Filter by host glob. *.example.com = subdomains only; *example.com = domain + subdomains")),
 		mcp.WithString("path", mcp.Description("Filter by path+query glob pattern (e.g., '/api/*')")),
 		mcp.WithString("method", mcp.Description("Filter by HTTP method (comma-separated)")),
 		mcp.WithString("status", mcp.Description("Filter by status codes or ranges (e.g., '200,404' or '2XX,4XX')")),

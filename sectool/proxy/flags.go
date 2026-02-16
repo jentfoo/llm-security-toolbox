@@ -237,7 +237,7 @@ Use this first to understand available traffic before using proxy list.
 
 Filter examples:
   --host api.example.com          Exact host match
-  --host "*.example.com"          Glob pattern (subdomains)
+  --host "*example.com"           Glob pattern
   --exclude-host "*.google.com"   Filter out noise
   --source proxy                  Only proxy-captured traffic
   --source replay                 Only replay-sent traffic
@@ -282,7 +282,7 @@ List individual flows with flow_id for export or replay.
 
 Filter examples:
   --host api.example.com          Exact host match
-  --host "*.example.com"          Glob pattern (subdomains)
+  --host "*example.com"           Glob pattern
   --path "/api/*"                 Path prefix
   --method POST,PUT               Multiple methods
   --status 200,201                Multiple status codes

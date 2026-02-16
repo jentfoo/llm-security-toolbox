@@ -37,7 +37,7 @@ Search: search_header/search_body use regex; literal if invalid.
 Incremental: since accepts flow_id or "last" (cursor). Flows mode only: pagination with limit/offset.`),
 		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default) or 'flows'")),
 		mcp.WithString("source", mcp.Description("Filter by source: 'proxy', 'replay', or empty for both")),
-		mcp.WithString("host", mcp.Description("Filter by host (glob pattern, e.g., '*.example.com')")),
+		mcp.WithString("host", mcp.Description("Filter by host glob. *.example.com = subdomains only; *example.com = domain + subdomains")),
 		mcp.WithString("path", mcp.Description("Filter by path+query (glob pattern, e.g., '/api/*')")),
 		mcp.WithString("method", mcp.Description("Filter by HTTP method(s), comma-separated (e.g., 'GET,POST')")),
 		mcp.WithString("status", mcp.Description("Filter by status code(s) or ranges (e.g., '200,302' or '2XX,4XX')")),
@@ -76,7 +76,7 @@ func (m *mcpServer) proxyRuleListTool() mcp.Tool {
 
 func (m *mcpServer) proxyRuleAddTool() mcp.Tool {
 	return mcp.NewTool("proxy_rule_add",
-		mcp.WithDescription(`Add proxy match/replace rule. Persists across all traffic (vs replay_send for one-off edits).
+		mcp.WithDescription(`Add proxy match/replace rule. Applies to proxy-intercepted traffic only. For one-off request edits, use replay_send parameters instead.
 
 Types:
   HTTP:      request_header (default), request_body, response_header, response_body

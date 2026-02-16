@@ -554,6 +554,7 @@ func TestFindReflections(t *testing.T) {
 		resp := []byte("HTTP/1.1 200 OK\r\n\r\nsomething else entirely")
 
 		reflections := findReflections(params, resp)
+		assert.NotNil(t, reflections)
 		assert.Empty(t, reflections)
 	})
 
