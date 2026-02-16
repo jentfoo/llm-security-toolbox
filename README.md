@@ -1,4 +1,4 @@
-# go-appsec/toolbox
+<img width="400" height="160" alt="go-appsec/toolbox" src="https://github.com/user-attachments/assets/00d3aa0d-68ef-471a-a5d7-07d3b4db7455" />
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/go-appsec/toolbox/blob/main/LICENSE)
 [![Build Status](https://github.com/go-appsec/toolbox/actions/workflows/tests-main.yml/badge.svg)](https://github.com/go-appsec/toolbox/actions/workflows/tests-main.yml)
