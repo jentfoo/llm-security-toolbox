@@ -36,7 +36,7 @@ func Parse(args []string, mcpURL string) error {
 func printUsage() {
 	_, _ = fmt.Fprint(os.Stderr, `Usage: sectool replay <command> [options]
 
-Replay or send HTTP requests through the http backend.
+Replay or send HTTP requests through the HTTP backend.
 
 ---
 
@@ -62,26 +62,12 @@ replay send [options]
     --set-json "key=value"         set key (infers type: null/bool/number/object/string)
     --set-json "key"               set key to null (no = sign)
     --remove-json "key"            remove key from JSON body
-
     Nested paths: user.email, items[0].id, data.users[0].name
-    Objects/arrays: --set-json 'meta={"k":"v"}' or 'ids=[1,2,3]'
-
-  Note: Content-Length header is automatically updated when body changes.
 
   Other options:
     --follow-redirects             follow 3xx redirects
     --force                        send even if validation fails
     --body <path>                  body file (with --file)
-
-  Examples:
-    sectool replay send --flow f7k2x
-    sectool replay send --flow f7k2x --set-header "Authorization: Bearer tok"
-    sectool replay send --flow f7k2x --path /api/v2/users --set-query "id=123"
-    sectool replay send --flow f7k2x --set-json "user.role=admin"
-    sectool replay send --bundle abc123
-    sectool replay send --file request.http --body payload
-
-  Output: Markdown with replay_id, status, headers, body preview
 
 ---
 
@@ -89,32 +75,19 @@ replay get <replay_id>
 
   Retrieve full details of a previous replay.
 
-  Example:
-    sectool replay get rpl_abc123           # get full response
-
-  Output: Markdown with status, headers, and complete response body
-
 ---
 
 replay create <url> [options]
 
   Create a request bundle from scratch (without capturing traffic first).
-  Creates an editable bundle that can be modified and sent with 'replay send'.
-
-  Arguments:
-    <url>       Target URL (defaults to HTTPS)
+  Creates an editable bundle that can be sent with 'replay send --bundle'.
 
   Options:
     --method        HTTP method (default: GET)
     --header        Header in 'Name: Value' format (repeatable)
     --body          Path to body file (- for stdin)
 
-  Examples:
-    sectool replay create https://api.example.com/users
-    sectool replay create example.com/api/v1/data --method POST --body payload.json
-    sectool replay create https://api.example.com --header "Authorization: Bearer token"
-
-  Output: Bundle path that can be used with 'sectool replay send --bundle'
+Use "sectool replay <command> --help" for examples.
 `)
 }
 

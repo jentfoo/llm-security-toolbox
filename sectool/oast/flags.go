@@ -55,13 +55,11 @@ oast create [options]
   Options:
     --label <str>      optional unique label for easier reference
 
-  Output: oast_id and domain (e.g., xyz123.oast.fun)
-
 ---
 
 oast summary <oast_id|label|domain> [options]
 
-  Get aggregated summary of OAST interactions.
+  Aggregated summary of OAST interactions.
 
   Options:
     --since <id|time>  events after event_id or RFC3339 timestamp
@@ -69,13 +67,11 @@ oast summary <oast_id|label|domain> [options]
     --wait <dur>       max wait time for events (default: 2m, max: 2m)
     --limit <n>        maximum number of events to aggregate
 
-  Output: Markdown table with subdomain, source_ip, type, count
-
 ---
 
 oast poll <oast_id|label|domain> [options]
 
-  Poll for out-of-band interactions.
+  Poll for individual out-of-band interactions.
 
   Options:
     --since <id|time>  events after event_id or RFC3339 timestamp
@@ -83,24 +79,11 @@ oast poll <oast_id|label|domain> [options]
     --wait <dur>       max wait time for events (default: 2m, max: 2m)
     --limit <n>        maximum number of events to return
 
-  Examples:
-    sectool oast poll abc123 --since evt_xyz         # events after specific ID
-    sectool oast poll abc123 --type dns              # only DNS events
-    sectool oast poll abc123 --wait 30s              # wait up to 30s for events
-
-  Output: Markdown table with event_id, time, type, source_ip, subdomain
-
 ---
 
 oast get <oast_id|label|domain> <event_id>
 
-  Get full details for a specific event without truncation.
-
-  Example:
-    sectool oast poll abc123          # find event_id
-    sectool oast get abc123 evt_xyz   # get full details
-
-  Output: Complete raw request/response data
+  Full details for a specific event without truncation.
 
 ---
 
@@ -111,15 +94,13 @@ oast list [options]
   Options:
     --limit <n>        maximum number of sessions to return
 
-  Output: Markdown table with oast_id, domain, created_at
-
 ---
 
 oast delete <oast_id|label|domain>
 
   Delete an OAST session.
 
-  Output: Confirmation message
+Use "sectool oast <command> --help" for examples.
 `)
 }
 

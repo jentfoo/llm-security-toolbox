@@ -64,7 +64,7 @@ Web crawler for discovering URLs, forms, and content by following links.
 
 crawl create [options]
 
-  Start a new crawl session. Crawling runs asynchronously in the background.
+  Start a new crawl session (runs asynchronously in the background).
 
   Options:
     --url <url>            seed URL (can specify multiple times)
@@ -78,8 +78,6 @@ crawl create [options]
     --submit-forms         automatically submit discovered forms
     --ignore-robots        ignore robots.txt restrictions
 
-  Output: session_id and initial state
-
 ---
 
 crawl seed <session_id> [options]
@@ -90,21 +88,17 @@ crawl seed <session_id> [options]
     --url <url>            seed URL (can specify multiple times)
     --flow <flow_id>       seed from proxy flow (can specify multiple times)
 
-  Output: Number of seeds added
-
 ---
 
 crawl status <session_id>
 
   Get progress metrics for a crawl session.
 
-  Output: URLs queued, visited, errored, forms discovered
-
 ---
 
 crawl summary <session_id> [options]
 
-  Get aggregated summary grouped by host/path/method/status.
+  Aggregated summary grouped by host/path/method/status.
 
   Options:
     --host <pattern>          filter by host pattern (glob: *, ?)
@@ -115,8 +109,6 @@ crawl summary <session_id> [options]
     --search-body <regex>     regex search in request/response body (RE2)
     --exclude-host <pat>      exclude hosts matching pattern
     --exclude-path <pat>      exclude paths matching pattern
-
-  Output: Markdown table with host, path, method, status, count
 
 ---
 
@@ -137,21 +129,17 @@ crawl list <session_id> [options]
     --limit <n>               maximum result count
     --offset <n>              skip first N results
 
-  Output: Markdown table with flow_id, method, host, path, status, size
-
 ---
 
 crawl get <flow_id> [options]
 
-  Get full request and response data for a crawled flow.
+  Full request and response data for a crawled flow.
 
   Options:
     --scope <sections>        sections to include (comma-separated):
                               request_headers, request_body, response_headers,
                               response_body, all (default)
     --pattern <regex>         regex search within scoped sections (RE2)
-
-  Output: Request/response headers and body for the specified sections
 
 ---
 
@@ -162,8 +150,6 @@ crawl forms <session_id> [options]
   Options:
     --limit <n>            maximum result count
 
-  Output: Forms with fields and CSRF detection
-
 ---
 
 crawl errors <session_id> [options]
@@ -172,8 +158,6 @@ crawl errors <session_id> [options]
 
   Options:
     --limit <n>            maximum result count
-
-  Output: Markdown table with URL and error message
 
 ---
 
@@ -184,15 +168,11 @@ crawl sessions [options]
   Options:
     --limit <n>            maximum sessions to return
 
-  Output: Markdown table with session_id, label, state, created_at
-
 ---
 
 crawl stop <session_id>
 
   Stop a running crawl session. In-flight requests are abandoned.
-
-  Output: Confirmation message
 
 ---
 
@@ -200,7 +180,7 @@ crawl export <flow_id>
 
   Export a crawled flow to an editable bundle on disk.
 
-  Output: Bundle path and list of created files
+Use "sectool crawl <command> --help" for examples.
 `)
 }
 

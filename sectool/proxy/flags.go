@@ -44,13 +44,11 @@ func printUsage() {
 
 Query and manage proxy history.
 
-Run 'sectool replay --help' to see all replay options and modification support.
-
 ---
 
 proxy summary [options]
 
-  Get aggregated summary of proxy history grouped by host/path/method/status.
+  Aggregated summary of proxy history grouped by host/path/method/status.
   Use this first to understand available traffic before using proxy list.
 
   Options:
@@ -63,14 +61,6 @@ proxy summary [options]
     --search-body <regex>     regex search in request/response body (RE2)
     --exclude-host <pat>      exclude matching hosts
     --exclude-path <pat>      exclude matching paths
-
-  Examples:
-    sectool proxy summary                                 # full summary
-    sectool proxy summary --host api.example.com          # summary for host
-    sectool proxy summary --exclude-host "*.google.com"   # filter out noise
-    sectool proxy summary --source replay                 # only replay-sent traffic
-
-  Output: Markdown table with host, path, method, status, count
 
 ---
 
@@ -92,20 +82,11 @@ proxy list [options]
     --limit <n>               maximum number of flows to return
     --offset <n>              skip first N results (applied after filtering)
 
-  Examples:
-    sectool proxy list --host api.example.com             # flows for host
-    sectool proxy list --host "*.example.com" --method POST,PUT
-    sectool proxy list --path "/api/*" --status 200,201
-    sectool proxy list --since f7k2x --limit 10           # flows after specific ID
-    sectool proxy list --source replay --limit 10         # recent replay requests
-
-  Output: Markdown table with flow_id, method, host, path, status, size
-
 ---
 
 proxy get <flow_id> [options]
 
-  Get full request and response data for a flow.
+  Full request and response data for a flow.
 
   Options:
     --scope <sections>        sections to include (comma-separated):
@@ -113,13 +94,6 @@ proxy get <flow_id> [options]
                               response_body, all (default)
     --pattern <regex>         regex search within scoped sections (RE2);
                               returns matching snippets instead of full content
-
-  Examples:
-    sectool proxy get f7k2x                                   # full flow
-    sectool proxy get f7k2x --scope response_body             # response body only
-    sectool proxy get f7k2x --scope response_body --pattern "token=[a-f0-9]+"
-
-  Output: Request/response headers and body for the specified sections
 
 ---
 
@@ -132,42 +106,23 @@ proxy cookies [options]
     --name <name>           filter by cookie name (exact match)
     --domain <name>         filter by domain (matches domain and all subdomains)
 
-  Examples:
-    sectool proxy cookies                                    # all observed cookies
-    sectool proxy cookies --name session                     # specific cookie by name
-    sectool proxy cookies --domain example.com               # cookies for domain + subdomains
-
-  Output: Markdown table with name, domain, path, flags, expires, value, flow_id
-
 ---
 
 proxy export <flow_id>
 
   Export a captured request to disk for editing and replay.
-  Note: Prefer 'replay send --flow' with modification flags for simple changes.
-  Export is useful for complex edits (raw body, binary data, etc).
-
-  The bundle_id matches the flow_id for simplicity. Re-exporting the same
-  flow overwrites the bundle, restoring it to the original captured state.
+  Prefer 'replay send --flow' with modification flags for simple changes.
 
   Creates bundle in sectool-requests/<flow_id>/:
     request.http       HTTP headers with body placeholder
     body               request body (edit this for modifications)
     request.meta.json  metadata (method, URL, timestamps)
 
-  Examples:
-    sectool proxy list --host example.com     # find flow_id
-    sectool proxy export f7k2x                # exports to sectool-requests/f7k2x/
-    sectool replay send --bundle f7k2x        # replay the exported bundle
-
-  Output: Bundle path and files created
-
 ---
 
 proxy rule <command> [options]
 
-  Manage match and replace rules for request/response modification.
-  Rules are applied by the proxy to all traffic flowing through it.
+  Manage match/replace rules applied by the proxy to all traffic.
   To modify a rule, delete it and recreate with the new values.
 
   Commands:
@@ -197,20 +152,12 @@ proxy rule add [options] [match] [replace]
     --regex                 Treat match as regex pattern
     --label <name>          Optional label for easier reference
 
-  Examples:
-    sectool proxy rule add "X-Custom: value"
-    sectool proxy rule add --type response_header "X-Frame-Options: DENY"
-    sectool proxy rule add --regex "^User-Agent.*$" "User-Agent: Custom"
-    sectool proxy rule add --type ws:both "old" "new"
-
 proxy rule delete <rule_id>
 
   Delete a rule by ID or label.
   Searches both HTTP and WebSocket rules automatically.
 
-  Examples:
-    sectool proxy rule delete abc123
-    sectool proxy rule delete my-rule
+Use "sectool proxy <command> --help" for examples.
 `)
 }
 
