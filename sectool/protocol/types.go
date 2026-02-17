@@ -1,6 +1,10 @@
 package protocol
 
-import "github.com/go-appsec/toolbox/sectool/jwt"
+import (
+	"encoding/json"
+
+	"github.com/go-appsec/toolbox/sectool/jwt"
+)
 
 // =============================================================================
 // Proxy Types
@@ -39,6 +43,22 @@ type ProxyPollResponse struct {
 	Aggregates []SummaryEntry `json:"aggregates,omitempty"` // summary mode
 	Flows      []FlowEntry    `json:"flows,omitempty"`      // list mode
 	Note       string         `json:"note,omitempty"`
+}
+
+// MarshalJSON preserves non-nil empty slices (as []) while omitting nil ones.
+// This ensures the active mode key is always present even with zero results.
+func (r ProxyPollResponse) MarshalJSON() ([]byte, error) {
+	m := make(map[string]interface{})
+	if r.Aggregates != nil {
+		m["aggregates"] = r.Aggregates
+	}
+	if r.Flows != nil {
+		m["flows"] = r.Flows
+	}
+	if r.Note != "" {
+		m["note"] = r.Note
+	}
+	return json.Marshal(m)
 }
 
 // ProxyGetResponse is the response for proxy_get.
@@ -120,6 +140,21 @@ type OastPollResponse struct {
 	Aggregates   []OastSummaryEntry `json:"aggregates,omitempty"` // summary mode
 	Events       []OastEvent        `json:"events,omitempty"`     // list mode
 	DroppedCount int                `json:"dropped_count,omitempty"`
+}
+
+// MarshalJSON preserves non-nil empty slices (as []) while omitting nil ones.
+func (r OastPollResponse) MarshalJSON() ([]byte, error) {
+	m := make(map[string]interface{})
+	if r.Aggregates != nil {
+		m["aggregates"] = r.Aggregates
+	}
+	if r.Events != nil {
+		m["events"] = r.Events
+	}
+	if r.DroppedCount > 0 {
+		m["dropped_count"] = r.DroppedCount
+	}
+	return json.Marshal(m)
 }
 
 // OastEvent represents a single OAST interaction event.
@@ -213,6 +248,35 @@ type CrawlPollResponse struct {
 	Forms      []CrawlForm    `json:"forms,omitempty"`
 	Errors     []CrawlError   `json:"errors,omitempty"`
 	Note       string         `json:"note,omitempty"`
+}
+
+// MarshalJSON preserves non-nil empty slices (as []) while omitting nil ones.
+func (r CrawlPollResponse) MarshalJSON() ([]byte, error) {
+	m := map[string]interface{}{
+		"session_id": r.SessionID,
+	}
+	if r.State != "" {
+		m["state"] = r.State
+	}
+	if r.Duration != "" {
+		m["duration"] = r.Duration
+	}
+	if r.Aggregates != nil {
+		m["aggregates"] = r.Aggregates
+	}
+	if r.Flows != nil {
+		m["flows"] = r.Flows
+	}
+	if r.Forms != nil {
+		m["forms"] = r.Forms
+	}
+	if r.Errors != nil {
+		m["errors"] = r.Errors
+	}
+	if r.Note != "" {
+		m["note"] = r.Note
+	}
+	return json.Marshal(m)
 }
 
 // CrawlFlow is a crawled request/response summary.

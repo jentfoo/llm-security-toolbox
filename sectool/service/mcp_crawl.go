@@ -258,7 +258,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 			return errorResultFromErr("failed to list errors: ", err), nil
 		}
 
-		var apiErrors []protocol.CrawlError
+		apiErrors := make([]protocol.CrawlError, 0, len(errs))
 		for _, e := range errs {
 			apiErrors = append(apiErrors, protocol.CrawlError{
 				URL:    e.URL,
@@ -311,7 +311,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 			return errorResultFromErr("failed to list flows: ", err), nil
 		}
 
-		var apiFlows []protocol.CrawlFlow
+		apiFlows := make([]protocol.CrawlFlow, 0, len(flows))
 		for _, f := range flows {
 			apiFlows = append(apiFlows, protocol.CrawlFlow{
 				FlowID:         f.ID,
