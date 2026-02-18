@@ -893,11 +893,11 @@ func (c *BurpClient) setMatchReplaceRulesToKey(ctx context.Context, key string, 
 		})
 		if err != nil {
 			return fmt.Errorf("set_project_options failed: %w", err)
+		}
+		msg := extractTextContent(result.Content)
+		if strings.Contains(msg, "disabled configuration editing") {
+			return ErrConfigEditingDisabled
 		} else if result.IsError {
-			msg := extractTextContent(result.Content)
-			if strings.Contains(msg, "User has disabled configuration editing") {
-				return ErrConfigEditingDisabled
-			}
 			return fmt.Errorf("MCP error: %s", msg)
 		}
 		return nil

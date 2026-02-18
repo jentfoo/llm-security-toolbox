@@ -285,6 +285,50 @@ func TestBurpBackendRuleIsolation(t *testing.T) {
 	assert.Equal(t, "ws:both", wsRules[0].Type)
 }
 
+func TestBurpBackendConfigEditingDisabled(t *testing.T) {
+	t.Parallel()
+
+	t.Run("add_rule_fails", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+		mockServer.SetConfigEditingDisabled(true)
+
+		_, err := backend.AddRule(t.Context(), ProxyRuleInput{
+			Label: "should-fail",
+			Type:  mcp.RuleTypeRequestHeader,
+			Match: "old",
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrConfigEditDisabled)
+	})
+
+	t.Run("delete_rule_fails", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+
+		// Add a rule while editing is enabled
+		rule, err := backend.AddRule(t.Context(), ProxyRuleInput{
+			Label: "to-delete",
+			Type:  mcp.RuleTypeRequestHeader,
+		})
+		require.NoError(t, err)
+
+		// Disable editing, then try to delete
+		mockServer.SetConfigEditingDisabled(true)
+		err = backend.DeleteRule(t.Context(), rule.RuleID)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrConfigEditDisabled)
+	})
+
+	t.Run("list_still_works", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+		mockServer.SetConfigEditingDisabled(true)
+
+		// List is a read operation and should succeed regardless
+		rules, err := backend.ListRules(t.Context(), false)
+		require.NoError(t, err)
+		assert.Empty(t, rules)
+	})
+}
+
 func newTestBurpBackend(t *testing.T) (*BurpBackend, *TestMCPServer) {
 	t.Helper()
 	mockServer := NewTestMCPServer(t)

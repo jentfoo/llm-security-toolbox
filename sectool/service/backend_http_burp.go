@@ -16,6 +16,9 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/mcp"
 )
 
+// ErrConfigEditDisabled is returned when a write operation fails because config editing is not enabled.
+var ErrConfigEditDisabled = errors.New("config editing disabled")
+
 // BurpBackend implements HttpBackend using Burp Suite via MCP.
 type BurpBackend struct {
 	client *mcp.BurpClient
@@ -427,9 +430,12 @@ func (b *BurpBackend) setAllRules(ctx context.Context, websocket bool, rules []m
 		err = b.client.SetMatchReplaceRules(ctx, rules)
 	}
 	if errors.Is(err, mcp.ErrConfigEditingDisabled) {
-		return fmt.Errorf("%w; enable 'Edit config' in Burp's MCP settings", err)
+		return fmt.Errorf("%w: %w", ErrConfigEditDisabled, err)
+	} else if err != nil {
+		return err
 	}
-	return err
+
+	return nil
 }
 
 func (b *BurpBackend) findRuleIndex(rules []mcp.MatchReplaceRule, idOrLabel string) int {

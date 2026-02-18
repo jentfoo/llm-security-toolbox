@@ -68,13 +68,14 @@ type TestMCPServer struct {
 	HTTPServer *httptest.Server
 	MCPServer  *mcpserver.MCPServer
 
-	mu               sync.Mutex
-	proxyHistory     []testProxyEntry
-	sendResponses    []string // Stack of responses for send_http1_request and send_http2_request
-	lastSentRequest  string   // Last raw request sent via send_http1_request
-	matchReplaceHTTP []testMatchReplaceRule
-	matchReplaceWS   []testMatchReplaceRule
-	toolCallLog      []string // Ordered log of tool names called
+	mu                    sync.Mutex
+	proxyHistory          []testProxyEntry
+	sendResponses         []string // Stack of responses for send_http1_request and send_http2_request
+	lastSentRequest       string   // Last raw request sent via send_http1_request
+	matchReplaceHTTP      []testMatchReplaceRule
+	matchReplaceWS        []testMatchReplaceRule
+	toolCallLog           []string // Ordered log of tool names called
+	configEditingDisabled bool     // when true, set_project_options returns the disabled message
 }
 
 type testMatchReplaceRule struct {
@@ -286,6 +287,12 @@ func NewTestMCPServer(t *testing.T) *TestMCPServer {
 			ts.mu.Lock()
 			defer ts.mu.Unlock()
 
+			if ts.configEditingDisabled {
+				// Simulate Burp returning success with a disabled message
+				// (IsError not set — this is the real-world behavior that was causing silent failures)
+				return mcp.NewToolResultText("User has disabled configuration editing via the MCP AI settings"), nil
+			}
+
 			args := req.Params.Arguments.(map[string]any)
 			jsonStr := args["json"].(string)
 
@@ -373,4 +380,11 @@ func (t *TestMCPServer) ClearToolCallLog() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.toolCallLog = nil
+}
+
+// SetConfigEditingDisabled simulates Burp's config editing being disabled.
+func (t *TestMCPServer) SetConfigEditingDisabled(disabled bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.configEditingDisabled = disabled
 }

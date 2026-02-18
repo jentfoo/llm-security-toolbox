@@ -599,7 +599,9 @@ func (m *mcpServer) handleProxyRuleAdd(ctx context.Context, req mcp.CallToolRequ
 		Replace: replace,
 	})
 	if err != nil {
-		if errors.Is(err, ErrLabelExists) {
+		if errors.Is(err, ErrConfigEditDisabled) {
+			return errorResult("STOP: Burp config editing is disabled. Proxy rules cannot be added or removed. Ask the user to enable 'Edit config' in MCP Extension, then retry."), nil
+		} else if errors.Is(err, ErrLabelExists) {
 			return errorResult("label already exists: delete the existing rule first with proxy_rule_delete, or use a different label"), nil
 		}
 		return errorResultFromErr("failed to add rule: ", err), nil
@@ -620,7 +622,9 @@ func (m *mcpServer) handleProxyRuleDelete(ctx context.Context, req mcp.CallToolR
 	}
 
 	if err := m.service.httpBackend.DeleteRule(ctx, ruleID); err != nil {
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, ErrConfigEditDisabled) {
+			return errorResult("STOP: Burp config editing is disabled. Proxy rules cannot be added or removed. Ask the user to enable 'Edit config' in MCP Extension, then retry."), nil
+		} else if errors.Is(err, ErrNotFound) {
 			return errorResult("rule not found"), nil
 		}
 		return errorResultFromErr("failed to delete rule: ", err), nil
