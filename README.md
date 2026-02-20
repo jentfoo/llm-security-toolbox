@@ -5,9 +5,9 @@
 
 **MCP-based application security testing tools for your coding agent.**
 
-Not a scanner — a collaborative workbench. Agents struggle with UI and stateful APIs; you're good at both. Sectool bridges the gap by exposing stable primitives — proxy history, replay, crawling, OAST, diffing — so AppSec engineers and pentesters can explore apps and validate reports augmented by an agent.
+Not a scanner — a collaborative workbench. Agents struggle with UI and stateful APIs; you're good at both. Sectool lets you explore an application through its proxy while an agent analyzes and manipulates the same authenticated traffic you generate.
 
-You handle auth and UI interactions, the agent queries flows, mutates requests, finds reflections, and attempts other permutations. Combining your abilities makes routine tasks easier, hidden indicators less likely to be missed, and complex testing more thorough.
+You handle auth and UI interactions, the agent queries flows, mutates requests, finds reflections, monitors out-of-band interactions, and attempts other permutations. Combining your abilities makes routine tasks easier, hidden indicators less likely to be missed, and complex testing more thorough.
 
 ## Getting Started
 
@@ -56,7 +56,7 @@ Work with the agent to build a test plan and execute it together. The agent can 
 
 ### Proxy backends
 
-**Native (default):** Built-in proxy with wire-fidelity and HTTP/1.1, HTTP/2, and WebSocket support. Designed to be as capable as Burp for MITM testing. A single binary provides the MCP server, proxy, and CLI — fully self-contained and usable in headless environments.
+**Native:** Built-in proxy with wire-fidelity and HTTP/1.1, HTTP/2, and WebSocket support. Designed to be as capable as Burp for MITM testing. A single binary provides the MCP server, proxy, and CLI — fully self-contained and usable in headless environments.
 
 **Burp (optional):** If you prefer a GUI to review the agent's actions or already have Burp running, install the MCP extension from the BApp Store and ensure the MCP server runs on `http://127.0.0.1:9876/`.
 
@@ -72,16 +72,16 @@ Sectool automatically determines the appropriate workflow when the agent calls t
 
 ```bash
 sectool mcp                        # Default: agent selects task type via workflow tool
-sectool mcp --workflow explore     # Pre-set exploration mode (token-optimized)
-sectool mcp --workflow test-report # Pre-set validation mode (token-optimized)
+sectool mcp --workflow explore     # Pre-set exploration mode
+sectool mcp --workflow test-report # Pre-set validation mode
 sectool mcp --workflow none        # No workflow instructions
 ```
 
 | Mode | Description |
 |------|-------------|
 | (default) | Agent selects task type by calling `workflow` tool, receives collaboration instructions |
-| `explore` | Exploratory security testing; token-optimized, all tools available |
-| `test-report` | Validating a specific vulnerability report; token-optimized, crawl tools excluded |
+| `explore` | Exploratory security testing; all tools available |
+| `test-report` | Validating a specific vulnerability report; crawl tools excluded |
 | `none` | No workflow instructions, all tools available immediately |
 
 Workflow instructions guide agents toward collaborative testing rather than trying to do everything autonomously or stepping you through a process without adding value. If you have ideas for improving agent collaboration, [open an issue](https://github.com/go-appsec/toolbox/issues).
@@ -92,7 +92,7 @@ The server exposes two endpoints:
 - `/mcp` - Streamable HTTP (recommended)
 - `/sse` - SSE (legacy, for older clients)
 
-## CLI Usage
+## Example CLI Usage
 
 The CLI shares state with the agent and provides a human-friendly interface for reviewing, replaying, and scripting. All commands are also available as MCP tools, state shared with the agent.
 
@@ -129,8 +129,8 @@ Use `sectool <command> --help` for detailed options.
 
 ## Key Features
 
-- **Wire-fidelity proxy** - HTTP/1.1 and HTTP/2 MITM preserving header order, casing, and protocol anomalies — security testing needs exact bytes, not normalized rewrites
-- **Replay with mutation** - Resend captured requests with selective edits to headers, body, query params, or JSON fields; pair with match/replace rules for iterative testing
+- **Wire-fidelity proxy** - HTTP/1.1 and HTTP/2 MITM preserving header order, casing, and protocol anomalies
+- **Replay with mutation** - Resend captured requests with selective edits to headers, body, query params, or JSON fields
 - **Flow diffing** - Structured, content-type-aware comparison of two flows (JSON path-level, unified text, binary size) for fast report validation
 - **Reflection detection** - Find request parameter values reflected in responses across multiple encoding variants to surface injection points
 - **OAST** - Out-of-band interaction testing via Interactsh; create domains, poll for DNS/HTTP/SMTP callbacks
