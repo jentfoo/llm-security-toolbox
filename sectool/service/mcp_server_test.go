@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,24 +16,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/service/ids"
 )
 
 // Unit tests for MCP server functionality using mock backends.
 // Integration tests that require Burp Suite are in integration_test.go.
 
-// setupMockMCPServer creates an MCP server with mock backends for unit testing.
-func setupMockMCPServer(t *testing.T) (*Server, *mcpclient.Client, *TestMCPServer, *mockOastBackend, *mockCrawlerBackend) {
-	t.Helper()
-	return setupMockMCPServerWithConfig(t, nil)
-}
-
-// setupMockMCPServerWithConfig creates an MCP server with mock backends and a
+// setupMockMCPServer creates an MCP server with mock backends and a
 // pre-written config file. Fields set on cfg are merged onto the defaults so
 // the server loads them before any handler runs (no post-start mutation).
-func setupMockMCPServerWithConfig(t *testing.T, cfg *config.Config) (*Server, *mcpclient.Client, *TestMCPServer, *mockOastBackend, *mockCrawlerBackend) {
+func setupMockMCPServer(t *testing.T, cfg *config.Config) (*Server, *mcpclient.Client, *mockHttpBackend, *mockOastBackend, *mockCrawlerBackend) {
 	t.Helper()
 
-	mockMCP := NewTestMCPServer(t)
+	mockHTTP := newMockHttpBackend()
 	mockOast := newMockOastBackend()
 	mockCrawler := newMockCrawlerBackend()
 
@@ -53,11 +51,10 @@ func setupMockMCPServerWithConfig(t *testing.T, cfg *config.Config) (*Server, *m
 	}
 
 	srv, err := NewServer(MCPServerFlags{
-		BurpMCPURL:   mockMCP.URL(),
 		MCPPort:      0, // Let OS pick a port
 		WorkflowMode: WorkflowModeNone,
 		ConfigPath:   configPath,
-	}, nil, mockOast, mockCrawler)
+	}, mockHTTP, mockOast, mockCrawler)
 	require.NoError(t, err)
 	srv.SetQuietLogging()
 
@@ -93,13 +90,13 @@ func setupMockMCPServerWithConfig(t *testing.T, cfg *config.Config) (*Server, *m
 		<-serverErr
 	})
 
-	return srv, mcpClient, mockMCP, mockOast, mockCrawler
+	return srv, mcpClient, mockHTTP, mockOast, mockCrawler
 }
 
 func TestMCP_ListTools(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	t.Cleanup(cancel)
@@ -143,6 +140,182 @@ func TestMCP_ListTools(t *testing.T) {
 	for _, expected := range expectedTools {
 		assert.Contains(t, toolNames, expected)
 	}
+}
+
+// mockHttpBackend implements HttpBackend at the Go interface level for handler tests.
+type mockHttpBackend struct {
+	mu          sync.Mutex
+	entries     []ProxyEntry
+	sendResults []*SendRequestResult // queue of responses for SendRequest
+	lastSentReq []byte               // last RawRequest from SendRequest
+	rules       []protocol.RuleEntry // in-memory rules (both HTTP and WS)
+}
+
+// Compile-time check that mockHttpBackend implements HttpBackend.
+var _ HttpBackend = (*mockHttpBackend)(nil)
+
+func newMockHttpBackend() *mockHttpBackend {
+	return &mockHttpBackend{}
+}
+
+func (b *mockHttpBackend) Close() error { return nil }
+
+func (b *mockHttpBackend) GetProxyHistory(ctx context.Context, count int, offset uint32) ([]ProxyEntry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if int(offset) >= len(b.entries) {
+		return nil, nil
+	}
+	end := int(offset) + count
+	if end > len(b.entries) {
+		end = len(b.entries)
+	}
+	// Return copies to avoid mutation
+	result := make([]ProxyEntry, end-int(offset))
+	copy(result, b.entries[offset:end])
+	return result, nil
+}
+
+func (b *mockHttpBackend) GetProxyHistoryMeta(ctx context.Context, count int, offset uint32) ([]ProxyEntryMeta, error) {
+	entries, err := b.GetProxyHistory(ctx, count, offset)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ProxyEntryMeta, len(entries))
+	for i, e := range entries {
+		method, host, path := extractRequestMeta(e.Request)
+		status := readResponseStatusCode([]byte(e.Response))
+		_, respBody := splitHeadersBody([]byte(e.Response))
+		result[i] = ProxyEntryMeta{
+			Method:   method,
+			Host:     host,
+			Path:     path,
+			Status:   status,
+			RespLen:  len(respBody),
+			Protocol: e.Protocol,
+		}
+	}
+	return result, nil
+}
+
+func (b *mockHttpBackend) SendRequest(ctx context.Context, name string, req SendRequestInput) (*SendRequestResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.lastSentReq = make([]byte, len(req.RawRequest))
+	copy(b.lastSentReq, req.RawRequest)
+
+	if len(b.sendResults) > 0 {
+		result := b.sendResults[0]
+		b.sendResults = b.sendResults[1:]
+		if result.Duration == 0 {
+			result.Duration = time.Millisecond
+		}
+		return result, nil
+	}
+
+	// Default 200 OK response
+	return &SendRequestResult{
+		Headers:  []byte("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"),
+		Body:     []byte("<html>OK</html>"),
+		Duration: time.Millisecond,
+	}, nil
+}
+
+func (b *mockHttpBackend) ListRules(ctx context.Context, websocket bool) ([]protocol.RuleEntry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	rules := make([]protocol.RuleEntry, 0, len(b.rules))
+	for _, r := range b.rules {
+		if websocket == isWSType(r.Type) {
+			rules = append(rules, r)
+		}
+	}
+	return rules, nil
+}
+
+func (b *mockHttpBackend) AddRule(ctx context.Context, input ProxyRuleInput) (*protocol.RuleEntry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if input.Label != "" {
+		for _, r := range b.rules {
+			if r.Label == input.Label {
+				return nil, fmt.Errorf("%w: %s", ErrLabelExists, input.Label)
+			}
+		}
+	}
+
+	entry := protocol.RuleEntry{
+		RuleID:  ids.Generate(0),
+		Label:   input.Label,
+		Type:    input.Type,
+		Match:   input.Match,
+		Replace: input.Replace,
+	}
+	if input.IsRegex != nil && *input.IsRegex {
+		entry.IsRegex = true
+	}
+
+	b.rules = append(b.rules, entry)
+	return &entry, nil
+}
+
+func (b *mockHttpBackend) DeleteRule(ctx context.Context, idOrLabel string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for i, r := range b.rules {
+		if r.RuleID == idOrLabel || r.Label == idOrLabel {
+			b.rules = append(b.rules[:i], b.rules[i+1:]...)
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+// Test helper methods
+
+// AddProxyEntry adds an entry to the mock proxy history.
+func (b *mockHttpBackend) AddProxyEntry(request, response, notes string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.entries = append(b.entries, ProxyEntry{
+		Request:  request,
+		Response: response,
+		Notes:    notes,
+	})
+}
+
+// SetSendResult queues a response for the next SendRequest call.
+// Headers should include the status line and headers (e.g. "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n").
+// A terminal \r\n is appended automatically if missing.
+func (b *mockHttpBackend) SetSendResult(headers, body string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !strings.HasSuffix(headers, "\r\n\r\n") {
+		headers += "\r\n"
+	}
+	b.sendResults = append(b.sendResults, &SendRequestResult{
+		Headers: []byte(headers),
+		Body:    []byte(body),
+	})
+}
+
+// LastSentRequest returns the last raw request sent via SendRequest.
+func (b *mockHttpBackend) LastSentRequest() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.lastSentReq)
+}
+
+// ClearProxyHistory clears all proxy history entries.
+func (b *mockHttpBackend) ClearProxyHistory() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.entries = nil
 }
 
 type mockOastBackend struct {

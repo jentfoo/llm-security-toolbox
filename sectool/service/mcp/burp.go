@@ -50,8 +50,11 @@ var ErrClientClosed = errors.New("client closed")
 // BurpClient wraps the mcp-go SSE client to provide Burp-specific functionality.
 // Thread-safe for concurrent use. All MCP operations are serialized via mutex.
 type BurpClient struct {
-	url        string
-	httpClient *http.Client
+	url                 string
+	httpClient          *http.Client
+	healthCheckInterval time.Duration // 0 disables health loop
+	healthCancel        context.CancelFunc
+	healthWg            sync.WaitGroup
 
 	mu               sync.Mutex
 	mcpClient        *client.Client
@@ -70,6 +73,14 @@ func WithHTTPClient(httpClient *http.Client) Option {
 	}
 }
 
+// WithHealthCheckInterval overrides the default health check interval.
+// Set to 0 to disable the health check loop entirely.
+func WithHealthCheckInterval(d time.Duration) Option {
+	return func(c *BurpClient) {
+		c.healthCheckInterval = d
+	}
+}
+
 // New creates a new BurpClient and starts the health monitoring loop.
 // Call Connect to establish the connection, or let operations connect lazily.
 func New(url string, opts ...Option) *BurpClient {
@@ -77,13 +88,20 @@ func New(url string, opts ...Option) *BurpClient {
 		url = config.DefaultBurpMCPURL
 	}
 	c := &BurpClient{
-		url:  url,
-		done: make(chan struct{}),
+		url:                 url,
+		healthCheckInterval: healthCheckInterval,
+		healthCancel:        func() {},
+		done:                make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
-	go c.healthLoop()
+	if c.healthCheckInterval > 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		c.healthCancel = cancel
+		c.healthWg.Add(1)
+		go c.healthLoop(ctx)
+	}
 	return c
 }
 
@@ -167,8 +185,10 @@ func (c *BurpClient) connectLocked(ctx context.Context) error {
 
 // healthLoop periodically pings the MCP connection to detect failures early.
 // Runs until Close() is called.
-func (c *BurpClient) healthLoop() {
-	ticker := time.NewTicker(healthCheckInterval)
+func (c *BurpClient) healthLoop(ctx context.Context) {
+	defer c.healthWg.Done()
+
+	ticker := time.NewTicker(c.healthCheckInterval)
 	defer ticker.Stop()
 
 	for {
@@ -176,7 +196,7 @@ func (c *BurpClient) healthLoop() {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			if notify := c.doHealthCheck(); notify != nil {
+			if notify := c.doHealthCheck(ctx); notify != nil {
 				notify()
 			}
 		}
@@ -185,7 +205,7 @@ func (c *BurpClient) healthLoop() {
 
 // doHealthCheck performs a single health check, returning a callback to invoke
 // outside the lock if notification is needed.
-func (c *BurpClient) doHealthCheck() func() {
+func (c *BurpClient) doHealthCheck(ctx context.Context) func() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -193,11 +213,15 @@ func (c *BurpClient) doHealthCheck() func() {
 		return nil
 	}
 
-	pingCtx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
+	pingCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	err := c.mcpClient.Ping(pingCtx)
 	cancel()
 
 	if err != nil {
+		// Shutdown cancellation — not a real failure
+		if ctx.Err() != nil {
+			return nil
+		}
 		log.Printf("mcp: health check failed: %v", err)
 		_ = c.closeLocked()
 		if handler := c.onConnectionLost; handler != nil {
@@ -223,13 +247,19 @@ func (c *BurpClient) URL() string {
 // Safe to call multiple times.
 func (c *BurpClient) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
 	c.closed = true
 	close(c.done)
+	c.mu.Unlock()
+
+	c.healthCancel()
+	c.healthWg.Wait()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.closeLocked()
 }
 

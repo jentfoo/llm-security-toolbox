@@ -15,7 +15,7 @@ import (
 func TestMCP_CrawlLifecycleWithMock(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
 
 	createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
 		"seed_urls": "https://example.com",
@@ -212,7 +212,7 @@ func TestMCP_CrawlLifecycleWithMock(t *testing.T) {
 func TestMCP_CrawlSeedWithMock(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
 
 	createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
 		"seed_urls": "https://example.com",
@@ -242,7 +242,7 @@ func TestMCP_CrawlSeedWithMock(t *testing.T) {
 func TestMCP_FlowGetDecompressesGzipBody(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
 
 	// Create crawl session
 	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
@@ -289,7 +289,7 @@ func TestMCP_FlowGetDecompressesGzipBody(t *testing.T) {
 func TestMCP_CrawlValidation(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
 
 	t.Run("create_missing_seeds", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{})
@@ -443,7 +443,7 @@ func TestMCP_CrawlValidation(t *testing.T) {
 func TestMCP_CrawlPollSearch(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
 
 	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
 		"seed_urls": "https://example.com",
@@ -505,7 +505,7 @@ func TestMCP_CrawlPollSearch(t *testing.T) {
 func TestMCP_FlowGetWithCrawlScope(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
 
 	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
 		"seed_urls": "https://example.com",

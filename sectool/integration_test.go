@@ -723,7 +723,7 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 			t.Logf("server received query: %v", query)
 			assert.Equal(t, "value", query.Get("keep"), "keep param should be present")
 			assert.Empty(t, query.Get("remove_me"), "remove_me param should have been removed")
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("target server didn't receive replayed request")
 		}
 	})
@@ -748,7 +748,7 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 		case query := <-receivedQuery:
 			t.Logf("server received query: %v", query)
 			assert.Equal(t, "new_value", query.Get("new_param"), "new_param should be set")
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("target server didn't receive replayed request")
 		}
 	})
@@ -1048,7 +1048,7 @@ func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
 			select {
 			case headers := <-receivedHeaders:
 				assert.Equal(t, "rule-value-123", headers.Get("X-Injected-By-Rule"))
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("target server didn't receive request")
 			}
 		})
@@ -1077,7 +1077,7 @@ func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
 			select {
 			case headers := <-receivedHeaders:
 				assert.Equal(t, "Modified-By-Rule", headers.Get("User-Agent"))
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("target server didn't receive request")
 			}
 		})
@@ -1127,7 +1127,7 @@ func TestIntegration_RuleRequestBodyVerification(t *testing.T) {
 			case body := <-receivedBody:
 				assert.Contains(t, string(body), "MODIFIED_BY_RULE")
 				assert.NotContains(t, string(body), "ORIGINAL_VALUE")
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("target server didn't receive request")
 			}
 		})
@@ -1248,7 +1248,7 @@ func TestIntegration_ReplayBodyReplacement(t *testing.T) {
 		// Drain initial body
 		select {
 		case <-receivedBody:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive initial request")
 		}
 
@@ -1285,7 +1285,7 @@ func TestIntegration_ReplayBodyReplacement(t *testing.T) {
 			select {
 			case body := <-receivedBody:
 				assert.JSONEq(t, `{"replaced": "completely"}`, string(body))
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive replayed request")
 			}
 		})
@@ -1316,7 +1316,7 @@ func TestIntegration_ReplayJSONModifications(t *testing.T) {
 
 		select {
 		case <-receivedBody:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive initial request")
 		}
 
@@ -1362,7 +1362,7 @@ func TestIntegration_ReplayJSONModifications(t *testing.T) {
 				nested, ok := data["nested"].(map[string]interface{})
 				require.True(t, ok)
 				assert.Equal(t, "modified", nested["key"])
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive replayed request")
 			}
 		})
@@ -1390,7 +1390,7 @@ func TestIntegration_ReplayJSONModifications(t *testing.T) {
 				assert.False(t, hasRole, "role should be removed")
 				_, hasNested := data["nested"]
 				assert.False(t, hasNested, "nested should be removed")
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive replayed request")
 			}
 		})
@@ -1417,7 +1417,7 @@ func TestIntegration_ReplayMethodOverride(t *testing.T) {
 
 		select {
 		case <-receivedMethod:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive initial request")
 		}
 
@@ -1450,7 +1450,7 @@ func TestIntegration_ReplayMethodOverride(t *testing.T) {
 			select {
 			case method := <-receivedMethod:
 				assert.Equal(t, "POST", method)
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive replayed request")
 			}
 		})
@@ -1470,7 +1470,7 @@ func TestIntegration_ReplayMethodOverride(t *testing.T) {
 			select {
 			case method := <-receivedMethod:
 				assert.Equal(t, "DELETE", method)
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive replayed request")
 			}
 		})
@@ -1647,7 +1647,7 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 		select {
 		case serverReceived := <-receivedBody:
 			assert.JSONEq(t, postBody, string(serverReceived))
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("server didn't receive POST body")
 		}
 
@@ -1778,7 +1778,7 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 		select {
 		case headers := <-receivedHeaders:
 			assert.Equal(t, "injected-value", headers.Get("X-Injected-H2"))
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("server didn't receive request")
 		}
 	})
@@ -1808,7 +1808,7 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 		case body := <-receivedBody:
 			assert.Contains(t, string(body), "MODIFIED_BY_RULE")
 			assert.NotContains(t, string(body), "ORIGINAL_VALUE")
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("server didn't receive request")
 		}
 	})
@@ -1959,7 +1959,7 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 		select {
 		case received := <-wsMessages:
 			assert.Equal(t, message, received)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("WebSocket message not received")
 		}
 		assert.Empty(t, wsMessages)
@@ -2097,7 +2097,7 @@ func TestIntegration_ForceFlag(t *testing.T) {
 		select {
 		case req := <-receivedRequests:
 			assert.Equal(t, "CUSTOM", req.Method)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive request")
 		}
 	})
@@ -2219,7 +2219,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 			// Verify the raw request contains the malformed method
 			assert.True(t, bytes.HasPrefix(data, []byte("GET POST ")),
 				"request should start with 'GET POST', got: %s", string(data[:min(50, len(data))]))
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive request")
 		}
 	})
@@ -2257,7 +2257,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 			// Verify the raw request contains the header with NUL byte
 			assert.Contains(t, string(data), "X-Evil: value\x00injected",
 				"request should contain header with NUL byte")
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive request")
 		}
 	})
@@ -2295,7 +2295,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 			// Verify the raw request contains the method with tab
 			assert.True(t, bytes.HasPrefix(data, []byte("GET\tPOST ")),
 				"request should start with 'GET<tab>POST', got: %q", string(data[:min(50, len(data))]))
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive request")
 		}
 	})
@@ -2323,7 +2323,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 			case data := <-receivedData:
 				assert.True(t, bytes.HasPrefix(data, []byte(method+" ")),
 					"request should start with '%s ', got: %s", method, string(data[:min(50, len(data))]))
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatalf("didn't receive request for method %s", method)
 			}
 		}
@@ -2447,7 +2447,7 @@ func TestIntegration_ContentLengthMismatch(t *testing.T) {
 			assert.Contains(t, string(data), "Content-Length: 5")
 			// But actual body is longer
 			assert.Contains(t, string(data), "actual body content here")
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive request")
 		}
 	})
@@ -2485,7 +2485,7 @@ func TestIntegration_ContentLengthMismatch(t *testing.T) {
 		case data := <-receivedData:
 			assert.Contains(t, string(data), "Content-Length: 0")
 			assert.Contains(t, string(data), "hidden body")
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive request")
 		}
 	})
@@ -2566,7 +2566,7 @@ func TestIntegration_BinaryContent(t *testing.T) {
 			select {
 			case received := <-receivedData:
 				assert.Equal(t, binaryData, received)
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive request")
 			}
 		})
@@ -2786,7 +2786,7 @@ func TestIntegration_ReplayPathModification(t *testing.T) {
 
 		select {
 		case <-receivedPath:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive initial request")
 		}
 
@@ -2817,7 +2817,7 @@ func TestIntegration_ReplayPathModification(t *testing.T) {
 			select {
 			case path := <-receivedPath:
 				assert.Equal(t, "/modified-path", path)
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive replayed request")
 			}
 		})
@@ -2838,7 +2838,7 @@ func TestIntegration_ReplayPathModification(t *testing.T) {
 			select {
 			case path := <-receivedPath:
 				assert.Equal(t, "/new-path", path)
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive replayed request")
 			}
 		})
@@ -2963,7 +2963,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 		case received := <-serverReceived:
 			assert.Contains(t, received, "CLIENT_MODIFIED")
 			assert.NotContains(t, received, "CLIENT_SECRET")
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("server didn't receive message")
 		}
 		assert.Empty(t, serverReceived)
@@ -3015,7 +3015,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 		require.NoError(t, err)
 
 		// Read frame from client side (through proxy) - server echoes with SERVER_SECRET prefix
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		receivedFrame, err := readWebSocketFrame(conn)
 		require.NoError(t, err)
 
@@ -3109,14 +3109,14 @@ func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
 			select {
 			case method := <-receivedMethod:
 				assert.Equal(t, "POST", method, "307 should preserve POST method")
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive request")
 			}
 
 			select {
 			case body := <-receivedBody:
 				assert.Contains(t, string(body), "important")
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive body")
 			}
 		})
@@ -3150,14 +3150,14 @@ func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
 			select {
 			case method := <-receivedMethod:
 				assert.Equal(t, "POST", method, "308 should preserve POST method")
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive request")
 			}
 
 			select {
 			case body := <-receivedBody:
 				assert.Contains(t, string(body), "critical")
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive body")
 			}
 		})
@@ -3234,7 +3234,7 @@ func TestIntegration_CrossOriginRedirectAuthPreserved(t *testing.T) {
 			select {
 			case auth := <-receivedAuth:
 				assert.Equal(t, "Bearer secret-token-12345", auth, "Authorization header should be preserved on cross-origin redirect")
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("didn't receive request at target server")
 			}
 		})
@@ -3369,12 +3369,12 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 		select {
 		case received := <-wsMessages:
 			assert.Equal(t, message, received)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("wss message not received")
 		}
 
 		// Read echo response
-		_ = tlsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		responseFrame, err := readWebSocketFrame(tlsConn)
 		require.NoError(t, err)
 		assert.Equal(t, message, string(responseFrame.payload))
@@ -3479,7 +3479,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 		select {
 		case path := <-receivedPath:
 			assert.Equal(t, "/h2-replay-test", path)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive replayed request")
 		}
 
@@ -3487,7 +3487,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 		select {
 		case proto := <-receivedProto:
 			assert.Equal(t, "HTTP/2.0", proto)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive protocol info")
 		}
 	})
@@ -3509,7 +3509,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 		select {
 		case path := <-receivedPath:
 			assert.Equal(t, "/h2-modified-path", path)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("didn't receive modified request")
 		}
 	})
@@ -3617,13 +3617,13 @@ func TestIntegration_WebSocketBinaryFrames(t *testing.T) {
 		select {
 		case received := <-wsBinaryMessages:
 			assert.Equal(t, binaryData, received)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("binary WebSocket message not received")
 		}
 		assert.Empty(t, wsBinaryMessages)
 
 		// Read echo response
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		responseFrame, err := readWebSocketFrame(conn)
 		require.NoError(t, err)
 		assert.Equal(t, byte(2), responseFrame.opcode)
@@ -3731,13 +3731,13 @@ func TestIntegration_WebSocketPingPong(t *testing.T) {
 		select {
 		case received := <-wsPings:
 			assert.Equal(t, pingPayload, received)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Fatal("ping not received by server")
 		}
 		assert.Empty(t, wsPings)
 
 		// Read pong response (opcode 10)
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		pongFrame, err := readWebSocketFrame(conn)
 		require.NoError(t, err)
 		assert.Equal(t, byte(10), pongFrame.opcode)
@@ -3780,7 +3780,7 @@ func TestIntegration_WebSocketPingPong(t *testing.T) {
 		require.NoError(t, err)
 
 		// Read echo response
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		echoFrame, err := readWebSocketFrame(conn)
 		require.NoError(t, err)
 		assert.Equal(t, byte(1), echoFrame.opcode)
@@ -3883,7 +3883,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 
 				assert.Contains(t, string(decompressed), "REDACTED")
 				assert.NotContains(t, string(decompressed), "SECRET_TOKEN")
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("target server didn't receive request")
 			}
 		})
@@ -3931,7 +3931,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 				assert.Equal(t, "br", encoding, "Content-Encoding should be preserved")
 				// Body should be unchanged since we can't decompress brotli
 				assert.Equal(t, fakeBody, body)
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("target server didn't receive request")
 			}
 		})

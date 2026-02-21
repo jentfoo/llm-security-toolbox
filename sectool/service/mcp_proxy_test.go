@@ -15,32 +15,32 @@ import (
 func TestMCP_ProxyPoll(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
 	// Summary filter entries
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n",
 		"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"users\":[]}",
 		"",
 	)
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"POST /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n{\"name\":\"test\"}",
 		"HTTP/1.1 201 Created\r\n\r\n",
 		"",
 	)
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /other HTTP/1.1\r\nHost: other.com\r\n\r\n",
 		"HTTP/1.1 404 Not Found\r\n\r\n",
 		"",
 	)
 
 	// Flow search entries
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /api/data HTTP/1.1\r\nHost: test.com\r\nX-Custom: searchme\r\n\r\n",
 		"HTTP/1.1 200 OK\r\n\r\nresponse body with findme",
 		"",
 	)
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"POST /api/submit HTTP/1.1\r\nHost: test.com\r\nContent-Type: application/json\r\n\r\n{\"search\":\"bodysearch\"}",
 		"HTTP/1.1 201 Created\r\n\r\n",
 		"",
@@ -48,7 +48,7 @@ func TestMCP_ProxyPoll(t *testing.T) {
 
 	// Pagination entries
 	for i := 0; i < 5; i++ {
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /page HTTP/1.1\r\nHost: limit-test.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n",
 			"",
@@ -56,7 +56,7 @@ func TestMCP_ProxyPoll(t *testing.T) {
 	}
 
 	// Regex fallback entry
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET / HTTP/1.1\r\nHost: fallback.com\r\n\r\n",
 		"HTTP/1.1 200 OK\r\n\r\nsome [invalid regex",
 		"",
@@ -249,7 +249,7 @@ func TestMCP_ProxyPoll(t *testing.T) {
 		})
 
 		t.Run("since_replay_flow_id", func(t *testing.T) {
-			_, mc, mock, _, _ := setupMockMCPServer(t)
+			_, mc, mock, _, _ := setupMockMCPServer(t, nil)
 
 			mock.AddProxyEntry(
 				"GET /api/1 HTTP/1.1\r\nHost: test.com\r\n\r\n",
@@ -259,8 +259,9 @@ func TestMCP_ProxyPoll(t *testing.T) {
 				"GET /api/2 HTTP/1.1\r\nHost: test.com\r\n\r\n",
 				"HTTP/1.1 200 OK\r\n\r\nresponse2", "",
 			)
-			mock.SetSendResponse(
-				"HttpRequestResponse{httpRequest=GET /api/1 HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nreplayed}",
+			mock.SetSendResult(
+				"HTTP/1.1 200 OK\r\n",
+				"replayed",
 			)
 
 			listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mc, "proxy_poll", map[string]interface{}{
@@ -296,14 +297,15 @@ func TestMCP_ProxyPoll(t *testing.T) {
 		})
 
 		t.Run("since_multiple_replays", func(t *testing.T) {
-			_, mc, mock, _, _ := setupMockMCPServer(t)
+			_, mc, mock, _, _ := setupMockMCPServer(t, nil)
 
 			mock.AddProxyEntry(
 				"GET /api/test HTTP/1.1\r\nHost: test.com\r\n\r\n",
 				"HTTP/1.1 200 OK\r\n\r\noriginal", "",
 			)
-			mock.SetSendResponse(
-				"HttpRequestResponse{httpRequest=GET /api/test HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nreplayed}",
+			mock.SetSendResult(
+				"HTTP/1.1 200 OK\r\n",
+				"replayed",
 			)
 
 			listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mc, "proxy_poll", map[string]interface{}{
@@ -360,14 +362,14 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	t.Parallel()
 
 	t.Run("allowed_domains_filters", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServerWithConfig(t, &config.Config{
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"example.com"},
 		})
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /other HTTP/1.1\r\nHost: other.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
 		)
@@ -391,14 +393,14 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	})
 
 	t.Run("exclude_domains_filters", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServerWithConfig(t, &config.Config{
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			ExcludeDomains: []string{"noise.com"},
 		})
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /target HTTP/1.1\r\nHost: target.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /noise HTTP/1.1\r\nHost: noise.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
 		)
@@ -411,12 +413,12 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	})
 
 	t.Run("no_scoping_passes_all", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
-		mockMCP.AddProxyEntry(
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		mockHTTP.AddProxyEntry(
 			"GET /a HTTP/1.1\r\nHost: one.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /b HTTP/1.1\r\nHost: two.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
 		)
@@ -426,16 +428,16 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	})
 
 	t.Run("replay_entries_filtered", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServerWithConfig(t, &config.Config{
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.com"},
 		})
 
 		// Add proxy entries for both domains so replay_send can reference one
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /ok HTTP/1.1\r\nHost: allowed.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /nope HTTP/1.1\r\nHost: blocked.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
 		)
@@ -468,9 +470,9 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 func TestMCP_FlowGet(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /scoped HTTP/1.1\r\nHost: scope.com\r\n\r\nreq body here",
 		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nresp body here",
 		"",
@@ -589,7 +591,7 @@ func TestMCP_FlowGet(t *testing.T) {
 func TestMCP_ProxyRules(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
 
 	t.Run("crud", func(t *testing.T) {
 		var ruleID string
@@ -817,9 +819,9 @@ func TestMCP_CookieJar(t *testing.T) {
 	t.Parallel()
 
 	t.Run("overview_no_values", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /login HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: sid=abc123; Path=/; Secure; HttpOnly; SameSite=Lax\r\n\r\n",
 			"",
@@ -841,9 +843,9 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("detail_with_name", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /login HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: sid=abc123; Path=/; Secure; HttpOnly; SameSite=Lax\r\nSet-Cookie: csrf=xyz\r\nSet-Cookie: tracking=123\r\n\r\n",
 			"",
@@ -866,14 +868,14 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("dedup_keeps_last", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /page1 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: token=old; Domain=example.com\r\n\r\n",
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /page2 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: token=new; Domain=example.com\r\n\r\n",
 			"",
@@ -887,19 +889,19 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("domain_filter", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Domain=example.com\r\n\r\n",
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: sub.example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: c=3; Domain=sub.example.com\r\n\r\n",
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: other.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: b=2; Domain=other.com\r\n\r\n",
 			"",
@@ -916,15 +918,16 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("replay_included", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: test.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\nok",
 			"",
 		)
-		mockMCP.SetSendResponse(
-			"HttpRequestResponse{httpRequest=GET /api HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\nSet-Cookie: replay_cookie=yes\r\n\r\nok}",
+		mockHTTP.SetSendResult(
+			"HTTP/1.1 200 OK\r\nSet-Cookie: replay_cookie=yes\r\n",
+			"ok",
 		)
 
 		// Get flow_id and replay it
@@ -948,9 +951,9 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("no_cookies", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /plain HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello",
 			"",
@@ -961,10 +964,10 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("domain_defaults_to_host", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
 		// Cookie without Domain attribute should default to request host
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: mysite.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: name=val; Path=/\r\n\r\n",
 			"",
@@ -976,16 +979,16 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("config_domain_scoping", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServerWithConfig(t, &config.Config{
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.com"},
 		})
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: allowed.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: ok=1\r\n\r\n",
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: blocked.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: nope=2\r\n\r\n",
 			"",
@@ -997,9 +1000,9 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("multiple_cookies_one_response", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: multi.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2; Secure\r\nSet-Cookie: c=3; SameSite=Strict\r\n\r\n",
 			"",
@@ -1018,14 +1021,14 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("name_and_domain_filter", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: a.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: sid=a1; Domain=a.com\r\n\r\n",
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: b.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: sid=b1; Domain=b.com\r\n\r\n",
 			"",
@@ -1041,11 +1044,11 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("jwt_auto_decode", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
 		jwtValue := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /login HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: token="+jwtValue+"; Path=/; HttpOnly\r\n\r\n",
 			"",
@@ -1066,11 +1069,11 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("jwt_hidden_in_overview", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
 		jwtValue := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: token="+jwtValue+"\r\n\r\n",
 			"",
@@ -1084,9 +1087,9 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("non_jwt_no_decoded", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nSet-Cookie: sid=plainvalue123; Path=/\r\n\r\n",
 			"",

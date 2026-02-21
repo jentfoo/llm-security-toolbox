@@ -9,7 +9,7 @@ import (
 func TestMCP_Encode(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
 
 	t.Run("url", func(t *testing.T) {
 		text := CallMCPToolTextOK(t, mcpClient, "encode", map[string]interface{}{
@@ -56,7 +56,7 @@ func TestMCP_Encode(t *testing.T) {
 func TestMCP_Decode(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
 
 	t.Run("url", func(t *testing.T) {
 		text := CallMCPToolTextOK(t, mcpClient, "decode", map[string]interface{}{

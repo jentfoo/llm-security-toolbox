@@ -16,22 +16,21 @@ import (
 )
 
 // setupNotesEnabledServer creates an MCP server with notes enabled for testing.
-func setupNotesEnabledServer(t *testing.T) (*Server, *mcpclient.Client, *TestMCPServer, *mockCrawlerBackend) {
+func setupNotesEnabledServer(t *testing.T) (*Server, *mcpclient.Client, *mockHttpBackend, *mockCrawlerBackend) {
 	t.Helper()
 
-	mockMCP := NewTestMCPServer(t)
+	mockHTTP := newMockHttpBackend()
 	mockOast := newMockOastBackend()
 	mockCrawler := newMockCrawlerBackend()
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	srv, err := NewServer(MCPServerFlags{
-		BurpMCPURL:   mockMCP.URL(),
 		MCPPort:      0,
 		WorkflowMode: WorkflowModeNone,
 		ConfigPath:   configPath,
 		Notes:        true,
-	}, nil, mockOast, mockCrawler)
+	}, mockHTTP, mockOast, mockCrawler)
 	require.NoError(t, err)
 	srv.SetQuietLogging()
 
@@ -66,16 +65,16 @@ func setupNotesEnabledServer(t *testing.T) (*Server, *mcpclient.Client, *TestMCP
 		<-serverErr
 	})
 
-	return srv, mcpClient, mockMCP, mockCrawler
+	return srv, mcpClient, mockHTTP, mockCrawler
 }
 
 func TestMCP_NotesLifecycle(t *testing.T) {
 	t.Parallel()
 
-	srv, client, mockMCP, _ := setupNotesEnabledServer(t)
+	srv, client, mockHTTP, _ := setupNotesEnabledServer(t)
 
 	// Add a proxy entry so we have a valid flow_id
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /api/test HTTP/1.1\r\nHost: example.com\r\n\r\n",
 		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
 		"",
@@ -159,15 +158,15 @@ func TestMCP_NotesLifecycle(t *testing.T) {
 func TestMCP_NotesInProxyFlowListing(t *testing.T) {
 	t.Parallel()
 
-	srv, client, mockMCP, _ := setupNotesEnabledServer(t)
+	srv, client, mockHTTP, _ := setupNotesEnabledServer(t)
 
 	// Add proxy entries
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n",
 		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
 		"",
 	)
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /api/admin HTTP/1.1\r\nHost: example.com\r\n\r\n",
 		"HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\n\r\nDenied",
 		"",
@@ -278,7 +277,7 @@ func TestMCP_NotesToolsRegistered(t *testing.T) {
 func TestMCP_NotesToolsNotRegisteredWithoutFlag(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	t.Cleanup(cancel)

@@ -22,7 +22,7 @@ func testMakeJWT(header, payload map[string]interface{}) string {
 func TestMCP_JWTDecode(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
 
 	t.Run("valid_jwt", func(t *testing.T) {
 		now := time.Now()

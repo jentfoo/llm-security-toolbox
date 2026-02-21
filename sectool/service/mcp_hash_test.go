@@ -9,7 +9,7 @@ import (
 func TestMCP_Hash(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
 
 	t.Run("sha256_default", func(t *testing.T) {
 		text := CallMCPToolTextOK(t, mcpClient, "hash", map[string]interface{}{

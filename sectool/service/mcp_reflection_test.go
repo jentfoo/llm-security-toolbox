@@ -13,10 +13,10 @@ import (
 func TestHandleFindReflected(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
 	// Entry 0: query reflected as HTML-encoded in body, redirect in Location header, cookie in Set-Cookie
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /search?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E&redirect=https://evil.com&page=2 HTTP/1.1\r\n"+
 			"Host: example.com\r\n"+
 			"Cookie: session=abc123test; lang=en\r\n"+
@@ -30,7 +30,7 @@ func TestHandleFindReflected(t *testing.T) {
 	)
 
 	// Entry 1: JSON body with nested values reflected in response
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"POST /api/users HTTP/1.1\r\n"+
 			"Host: api.example.com\r\n"+
 			"Content-Type: application/json\r\n\r\n"+
@@ -42,7 +42,7 @@ func TestHandleFindReflected(t *testing.T) {
 	)
 
 	// Entry 2: no reflections
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /safe?token=abcdef HTTP/1.1\r\n"+
 			"Host: example.com\r\n\r\n",
 		"HTTP/1.1 200 OK\r\n"+
@@ -52,7 +52,7 @@ func TestHandleFindReflected(t *testing.T) {
 	)
 
 	// Entry 3: form-encoded body
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"POST /login HTTP/1.1\r\n"+
 			"Host: example.com\r\n"+
 			"Content-Type: application/x-www-form-urlencoded\r\n\r\n"+
@@ -64,7 +64,7 @@ func TestHandleFindReflected(t *testing.T) {
 	)
 
 	// Entry 4: JS Unicode escaped reflection
-	mockMCP.AddProxyEntry(
+	mockHTTP.AddProxyEntry(
 		"GET /api?callback=test<script> HTTP/1.1\r\n"+
 			"Host: example.com\r\n\r\n",
 		"HTTP/1.1 200 OK\r\n"+

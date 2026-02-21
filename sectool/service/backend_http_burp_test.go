@@ -2,6 +2,7 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,7 +100,7 @@ func TestBurpBackendRules(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			mockServer := NewTestMCPServer(t)
-			client := mcp.New(mockServer.URL())
+			client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(0))
 			require.NoError(t, client.Connect(t.Context()))
 			t.Cleanup(func() { _ = client.Close() })
 
@@ -250,7 +251,7 @@ func TestBurpBackendRuleIsolation(t *testing.T) {
 	t.Parallel()
 
 	mockServer := NewTestMCPServer(t)
-	client := mcp.New(mockServer.URL())
+	client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(0))
 	require.NoError(t, client.Connect(t.Context()))
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -332,10 +333,10 @@ func TestBurpBackendConfigEditingDisabled(t *testing.T) {
 func newTestBurpBackend(t *testing.T) (*BurpBackend, *TestMCPServer) {
 	t.Helper()
 	mockServer := NewTestMCPServer(t)
-	client := mcp.New(mockServer.URL())
+	client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(0))
 	require.NoError(t, client.Connect(t.Context()))
 	t.Cleanup(func() { _ = client.Close() })
-	return &BurpBackend{client: client}, mockServer
+	return NewBurpBackend(client), mockServer
 }
 
 func TestBurpBackendSendCreatesRepeaterTab(t *testing.T) {
@@ -401,6 +402,191 @@ func TestBurpBackendSendH2RoutesToH2(t *testing.T) {
 	require.Len(t, log, 2)
 	assert.Equal(t, "create_repeater_tab", log[0])
 	assert.Equal(t, "send_http2_request", log[1])
+}
+
+func TestBurpClientClosePrompt(t *testing.T) {
+	t.Parallel()
+
+	mockServer := NewTestMCPServer(t)
+	client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(200*time.Millisecond))
+	require.NoError(t, client.Connect(t.Context()))
+
+	// Let the health loop fire at least once
+	time.Sleep(300 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() did not complete within healthCheckTimeout")
+	}
+}
+
+func TestBurpBackendGetProxyHistory(t *testing.T) {
+	t.Parallel()
+
+	t.Run("full_entries", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+		mockServer.AddProxyEntry(
+			"GET /one HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nfirst",
+			"",
+		)
+		mockServer.AddProxyEntry(
+			"POST /two HTTP/1.1\r\nHost: example.com\r\n\r\nbody",
+			"HTTP/1.1 201 Created\r\n\r\nsecond",
+			"note2",
+		)
+
+		entries, err := backend.GetProxyHistory(t.Context(), 10, 0)
+		require.NoError(t, err)
+		require.Len(t, entries, 2)
+		assert.Contains(t, entries[0].Request, "GET /one")
+		assert.Contains(t, entries[0].Response, "200 OK")
+		assert.Contains(t, entries[1].Request, "POST /two")
+		assert.Equal(t, "note2", entries[1].Notes)
+	})
+
+	t.Run("offset_and_count", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+		mockServer.AddProxyEntry(
+			"GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\n\r\na",
+			"",
+		)
+		mockServer.AddProxyEntry(
+			"GET /b HTTP/1.1\r\nHost: b.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\n\r\nb",
+			"",
+		)
+
+		entries, err := backend.GetProxyHistory(t.Context(), 1, 1)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		assert.Contains(t, entries[0].Request, "GET /b")
+	})
+
+	t.Run("empty_history", func(t *testing.T) {
+		backend, _ := newTestBurpBackend(t)
+
+		entries, err := backend.GetProxyHistory(t.Context(), 10, 0)
+		require.NoError(t, err)
+		assert.Empty(t, entries)
+	})
+
+	t.Run("meta", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+		mockServer.AddProxyEntry(
+			"GET /page HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>hi</html>",
+			"",
+		)
+		mockServer.AddProxyEntry(
+			"POST /api HTTP/1.1\r\nHost: api.example.com\r\n\r\n{\"x\":1}",
+			"HTTP/1.1 201 Created\r\n\r\nok",
+			"",
+		)
+
+		metas, err := backend.GetProxyHistoryMeta(t.Context(), 10, 0)
+		require.NoError(t, err)
+		require.Len(t, metas, 2)
+
+		assert.Equal(t, "GET", metas[0].Method)
+		assert.Equal(t, "example.com", metas[0].Host)
+		assert.Equal(t, "/page", metas[0].Path)
+		assert.Equal(t, 200, metas[0].Status)
+		assert.Equal(t, len("<html>hi</html>"), metas[0].RespLen)
+
+		assert.Equal(t, "POST", metas[1].Method)
+		assert.Equal(t, "api.example.com", metas[1].Host)
+		assert.Equal(t, "/api", metas[1].Path)
+		assert.Equal(t, 201, metas[1].Status)
+	})
+}
+
+func TestBurpBackendSendDomainShortening(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		hostname      string
+		wantInTabName string
+	}{
+		{"two_part", "example.com", "example.com"},
+		{"subdomain_stripped", "api.example.com", "example.com"},
+		{"multipart_tld", "app.example.co.uk", "example.co.uk"},
+		{"ip_passthrough", "192.168.1.1", "192.168.1.1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, mockServer := newTestBurpBackend(t)
+
+			_, err := backend.SendRequest(t.Context(), "sectool-dom1", SendRequestInput{
+				RawRequest: []byte("GET /api HTTP/1.1\r\nHost: " + tc.hostname + "\r\n\r\n"),
+				Target:     Target{Hostname: tc.hostname, Port: 443, UsesHTTPS: true},
+			})
+			require.NoError(t, err)
+			assert.Contains(t, mockServer.LastTabName(), tc.wantInTabName)
+		})
+	}
+}
+
+func TestParseBurpResponse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		input      string
+		wantErr    bool
+		wantStatus string
+		wantBody   string
+	}{
+		{
+			"with_annotations",
+			`HttpRequestResponse{httpRequest=GET / HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nok, messageAnnotations=Annotations{}}`,
+			false,
+			"HTTP/1.1 ",
+			"ok",
+		},
+		{
+			"without_annotations",
+			`HttpRequestResponse{httpRequest=GET / HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\n\r\nbody}`,
+			false,
+			"HTTP/1.1 ",
+			"body",
+		},
+		{
+			"missing_http_response",
+			`HttpRequestResponse{httpRequest=GET / HTTP/1.1}`,
+			true,
+			"",
+			"",
+		},
+		{
+			"no_http_prefix",
+			`HttpRequestResponse{httpResponse=garbage, messageAnnotations=Annotations{}}`,
+			true,
+			"",
+			"",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			headers, body, err := parseBurpResponse(tc.input)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Contains(t, string(headers), tc.wantStatus)
+			assert.Equal(t, tc.wantBody, string(body))
+		})
+	}
 }
 
 func TestRawRequestToH2Params(t *testing.T) {

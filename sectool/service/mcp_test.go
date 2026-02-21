@@ -36,7 +36,7 @@ func CallMCPTool(t *testing.T, client *mcpclient.Client, name string, args map[s
 func ExtractMCPText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
 
-	assert.NotEmpty(t, result.Content, "result should have content")
+	assert.NotEmpty(t, result.Content)
 	for _, c := range result.Content {
 		if tc, ok := c.(mcp.TextContent); ok {
 			return tc.Text
@@ -50,8 +50,7 @@ func CallMCPToolTextOK(t *testing.T, client *mcpclient.Client, name string, args
 	t.Helper()
 
 	result := CallMCPTool(t, client, name, args)
-	require.False(t, result.IsError,
-		"%s failed: %s", name, ExtractMCPText(t, result))
+	require.False(t, result.IsError, "%s failed: %s", name, ExtractMCPText(t, result))
 	return ExtractMCPText(t, result)
 }
 
@@ -72,6 +71,7 @@ type TestMCPServer struct {
 	proxyHistory          []testProxyEntry
 	sendResponses         []string // Stack of responses for send_http1_request and send_http2_request
 	lastSentRequest       string   // Last raw request sent via send_http1_request
+	lastTabName           string   // Last tab name passed to create_repeater_tab
 	matchReplaceHTTP      []testMatchReplaceRule
 	matchReplaceWS        []testMatchReplaceRule
 	toolCallLog           []string // Ordered log of tool names called
@@ -245,6 +245,7 @@ func NewTestMCPServer(t *testing.T) *TestMCPServer {
 			ts.mu.Lock()
 			defer ts.mu.Unlock()
 			ts.toolCallLog = append(ts.toolCallLog, "create_repeater_tab")
+			ts.lastTabName = req.GetString("tabName", "")
 			return mcp.NewToolResultText("Tab created"), nil
 		},
 	)
@@ -373,6 +374,13 @@ func (t *TestMCPServer) ToolCallLog() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return append([]string(nil), t.toolCallLog...)
+}
+
+// LastTabName returns the last tab name passed to create_repeater_tab.
+func (t *TestMCPServer) LastTabName() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastTabName
 }
 
 // ClearToolCallLog resets the tool call log.

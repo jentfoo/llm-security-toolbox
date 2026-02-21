@@ -16,14 +16,14 @@ func TestHandleDiffFlow(t *testing.T) {
 	t.Parallel()
 
 	t.Run("scopes", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /api/v1/users?page=1 HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nAuthorization: Bearer tok1\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Request-Id: aaa\r\n\r\n"+`{"user":{"name":"alice","role":"admin","active":true},"count":10}`,
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"POST /api/v2/users?page=2&debug=true HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nX-Custom: test\r\n\r\n",
 			"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-Request-Id: bbb\r\n\r\n"+`{"user":{"name":"alice","role":"viewer","mfa":true},"count":10}`,
 			"",
@@ -172,9 +172,9 @@ func TestHandleDiffFlow(t *testing.T) {
 	})
 
 	t.Run("identical_flows", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /api/test HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world",
 			"",
@@ -207,14 +207,14 @@ func TestHandleDiffFlow(t *testing.T) {
 	})
 
 	t.Run("text_body_diff", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /page HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>Hello</body></html>",
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /page HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>Goodbye</body></html>",
 			"",
@@ -241,14 +241,14 @@ func TestHandleDiffFlow(t *testing.T) {
 	})
 
 	t.Run("json_body_diff", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"+`{"user":{"name":"alice","role":"admin"},"active":true}`,
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"+`{"user":{"name":"alice","role":"viewer","mfa":true},"count":5}`,
 			"",
@@ -304,14 +304,14 @@ func TestHandleDiffFlow(t *testing.T) {
 	})
 
 	t.Run("json_auto_detect", func(t *testing.T) {
-		_, mcpClient, mockMCP, _, _ := setupMockMCPServer(t)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"+`{"user":"alice","role":"admin"}`,
 			"",
 		)
-		mockMCP.AddProxyEntry(
+		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"+`{"user":"alice","role":"viewer"}`,
 			"",
