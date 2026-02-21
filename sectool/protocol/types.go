@@ -448,6 +448,22 @@ type PathABChange struct {
 }
 
 // =============================================================================
+// Validation Types
+// =============================================================================
+
+// ValidationIssue represents a single validation problem.
+type ValidationIssue struct {
+	Check  string `json:"check"`
+	Detail string `json:"detail"`
+}
+
+// ValidationResult is the structured response for validation failures.
+type ValidationResult struct {
+	Issues []ValidationIssue `json:"issues"`
+	Hint   string            `json:"hint,omitempty"`
+}
+
+// =============================================================================
 // Reflection Types
 // =============================================================================
 

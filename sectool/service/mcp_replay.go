@@ -246,7 +246,7 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 	// Validate when force is not set
 	if !mods.Force {
 		if issues := validateRequest(rawRequest); len(issues) > 0 {
-			return errorResult("validation failed:\n" + formatIssues(issues)), nil
+			return validationResult(issues)
 		}
 	}
 

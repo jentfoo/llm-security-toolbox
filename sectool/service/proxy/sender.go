@@ -81,7 +81,7 @@ func (s *Sender) prepareRequest(rawRequest []byte, mods *Modifications, force bo
 
 	if !force {
 		if err := validateRequest(req); err != nil {
-			return nil, fmt.Errorf("validation failed: %w (use force=true to bypass)", err)
+			return nil, fmt.Errorf("validation failed: %w (use 'force' for protocol testing)", err)
 		}
 	}
 
@@ -110,7 +110,7 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 			if err != nil {
 				return nil, fmt.Errorf("parse request: %w", err)
 			} else if err := validateRequest(req); err != nil {
-				return nil, fmt.Errorf("validation failed: %w (use force=true to bypass)", err)
+				return nil, fmt.Errorf("validation failed: %w (use 'force' for protocol testing)", err)
 			}
 		}
 		resp, err := s.sendRawRequest(ctx, opts)

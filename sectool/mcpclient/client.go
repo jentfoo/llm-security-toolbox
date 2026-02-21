@@ -100,6 +100,24 @@ func New(ctx context.Context, mcpURL string) (*Client, error) {
 	return c, nil
 }
 
+// ValidationError wraps structured validation failure data from the MCP server.
+type ValidationError struct {
+	Issues []protocol.ValidationIssue
+	Hint   string
+}
+
+func (e *ValidationError) Error() string {
+	var sb strings.Builder
+	sb.WriteString("validation failed:")
+	for _, issue := range e.Issues {
+		sb.WriteString("\n  " + issue.Check + ": " + issue.Detail)
+	}
+	if e.Hint != "" {
+		sb.WriteString("\nhint: " + e.Hint)
+	}
+	return sb.String()
+}
+
 // Close closes the MCP client connection.
 func (c *Client) Close() error {
 	if c.mcpClient != nil {
@@ -119,7 +137,12 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]inte
 	if err != nil {
 		return nil, translateTimeoutError(err)
 	} else if result.IsError {
-		return nil, errors.New(extractTextContent(result.Content))
+		text := extractTextContent(result.Content)
+		var vr protocol.ValidationResult
+		if json.Unmarshal([]byte(text), &vr) == nil && len(vr.Issues) > 0 {
+			return nil, &ValidationError{Issues: vr.Issues, Hint: vr.Hint}
+		}
+		return nil, errors.New(text)
 	}
 	return result, nil
 }

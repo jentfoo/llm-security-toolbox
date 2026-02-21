@@ -833,37 +833,31 @@ func applyHeaderModifications(headers []byte, remove []string, set []string) []b
 	return headers
 }
 
-// validationIssue represents a single validation problem.
-type validationIssue struct {
-	Check  string
-	Detail string
-}
-
 // validateWireAnomalies checks for wire-level anomalies that indicate
 // HTTP smuggling/desync test payloads. Returns issues that should block
 // sending unless force=true.
-func validateWireAnomalies(headers []byte) []validationIssue {
-	var issues []validationIssue
+func validateWireAnomalies(headers []byte) []protocol.ValidationIssue {
+	var issues []protocol.ValidationIssue
 
 	teCount := len(transferEncodingPresenceRe.FindAll(headers, -1))
 	clCount := len(contentLengthPresenceRe.FindAll(headers, -1))
 
 	if teCount > 0 && clCount > 0 {
-		issues = append(issues, validationIssue{
+		issues = append(issues, protocol.ValidationIssue{
 			Check:  "te-cl-conflict",
-			Detail: "both Transfer-Encoding and Content-Length headers present; use force=true for smuggling tests",
+			Detail: "both Transfer-Encoding and Content-Length headers present",
 		})
 	}
 	if clCount > 1 {
-		issues = append(issues, validationIssue{
+		issues = append(issues, protocol.ValidationIssue{
 			Check:  "duplicate-cl",
-			Detail: "multiple Content-Length headers; use force=true for smuggling tests",
+			Detail: "multiple Content-Length headers",
 		})
 	}
 	if teCount > 1 {
-		issues = append(issues, validationIssue{
+		issues = append(issues, protocol.ValidationIssue{
 			Check:  "duplicate-te",
-			Detail: "multiple Transfer-Encoding headers; use force=true for smuggling tests",
+			Detail: "multiple Transfer-Encoding headers",
 		})
 	}
 
@@ -879,9 +873,9 @@ func validateWireAnomalies(headers []byte) []validationIssue {
 		}
 		name := line[:colonIdx]
 		if bytes.ContainsAny(name, " \t") {
-			issues = append(issues, validationIssue{
+			issues = append(issues, protocol.ValidationIssue{
 				Check:  "header-whitespace",
-				Detail: fmt.Sprintf("space before colon in header '%s'; use force=true to send anyway", strings.TrimSpace(string(name))),
+				Detail: fmt.Sprintf("space before colon in header '%s'", strings.TrimSpace(string(name))),
 			})
 		}
 	}
@@ -890,16 +884,16 @@ func validateWireAnomalies(headers []byte) []validationIssue {
 }
 
 // validateRequest checks request for common issues.
-func validateRequest(raw []byte) []validationIssue {
-	var issues []validationIssue
+func validateRequest(raw []byte) []protocol.ValidationIssue {
+	var issues []protocol.ValidationIssue
 
 	headers, body := splitHeadersBody(raw)
 
 	// Check line endings FIRST - HTTP requires CRLF
 	if issue := proxy.CheckLineEndings(headers); issue != "" {
-		issues = append(issues, validationIssue{
+		issues = append(issues, protocol.ValidationIssue{
 			Check:  "crlf",
-			Detail: issue + "; HTTP requires CRLF (\\r\\n) line endings, use --force to send anyway",
+			Detail: issue + "; HTTP requires CRLF (\\r\\n) line endings",
 		})
 		return issues
 	}
@@ -911,7 +905,7 @@ func validateRequest(raw []byte) []validationIssue {
 	// Transform for validation only (HTTP/2 -> HTTP/1.1 for Go's parser)
 	validationRaw := transformRequestForValidation(raw)
 	if _, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(validationRaw))); err != nil {
-		issues = append(issues, validationIssue{
+		issues = append(issues, protocol.ValidationIssue{
 			Check:  "parse",
 			Detail: err.Error(),
 		})
@@ -919,7 +913,7 @@ func validateRequest(raw []byte) []validationIssue {
 
 	// Check Content-Length vs actual body length
 	if clIssue := validateContentLength(headers, body); clIssue != "" {
-		issues = append(issues, validationIssue{
+		issues = append(issues, protocol.ValidationIssue{
 			Check:  "content-length",
 			Detail: clIssue,
 		})
@@ -947,17 +941,6 @@ func validateContentLength(headers, body []byte) string {
 	}
 
 	return ""
-}
-
-// formatIssues formats validation issues as Markdown.
-func formatIssues(issues []validationIssue) string {
-	var sb strings.Builder
-	sb.WriteString("| Issue | Detail |\n")
-	sb.WriteString("|-------|--------|\n")
-	for _, i := range issues {
-		sb.WriteString(fmt.Sprintf("| %s | %s |\n", i.Check, i.Detail))
-	}
-	return sb.String()
 }
 
 // parseTarget determines host, port, and HTTPS from request or target override.

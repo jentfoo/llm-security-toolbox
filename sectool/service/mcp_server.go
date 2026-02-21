@@ -16,6 +16,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/go-appsec/toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 // mcpServer wraps the MCP server and its dependencies.
@@ -338,6 +339,21 @@ func errorResult(message string) *mcp.CallToolResult {
 // errorResultFromErr creates an error result with user-friendly timeout messages.
 func errorResultFromErr(prefix string, err error) *mcp.CallToolResult {
 	return mcp.NewToolResultError(prefix + translateTimeoutError(err))
+}
+
+// validationResult returns a structured JSON error result for validation failures.
+func validationResult(issues []protocol.ValidationIssue) (*mcp.CallToolResult, error) {
+	b, err := json.MarshalIndent(protocol.ValidationResult{
+		Issues: issues,
+		Hint:   "use 'force' for protocol testing",
+	}, "", "  ")
+	if err != nil {
+		return errorResult("failed to marshal validation result"), nil
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{mcp.TextContent{Type: mcp.ContentTypeText, Text: string(b)}},
+		IsError: true,
+	}, nil
 }
 
 // translateTimeoutError converts context errors to user-friendly messages.
