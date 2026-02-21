@@ -45,11 +45,18 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 	}
 
 	// Add instructions based on workflow mode
+	var instructions string
 	switch workflowMode {
 	case WorkflowModeExplore:
-		opts = append(opts, server.WithInstructions(workflowExploreContent))
+		instructions = workflowExploreContent
 	case WorkflowModeTestReport:
-		opts = append(opts, server.WithInstructions(workflowTestReportContent))
+		instructions = workflowTestReportContent
+	}
+	if instructions != "" {
+		if svc.notesEnabled {
+			instructions += workflowNotesSection
+		}
+		opts = append(opts, server.WithInstructions(instructions))
 	}
 
 	mcpSrv := server.NewMCPServer("sectool", config.Version, opts...)
@@ -175,6 +182,10 @@ func (m *mcpServer) registerTools() {
 		m.addDiffTools()
 		m.addReflectionTools()
 	}
+
+	if m.service.notesEnabled {
+		m.addNotesTools()
+	}
 }
 
 func (m *mcpServer) addProxyTools() {
@@ -265,11 +276,21 @@ func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest)
 		return errorResult("invalid task: use 'explore' or 'test-report'"), nil
 	}
 
+	if m.service.notesEnabled {
+		content += workflowNotesSection
+	}
+
 	m.workflowInitialized.Store(true)
 	log.Printf("workflow: initialized task=%s", task)
 
 	return mcp.NewToolResultText(content), nil
 }
+
+const workflowNotesSection = `
+
+## Notes
+
+Save notes for interesting discoveries, findings, or results using notes_save. Link notes to the relevant flow IDs for context.`
 
 var workflowExploreContent = `# Security Testing Workflow
 

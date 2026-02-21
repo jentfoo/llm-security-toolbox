@@ -53,7 +53,8 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/mcp_jwt.go` - JWT decode tool handler
 - `sectool/service/mcp_diff.go` - Diff tool handler (structured flow comparison)
 - `sectool/service/mcp_reflection.go` - Reflection tool handler (parameter reflection detection)
-- `sectool/service/flags.go` - MCP server flag parsing (`--port`, `--workflow`, `--config`)
+- `sectool/service/mcp_notes.go` - Notes tool handlers (save, list) and flow listing attachment
+- `sectool/service/flags.go` - MCP server flag parsing (`--port`, `--workflow`, `--config`, `--notes`)
 - `sectool/service/backend.go` - HttpBackend, OastBackend, CrawlerBackend interfaces
 - `sectool/service/backend_http_native.go` - Native built-in proxy implementation of HttpBackend
 - `sectool/service/backend_http_burp.go` - Burp MCP implementation of HttpBackend
@@ -94,6 +95,7 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/store/serialize.go` - Msgpack serialization helpers
 - `sectool/service/store/proxy_index.go` - Bidirectional flow_id ↔ proxy offset mapping
 - `sectool/service/store/replay_history.go` - Replay request/response storage with meta/payload split
+- `sectool/service/store/notes.go` - Note storage with reverse flow index
 - `sectool/service/ids/ids.go` - Base62 random IDs using crypto/rand
 
 ### CLI Commands
@@ -172,6 +174,7 @@ Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body place
 - `Storage` - key-value blob interface (`memStorage`, `SpillStore` disk-paging)
 - `ProxyIndex` - bidirectional flow_id ↔ proxy offset mapping
 - `ReplayHistoryStore` - replay storage with meta/payload split
+- `NoteStore` - note storage with reverse flow_id index
 
 ## MCP Tools
 
@@ -203,6 +206,8 @@ Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body place
 - `jwt_decode` - decode and inspect JWT tokens
 - `diff_flow` - compare two captured flows with structured, content-type-aware diffing
 - `find_reflected` - detect request parameter values reflected in the response
+- `notes_save` - create, update, or delete notes/findings linked to flows (requires `--notes`)
+- `notes_list` - list saved notes with filters (requires `--notes`)
 
 ## CLI Commands
 

@@ -271,7 +271,6 @@ func (s *ReplayHistoryStore) Clear() {
 	}
 }
 
-// Close releases storage resources.
-func (s *ReplayHistoryStore) Close() {
-	_ = s.storage.Close()
+func (s *ReplayHistoryStore) Close() error {
+	return s.storage.Close()
 }

@@ -21,15 +21,16 @@ type SummaryEntry struct {
 
 // FlowEntry represents a single proxy history entry in list view.
 type FlowEntry struct {
-	FlowID         string `json:"flow_id"`
-	Method         string `json:"method"`
-	Scheme         string `json:"scheme"`
-	Host           string `json:"host"`
-	Port           int    `json:"port,omitempty"`
-	Path           string `json:"path"`
-	Status         int    `json:"status"`
-	ResponseLength int    `json:"response_length"`
-	Source         string `json:"source,omitempty"` // "proxy" or "replay"
+	FlowID         string         `json:"flow_id"`
+	Method         string         `json:"method"`
+	Scheme         string         `json:"scheme"`
+	Host           string         `json:"host"`
+	Port           int            `json:"port,omitempty"`
+	Path           string         `json:"path"`
+	Status         int            `json:"status"`
+	ResponseLength int            `json:"response_length"`
+	Source         string         `json:"source,omitempty"` // "proxy" or "replay"
+	Notes          []FlowNoteInfo `json:"notes,omitempty"`
 }
 
 // RequestLine contains path and version from the HTTP request line.
@@ -274,14 +275,15 @@ func (r CrawlPollResponse) MarshalJSON() ([]byte, error) {
 
 // CrawlFlow is a crawled request/response summary.
 type CrawlFlow struct {
-	FlowID         string `json:"flow_id"`
-	Method         string `json:"method"`
-	Host           string `json:"host"`
-	Path           string `json:"path"`
-	Status         int    `json:"status"`
-	ResponseLength int    `json:"response_length"`
-	Duration       string `json:"duration"`
-	FoundOn        string `json:"found_on,omitempty"`
+	FlowID         string         `json:"flow_id"`
+	Method         string         `json:"method"`
+	Host           string         `json:"host"`
+	Path           string         `json:"path"`
+	Status         int            `json:"status"`
+	ResponseLength int            `json:"response_length"`
+	Duration       string         `json:"duration"`
+	FoundOn        string         `json:"found_on,omitempty"`
+	Notes          []FlowNoteInfo `json:"notes,omitempty"`
 }
 
 // CrawlForm is a discovered form.
@@ -479,4 +481,31 @@ type Reflection struct {
 	Value        string   `json:"value"`
 	Locations    []string `json:"locations"`
 	RawReflected bool     `json:"raw_reflected,omitempty"` // value has special chars and appears unencoded
+}
+
+// =============================================================================
+// Note Types
+// =============================================================================
+
+// NoteEntry represents a saved note/finding.
+type NoteEntry struct {
+	NoteID  string   `json:"note_id"`
+	Type    string   `json:"type"`
+	FlowIDs []string `json:"flow_ids"`
+	Content string   `json:"content"`
+}
+
+// NoteDeleteResponse is the response for notes_save delete.
+type NoteDeleteResponse struct{}
+
+// NotesListResponse is the response for notes_list.
+type NotesListResponse struct {
+	Notes []NoteEntry `json:"notes"`
+}
+
+// FlowNoteInfo is lightweight note info attached to flow listings.
+type FlowNoteInfo struct {
+	NoteID  string `json:"note_id"`
+	Type    string `json:"type"`
+	Content string `json:"content"`
 }

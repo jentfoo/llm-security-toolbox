@@ -88,9 +88,8 @@ func (p *ProxyIndex) Count() int {
 	return p.count
 }
 
-// Close releases storage resources.
-func (p *ProxyIndex) Close() {
-	_ = p.storage.Close()
+func (p *ProxyIndex) Close() error {
+	return p.storage.Close()
 }
 
 func reverseKey(offset uint32) string {

@@ -66,7 +66,9 @@ Work with the agent to build a test plan and execute it together. The agent can 
 | `--proxy-port 8080` | Force native proxy on specified port |
 | `--burp` | Force Burp MCP (fails if unavailable) |
 
-### Workflow modes
+### Session options
+
+#### Workflow
 
 Sectool automatically determines the appropriate workflow when the agent calls the `workflow` tool at the start of a session. You can skip this step and save tokens by specifying the workflow upfront:
 
@@ -85,6 +87,10 @@ sectool mcp --workflow none        # No workflow instructions
 | `none` | No workflow instructions, all tools available immediately |
 
 Workflow instructions guide agents toward collaborative testing rather than trying to do everything autonomously or stepping you through a process without adding value. If you have ideas for improving agent collaboration, [open an issue](https://github.com/go-appsec/toolbox/issues).
+
+#### Notes
+
+The `--notes` flag enables `notes_save` and `notes_list` tools for saving observations linked to flows. Disabled by default to keep context usage minimal for short sessions. Enable it when you expect multiple findings or conversation compactions.
 
 ### MCP transports
 

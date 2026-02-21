@@ -62,6 +62,10 @@ type Server struct {
 	// Replay history store (shared by both backends)
 	replayHistoryStore *store.ReplayHistoryStore
 
+	// Notes store
+	noteStore    *store.NoteStore
+	notesEnabled bool
+
 	// Proxy history storage (passed to native proxy backend)
 	historyStorage store.Storage
 	// Rule storage (passed to native proxy backend)
@@ -94,7 +98,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 	// Create per-store spill instances sharing the same temp directory
 	defaults := store.DefaultSpillStoreConfig()
 	defaults.Dir = storageTempDir
-	storeNames := []string{"pidx", "replay", "hist", "rule"}
+	storeNames := []string{"pidx", "replay", "hist", "rule", "notes"}
 	stores := make([]store.Storage, len(storeNames))
 	for i, name := range storeNames {
 		cfg := defaults
@@ -109,7 +113,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 			return nil, fmt.Errorf("create %s storage: %w", name, err)
 		}
 	}
-	proxyIndexStorage, replayStorage, historyStorage, ruleStorage := stores[0], stores[1], stores[2], stores[3]
+	proxyIndexStorage, replayStorage, historyStorage, ruleStorage, notesStorage := stores[0], stores[1], stores[2], stores[3], stores[4]
 
 	s := &Server{
 		flagBurpMCPURL:     flags.BurpMCPURL,
@@ -118,6 +122,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 		flagProxyPort:      flags.ProxyPort,
 		flagRequireBurp:    flags.RequireBurp,
 		mcpWorkflowMode:    flags.WorkflowMode,
+		notesEnabled:       flags.Notes,
 		metricProvider:     make(map[string]HealthMetricProvider),
 		started:            make(chan struct{}),
 		shutdownCh:         make(chan struct{}),
@@ -126,6 +131,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 		replayHistoryStore: store.NewReplayHistoryStore(replayStorage),
 		historyStorage:     historyStorage,
 		ruleStorage:        ruleStorage,
+		noteStore:          store.NewNoteStore(notesStorage),
 		httpBackend:        hb,
 		oastBackend:        ob,
 		crawlerBackend:     cb,
@@ -134,6 +140,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 	// Register health metrics for store counts
 	s.RegisterHealthMetric("flows", func() string { return strconv.Itoa(s.proxyIndex.Count()) })
 	s.RegisterHealthMetric("replay_history", func() string { return strconv.Itoa(s.replayHistoryStore.Count()) })
+	s.RegisterHealthMetric("notes", func() string { return strconv.Itoa(s.noteStore.Count()) })
 
 	return s, nil
 }
@@ -240,8 +247,9 @@ func (s *Server) shutdown() error {
 	}
 
 	// Close storage stores (each removes its own data file)
-	s.proxyIndex.Close()
-	s.replayHistoryStore.Close()
+	_ = s.proxyIndex.Close()
+	_ = s.replayHistoryStore.Close()
+	_ = s.noteStore.Close()
 	_ = s.historyStorage.Close()
 	_ = s.ruleStorage.Close()
 	// Remove shared temp directory

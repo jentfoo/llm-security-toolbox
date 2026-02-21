@@ -27,6 +27,7 @@ type MCPServerFlags struct {
 	ProxyPort    int    // 0 = not set via CLI
 	RequireBurp  bool   // --burp flag: require Burp, error if unavailable
 	WorkflowMode string // "", "none", "explore", "test-report"
+	Notes        bool   // enable notes/findings tools (experimental)
 }
 
 // ParseMCPServerFlags parses flags for MCP server mode (sectool mcp).
@@ -43,6 +44,7 @@ func ParseMCPServerFlags(args []string) (MCPServerFlags, error) {
 	fs.IntVar(&flags.ProxyPort, "proxy-port", 0, "built-in proxy port (skips Burp, default: from config or 8080)")
 	fs.BoolVar(&flags.RequireBurp, "burp", false, "require Burp MCP (error if unavailable)")
 	fs.StringVar(&flags.WorkflowMode, "workflow", "", "MCP workflow mode: none, explore, test-report")
+	fs.BoolVar(&flags.Notes, "notes", false, "enable notes/findings tools (experimental)")
 
 	if err := fs.Parse(args); err != nil {
 		return flags, err

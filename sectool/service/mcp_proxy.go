@@ -353,6 +353,7 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 				Source:         entry.source,
 			})
 		}
+		m.attachFlowNotes(flows)
 		log.Printf("proxy/poll: %d flows (host=%q path=%q method=%q status=%q)", len(flows), listReq.Host, listReq.Path, listReq.Method, listReq.Status)
 
 		// Update tracking for "since=last" cursor

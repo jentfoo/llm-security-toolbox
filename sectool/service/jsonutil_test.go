@@ -494,3 +494,26 @@ func TestFlattenJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestParseStringList(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{"json_array", `["a","b","c"]`, []string{"a", "b", "c"}},
+		{"json_array_spaces", ` ["a", "b"] `, []string{"a", "b"}},
+		{"comma_fallback", "a,b,c", []string{"a", "b", "c"}},
+		{"single_value", "abc", []string{"abc"}},
+		{"empty", "", nil},
+		{"invalid_json_array", `["a","b"`, []string{`["a"`, `"b"`}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, parseStringList(tt.input))
+		})
+	}
+}

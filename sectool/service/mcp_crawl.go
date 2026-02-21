@@ -322,6 +322,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 				FoundOn:        f.FoundOn,
 			})
 		}
+		m.attachCrawlFlowNotes(apiFlows)
 		log.Printf("crawl/poll: session %s %d flows (limit=%d)", sessionID, len(flows), limit)
 		noteStr := strings.Join(notes, "; ")
 		return jsonResult(protocol.CrawlPollResponse{SessionID: sessionID, Flows: apiFlows, Note: noteStr})

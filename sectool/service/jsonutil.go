@@ -155,11 +155,8 @@ func inferJSONValue(s string) interface{} {
 	}
 
 	// Try JSON object or array
-	if len(s) >= 2 && ((s[0] == '{' && s[len(s)-1] == '}') || (s[0] == '[' && s[len(s)-1] == ']')) {
-		var parsed interface{}
-		if err := json.Unmarshal([]byte(s), &parsed); err == nil {
-			return parsed
-		}
+	if parsed, ok := tryDecodeJSONString(s); ok {
+		return parsed
 	}
 
 	return s
@@ -374,6 +371,21 @@ func removeKeyAtPath(data interface{}, segments []pathSegment) (interface{}, err
 		obj[seg.Key] = newVal
 	}
 	return obj, nil
+}
+
+// parseStringList parses a JSON array or comma-separated list into a slice.
+func parseStringList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	trimmed := strings.TrimSpace(s)
+	if len(trimmed) > 1 && trimmed[0] == '[' {
+		var arr []string
+		if json.Unmarshal([]byte(trimmed), &arr) == nil {
+			return arr
+		}
+	}
+	return parseCommaSeparated(s)
 }
 
 // flattenJSON flattens a JSON value into a map of dot-notation paths to leaf values.
