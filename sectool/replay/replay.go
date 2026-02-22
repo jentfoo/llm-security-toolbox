@@ -250,7 +250,7 @@ func create(urlArg, method string, headers []string, bodyPath string) error {
 
 	// Add Content-Length if body present
 	if len(bodyBytes) > 0 {
-		reqBuilder.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(bodyBytes)))
+		_, _ = fmt.Fprintf(&reqBuilder, "Content-Length: %d\r\n", len(bodyBytes))
 	}
 
 	// Generate a bundle ID

@@ -1064,11 +1064,11 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget Tar
 	}
 
 	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", method, newPath))
+	_, _ = fmt.Fprintf(&buf, "%s %s HTTP/1.1\r\n", method, newPath)
 	copyHeadersForRedirect(originalReq, &buf, newTarget, preserveBody)
 
 	if len(body) > 0 {
-		buf.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(body)))
+		_, _ = fmt.Fprintf(&buf, "Content-Length: %d\r\n", len(body))
 	}
 
 	buf.WriteString("\r\n")
