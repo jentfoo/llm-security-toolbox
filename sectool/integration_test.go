@@ -2671,9 +2671,9 @@ type wsFrame struct {
 	payload []byte
 }
 
-func readWebSocketFrame(conn net.Conn) (*wsFrame, error) {
+func readWebSocketFrame(r io.Reader) (*wsFrame, error) {
 	header := make([]byte, 2)
-	if _, err := io.ReadFull(conn, header); err != nil {
+	if _, err := io.ReadFull(r, header); err != nil {
 		return nil, err
 	}
 
@@ -2685,13 +2685,13 @@ func readWebSocketFrame(conn net.Conn) (*wsFrame, error) {
 	switch payloadLen {
 	case 126:
 		ext := make([]byte, 2)
-		if _, err := io.ReadFull(conn, ext); err != nil {
+		if _, err := io.ReadFull(r, ext); err != nil {
 			return nil, err
 		}
 		payloadLen = int(ext[0])<<8 | int(ext[1])
 	case 127:
 		ext := make([]byte, 8)
-		if _, err := io.ReadFull(conn, ext); err != nil {
+		if _, err := io.ReadFull(r, ext); err != nil {
 			return nil, err
 		}
 		payloadLen = int(ext[4])<<24 | int(ext[5])<<16 | int(ext[6])<<8 | int(ext[7])
@@ -2699,13 +2699,13 @@ func readWebSocketFrame(conn net.Conn) (*wsFrame, error) {
 
 	var mask [4]byte
 	if masked {
-		if _, err := io.ReadFull(conn, mask[:]); err != nil {
+		if _, err := io.ReadFull(r, mask[:]); err != nil {
 			return nil, err
 		}
 	}
 
 	payload := make([]byte, payloadLen)
-	if _, err := io.ReadFull(conn, payload); err != nil {
+	if _, err := io.ReadFull(r, payload); err != nil {
 		return nil, err
 	}
 
@@ -2879,7 +2879,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 
 		// Echo loop - receive message and send back with SERVER_SECRET
 		for {
-			frame, err := readWebSocketFrame(conn)
+			frame, err := readWebSocketFrame(bufrw)
 			if err != nil {
 				return
 			}
@@ -3015,8 +3015,8 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 		require.NoError(t, err)
 
 		// Read frame from client side (through proxy) - server echoes with SERVER_SECRET prefix
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		receivedFrame, err := readWebSocketFrame(conn)
+		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+		receivedFrame, err := readWebSocketFrame(reader)
 		require.NoError(t, err)
 
 		// Verify the message was modified by the rule (SERVER_SECRET -> SERVER_MODIFIED)
