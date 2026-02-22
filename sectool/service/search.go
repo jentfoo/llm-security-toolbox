@@ -10,10 +10,23 @@ import (
 const maxMatchesPerSection = 10
 
 // compileSearchPattern compiles an RE2 regex; on failure auto-escapes to literal.
+// Automatically corrects double-escaped regex metacharacters that LLM agents
+// commonly produce (e.g. \\. instead of \.) before compilation.
 // When caseInsensitive is true, prepends (?i) to make the match case-insensitive.
-// Returns compiled regexp and note string (empty if pattern was valid regex).
+// Returns compiled regexp and note string (empty if pattern was clean regex).
 func compileSearchPattern(pattern string, caseInsensitive bool) (*regexp.Regexp, string) {
+	var note string
 	p := pattern
+
+	// LLM agents often double-escape regex metacharacters due to extra
+	// JSON encoding layers. Collapse \\X → \X for known metacharacters
+	// before compilation so patterns like www\\.google\\.com work as
+	// the caller intended (matching www.google.com).
+	if fixed := unDoubleEscapeRegex(p); fixed != p {
+		p = fixed
+		note = fmt.Sprintf("pattern had double-escaped regex metacharacters, auto-corrected to %q", p)
+	}
+
 	if caseInsensitive && !strings.HasPrefix(p, "(?i)") {
 		p = "(?i)" + p
 	}
@@ -25,7 +38,7 @@ func compileSearchPattern(pattern string, caseInsensitive bool) (*regexp.Regexp,
 		}
 		return regexp.MustCompile(escaped), fmt.Sprintf("invalid regex %q, treated as literal", pattern)
 	}
-	return re, ""
+	return re, note
 }
 
 // extractMatchContext returns grep-like output with ~80 chars context around each match.
@@ -128,6 +141,41 @@ func matchesFlowSearch(request, response []byte, headerRe, bodyRe *regexp.Regexp
 		}
 	}
 	return false
+}
+
+// unDoubleEscapeRegex collapses double-escaped regex metacharacters (\\X → \X).
+// LLM agents sometimes produce double-escaped patterns (e.g. \\* instead of \*)
+// due to extra JSON encoding of backslashes in tool call arguments.
+func unDoubleEscapeRegex(s string) string {
+	if !strings.Contains(s, `\\`) {
+		return s
+	}
+	// Regex punctuation metacharacters — always collapse \\X → \X
+	const metachars = `.*+?()[]{}^$|/`
+	// Regex shorthand class letters (\d, \w, \s, etc.) — only collapse when
+	// the \\ pair is not preceded by another backslash, to avoid mangling
+	// literal-backslash sequences like \\\\server into \\\server.
+	const shorthand = `dDwWsSbBnrtfv`
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if i+2 < len(s) && s[i] == '\\' && s[i+1] == '\\' {
+			c := s[i+2]
+			if strings.IndexByte(metachars, c) >= 0 {
+				b.WriteByte('\\')
+				b.WriteByte(c)
+				i += 2
+				continue
+			} else if strings.IndexByte(shorthand, c) >= 0 && (i == 0 || s[i-1] != '\\') {
+				b.WriteByte('\\')
+				b.WriteByte(c)
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // parseScopeSet parses a comma-separated scope string into a set.

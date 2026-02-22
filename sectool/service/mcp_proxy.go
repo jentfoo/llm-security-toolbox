@@ -934,38 +934,3 @@ func validateRuleTypeAny(t string) error {
 	}
 	return nil
 }
-
-// unDoubleEscapeRegex collapses double-escaped regex metacharacters (\\X → \X).
-// LLM agents sometimes produce double-escaped patterns (e.g. \\* instead of \*)
-// due to extra JSON encoding of backslashes in tool call arguments.
-func unDoubleEscapeRegex(s string) string {
-	if !strings.Contains(s, `\\`) {
-		return s
-	}
-	// Regex punctuation metacharacters — always collapse \\X → \X
-	const metachars = `.*+?()[]{}^$|/`
-	// Regex shorthand class letters (\d, \w, \s, etc.) — only collapse when
-	// the \\ pair is not preceded by another backslash, to avoid mangling
-	// literal-backslash sequences like \\\\server into \\\server.
-	const shorthand = `dDwWsSbBnrtfv`
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		if i+2 < len(s) && s[i] == '\\' && s[i+1] == '\\' {
-			c := s[i+2]
-			if strings.IndexByte(metachars, c) >= 0 {
-				b.WriteByte('\\')
-				b.WriteByte(c)
-				i += 2
-				continue
-			} else if strings.IndexByte(shorthand, c) >= 0 && (i == 0 || s[i-1] != '\\') {
-				b.WriteByte('\\')
-				b.WriteByte(c)
-				i += 2
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
-}

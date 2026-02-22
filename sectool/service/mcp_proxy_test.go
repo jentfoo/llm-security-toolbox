@@ -560,6 +560,36 @@ func TestMCP_FlowGet(t *testing.T) {
 		assert.NotContains(t, raw, "response_body")
 	})
 
+	// Double-escaped patterns: LLM agents commonly over-escape regex metacharacters.
+	// All variants should match scope.com in request_headers.
+	t.Run("double_escaped_dot", func(t *testing.T) {
+		var raw map[string]interface{}
+		// \\. is a double-escaped dot — should be auto-corrected to \.
+		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": flowID,
+			"scope":   "request_headers",
+			"pattern": `scope\\.com`,
+		})
+		require.NoError(t, json.Unmarshal([]byte(text), &raw))
+		assert.Contains(t, raw, "request_headers")
+		assert.Contains(t, raw["request_headers"], "scope.com")
+		assert.Contains(t, raw, "note")
+	})
+
+	t.Run("single_escaped_dot", func(t *testing.T) {
+		var raw map[string]interface{}
+		// \. is correctly escaped — should work without auto-correction
+		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": flowID,
+			"scope":   "request_headers",
+			"pattern": `scope\.com`,
+		})
+		require.NoError(t, json.Unmarshal([]byte(text), &raw))
+		assert.Contains(t, raw, "request_headers")
+		assert.Contains(t, raw["request_headers"], "scope.com")
+		assert.NotContains(t, raw, "note")
+	})
+
 	t.Run("invalid_scope", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
 			"flow_id": flowID,
@@ -786,33 +816,6 @@ func TestMCP_ProxyRules(t *testing.T) {
 			assert.Contains(t, ExtractMCPText(t, result), "not found")
 		})
 	})
-}
-
-func TestUnDoubleEscapeRegex(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"no_escapes", "Accept: text/html", "Accept: text/html"},
-		{"single_escape_preserved", `Accept: \*/\*`, `Accept: \*/\*`},
-		{"double_escape_collapsed", `Accept: \\*/\\*`, `Accept: \*/\*`},
-		{"double_escape_dot", `Host: example\\.com`, `Host: example\.com`},
-		{"double_escape_plus", `count: \\d\\+`, `count: \d\+`},
-		{"shorthand_classes", `\\d{3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}`, `\d{3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`},
-		{"word_whitespace", `\\w+\\s+\\b`, `\w+\s+\b`},
-		{"literal_backslash_kept", `path: \\\\server`, `path: \\\\server`},
-		{"mixed", `\\. and \. ok`, `\. and \. ok`},
-		{"empty", "", ""},
-		{"trailing_backslash", `test\\`, `test\\`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, unDoubleEscapeRegex(tt.in))
-		})
-	}
 }
 
 func TestMCP_CookieJar(t *testing.T) {

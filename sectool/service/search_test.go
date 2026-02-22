@@ -44,6 +44,47 @@ func TestCompileSearchPattern(t *testing.T) {
 			input:     "some plain text here",
 			wantMatch: true,
 		},
+		// Double-escaped patterns: LLM agents often over-escape
+		{
+			name:      "double_escaped_dot",
+			pattern:   `www\\.google\\.com`,
+			input:     "https://www.google.com/",
+			wantMatch: true,
+			wantNote:  true,
+		},
+		{
+			name:      "double_escaped_star",
+			pattern:   `Accept: \\*/\\*`,
+			input:     "Accept: */*",
+			wantMatch: true,
+			wantNote:  true,
+		},
+		{
+			name:      "double_escaped_shorthand",
+			pattern:   `\\d+\\.\\d+`,
+			input:     "version 1.23",
+			wantMatch: true,
+			wantNote:  true,
+		},
+		{
+			name:      "correct_single_escape",
+			pattern:   `www\.google\.com`,
+			input:     "https://www.google.com/",
+			wantMatch: true,
+		},
+		{
+			name:      "mixed_correct_and_double",
+			pattern:   `www\\.google\.com`,
+			input:     "https://www.google.com/",
+			wantMatch: true,
+			wantNote:  true,
+		},
+		{
+			name:      "unescaped_dot_wildcard",
+			pattern:   `www.google.com`,
+			input:     "https://www.google.com/",
+			wantMatch: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -350,6 +391,33 @@ func TestParseScopeSet(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, tt.want, got)
 			}
+		})
+	}
+}
+
+func TestUnDoubleEscapeRegex(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"no_escapes", "Accept: text/html", "Accept: text/html"},
+		{"single_escape_preserved", `Accept: \*/\*`, `Accept: \*/\*`},
+		{"double_escape_collapsed", `Accept: \\*/\\*`, `Accept: \*/\*`},
+		{"double_escape_dot", `Host: example\\.com`, `Host: example\.com`},
+		{"double_escape_plus", `count: \\d\\+`, `count: \d\+`},
+		{"shorthand_classes", `\\d{3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}`, `\d{3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`},
+		{"word_whitespace", `\\w+\\s+\\b`, `\w+\s+\b`},
+		{"literal_backslash_kept", `path: \\\\server`, `path: \\\\server`},
+		{"mixed", `\\. and \. ok`, `\. and \. ok`},
+		{"empty", "", ""},
+		{"trailing_backslash", `test\\`, `test\\`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, unDoubleEscapeRegex(tt.in))
 		})
 	}
 }
