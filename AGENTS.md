@@ -137,6 +137,21 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/cliutil/suggest.go` - "Did you mean" levenshtein suggestions for unknown commands
 - `sectool/util/strutil.go` - TruncateString and other shared string utilities
 
+### Controller (`controller/claude/`)
+
+Python-based autonomous security exploration controller using the Claude Agent SDK. Runs a worker/orchestrator multi-agent loop against a running sectool MCP server; workers test, orchestrator independently verifies candidates and files findings.
+
+- `controller/claude/controller.py` - Main loop: build, MCP server lifecycle, worker/orchestrator clients, turn collection, decision application, stall detection, recovery
+- `controller/claude/config.py` - `Config` dataclass, CLI arg parsing, model alias map (sonnet/opus/haiku → model IDs)
+- `controller/claude/tools.py` - SDK MCP servers (`worker_tools` with `report_finding_candidate`; `orch_tools` with `plan_workers`/`continue_worker`/`expand_worker`/`stop_worker`/`file_finding`/`dismiss_candidate`/`done`). Hosts `CandidatePool`, `DecisionQueue`, `WorkerTurnSummary`, `ToolCallRecord`, `FindingCandidate`, `FindingFiled`, `PlanEntry`, `WorkerDecision`, and `extract_flow_ids`
+- `controller/claude/findings.py` - `FindingWriter`: slug-based filename generation, dedup by title/endpoint similarity, markdown template with Verification section
+- `controller/claude/prompts/worker.py` - Worker agent system prompt (sectool tool surface + candidate reporting contract)
+- `controller/claude/prompts/orchestrator.py` - Orchestrator agent system prompt (verification duty + decision tool contract)
+- `controller/claude/tests/` - pytest suite: `test_controller_loop.py`, `test_tools.py`, `test_findings.py`, `conftest.py` (scripted fake `ClaudeSDKClient`; no real SDK or network)
+- `controller/claude/requirements.txt`, `pyproject.toml` - Python deps (Python 3.10+, `claude-agent-sdk`)
+
+Verification-side sectool tools exposed to the orchestrator are an allowlist in `controller.py:ORCH_SECTOOL_READ_TOOLS` — destructive tools (`proxy_rule_*`, `crawl_stop`, `oast_delete`) are intentionally withheld to avoid disrupting workers. Stall thresholds: `STALL_WARN_AFTER=3`, `STALL_STOP_AFTER=4` consecutive `progress=none` turns. Max workers capped at 5 by `config.parse_args`. See `controller/claude/README.md` for usage.
+
 ### Config
 
 Global config at `~/.sectool/config.json` (auto-created with defaults):
