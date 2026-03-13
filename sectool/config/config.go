@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 )
 
@@ -21,8 +22,16 @@ const (
 	DefaultExcludeExtensions = "gif|jpg|jpeg|png|ico|webp|woff|woff2|ttf|eot"
 )
 
-// Version is injected at build time via ldflags; defaults to "dev".
+// Version is injected at build time via ldflags or from go install; defaults to "dev".
 var Version = "dev"
+
+func init() {
+	if Version != "dev" {
+		return
+	} else if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		Version = info.Main.Version
+	}
+}
 
 func UserAgent() string {
 	return "Mozilla/5.0 (compatible; go-appsec/toolbox sectool-" + Version + ")"
