@@ -159,7 +159,7 @@ type OastBackend interface {
 // OastSessionInfo represents an active OAST session (internal domain type).
 type OastSessionInfo struct {
 	ID        string    // Short sectool ID (e.g., "a1b2c3")
-	Domain    string    // Full Interactsh domain (e.g., "xyz123.oast.fun")
+	Domain    string    // Full Interactsh domain (e.g., "xyz123.alpha.oastsrv.net")
 	Label     string    // Optional user-provided label for easier reference
 	CreatedAt time.Time // When the session was created
 }
