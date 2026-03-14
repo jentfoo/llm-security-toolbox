@@ -37,8 +37,10 @@ func create(mcpURL string, label string) error {
 		fmt.Printf("Label: %s\n", cliutil.ID(resp.Label))
 	}
 	fmt.Println()
-	cliutil.Hint(os.Stdout, "Use any subdomain for tagging (e.g., sqli-test."+resp.Domain+")")
-	fmt.Println()
+	if resp.Label == "" {
+		cliutil.Hint(os.Stdout, "Use any subdomain for tagging (e.g., sqli-test."+resp.Domain+")")
+		fmt.Println()
+	}
 	pollRef := resp.OastID
 	if resp.Label != "" {
 		pollRef = resp.Label
@@ -132,7 +134,7 @@ func poll(mcpURL string, oastID, since, eventType string, wait time.Duration, li
 	}
 
 	// Show hints for next actions
-	cliutil.HintCommand(os.Stdout, "To view event details", fmt.Sprintf("sectool oast get %s <event_id>", oastID))
+	cliutil.HintCommand(os.Stdout, "To view event details", "sectool oast get <event_id>")
 	if len(resp.Events) > 0 {
 		lastEvent := resp.Events[len(resp.Events)-1]
 		cliutil.HintCommand(os.Stdout, "To poll for new events", fmt.Sprintf("sectool oast poll %s --since %s", oastID, lastEvent.EventID))
@@ -141,7 +143,7 @@ func poll(mcpURL string, oastID, since, eventType string, wait time.Duration, li
 	return nil
 }
 
-func get(mcpURL string, oastID, eventID string) error {
+func get(mcpURL string, eventID string) error {
 	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
@@ -150,7 +152,7 @@ func get(mcpURL string, oastID, eventID string) error {
 	}
 	defer func() { _ = client.Close() }()
 
-	resp, err := client.OastGet(ctx, oastID, eventID)
+	resp, err := client.OastGet(ctx, eventID)
 	if err != nil {
 		return fmt.Errorf("oast get failed: %w", err)
 	}

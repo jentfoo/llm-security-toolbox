@@ -105,7 +105,6 @@ func TestMCP_OastLifecycleWithMock(t *testing.T) {
 		})
 
 		resp := CallMCPToolJSONOK[protocol.OastGetResponse](t, mcpClient, "oast_get", map[string]interface{}{
-			"oast_id":  oastID,
 			"event_id": "event-get-test",
 		})
 		assert.Equal(t, "event-get-test", resp.EventID)
@@ -174,18 +173,18 @@ func TestMCP_OastValidation(t *testing.T) {
 		assert.Contains(t, ExtractMCPText(t, result), "not found")
 	})
 
-	t.Run("get_missing_id", func(t *testing.T) {
+	t.Run("get_missing_event_id", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "oast_get", map[string]interface{}{})
 		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "oast_id is required")
+		assert.Contains(t, ExtractMCPText(t, result), "event_id is required")
 	})
 
-	t.Run("get_missing_event_id", func(t *testing.T) {
+	t.Run("get_not_found", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "oast_get", map[string]interface{}{
-			"oast_id": "test",
+			"event_id": "nonexistent",
 		})
 		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "event_id is required")
+		assert.Contains(t, ExtractMCPText(t, result), "event_id not found")
 	})
 
 	t.Run("delete_missing_id", func(t *testing.T) {

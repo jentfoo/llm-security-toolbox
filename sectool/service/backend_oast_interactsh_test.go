@@ -458,8 +458,33 @@ func TestOastSession_FilterEvents(t *testing.T) {
 
 	t.Run("type_filter_no_matches", func(t *testing.T) {
 		sess := &oastSession{events: makeEvents("e1", "e2", "e3")}
-		result := sess.filterEvents("", "http")
+		result := sess.filterEvents("", "smtp")
 		assert.Empty(t, result)
+	})
+
+	t.Run("http_filter_matches_https", func(t *testing.T) {
+		sess := &oastSession{events: []OastEventInfo{
+			{ID: "e1", Time: baseTime, Type: "dns"},
+			{ID: "e2", Time: baseTime.Add(time.Second), Type: "http"},
+			{ID: "e3", Time: baseTime.Add(2 * time.Second), Type: "https"},
+			{ID: "e4", Time: baseTime.Add(3 * time.Second), Type: "smtp"},
+		}}
+		result := sess.filterEvents("", "http")
+		require.Len(t, result, 2)
+		assert.Equal(t, "e2", result[0].ID)
+		assert.Equal(t, "e3", result[1].ID)
+	})
+
+	t.Run("https_filter_matches_http", func(t *testing.T) {
+		sess := &oastSession{events: []OastEventInfo{
+			{ID: "e1", Time: baseTime, Type: "http"},
+			{ID: "e2", Time: baseTime.Add(time.Second), Type: "https"},
+			{ID: "e3", Time: baseTime.Add(2 * time.Second), Type: "dns"},
+		}}
+		result := sess.filterEvents("", "https")
+		require.Len(t, result, 2)
+		assert.Equal(t, "e1", result[0].ID)
+		assert.Equal(t, "e2", result[1].ID)
 	})
 
 	t.Run("type_filter_with_since", func(t *testing.T) {
@@ -589,16 +614,16 @@ func TestOastSession_BufferRotation(t *testing.T) {
 func TestInteractshBackend_GetEvent(t *testing.T) {
 	t.Parallel()
 
-	t.Run("session_not_found", func(t *testing.T) {
+	t.Run("event_not_found", func(t *testing.T) {
 		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
-		_, err := backend.GetEvent(t.Context(), "nonexistent", "event1")
+		_, err := backend.GetEvent(t.Context(), "nonexistent")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrNotFound)
 	})
 
-	t.Run("event_not_found", func(t *testing.T) {
+	t.Run("event_not_found_with_sessions", func(t *testing.T) {
 		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -616,7 +641,7 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 		backend.sessions["test.alpha.oastsrv.net"] = sess
 		backend.byID["test123"] = "test.alpha.oastsrv.net"
 
-		_, err := backend.GetEvent(t.Context(), "test123", "nonexistent")
+		_, err := backend.GetEvent(t.Context(), "nonexistent")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrNotFound)
 	})
@@ -649,7 +674,7 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 		backend.sessions["test2.alpha.oastsrv.net"] = sess
 		backend.byID["test456"] = "test2.alpha.oastsrv.net"
 
-		event, err := backend.GetEvent(t.Context(), "test456", "e2")
+		event, err := backend.GetEvent(t.Context(), "e2")
 		require.NoError(t, err)
 		assert.Equal(t, "e2", event.ID)
 		assert.Equal(t, "http", event.Type)
@@ -658,36 +683,50 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 		assert.Equal(t, "GET / HTTP/1.1\r\nHost: test", event.Details["raw_request"])
 	})
 
-	t.Run("by_domain", func(t *testing.T) {
+	t.Run("searches_across_sessions", func(t *testing.T) {
 		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
-		sess := &oastSession{
+		sess1 := &oastSession{
 			info: OastSessionInfo{
-				ID:     "testdom",
-				Domain: "domain.alpha.oastsrv.net",
+				ID:     "sess1",
+				Domain: "s1.alpha.oastsrv.net",
 			},
 			notify:      make(chan struct{}),
 			stopPolling: make(chan struct{}),
 			events: []OastEventInfo{
-				{ID: "evt1", Time: time.Now(), Type: "dns"},
+				{ID: "e1", Time: time.Now(), Type: "dns"},
 			},
 		}
-		backend.sessions["domain.alpha.oastsrv.net"] = sess
-		backend.byID["testdom"] = "domain.alpha.oastsrv.net"
+		sess2 := &oastSession{
+			info: OastSessionInfo{
+				ID:     "sess2",
+				Domain: "s2.alpha.oastsrv.net",
+			},
+			notify:      make(chan struct{}),
+			stopPolling: make(chan struct{}),
+			events: []OastEventInfo{
+				{ID: "e2", Time: time.Now(), Type: "http", SourceIP: "3.3.3.3"},
+			},
+		}
+		backend.sessions["s1.alpha.oastsrv.net"] = sess1
+		backend.sessions["s2.alpha.oastsrv.net"] = sess2
+		backend.byID["sess1"] = "s1.alpha.oastsrv.net"
+		backend.byID["sess2"] = "s2.alpha.oastsrv.net"
 
-		event, err := backend.GetEvent(t.Context(), "domain.alpha.oastsrv.net", "evt1")
+		event, err := backend.GetEvent(t.Context(), "e2")
 		require.NoError(t, err)
-		assert.Equal(t, "evt1", event.ID)
+		assert.Equal(t, "e2", event.ID)
+		assert.Equal(t, "3.3.3.3", event.SourceIP)
 	})
 
-	t.Run("stopped_session_returns_error", func(t *testing.T) {
+	t.Run("skips_stopped_sessions", func(t *testing.T) {
 		backend := NewInteractshBackend("")
 		t.Cleanup(func() { _ = backend.Close() })
 
 		notify := make(chan struct{})
-		close(notify) // already stopped
-		sess := &oastSession{
+		close(notify)
+		stoppedSess := &oastSession{
 			info: OastSessionInfo{
 				ID:     "teststopped",
 				Domain: "stopped.alpha.oastsrv.net",
@@ -699,12 +738,12 @@ func TestInteractshBackend_GetEvent(t *testing.T) {
 				{ID: "e1", Time: time.Now(), Type: "dns"},
 			},
 		}
-		backend.sessions["stopped.alpha.oastsrv.net"] = sess
+		backend.sessions["stopped.alpha.oastsrv.net"] = stoppedSess
 		backend.byID["teststopped"] = "stopped.alpha.oastsrv.net"
 
-		_, err := backend.GetEvent(t.Context(), "teststopped", "e1")
+		_, err := backend.GetEvent(t.Context(), "e1")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "deleted")
+		assert.ErrorIs(t, err, ErrNotFound)
 	})
 }
 

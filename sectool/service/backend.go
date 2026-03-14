@@ -140,9 +140,9 @@ type OastBackend interface {
 	// the last position is updated to the last returned event (for pagination).
 	PollSession(ctx context.Context, idOrDomain string, since string, eventType string, wait time.Duration, limit int) (*OastPollResultInfo, error)
 
-	// GetEvent retrieves a single event by ID from a session.
+	// GetEvent retrieves a single event by ID, searching across all sessions.
 	// Returns the full event details without truncation.
-	GetEvent(ctx context.Context, idOrDomain string, eventID string) (*OastEventInfo, error)
+	GetEvent(ctx context.Context, eventID string) (*OastEventInfo, error)
 
 	// ListSessions returns all active sessions.
 	ListSessions(ctx context.Context) ([]OastSessionInfo, error)

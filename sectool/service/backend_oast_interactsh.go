@@ -301,8 +301,17 @@ func (s *oastSession) filterEvents(since, eventType string) []OastEventInfo {
 	}
 
 	return bulk.SliceFilter(func(e OastEventInfo) bool {
-		return e.Type == eventType
+		return matchesEventType(e.Type, eventType)
 	}, events)
+}
+
+// matchesEventType reports whether an event type matches the filter.
+// "http" and "https" are treated as equivalent since agents typically want both.
+func matchesEventType(eventType, filter string) bool {
+	if eventType == filter {
+		return true
+	}
+	return (eventType == "http" || eventType == "https") && (filter == "http" || filter == "https")
 }
 
 // updateLastPollIdx updates lastPollIdx based on returned events (for --since last tracking).
@@ -323,25 +332,24 @@ func (s *oastSession) updateLastPollIdx(returnedEvents []OastEventInfo) {
 	s.lastPollIdx = len(s.events)
 }
 
-func (b *InteractshBackend) GetEvent(ctx context.Context, idOrDomain string, eventID string) (*OastEventInfo, error) {
-	sess, err := b.resolveSession(idOrDomain)
-	if err != nil {
-		return nil, err
-	}
+func (b *InteractshBackend) GetEvent(_ context.Context, eventID string) (*OastEventInfo, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-
-	if sess.stopped {
-		return nil, errors.New("session has been deleted")
-	}
-
-	for _, e := range sess.events {
-		if e.ID == eventID {
-			// Return a copy to avoid holding the lock
-			eventCopy := e
-			return &eventCopy, nil
+	for _, sess := range b.sessions {
+		sess.mu.Lock()
+		if sess.stopped {
+			sess.mu.Unlock()
+			continue
 		}
+		for _, e := range sess.events {
+			if e.ID == eventID {
+				eventCopy := e
+				sess.mu.Unlock()
+				return &eventCopy, nil
+			}
+		}
+		sess.mu.Unlock()
 	}
 
 	return nil, fmt.Errorf("%w: event %s", ErrNotFound, eventID)

@@ -388,15 +388,13 @@ func (b *mockOastBackend) PollSession(ctx context.Context, idOrDomain string, si
 	return &OastPollResultInfo{Events: filtered}, nil
 }
 
-func (b *mockOastBackend) GetEvent(ctx context.Context, idOrDomain string, eventID string) (*OastEventInfo, error) {
-	id, err := b.resolveID(idOrDomain)
-	if err != nil {
-		return nil, err
-	}
-	for _, ev := range b.events[id] {
-		if ev.ID == eventID {
-			e := ev
-			return &e, nil
+func (b *mockOastBackend) GetEvent(_ context.Context, eventID string) (*OastEventInfo, error) {
+	for _, events := range b.events {
+		for _, ev := range events {
+			if ev.ID == eventID {
+				e := ev
+				return &e, nil
+			}
 		}
 	}
 	return nil, ErrNotFound

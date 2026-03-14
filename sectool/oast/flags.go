@@ -81,7 +81,7 @@ oast poll <oast_id|label|domain> [options]
 
 ---
 
-oast get <oast_id|label|domain> <event_id>
+oast get <event_id>
 
   Full details for a specific event without truncation.
 
@@ -214,7 +214,7 @@ func parseGet(args []string, mcpURL string) error {
 	fs.SetInterspersed(true)
 
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool oast get <oast_id> <event_id> [options]
+		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool oast get <event_id>
 
 Get full details for a specific OAST event. Use 'sectool oast poll' to list
 events and get their event_id values.
@@ -229,12 +229,12 @@ Options:
 
 	if err := fs.Parse(args); err != nil {
 		return err
-	} else if len(fs.Args()) < 2 {
+	} else if len(fs.Args()) < 1 {
 		fs.Usage()
-		return errors.New("oast_id and event_id required (get event_id from 'sectool oast poll')")
+		return errors.New("event_id required (get from 'sectool oast poll')")
 	}
 
-	return get(mcpURL, fs.Args()[0], fs.Args()[1])
+	return get(mcpURL, fs.Args()[0])
 }
 
 func parseList(args []string, mcpURL string) error {

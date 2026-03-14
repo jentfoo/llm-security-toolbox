@@ -54,7 +54,6 @@ Response includes events/aggregates and optional dropped_count; use oast_get for
 func (m *mcpServer) oastGetTool() mcp.Tool {
 	return mcp.NewTool("oast_get",
 		mcp.WithDescription("Get full OAST event data: HTTP request/response, DNS query type/answer, SMTP headers/body."),
-		mcp.WithString("oast_id", mcp.Required(), mcp.Description("OAST session ID, label, or domain")),
 		mcp.WithString("event_id", mcp.Required(), mcp.Description("Event ID from oast_poll")),
 	)
 }
@@ -195,24 +194,20 @@ func (m *mcpServer) handleOastGet(ctx context.Context, req mcp.CallToolRequest) 
 		return err, nil
 	}
 
-	oastID := req.GetString("oast_id", "")
-	if oastID == "" {
-		return errorResult("oast_id is required"), nil
-	}
 	eventID := req.GetString("event_id", "")
 	if eventID == "" {
 		return errorResult("event_id is required"), nil
 	}
 
-	event, err := m.service.oastBackend.GetEvent(ctx, oastID, eventID)
+	event, err := m.service.oastBackend.GetEvent(ctx, eventID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return errorResult("session or event not found"), nil
+			return errorResult("event_id not found"), nil
 		}
 		return errorResultFromErr("failed to get event: ", err), nil
 	}
 
-	log.Printf("oast/get: session %s event %s type=%s", oastID, eventID, event.Type)
+	log.Printf("oast/get: event %s type=%s", eventID, event.Type)
 	return jsonResult(protocol.OastGetResponse{
 		EventID:   event.ID,
 		Time:      event.Time.UTC().Format(time.RFC3339),
