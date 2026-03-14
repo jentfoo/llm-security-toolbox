@@ -9,7 +9,6 @@ import time
 import urllib.error
 import urllib.request
 
-import anthropic
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -140,109 +139,41 @@ async def collect_worker_response(
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-CONTEXT_WINDOW = 200_000
-SUMMARIZE_AT = int(CONTEXT_WINDOW * 0.4)  # 80,000 tokens
+
+MAX_ORCH_RETRIES = 2
 
 
-def call_orchestrator(
-    client: anthropic.Anthropic,
-    model: str,
-    messages: list[dict],
-) -> tuple[str, anthropic.types.Usage]:
-    """Single orchestrator API call. Returns (response_text, usage)."""
-    response = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=orch_prompts.SYSTEM_PROMPT,
-        messages=messages,
-    )
-    return response.content[0].text, response.usage
-
-
-def _log_api_error(tag: str, exc: anthropic.APIError) -> None:
-    status = getattr(exc, "status_code", "?")
-    body = getattr(exc, "body", None)
-    log(tag, f"API error {status}: {exc}")
-    if body:
-        log(tag, f"Response body: {body}")
-
-
-def call_orchestrator_with_retry(
-    client: anthropic.Anthropic,
-    model: str,
-    messages: list[dict],
+async def query_orchestrator(
+    client: ClaudeSDKClient,
+    message: str,
     iteration: int,
-) -> tuple[str, anthropic.types.Usage] | None:
-    """Call orchestrator with one retry on server errors. Returns None on failure."""
-    try:
-        return call_orchestrator(client, model, messages)
-    except anthropic.APIError as exc:
-        if getattr(exc, "status_code", 0) < 500:
-            _log_api_error(f"iter {iteration}", exc)
+) -> tuple[str, float | None] | None:
+    """Send message to orchestrator, collect text response. Returns None on failure."""
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_ORCH_RETRIES + 1):
+        try:
+            await client.query(message)
+            text_parts: list[str] = []
+            cost: float | None = None
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            text_parts.append(block.text)
+                elif isinstance(msg, ResultMessage):
+                    cost = msg.total_cost_usd
+                    break
+            return "\n".join(text_parts), cost
+        except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
+            last_exc = exc
+            log(f"iter {iteration}", f"Orchestrator attempt {attempt}/{MAX_ORCH_RETRIES} failed: {exc}")
+            if attempt < MAX_ORCH_RETRIES:
+                await asyncio.sleep(2)
+        except Exception as exc:
+            log(f"iter {iteration}", f"Orchestrator error (non-retryable): {exc}")
             return None
-        _log_api_error(f"iter {iteration}", exc)
-    try:
-        time.sleep(2)
-        return call_orchestrator(client, model, messages)
-    except anthropic.APIError as exc:
-        _log_api_error(f"iter {iteration}", exc)
-        return None
-
-
-def summarize_context(
-    client: anthropic.Anthropic,
-    messages: list[dict],
-    model: str,
-) -> list[dict]:
-    """Summarize older orchestrator messages to reduce context size.
-
-    Keeps the first message (goal context) and the last 40% of messages intact,
-    replacing the middle portion with a single summary message.
-    """
-    if len(messages) < 4:
-        return messages
-
-    keep_recent = max(2, int(len(messages) * 0.4))
-    # Ensure even count so the slice starts on a user message (preserving alternation)
-    if keep_recent % 2 != 0:
-        keep_recent += 1
-    keep_recent = min(keep_recent, len(messages) - 1)
-    first_msg = messages[0]
-    middle = messages[1:-keep_recent]
-    recent = messages[-keep_recent:]
-
-    if not middle:
-        return messages
-
-    middle_text = "\n\n---\n\n".join(
-        f"[{m['role']}]: {m['content']}" for m in middle
-    )
-
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=2048,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Summarize this security testing conversation history concisely. "
-                    "Preserve: endpoints tested, vulnerability findings, tools used, "
-                    "and key decisions. Omit redundant details.\n\n"
-                    f"{middle_text}"
-                ),
-            }],
-        )
-        summary_text = response.content[0].text
-    except anthropic.APIError as exc:
-        log("context", f"Summarization failed, keeping original messages: {exc}")
-        return messages
-
-    summary_msg = {
-        "role": "assistant",
-        "content": f"[Context summary of iterations 2–{len(messages) - keep_recent}]:\n{summary_text}",
-    }
-    log("context", f"Summarized {len(middle)} messages into 1 (keeping first + {keep_recent} recent)")
-    return [first_msg, summary_msg, *recent]
+    log(f"iter {iteration}", f"Orchestrator failed after {MAX_ORCH_RETRIES} attempts: {last_exc}")
+    return None
 
 
 def parse_decision(response: str) -> tuple[str, str]:
@@ -304,7 +235,7 @@ async def run(config: Config) -> None:
         mcp_url = f"http://127.0.0.1:{config.mcp_port}/mcp"
         log("worker", "Connecting Claude Code worker...")
         stderr_cb = (lambda line: log("claude", line.rstrip())) if config.verbose else None
-        options = ClaudeAgentOptions(
+        worker_options = ClaudeAgentOptions(
             mcp_servers={
                 "sectool": {
                     "type": "http",
@@ -326,44 +257,50 @@ async def run(config: Config) -> None:
             stderr=stderr_cb,
         )
         if config.worker_model_id:
-            options.model = config.worker_model_id
+            worker_options.model = config.worker_model_id
 
-        orch_kwargs: dict = {}
-        if config.api_base_url:
-            orch_kwargs["base_url"] = config.api_base_url
-        orch_client = anthropic.Anthropic(**orch_kwargs)
-        if config.api_base_url and not os.environ.get("ANTHROPIC_API_KEY"):
-            # Gateway handles auth; disable SDK's auth validation.
-            orch_client._validate_headers = lambda *_args, **_kw: None
-        orch_messages: list[dict] = []
+        orch_options = ClaudeAgentOptions(
+            system_prompt=orch_prompts.SYSTEM_PROMPT,
+        )
+        orch_options.model = config.orchestrator_model_id
+
         consecutive_continues = 0
         stall_warned = False
         initial_context = orch_prompts.format_initial_message(config.prompt)
 
         try:
-            sdk_ctx = ClaudeSDKClient(options=options)
-            client = await sdk_ctx.__aenter__()
+            worker_ctx = ClaudeSDKClient(options=worker_options)
+            worker = await worker_ctx.__aenter__()
         except Exception as exc:
-            log("worker", f"Failed to connect Claude Code: {exc}")
+            log("worker", f"Failed to connect Claude Code worker: {exc}")
             raise SystemExit(1) from exc
-        log("worker", "Claude Code connected.")
+        log("worker", "Claude Code worker connected.")
+
+        try:
+            orch_ctx = ClaudeSDKClient(options=orch_options)
+            orch_client = await orch_ctx.__aenter__()
+        except Exception as exc:
+            await worker_ctx.__aexit__(None, None, None)
+            log("orch", f"Failed to connect Claude Code orchestrator: {exc}")
+            raise SystemExit(1) from exc
+        log("orch", "Orchestrator connected.")
 
         try:
             # 4. Initial prompt
             log("worker", "Sending initial prompt...")
-            await client.query(config.prompt)
+            await worker.query(config.prompt)
 
             for iteration in range(1, config.max_iterations + 1):
                 # -- Collect worker output --
                 log(f"iter {iteration}", "Waiting for worker...")
                 try:
                     worker_output, tools_used, cost = await asyncio.wait_for(
-                        collect_worker_response(client),
+                        collect_worker_response(worker),
                         timeout=300,
                     )
                 except asyncio.TimeoutError:
                     log(f"iter {iteration}", "Worker timed out (5 min). Interrupting...")
-                    await client.interrupt()
+                    await worker.interrupt()
                     worker_output = "(Worker timed out and was interrupted.)"
                     tools_used = []
                     cost = None
@@ -404,36 +341,15 @@ async def run(config: Config) -> None:
                     stall_warned = True
                     log(f"iter {iteration}", "Appending stall warning to orchestrator message.")
 
-                orch_messages.append({"role": "user", "content": user_content})
-
-                # -- Summarize context if approaching window limit --
-                if not config.api_base_url:
-                    try:
-                        token_count = orch_client.messages.count_tokens(
-                            model=config.orchestrator_model_id,
-                            system=orch_prompts.SYSTEM_PROMPT,
-                            messages=orch_messages,
-                        )
-                        if token_count.input_tokens >= SUMMARIZE_AT:
-                            log("context", f"Token count {token_count.input_tokens} >= {SUMMARIZE_AT}, summarizing...")
-                            orch_messages = summarize_context(orch_client, orch_messages, config.orchestrator_model_id)
-                    except Exception as exc:
-                        log("context", f"Token counting failed (non-fatal): {exc}")
-                elif len(orch_messages) > 20:
-                    # Rough heuristic when count_tokens is unavailable
-                    log("context", f"Message count {len(orch_messages)} > 20, summarizing...")
-                    orch_messages = summarize_context(orch_client, orch_messages, config.orchestrator_model_id)
-
                 # -- Call orchestrator --
-                result = call_orchestrator_with_retry(
-                    orch_client, config.orchestrator_model_id, orch_messages, iteration,
-                )
+                result = await query_orchestrator(orch_client, user_content, iteration)
                 if result is None:
                     log(f"iter {iteration}", "Orchestrator unavailable. Stopping.")
                     break
 
-                orch_response, _usage = result
-                orch_messages.append({"role": "assistant", "content": orch_response})
+                orch_response, orch_cost = result
+                if orch_cost is not None:
+                    total_cost += orch_cost
 
                 decision, content = parse_decision(orch_response)
 
@@ -452,21 +368,21 @@ async def run(config: Config) -> None:
 
                 if decision == "FINDING":
                     # Drain consecutive findings, then let orchestrator decide next action.
+                    followup = None
                     while decision == "FINDING":
                         filepath = finding_writer.write(content)
                         log("finding", f"Written to {filepath}")
-                        orch_messages.append({
-                            "role": "user",
-                            "content": "Finding recorded. Should we continue testing or is coverage sufficient?",
-                        })
-                        followup = call_orchestrator_with_retry(
-                            orch_client, config.orchestrator_model_id, orch_messages, iteration,
+                        followup = await query_orchestrator(
+                            orch_client,
+                            "Finding recorded. Should we continue testing or is coverage sufficient?",
+                            iteration,
                         )
                         if followup is None:
                             log(f"iter {iteration}", "Orchestrator unavailable after finding. Stopping.")
                             break
-                        followup_response, _ = followup
-                        orch_messages.append({"role": "assistant", "content": followup_response})
+                        followup_response, followup_cost = followup
+                        if followup_cost is not None:
+                            total_cost += followup_cost
                         decision, content = parse_decision(followup_response)
                         snippet = content[:100] + ("..." if len(content) > 100 else "")
                         log(f"iter {iteration}", f'Orchestrator (post-finding): {decision} — "{snippet}"')
@@ -474,21 +390,22 @@ async def run(config: Config) -> None:
                         break
                     consecutive_continues = 0
                     stall_warned = False
-                    await client.query(content)
+                    await worker.query(content)
                 elif decision == "EXPAND":
                     consecutive_continues = 0
                     stall_warned = False
-                    await client.query(content)
+                    await worker.query(content)
                 else:  # CONTINUE or unrecognised
                     consecutive_continues += 1
                     if stall_warned:
                         log(f"iter {iteration}", "STALLED: orchestrator did not redirect after stall warning. Halting.")
                         break
-                    await client.query(content)
+                    await worker.query(content)
             else:
                 log("summary", f"Max iterations ({config.max_iterations}) reached.")
         finally:
-            await sdk_ctx.__aexit__(None, None, None)
+            await orch_ctx.__aexit__(None, None, None)
+            await worker_ctx.__aexit__(None, None, None)
 
         # -- Final summary --
         print()

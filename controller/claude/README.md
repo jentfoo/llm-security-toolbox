@@ -4,14 +4,15 @@ Autonomous security exploration controller that uses two Claude instances:
 
 - **Worker** — Claude Code connected to sectool's MCP server. Performs the actual
   security testing using proxy, replay, crawl, OAST, and analysis tools.
-- **Orchestrator** — Standard Claude API call (no tools). Evaluates worker output
+- **Orchestrator** — Claude Code instance (no tools). Evaluates worker output
   each turn and decides whether to continue, pivot, report a finding, or stop.
+
+Both instances authenticate via Claude Code's built-in OAuth — no API key required.
 
 ## Prerequisites
 
 - Python 3.10+
 - Claude Code CLI installed and authenticated (`claude` must be on PATH)
-- An Anthropic API key exported as `ANTHROPIC_API_KEY` (for the orchestrator)
 - Go toolchain (for building sectool)
 
 ## Installation
@@ -80,8 +81,10 @@ The `--external` flag:
    configured proxy port and workflow mode.
 3. **Connect worker** — Creates a `ClaudeSDKClient` pointed at the MCP server
    with read-only repo access (Read, Glob, Grep, Bash) and all sectool tools.
-4. **Initial prompt** — Sends the user's prompt to the worker.
-5. **Orchestrator loop** — Each iteration:
+4. **Connect orchestrator** — Creates a second `ClaudeSDKClient` with no tools,
+   configured with the orchestrator system prompt and model.
+5. **Initial prompt** — Sends the user's prompt to the worker.
+6. **Orchestrator loop** — Each iteration:
    - Collects the worker's output (text and tool usage).
    - Sends a summary to the orchestrator for evaluation.
    - The orchestrator responds with one of:
@@ -89,7 +92,7 @@ The `--external` flag:
      - `EXPAND` — pivot the plan based on new information.
      - `FINDING` — a vulnerability has been confirmed; writes a report file.
      - `DONE` — exploration is complete.
-6. **Teardown** — Terminates the MCP server and prints a summary.
+7. **Teardown** — Terminates the MCP server and prints a summary.
 
 ## Findings
 

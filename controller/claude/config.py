@@ -24,7 +24,6 @@ class Config:
     skip_build: bool = False
     workflow: str = "explore"
     external: bool = False
-    api_base_url: str | None = None
 
     @property
     def orchestrator_model_id(self) -> str:
@@ -88,11 +87,6 @@ def parse_args() -> Config:
         "--external", action="store_true",
         help="Connect to an already-running MCP server; skips build, server start, and server teardown. Use --mcp-port and --proxy-port to specify connection details.",
     )
-    parser.add_argument(
-        "--api-base-url", default=None,
-        help="Base URL for the Anthropic API proxy",
-    )
-
     args = parser.parse_args()
     return Config(
         prompt=args.prompt,
@@ -107,5 +101,4 @@ def parse_args() -> Config:
         skip_build=args.skip_build,
         workflow=args.workflow,
         external=args.external,
-        api_base_url=args.api_base_url,
     )
