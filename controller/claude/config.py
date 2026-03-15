@@ -24,6 +24,7 @@ class Config:
     skip_build: bool = False
     workflow: str = "explore"
     external: bool = False
+    max_workers: int = 4
 
     @property
     def orchestrator_model_id(self) -> str:
@@ -87,7 +88,12 @@ def parse_args() -> Config:
         "--external", action="store_true",
         help="Connect to an already-running MCP server; skips build, server start, and server teardown. Use --mcp-port and --proxy-port to specify connection details.",
     )
+    parser.add_argument(
+        "--max-workers", type=int, default=4,
+        help="Maximum parallel workers the orchestrator can assign (default: 4)",
+    )
     args = parser.parse_args()
+    max_workers = max(1, min(5, args.max_workers))
     return Config(
         prompt=args.prompt,
         proxy_port=args.proxy_port,
@@ -101,4 +107,5 @@ def parse_args() -> Config:
         skip_build=args.skip_build,
         workflow=args.workflow,
         external=args.external,
+        max_workers=max_workers,
     )
