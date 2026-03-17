@@ -229,29 +229,27 @@ func (s *Server) shutdown() error {
 		}
 	}
 
-	// Close backends
-	if s.httpBackend != nil {
-		if err := s.httpBackend.Close(); err != nil {
-			log.Printf("warning: failed to close HttpBackend: %v", err)
-		}
+	// Close backends and storage in parallel (backends have their own internal timeouts)
+	var wg sync.WaitGroup
+	closeAsync := func(name string, fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := fn(); err != nil {
+				log.Printf("warning: failed to close %s: %v", name, err)
+			}
+		}()
 	}
-	if s.oastBackend != nil {
-		if err := s.oastBackend.Close(); err != nil {
-			log.Printf("warning: failed to close OastBackend: %v", err)
-		}
-	}
-	if s.crawlerBackend != nil {
-		if err := s.crawlerBackend.Close(); err != nil {
-			log.Printf("warning: failed to close CrawlerBackend: %v", err)
-		}
-	}
+	closeAsync("HttpBackend", s.httpBackend.Close)
+	closeAsync("OastBackend", s.oastBackend.Close)
+	closeAsync("CrawlerBackend", s.crawlerBackend.Close)
+	closeAsync("ProxyIndex", s.proxyIndex.Close)
+	closeAsync("ReplayHistoryStore", s.replayHistoryStore.Close)
+	closeAsync("NoteStore", s.noteStore.Close)
+	closeAsync("HistoryStorage", s.historyStorage.Close)
+	closeAsync("RuleStorage", s.ruleStorage.Close)
+	wg.Wait()
 
-	// Close storage stores (each removes its own data file)
-	_ = s.proxyIndex.Close()
-	_ = s.replayHistoryStore.Close()
-	_ = s.noteStore.Close()
-	_ = s.historyStorage.Close()
-	_ = s.ruleStorage.Close()
 	// Remove shared temp directory
 	_ = os.RemoveAll(s.storageTempDir)
 
