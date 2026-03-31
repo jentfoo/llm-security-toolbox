@@ -40,10 +40,11 @@ const (
 
 // http2Handler handles HTTP/2 MITM interception.
 type http2Handler struct {
-	history      *HistoryStore
-	ruleApplier  RuleApplier
-	maxBodyBytes int
-	timeouts     TimeoutConfig
+	history             *HistoryStore
+	ruleApplier         RuleApplier
+	responseInterceptor ResponseInterceptor
+	maxBodyBytes        int
+	timeouts            TimeoutConfig
 }
 
 // newHTTP2Handler creates a new HTTP/2 handler.
@@ -582,6 +583,19 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 			stream.scheme = pseudos[":scheme"]
 			stream.authority = pseudos[":authority"]
 			stream.path = pseudos[":path"]
+
+			// Check for response interception before rule application and forwarding
+			if p.handler.responseInterceptor != nil {
+				host, port := ParseAuthority(stream.authority, stream.scheme)
+				if intercepted := p.handler.responseInterceptor.InterceptRequest(
+					host, port, PathWithoutQuery(stream.path), stream.method,
+				); intercepted != nil {
+					stream.reqHeaders = headers
+					stream.mu.Unlock()
+					p.sendInterceptedH2Response(buf, stream, intercepted, src)
+					return
+				}
+			}
 
 			// Apply request header rules
 			if p.handler.ruleApplier != nil {
@@ -1339,6 +1353,38 @@ func (p *h2Proxy) storeStreamInHistory(stream *h2Stream) {
 		return
 	}
 	p.handler.history.Store(entry)
+}
+
+// sendInterceptedH2Response sends a canned response to the client for an intercepted request.
+// The stream mutex must NOT be held when calling this method.
+func (p *h2Proxy) sendInterceptedH2Response(buf *bytes.Buffer, stream *h2Stream, intercepted *InterceptedResponse, src *h2Conn) {
+	streamID := stream.id
+
+	// Populate stream with response data for history
+	stream.mu.Lock()
+	stream.statusCode = intercepted.StatusCode
+	stream.respHeaders = intercepted.Headers
+	stream.respBody.Write(intercepted.Body)
+	stream.mu.Unlock()
+
+	// Encode response headers using client's HPACK context (response goes to client)
+	respPseudos := map[string]string{":status": strconv.Itoa(intercepted.StatusCode)}
+	encoded, err := src.encodeHeaders(respPseudos, intercepted.Headers)
+	if err != nil {
+		log.Printf("h2: intercepted response HPACK encode error: %v", err)
+		p.sendRSTStream(buf, src, streamID, http2.ErrCodeInternal)
+		return
+	}
+
+	hasBody := len(intercepted.Body) > 0
+	p.writeHeadersFrame(buf, src, streamID, encoded, !hasBody)
+
+	if hasBody {
+		p.writeDataFrame(buf, src, streamID, intercepted.Body, true)
+	}
+
+	p.storeStreamInHistory(stream)
+	p.cleanupStream(streamID)
 }
 
 // cleanupStaleStreams periodically removes streams that haven't had activity.

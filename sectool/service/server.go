@@ -69,6 +69,8 @@ type Server struct {
 	historyStorage store.Storage
 	// Rule storage (passed to native proxy backend)
 	ruleStorage store.Storage
+	// Responder storage (passed to native proxy backend)
+	responderStorage store.Storage
 
 	// proxyLastOffset tracks the highest offset seen across all proxy list queries.
 	// Enables "since=last" to show only new traffic since the last query.
@@ -97,7 +99,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 	// Create per-store spill instances sharing the same temp directory
 	defaults := store.DefaultSpillStoreConfig()
 	defaults.Dir = storageTempDir
-	storeNames := []string{"pidx", "replay", "hist", "rule", "notes"}
+	storeNames := []string{"pidx", "replay", "hist", "rule", "notes", "resp"}
 	stores := make([]store.Storage, len(storeNames))
 	for i, name := range storeNames {
 		cfg := defaults
@@ -112,7 +114,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 			return nil, fmt.Errorf("create %s storage: %w", name, err)
 		}
 	}
-	proxyIndexStorage, replayStorage, historyStorage, ruleStorage, notesStorage := stores[0], stores[1], stores[2], stores[3], stores[4]
+	proxyIndexStorage, replayStorage, historyStorage, ruleStorage, notesStorage, responderStorage := stores[0], stores[1], stores[2], stores[3], stores[4], stores[5]
 
 	s := &Server{
 		flagBurpMCPURL:     flags.BurpMCPURL,
@@ -130,6 +132,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 		replayHistoryStore: store.NewReplayHistoryStore(replayStorage),
 		historyStorage:     historyStorage,
 		ruleStorage:        ruleStorage,
+		responderStorage:   responderStorage,
 		noteStore:          store.NewNoteStore(notesStorage),
 		httpBackend:        hb,
 		oastBackend:        ob,
@@ -348,7 +351,7 @@ func (s *Server) startBuiltinProxy() error {
 		WriteTimeout: time.Duration(s.cfg.Proxy.WriteTimeoutSecs) * time.Second,
 	}
 
-	backend, err := NewNativeProxyBackend(s.proxyPort, configDir, s.cfg.MaxBodyBytes, s.historyStorage, s.ruleStorage, timeouts)
+	backend, err := NewNativeProxyBackend(s.proxyPort, configDir, s.cfg.MaxBodyBytes, s.historyStorage, s.ruleStorage, s.responderStorage, timeouts)
 	if err != nil {
 		return fmt.Errorf("start built-in proxy: %w", err)
 	}

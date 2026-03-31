@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -149,10 +150,12 @@ type mockHttpBackend struct {
 	sendResults []*SendRequestResult // queue of responses for SendRequest
 	lastSentReq []byte               // last RawRequest from SendRequest
 	rules       []protocol.RuleEntry // in-memory rules (both HTTP and WS)
+	responders  []protocol.ResponderEntry
 }
 
-// Compile-time check that mockHttpBackend implements HttpBackend.
+// Compile-time checks
 var _ HttpBackend = (*mockHttpBackend)(nil)
+var _ ResponderBackend = (*mockHttpBackend)(nil)
 
 func newMockHttpBackend() *mockHttpBackend {
 	return &mockHttpBackend{}
@@ -274,6 +277,46 @@ func (b *mockHttpBackend) DeleteRule(ctx context.Context, idOrLabel string) erro
 		}
 	}
 	return ErrNotFound
+}
+
+func (b *mockHttpBackend) AddResponder(ctx context.Context, input protocol.ResponderEntry) (*protocol.ResponderEntry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if input.Label != "" {
+		for _, r := range b.responders {
+			if r.Label == input.Label {
+				return nil, fmt.Errorf("%w: %s", ErrLabelExists, input.Label)
+			}
+		}
+	}
+
+	entry := input
+	entry.ResponderID = ids.Generate(0)
+	if entry.StatusCode == 0 {
+		entry.StatusCode = 200
+	}
+	b.responders = append(b.responders, entry)
+	return &entry, nil
+}
+
+func (b *mockHttpBackend) DeleteResponder(ctx context.Context, idOrLabel string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for i, r := range b.responders {
+		if r.ResponderID == idOrLabel || r.Label == idOrLabel {
+			b.responders = append(b.responders[:i], b.responders[i+1:]...)
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (b *mockHttpBackend) ListResponders(ctx context.Context) ([]protocol.ResponderEntry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.responders), nil
 }
 
 // Test helper methods

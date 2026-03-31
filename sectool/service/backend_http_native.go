@@ -37,6 +37,11 @@ type NativeProxyBackend struct {
 	wsRules     []nativeStoredRule
 	ruleStorage store.Storage
 
+	// Responders: cached from responderStorage for hot path access
+	respondersMu     sync.RWMutex
+	responders       []nativeStoredResponder
+	responderStorage store.Storage
+
 	closed atomic.Bool
 }
 
@@ -56,21 +61,25 @@ type nativeStoredRule struct {
 // Compile-time checks that NativeProxyBackend implements interfaces.
 var _ HttpBackend = (*NativeProxyBackend)(nil)
 var _ proxy.RuleApplier = (*NativeProxyBackend)(nil)
+var _ proxy.ResponseInterceptor = (*NativeProxyBackend)(nil)
+var _ ResponderBackend = (*NativeProxyBackend)(nil)
 
 // NewNativeProxyBackend creates a new native proxy backend.
 // Does NOT start serving - call Serve() separately (typically in a goroutine).
 // historyStorage is the storage backend for proxy history entries.
 // ruleStorage is the storage backend for persisting match/replace rules.
-func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, historyStorage store.Storage, ruleStorage store.Storage, timeouts proxy.TimeoutConfig) (*NativeProxyBackend, error) {
+// responderStorage is the storage backend for persisting proxy responders.
+func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, historyStorage store.Storage, ruleStorage store.Storage, responderStorage store.Storage, timeouts proxy.TimeoutConfig) (*NativeProxyBackend, error) {
 	server, err := proxy.NewProxyServer(port, configDir, maxBodyBytes, historyStorage, timeouts)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy server: %w", err)
 	}
 
 	b := &NativeProxyBackend{
-		server:      server,
-		timeouts:    timeouts,
-		ruleStorage: ruleStorage,
+		server:           server,
+		timeouts:         timeouts,
+		ruleStorage:      ruleStorage,
+		responderStorage: responderStorage,
 	}
 
 	// Load persisted rules
@@ -80,7 +89,13 @@ func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, history
 		return nil, fmt.Errorf("load WebSocket rules: %w", err)
 	}
 
-	server.SetRuleApplier(b) // Wire backend as rule applier for the proxy handlers
+	// Load persisted responders
+	if b.responders, err = b.loadResponders(); err != nil {
+		return nil, fmt.Errorf("load responders: %w", err)
+	}
+
+	server.SetRuleApplier(b)
+	server.SetResponseInterceptor(b)
 
 	return b, nil
 }

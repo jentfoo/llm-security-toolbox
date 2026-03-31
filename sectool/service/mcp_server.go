@@ -53,6 +53,9 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 		instructions = workflowTestReportContent
 	}
 	if instructions != "" {
+		if _, ok := svc.httpBackend.(ResponderBackend); ok {
+			instructions += workflowRespondSection
+		}
 		if svc.notesEnabled {
 			instructions += workflowNotesSection
 		}
@@ -184,6 +187,11 @@ func (m *mcpServer) registerTools() {
 		m.addReflectionTools()
 	}
 
+	// Register responder tools only when native proxy backend is used
+	if rb, ok := m.service.httpBackend.(ResponderBackend); ok {
+		m.addRespondTools(rb)
+	}
+
 	if m.service.notesEnabled {
 		m.addNotesTools()
 	}
@@ -277,6 +285,9 @@ func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest)
 		return errorResult("invalid task: use 'explore' or 'test-report'"), nil
 	}
 
+	if _, ok := m.service.httpBackend.(ResponderBackend); ok {
+		content += workflowRespondSection
+	}
 	if m.service.notesEnabled {
 		content += workflowNotesSection
 	}
@@ -286,6 +297,12 @@ func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest)
 
 	return mcp.NewToolResultText(content), nil
 }
+
+const workflowRespondSection = `
+
+## Setting Browser State
+
+Use proxy_respond_add to serve custom responses under the target site's origin. This enables collaborative browser state setup - for example, setting authenticated cookies, configuring localStorage. Create the responder, then ask the user to visit the URL in their browser. Static responses can also be used to replace assets or other static responses.`
 
 const workflowNotesSection = `
 

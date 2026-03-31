@@ -68,6 +68,20 @@ type HttpBackend interface {
 	DeleteRule(ctx context.Context, idOrLabel string) error
 }
 
+// ResponderBackend defines the interface for managing proxy responders.
+// Only available when using the native proxy backend.
+type ResponderBackend interface {
+	// AddResponder registers a custom response for a specific origin and path.
+	// ResponderID is assigned by the backend and returned in the result.
+	AddResponder(ctx context.Context, input protocol.ResponderEntry) (*protocol.ResponderEntry, error)
+
+	// DeleteResponder removes a responder by ID or label.
+	DeleteResponder(ctx context.Context, idOrLabel string) error
+
+	// ListResponders returns all registered responders.
+	ListResponders(ctx context.Context) ([]protocol.ResponderEntry, error)
+}
+
 // ProxyEntryMeta holds lightweight metadata for a proxy history entry.
 // Used by summary/list paths to avoid deserializing full request/response bodies.
 type ProxyEntryMeta struct {
@@ -81,6 +95,7 @@ type ProxyEntryMeta struct {
 }
 
 // ProxyRuleInput contains parameters for creating a rule.
+// TODO - replace with RuleEntry?
 type ProxyRuleInput struct {
 	Label   string // Optional label for easier reference
 	Type    string // Required on add
@@ -157,6 +172,7 @@ type OastBackend interface {
 }
 
 // OastSessionInfo represents an active OAST session (internal domain type).
+// TODO - de-duplicate with OastSession?
 type OastSessionInfo struct {
 	ID        string    // Short sectool ID (e.g., "a1b2c3")
 	Domain    string    // Full Interactsh domain (e.g., "xyz123.alpha.oastsrv.net")
@@ -165,6 +181,7 @@ type OastSessionInfo struct {
 }
 
 // OastEventInfo represents a captured out-of-band interaction (internal domain type).
+// TODO - de-duplicate with OastGetResponse?
 type OastEventInfo struct {
 	ID        string                 // Short sectool ID
 	Time      time.Time              // When the interaction occurred
@@ -317,6 +334,7 @@ type DiscoveredForm struct {
 }
 
 // FormInput represents a single form field.
+// TODO - replace with protocol.FormInput?
 type FormInput struct {
 	Name     string // Field name attribute
 	Type     string // text, password, hidden, select, textarea, etc.
@@ -325,20 +343,12 @@ type FormInput struct {
 }
 
 // CrawlError represents an error encountered during crawling.
+// TODO - replace with protocol.CrawlError?
 type CrawlError struct {
 	FlowID string // May be empty if request never sent
 	URL    string // URL that caused the error
 	Error  string // Error message
 	Status int    // HTTP status if available
-}
-
-// ExportResult contains information about an exported flow bundle.
-// BundleID equals FlowID for simpler mental model - one ID per request.
-// Re-exporting the same flow overwrites the bundle, restoring original state.
-type ExportResult struct {
-	BundleID   string   // Bundle identifier (equals flow_id)
-	BundlePath string   // Full path to bundle directory
-	Files      []string // List of created files
 }
 
 // parseSinceTimestamp attempts to parse a string as a timestamp in multiple formats.

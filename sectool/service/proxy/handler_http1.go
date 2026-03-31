@@ -19,14 +19,17 @@ const (
 
 	schemeHTTP  = "http"
 	schemeHTTPS = "https"
+
+	connectionClose = "close"
 )
 
 type http1Handler struct {
-	history      *HistoryStore
-	maxBodyBytes int
-	ruleApplier  RuleApplier       // optional, nil means no rules applied
-	wsHandler    *webSocketHandler // optional, for WebSocket upgrade handling
-	timeouts     TimeoutConfig
+	history             *HistoryStore
+	maxBodyBytes        int
+	ruleApplier         RuleApplier         // optional, nil means no rules applied
+	responseInterceptor ResponseInterceptor // optional, nil means no interception
+	wsHandler           *webSocketHandler   // optional, for WebSocket upgrade handling
+	timeouts            TimeoutConfig
 }
 
 // Handle processes HTTP/1.1 proxy requests with keep-alive support.
@@ -66,12 +69,6 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		return false
 	}
 
-	// Apply request rules BEFORE routing decisions (target extraction, WebSocket detection)
-	// This allows rules to affect Host header, Upgrade header, etc.
-	if h.ruleApplier != nil {
-		req = h.ruleApplier.ApplyRequestRules(req)
-	}
-
 	target, err := h.extractTarget(req)
 	if err != nil {
 		log.Printf("proxy: failed to extract target: %v", err)
@@ -82,6 +79,26 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	// Rewrite proxy-form to origin-form
 	h.rewriteToOriginForm(req, target)
 	req.Protocol = protocolHTTP11
+
+	// Check for response interception before rules and upstream dial
+	if h.responseInterceptor != nil {
+		if intercepted := h.responseInterceptor.InterceptRequest(
+			target.Hostname, target.Port, PathWithoutQuery(req.Path), req.Method,
+		); intercepted != nil {
+			resp := BuildInterceptedH1Response(intercepted)
+			_, _ = clientConn.Write(resp.SerializeRaw(&buf, false))
+			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
+				req.Body = req.Body[:h.maxBodyBytes]
+			}
+			h.storeEntry(req, resp, startTime)
+			return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
+		}
+	}
+
+	// Apply request rules BEFORE WebSocket detection to affect Upgrade header, etc.
+	if h.ruleApplier != nil {
+		req = h.ruleApplier.ApplyRequestRules(req)
+	}
 
 	if h.wsHandler != nil && isWebSocketUpgrade(req) {
 		h.wsHandler.Handle(ctx, clientConn, clientReader, req, target)
@@ -161,7 +178,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	h.storeEntry(req, resp, startTime)
 
 	connHeader := strings.ToLower(resp.GetHeader("Connection"))
-	return connHeader != "close"
+	return connHeader != connectionClose
 }
 
 // extractTarget determines the upstream server from the request.
@@ -321,6 +338,24 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 
 	req.Protocol = protocolHTTP11
 
+	// Check for response interception before rules and upstream send
+	if h.responseInterceptor != nil {
+		if intercepted := h.responseInterceptor.InterceptRequest(
+			target.Hostname, target.Port, PathWithoutQuery(req.Path), req.Method,
+		); intercepted != nil {
+			resp := BuildInterceptedH1Response(intercepted)
+			if h.timeouts.WriteTimeout > 0 {
+				_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
+			}
+			_, _ = clientConn.Write(resp.SerializeRaw(&buf, false))
+			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
+				req.Body = req.Body[:h.maxBodyBytes]
+			}
+			h.storeEntry(req, resp, startTime)
+			return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
+		}
+	}
+
 	// Apply request rules BEFORE WebSocket detection to affect Upgrade header
 	if h.ruleApplier != nil {
 		req = h.ruleApplier.ApplyRequestRules(req)
@@ -388,5 +423,5 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 	h.storeEntry(req, resp, startTime)
 
 	connHeader := strings.ToLower(resp.GetHeader("Connection"))
-	return connHeader != "close"
+	return connHeader != connectionClose
 }

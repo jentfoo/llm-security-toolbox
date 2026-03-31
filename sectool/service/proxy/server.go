@@ -133,6 +133,13 @@ func (s *ProxyServer) SetRuleApplier(applier RuleApplier) {
 	s.wsHandler.SetRuleApplier(applier)
 }
 
+// SetResponseInterceptor sets the response interceptor for HTTP handlers.
+// Call after construction but before Serve().
+func (s *ProxyServer) SetResponseInterceptor(interceptor ResponseInterceptor) {
+	s.http1Handler.responseInterceptor = interceptor
+	s.http2Handler.responseInterceptor = interceptor
+}
+
 // WaitReady blocks until Serve() has entered its accept loop.
 func (s *ProxyServer) WaitReady(ctx context.Context) error {
 	for !s.running.Load() {

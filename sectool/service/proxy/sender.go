@@ -577,14 +577,6 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 	return currentTarget, resolved, nil
 }
 
-// PathWithoutQuery returns the path portion before any query string.
-func PathWithoutQuery(p string) string {
-	if idx := strings.Index(p, "?"); idx >= 0 {
-		return p[:idx]
-	}
-	return p
-}
-
 // queryFromPath extracts the query string from a path (without the ?).
 func queryFromPath(p string) string {
 	if idx := strings.Index(p, "?"); idx >= 0 {

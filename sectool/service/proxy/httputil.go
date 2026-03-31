@@ -33,6 +33,14 @@ func ExtractMethod(raw []byte) string {
 	return "GET"
 }
 
+// PathWithoutQuery returns the path portion before any query string.
+func PathWithoutQuery(p string) string {
+	if idx := strings.Index(p, "?"); idx >= 0 {
+		return p[:idx]
+	}
+	return p
+}
+
 // HeaderGroup represents headers sharing the same name (case-insensitive).
 type HeaderGroup struct {
 	Key     string   // lowercase header name

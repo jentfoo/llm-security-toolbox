@@ -212,6 +212,30 @@ type RuleEntry struct {
 }
 
 // =============================================================================
+// Responder Types
+// =============================================================================
+
+// ResponderEntry represents a registered proxy responder.
+type ResponderEntry struct {
+	ResponderID string            `json:"responder_id"`
+	Origin      string            `json:"origin"`
+	Path        string            `json:"path"`
+	Method      string            `json:"method,omitempty"`
+	StatusCode  int               `json:"status_code"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Body        string            `json:"body,omitempty"`
+	Label       string            `json:"label,omitempty"`
+}
+
+// ResponderListResponse is the response for proxy_respond_list.
+type ResponderListResponse struct {
+	Responders []ResponderEntry `json:"responders"`
+}
+
+// ResponderDeleteResponse is the response for proxy_respond_delete.
+type ResponderDeleteResponse struct{}
+
+// =============================================================================
 // Crawler Types
 // =============================================================================
 
