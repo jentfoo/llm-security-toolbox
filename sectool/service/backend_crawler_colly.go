@@ -233,7 +233,7 @@ func (b *CollyBackend) CreateSession(ctx context.Context, opts CrawlOptions) (*C
 
 	sessionCtx, cancel := context.WithCancel(context.Background())
 
-	sessionID := ids.Generate(ids.DefaultLength)
+	sessionID := ids.Generate(ids.EntityLength)
 
 	// Precompile path filter regexes
 	disallowedRegexes := globsToRegexes(opts.DisallowedPaths)
@@ -529,7 +529,7 @@ func (b *CollyBackend) CreateSession(ctx context.Context, opts CrawlOptions) (*C
 
 	// Ensure ID uniqueness
 	for b.sessions[sessionID] != nil {
-		sessionID = ids.Generate(ids.DefaultLength)
+		sessionID = ids.Generate(ids.EntityLength)
 		sess.info.ID = sessionID
 	}
 

@@ -111,7 +111,7 @@ func (m *mcpServer) handleNotesSave(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	note := &store.NoteMeta{
-		NoteID:  ids.Generate(ids.DefaultLength),
+		NoteID:  ids.Generate(ids.EntityLength),
 		Type:    noteType,
 		FlowIDs: flowIDs,
 		Content: content,

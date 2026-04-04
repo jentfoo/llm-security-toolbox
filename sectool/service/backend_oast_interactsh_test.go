@@ -887,19 +887,18 @@ func TestHandleInteraction(t *testing.T) {
 	setup := func() (*InteractshBackend, *oastSession) {
 		b := NewInteractshBackend("")
 		b.correlationID = testCorrelationID
+		b.serverHost = "alpha.oastsrv.net"
 
 		sess := &oastSession{
 			info: OastSessionInfo{
-				ID:        "sess1",
+				ID:        testNonce,
 				Domain:    "test.oastsrv.net",
 				CreatedAt: time.Now(),
 			},
-			nonce:  testNonce,
 			notify: make(chan struct{}),
 		}
 		b.sessions["test.oastsrv.net"] = sess
-		b.byID["sess1"] = "test.oastsrv.net"
-		b.byNonce[testNonce] = "test.oastsrv.net"
+		b.byID[testNonce] = "test.oastsrv.net"
 		return b, sess
 	}
 
@@ -907,7 +906,7 @@ func TestHandleInteraction(t *testing.T) {
 		b, sess := setup()
 
 		b.handleInteraction(&oobclient.Interaction{
-			FullId:   testCorrelationID + testNonce,
+			FullId:   testCorrelationID + "." + testNonce,
 			Protocol: "DNS",
 		})
 
@@ -920,7 +919,7 @@ func TestHandleInteraction(t *testing.T) {
 		b, sess := setup()
 
 		b.handleInteraction(&oobclient.Interaction{
-			FullId:   "ssrf." + testCorrelationID + testNonce,
+			FullId:   "ssrf." + testCorrelationID + "." + testNonce,
 			Protocol: "HTTP",
 		})
 
@@ -933,7 +932,7 @@ func TestHandleInteraction(t *testing.T) {
 		b, sess := setup()
 
 		b.handleInteraction(&oobclient.Interaction{
-			FullId:   testCorrelationID + "unkno99z",
+			FullId:   testCorrelationID + "." + "unkno99z",
 			Protocol: "DNS",
 		})
 
@@ -942,11 +941,11 @@ func TestHandleInteraction(t *testing.T) {
 		assert.Empty(t, sess.events)
 	})
 
-	t.Run("wrong_correlation_id", func(t *testing.T) {
+	t.Run("no_dot_separator", func(t *testing.T) {
 		b, sess := setup()
 
 		b.handleInteraction(&oobclient.Interaction{
-			FullId:   "wrongcorrelation" + testNonce,
+			FullId:   testCorrelationID + testNonce,
 			Protocol: "DNS",
 		})
 
@@ -964,7 +963,7 @@ func TestHandleInteraction(t *testing.T) {
 		sess.mu.Unlock()
 
 		b.handleInteraction(&oobclient.Interaction{
-			FullId:   testCorrelationID + testNonce,
+			FullId:   testCorrelationID + "." + testNonce,
 			Protocol: "DNS",
 		})
 
@@ -977,8 +976,9 @@ func TestHandleInteraction(t *testing.T) {
 		b, sess := setup()
 
 		ts := time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
+		fullId := testCorrelationID + "." + testNonce
 		b.handleInteraction(&oobclient.Interaction{
-			FullId:        testCorrelationID + testNonce,
+			FullId:        fullId,
 			Protocol:      "HTTP",
 			RemoteAddress: "10.0.0.1",
 			Timestamp:     ts,
@@ -996,11 +996,135 @@ func TestHandleInteraction(t *testing.T) {
 		assert.NotEmpty(t, e.ID)
 		assert.Equal(t, "http", e.Type)
 		assert.Equal(t, "10.0.0.1", e.SourceIP)
-		assert.Equal(t, testCorrelationID+testNonce, e.Subdomain)
+		assert.Equal(t, fullId, e.Subdomain)
 		assert.Equal(t, ts, e.Time)
 		assert.Equal(t, "GET / HTTP/1.1\r\nHost: example.com", e.Details["raw_request"])
 		assert.Equal(t, "HTTP/1.1 200 OK", e.Details["raw_response"])
 		assert.Equal(t, "A", e.Details["query_type"])
 		assert.Equal(t, "test@example.com", e.Details["smtp_from"])
+	})
+}
+
+func TestExtractNonce(t *testing.T) {
+	t.Parallel()
+
+	t.Run("standard_format", func(t *testing.T) {
+		nonce := extractNonce("abcdefghijklmnopqrstnonce123.oastsrv.net", "abcdefghijklmnopqrst")
+		assert.Equal(t, "nonce123", nonce)
+	})
+
+	t.Run("short_correlation_id", func(t *testing.T) {
+		nonce := extractNonce("corrxyz.example.com", "corr")
+		assert.Equal(t, "xyz", nonce)
+	})
+
+	t.Run("no_dot_panics", func(t *testing.T) {
+		assert.Panics(t, func() { extractNonce("nodothere", "corr") })
+	})
+
+	t.Run("empty_nonce_panics", func(t *testing.T) {
+		assert.Panics(t, func() { extractNonce("corr.example.com", "corr") })
+	})
+
+	t.Run("correlation_exceeds_prefix_panics", func(t *testing.T) {
+		assert.Panics(t, func() { extractNonce("ab.example.com", "abcdef") })
+	})
+
+	t.Run("live_client", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skipping integration test in short mode")
+		}
+		t.Parallel()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		t.Cleanup(cancel)
+
+		c, err := oobclient.New(ctx, oobclient.Options{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+
+		for range 5 {
+			nonce := extractNonce(c.Domain(), c.CorrelationID())
+			assert.NotEmpty(t, nonce)
+		}
+	})
+}
+
+func TestHandleInteraction_CustomServer(t *testing.T) {
+	t.Parallel()
+
+	const testCorrelationID = "abcdefghijklmnopqrst"
+	const testNonce = "xy8qr1abzz99w"
+
+	setup := func() (*InteractshBackend, *oastSession) {
+		b := NewInteractshBackend("custom.example.com")
+		b.correlationID = testCorrelationID
+		b.serverHost = "custom.example.com"
+
+		sess := &oastSession{
+			info: OastSessionInfo{
+				ID:        "sA1b",
+				Domain:    testCorrelationID + testNonce + ".custom.example.com",
+				CreatedAt: time.Now(),
+			},
+			nonce:  testNonce,
+			notify: make(chan struct{}),
+		}
+		b.sessions[sess.info.Domain] = sess
+		b.byID["sA1b"] = sess.info.Domain
+		b.byNonce[testNonce] = sess.info.Domain
+		return b, sess
+	}
+
+	t.Run("routes_by_nonce", func(t *testing.T) {
+		b, sess := setup()
+
+		b.handleInteraction(&oobclient.Interaction{
+			FullId:   testCorrelationID + testNonce,
+			Protocol: "DNS",
+		})
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		assert.Len(t, sess.events, 1)
+	})
+
+	t.Run("routes_with_prefix", func(t *testing.T) {
+		b, sess := setup()
+
+		b.handleInteraction(&oobclient.Interaction{
+			FullId:   "ssrf." + testCorrelationID + testNonce,
+			Protocol: "HTTP",
+		})
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		assert.Len(t, sess.events, 1)
+	})
+
+	t.Run("unknown_nonce_ignored", func(t *testing.T) {
+		b, sess := setup()
+
+		b.handleInteraction(&oobclient.Interaction{
+			FullId:   testCorrelationID + "zzzzzzzzzzzz9",
+			Protocol: "DNS",
+		})
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		assert.Empty(t, sess.events)
+	})
+
+	t.Run("wrong_correlation_id", func(t *testing.T) {
+		b, sess := setup()
+
+		b.handleInteraction(&oobclient.Interaction{
+			FullId:   "wrongcorrelationidxx" + testNonce,
+			Protocol: "DNS",
+		})
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		assert.Empty(t, sess.events)
 	})
 }

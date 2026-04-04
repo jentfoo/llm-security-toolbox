@@ -356,7 +356,7 @@ func (b *BurpBackend) AddRule(ctx context.Context, input protocol.RuleEntry) (*p
 		ruleType = wsToBurpType(input.Type)
 	}
 
-	id := ids.Generate(0)
+	id := ids.Generate(ids.EntityLength)
 	newRule := mcp.MatchReplaceRule{
 		Category:      mcp.RuleCategoryLiteral,
 		Comment:       formatSectoolComment(id, input.Label),

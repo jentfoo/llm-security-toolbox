@@ -252,7 +252,7 @@ func (b *mockHttpBackend) AddRule(ctx context.Context, input protocol.RuleEntry)
 	}
 
 	entry := protocol.RuleEntry{
-		RuleID:  ids.Generate(0),
+		RuleID:  ids.Generate(ids.EntityLength),
 		Label:   input.Label,
 		Type:    input.Type,
 		IsRegex: input.IsRegex,

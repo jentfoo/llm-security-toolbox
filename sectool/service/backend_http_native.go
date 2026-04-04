@@ -297,7 +297,7 @@ func (b *NativeProxyBackend) AddRule(ctx context.Context, input protocol.RuleEnt
 	}
 
 	rule := nativeStoredRule{
-		ID:       ids.Generate(0),
+		ID:       ids.Generate(ids.EntityLength),
 		Label:    input.Label,
 		Type:     input.Type,
 		IsRegex:  input.IsRegex,

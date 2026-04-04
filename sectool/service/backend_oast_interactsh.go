@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,10 @@ const (
 // dnsLabelRe matches a valid DNS label: alphanumeric with optional interior hyphens.
 var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
+// structuredDomainSuffixes are server hosts that support the structured
+// domain format (correlationID.sessionID.serverHost).
+var structuredDomainSuffixes = [...]string{"oastsrv.net", "oastlab.net"}
+
 // InteractshBackend implements OastBackend using Interactsh.
 type InteractshBackend struct {
 	serverURL string // custom server URL, empty = use defaults
@@ -38,13 +43,14 @@ type InteractshBackend struct {
 	sessions  map[string]*oastSession // by domain (canonical key)
 	byID      map[string]string       // short ID -> domain
 	byLabel   map[string]string       // label -> domain (only non-empty labels)
-	byNonce   map[string]string       // nonce -> domain (interaction routing)
+	byNonce   map[string]string       // nonce -> domain (legacy server routing only)
 	closed    bool
 
 	// Shared client, lazily created on first CreateSession
 	client        atomic.Pointer[oobclient.Client]
 	initMu        sync.Mutex // guards lazy init slow path
-	correlationID string     // from URL(), immutable after init
+	correlationID string     // from CorrelationID(), immutable after init
+	serverHost    string     // from ServerHost(), immutable after init
 }
 
 // Compile-time check that InteractshBackend implements OastBackend
@@ -53,7 +59,7 @@ var _ OastBackend = (*InteractshBackend)(nil)
 // oastSession holds the state for a single OAST session.
 type oastSession struct {
 	info  OastSessionInfo
-	nonce string // unique nonce from URL(), for routing interactions
+	nonce string // nonce from Domain(), only set for legacy server sessions
 
 	mu           sync.Mutex
 	notify       chan struct{} // closed when new events arrive, then replaced
@@ -97,27 +103,21 @@ func (b *InteractshBackend) ensureClient(ctx context.Context) (*oobclient.Client
 
 	var opts oobclient.Options
 	if b.serverURL != "" {
+		// Custom server URL; let oobclient use its default nonce length.
 		opts.ServerURLs = []string{b.serverURL}
+	} else {
+		// Default servers. Shorter nonce for structured domains;
+		// oobclient bumps this automatically if it falls back to oast.* servers.
+		opts.CorrelationIdNonceLength = correlationIdNonceLength
 	}
-	opts.CorrelationIdNonceLength = correlationIdNonceLength
 
 	c, err := oobclient.New(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create interactsh client: %w", err)
 	}
 
-	// Extract correlationID from URL (correlationID + nonce + "." + serverHost).
-	// The first URL's nonce is discarded; CreateSession generates its own.
-	domain := c.Domain()
-	dotIdx := strings.IndexByte(domain, '.')
-	if dotIdx < 0 {
-		_ = c.Close()
-		panic(fmt.Sprintf("BUG: domain from interactsh has no dot separator: %q", domain))
-	} else if dotIdx < correlationIdNonceLength {
-		_ = c.Close()
-		panic(fmt.Sprintf("BUG: domain prefix too short for nonce extraction: %q", domain))
-	}
-	b.correlationID = domain[:dotIdx-correlationIdNonceLength]
+	b.correlationID = c.CorrelationID()
+	b.serverHost = c.ServerHost()
 
 	if err := c.StartPolling(interactshPollInterval, b.handleInteraction); err != nil {
 		_ = c.Close()
@@ -129,22 +129,69 @@ func (b *InteractshBackend) ensureClient(ctx context.Context) (*oobclient.Client
 	return c, nil
 }
 
+// buildStructuredOASTDomain constructs a structured OAST domain from its parts.
+// Format: correlationID.sessionID.serverHost or correlationID.label.sessionID.serverHost.
+func buildStructuredOASTDomain(correlationID, label, sessionID, serverHost string) string {
+	if label != "" && len(label) <= maxLabelPrefixLen {
+		if lower := strings.ToLower(label); dnsLabelRe.MatchString(lower) {
+			return correlationID + "." + lower + "." + sessionID + "." + serverHost
+		}
+	}
+	return correlationID + "." + sessionID + "." + serverHost
+}
+
+// extractNonce extracts the per-domain nonce from an interactsh domain.
+// Domain format: correlationID + nonce + "." + serverHost.
+func extractNonce(domain, correlationID string) string {
+	dotIdx := strings.IndexByte(domain, '.')
+	if dotIdx < 0 || dotIdx <= len(correlationID) {
+		panic(fmt.Sprintf("BUG: unexpected domain format from interactsh: %q (correlationID=%q)", domain, correlationID))
+	}
+	return domain[len(correlationID):dotIdx]
+}
+
 // handleInteraction routes an interaction to the correct session.
-// FullId contains subdomain labels only (e.g., "correlationIDnonce" or
-// "prefix.correlationIDnonce"), not a full FQDN.
+//
+// Structured servers (oastsrv.net, oastlab.net): FullId is dot-separated
+// ("correlationID.sessionID"), last label is the sessionID routing key.
+//
+// Legacy servers: FullId leaf label is correlationID+nonce concatenated
+// ("correlationIDnonce" or "label.correlationIDnonce").
 func (b *InteractshBackend) handleInteraction(interaction *oobclient.Interaction) {
-	// Extract the leaf label from FullId (handles user-added prefix subdomains)
-	label := interaction.FullId
-	if dotIdx := strings.LastIndexByte(label, '.'); dotIdx >= 0 {
-		label = label[dotIdx+1:]
-	}
-	if !strings.HasPrefix(label, b.correlationID) || len(label) <= len(b.correlationID) {
-		return
-	}
-	nonce := label[len(b.correlationID):]
+	fullId := interaction.FullId
+
+	var domain string
+	var ok bool
 
 	b.mu.RLock()
-	domain, ok := b.byNonce[nonce]
+
+	structured := slices.ContainsFunc(structuredDomainSuffixes[:], func(suffix string) bool {
+		return b.serverHost == suffix || strings.HasSuffix(b.serverHost, "."+suffix)
+	})
+
+	if structured {
+		// Structured server: last dot-label = sessionID
+		lastDot := strings.LastIndexByte(fullId, '.')
+		if lastDot < 0 {
+			b.mu.RUnlock()
+			return
+		}
+		nonce := fullId[lastDot+1:]
+		domain, ok = b.byID[nonce]
+	} else {
+		// Legacy server: leaf label = correlationID + nonce
+		leaf := fullId
+		if dotIdx := strings.LastIndexByte(leaf, '.'); dotIdx >= 0 {
+			leaf = leaf[dotIdx+1:]
+		}
+		if !strings.HasPrefix(leaf, b.correlationID) || len(leaf) <= len(b.correlationID) {
+			b.mu.RUnlock()
+			return
+		}
+		nonce := leaf[len(b.correlationID):]
+		domain, ok = b.byNonce[nonce]
+	}
+
 	if !ok {
 		b.mu.RUnlock()
 		return
@@ -225,33 +272,15 @@ func (b *InteractshBackend) CreateSession(ctx context.Context, label string) (*O
 		return nil, err
 	}
 
-	sessionID := ids.Generate(ids.DefaultLength)
-	domain := c.Domain()
+	structured := slices.ContainsFunc(structuredDomainSuffixes[:], func(suffix string) bool {
+		return b.serverHost == suffix || strings.HasSuffix(b.serverHost, "."+suffix)
+	})
 
-	// Extract nonce: domain = correlationID + nonce + "." + serverHost
-	dotIdx := strings.IndexByte(domain, '.')
-	if dotIdx < 0 {
-		panic(fmt.Sprintf("BUG: domain from interactsh has no dot separator: %q", domain))
-	} else if len(b.correlationID) > dotIdx {
-		panic(fmt.Sprintf("BUG: correlationID %q longer than domain prefix %q", b.correlationID, domain[:dotIdx]))
-	}
-	nonce := domain[len(b.correlationID):dotIdx]
-
-	if label != "" && len(label) <= maxLabelPrefixLen {
-		if lower := strings.ToLower(label); dnsLabelRe.MatchString(lower) {
-			domain = lower + "." + domain
-		}
-	}
-
-	sess := &oastSession{
-		info: OastSessionInfo{
-			ID:        sessionID,
-			Domain:    domain,
-			Label:     label,
-			CreatedAt: time.Now(),
-		},
-		nonce:  nonce,
-		notify: make(chan struct{}),
+	// For legacy servers, generate the base domain outside the lock (c.Domain() uses crypto/rand).
+	var legacyBaseDomain, nonce string
+	if !structured {
+		legacyBaseDomain = c.Domain()
+		nonce = extractNonce(legacyBaseDomain, b.correlationID)
 	}
 
 	b.mu.Lock()
@@ -270,15 +299,43 @@ func (b *InteractshBackend) CreateSession(ctx context.Context, label string) (*O
 		}
 	}
 
-	// Ensure ID uniqueness
-	for b.byID[sessionID] != "" {
-		sessionID = ids.Generate(ids.DefaultLength)
-		sess.info.ID = sessionID
+	// Generate unique session ID, then build domain once with the final value
+	var sessionID, domain string
+	if structured {
+		sessionID = strings.ToLower(ids.Generate(ids.EntityLength))
+		for b.byID[sessionID] != "" {
+			sessionID = strings.ToLower(ids.Generate(ids.EntityLength))
+		}
+		domain = buildStructuredOASTDomain(b.correlationID, label, sessionID, b.serverHost)
+	} else {
+		sessionID = ids.Generate(ids.EntityLength)
+		for b.byID[sessionID] != "" {
+			sessionID = ids.Generate(ids.EntityLength)
+		}
+		domain = legacyBaseDomain
+		if label != "" && len(label) <= maxLabelPrefixLen {
+			if lower := strings.ToLower(label); dnsLabelRe.MatchString(lower) {
+				domain = lower + "." + domain
+			}
+		}
+	}
+
+	sess := &oastSession{
+		info: OastSessionInfo{
+			ID:        sessionID,
+			Domain:    domain,
+			Label:     label,
+			CreatedAt: time.Now(),
+		},
+		nonce:  nonce,
+		notify: make(chan struct{}),
 	}
 
 	b.sessions[domain] = sess
 	b.byID[sessionID] = domain
-	b.byNonce[nonce] = domain
+	if nonce != "" {
+		b.byNonce[nonce] = domain
+	}
 	if label != "" {
 		b.byLabel[label] = domain
 	}
@@ -458,7 +515,9 @@ func (b *InteractshBackend) deleteSession(sess *oastSession) error {
 	b.mu.Lock()
 	delete(b.sessions, sess.info.Domain)
 	delete(b.byID, sess.info.ID)
-	delete(b.byNonce, sess.nonce)
+	if sess.nonce != "" {
+		delete(b.byNonce, sess.nonce)
+	}
 	if sess.info.Label != "" {
 		delete(b.byLabel, sess.info.Label)
 	}

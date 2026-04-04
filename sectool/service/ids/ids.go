@@ -7,6 +7,9 @@ import (
 
 const DefaultLength = 6
 
+// EntityLength is a shorter length for low-volume entity IDs (sessions, rules, notes).
+const EntityLength = 4
+
 // base62 character set for LLM-friendly short IDs
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 

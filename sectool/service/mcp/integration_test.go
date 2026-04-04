@@ -4,7 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-appsec/interactsh-lite/oobclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -607,4 +609,61 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 		}
 		t.Logf("Successfully added %d rule types", len(ruleTypes))
 	})
+}
+
+// TestOASTPublicServers validates the oobclient domain format contract against
+// public OAST servers. The InteractshBackend's extractNonce and custom server
+// routing depend on Domain() returning correlationID + nonce + "." + serverHost.
+func TestOASTPublicServers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	t.Parallel()
+
+	servers := []string{
+		"oast.me",
+		"oast.pro",
+		"oast.live",
+		"oast.site",
+	}
+
+	for _, server := range servers {
+		t.Run(server, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			t.Cleanup(cancel)
+
+			c, err := oobclient.New(ctx, oobclient.Options{
+				ServerURLs: []string{server},
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+
+			correlationID := c.CorrelationID()
+			serverHost := c.ServerHost()
+			require.NotEmpty(t, correlationID)
+			require.NotEmpty(t, serverHost)
+			t.Logf("correlationID=%s serverHost=%s", correlationID, serverHost)
+
+			// Validate Domain() format: correlationID + nonce + "." + serverHost
+			for range 3 {
+				domain := c.Domain()
+				assert.True(t, strings.HasPrefix(domain, correlationID),
+					"domain %q must start with correlationID %q", domain, correlationID)
+
+				dotIdx := strings.IndexByte(domain, '.')
+				require.Greater(t, dotIdx, len(correlationID),
+					"first dot in %q must come after correlationID %q", domain, correlationID)
+
+				nonce := domain[len(correlationID):dotIdx]
+				assert.NotEmpty(t, nonce)
+
+				host := domain[dotIdx+1:]
+				assert.Equal(t, serverHost, host)
+
+				t.Logf("domain=%s nonce=%s", domain, nonce)
+			}
+		})
+	}
 }
