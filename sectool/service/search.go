@@ -178,6 +178,37 @@ func unDoubleEscapeRegex(s string) string {
 	return b.String()
 }
 
+// unescapeLiteral converts double-escaped \r, \n, \t sequences to actual
+// bytes in literal (non-regex) rule strings. LLMs produce these when the
+// user writes \r\n meaning CRLF but JSON serialization double-escapes it.
+func unescapeLiteral(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if i+1 < len(s) && s[i] == '\\' {
+			switch s[i+1] {
+			case 'r':
+				b.WriteByte('\r')
+				i++
+				continue
+			case 'n':
+				b.WriteByte('\n')
+				i++
+				continue
+			case 't':
+				b.WriteByte('\t')
+				i++
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
 // parseScopeSet parses a comma-separated scope string into a set.
 // Valid values: request_headers, request_body, response_headers, response_body, all.
 // Empty string or "all" returns all four scopes.

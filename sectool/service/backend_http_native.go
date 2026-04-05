@@ -707,7 +707,7 @@ func applyMatchReplaceRule(input []byte, rule nativeStoredRule, caseInsensitive 
 	// Empty find means "append" - add the replacement at the end
 	if rule.Find == "" {
 		// For headers, ensure proper line ending before appending
-		if len(input) > 0 && !bytes.HasSuffix(input, []byte("\r\n")) {
+		if caseInsensitive && len(input) > 0 && !bytes.HasSuffix(input, []byte("\r\n")) {
 			input = append(input, '\r', '\n')
 		}
 		return append(input, []byte(rule.Replace)...)

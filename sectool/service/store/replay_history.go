@@ -19,6 +19,8 @@ type ReplayHistoryMeta struct {
 	Method          string        `msgpack:"m"`
 	Host            string        `msgpack:"h"`
 	Path            string        `msgpack:"p"`
+	Scheme          string        `msgpack:"sc,omitempty"` // "http" or "https"
+	Port            int           `msgpack:"po,omitempty"` // original port (0 = infer from scheme)
 	Protocol        string        `msgpack:"pr"`
 	SourceFlowID    string        `msgpack:"sf"`
 	CreatedAt       time.Time     `msgpack:"ca"`
@@ -30,9 +32,10 @@ type ReplayHistoryMeta struct {
 
 // ReplayHistoryPayload holds the heavy request/response data for a replay entry.
 type ReplayHistoryPayload struct {
-	RawRequest  []byte `msgpack:"rq"`
-	RespHeaders []byte `msgpack:"rh"`
-	RespBody    []byte `msgpack:"rb"`
+	RawRequest      []byte `msgpack:"rq"`
+	ModifiedRequest []byte `msgpack:"mq,omitempty"` // post-rule request; nil if no rules applied
+	RespHeaders     []byte `msgpack:"rh"`
+	RespBody        []byte `msgpack:"rb"`
 }
 
 // ReplayHistoryEntry stores a replay request/response with positioning info.
@@ -42,11 +45,14 @@ type ReplayHistoryEntry struct {
 	ReferenceOffset uint32    // Max proxy offset at time of replay (for ordering)
 
 	// Request data (for display and export)
-	RawRequest []byte
-	Method     string
-	Host       string
-	Path       string
-	Protocol   string // "http/1.1" or "h2"
+	RawRequest      []byte // pre-rule request (base for replay)
+	ModifiedRequest []byte // post-rule request (what was sent); nil if no rules applied
+	Method          string
+	Host            string
+	Path            string
+	Scheme          string // "http" or "https"
+	Port            int    // original port (0 = infer from scheme)
+	Protocol        string // "http/1.1" or "h2"
 
 	// Response data
 	RespHeaders []byte
@@ -87,6 +93,8 @@ func (s *ReplayHistoryStore) Store(entry *ReplayHistoryEntry) {
 		Method:          entry.Method,
 		Host:            entry.Host,
 		Path:            entry.Path,
+		Scheme:          entry.Scheme,
+		Port:            entry.Port,
 		Protocol:        entry.Protocol,
 		SourceFlowID:    entry.SourceFlowID,
 		CreatedAt:       entry.CreatedAt,
@@ -96,9 +104,10 @@ func (s *ReplayHistoryStore) Store(entry *ReplayHistoryEntry) {
 		Duration:        entry.Duration,
 	}
 	payload := ReplayHistoryPayload{
-		RawRequest:  entry.RawRequest,
-		RespHeaders: entry.RespHeaders,
-		RespBody:    entry.RespBody,
+		RawRequest:      entry.RawRequest,
+		ModifiedRequest: entry.ModifiedRequest,
+		RespHeaders:     entry.RespHeaders,
+		RespBody:        entry.RespBody,
 	}
 
 	if metaData, err := Serialize(&meta); err != nil {
@@ -153,9 +162,12 @@ func (s *ReplayHistoryStore) getLocked(flowID string) (*ReplayHistoryEntry, bool
 		CreatedAt:       meta.CreatedAt,
 		ReferenceOffset: meta.ReferenceOffset,
 		RawRequest:      payload.RawRequest,
+		ModifiedRequest: payload.ModifiedRequest,
 		Method:          meta.Method,
 		Host:            meta.Host,
 		Path:            meta.Path,
+		Scheme:          meta.Scheme,
+		Port:            meta.Port,
 		Protocol:        meta.Protocol,
 		RespHeaders:     payload.RespHeaders,
 		RespBody:        payload.RespBody,

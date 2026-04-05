@@ -344,7 +344,11 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 				flowID = m.service.proxyIndex.Register(entry.offset)
 			}
 
-			scheme, port, _ := inferSchemeAndPort(entry.host)
+			scheme := entry.scheme
+			port := entry.port
+			if scheme == "" {
+				scheme, port, _ = inferSchemeAndPort(entry.host)
+			}
 
 			flows = append(flows, protocol.FlowEntry{
 				FlowID:         flowID,
@@ -428,7 +432,7 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 	if errResult != nil {
 		return errResult, nil
 	}
-	rawReq := resolved.RawRequest
+	rawReq := resolved.DisplayRequest()
 	rawResp := resolved.RawResponse
 
 	method, host, path := extractRequestMeta(string(rawReq))
@@ -444,7 +448,10 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 
-	scheme, _, _ := inferSchemeAndPort(host)
+	scheme := resolved.Scheme
+	if scheme == "" {
+		scheme, _, _ = inferSchemeAndPort(host)
+	}
 	fullURL := scheme + "://" + host + path
 
 	log.Printf("flow/get: flow=%s method=%s url=%s source=%s", flowID, method, fullURL, resolved.Source)
@@ -611,6 +618,9 @@ func (m *mcpServer) handleProxyRuleAdd(ctx context.Context, req mcp.CallToolRequ
 		if fixed := unDoubleEscapeRegex(find); fixed != find {
 			find = fixed
 		}
+	} else {
+		find = unescapeLiteral(find)
+		replace = unescapeLiteral(replace)
 	}
 	rule, err := m.service.httpBackend.AddRule(ctx, protocol.RuleEntry{
 		Label:   label,
@@ -663,6 +673,8 @@ type flowEntry struct {
 	method          string
 	host            string
 	path            string
+	scheme          string // "http" or "https" (empty = infer from host)
+	port            int    // original port (0 = infer from scheme)
 	status          int
 	respLen         int
 	request         string
@@ -770,6 +782,8 @@ func (s *Server) fetchAllProxyEntries(ctx context.Context, needsFullText bool) (
 				method:          re.Method,
 				host:            re.Host,
 				path:            re.Path,
+				scheme:          re.Scheme,
+				port:            re.Port,
 				status:          re.RespStatus,
 				respLen:         len(re.RespBody),
 				request:         string(re.RawRequest),
@@ -788,6 +802,8 @@ func (s *Server) fetchAllProxyEntries(ctx context.Context, needsFullText bool) (
 				method:          rm.Method,
 				host:            rm.Host,
 				path:            rm.Path,
+				scheme:          rm.Scheme,
+				port:            rm.Port,
 				status:          rm.RespStatus,
 				respLen:         rm.RespLen,
 				source:          SourceReplay,

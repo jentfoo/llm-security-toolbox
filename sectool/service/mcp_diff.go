@@ -83,8 +83,8 @@ func (m *mcpServer) handleDiffFlow(ctx context.Context, req mcp.CallToolRequest)
 	includeRespHeaders := scope == "response" || scope == "response_headers"
 	includeRespBody := scope == "response" || scope == "response_body"
 
-	reqHeadersA, reqBodyA := splitHeadersBody(flowA.RawRequest)
-	reqHeadersB, reqBodyB := splitHeadersBody(flowB.RawRequest)
+	reqHeadersA, reqBodyA := splitHeadersBody(flowA.DisplayRequest())
+	reqHeadersB, reqBodyB := splitHeadersBody(flowB.DisplayRequest())
 	respHeadersA, respBodyA := splitHeadersBody(flowA.RawResponse)
 	respHeadersB, respBodyB := splitHeadersBody(flowB.RawResponse)
 

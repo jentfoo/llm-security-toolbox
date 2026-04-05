@@ -19,6 +19,11 @@ import (
 	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
+// displayModifiedRequests controls whether flow_get shows post-rule requests.
+// false: show pre-rule (matches proxy history)
+// true: show post-rule (shows what actually hit the wire)
+const displayModifiedRequests = false // TODO - do testing for what agents expect most often, disabled matches Burp UI usage
+
 // mcpServer wraps the MCP server and its dependencies.
 type mcpServer struct {
 	server           *server.MCPServer
@@ -408,14 +413,25 @@ func translateTimeoutError(err error) string {
 
 // resolvedFlow holds the raw request and response bytes for a resolved flow.
 type resolvedFlow struct {
-	RawRequest  []byte
-	RawResponse []byte
-	Source      string        // "proxy", "replay", "crawl"
-	Protocol    string        // "http/1.1", "h2", or empty (defaults to http/1.1)
-	Duration    time.Duration // replay, crawl (zero = not available)
-	FoundOn     string        // crawl only
-	Depth       int           // crawl only
-	Truncated   bool          // crawl only
+	RawRequest      []byte
+	ModifiedRequest []byte // post-rule request for display; nil if no rules applied
+	RawResponse     []byte
+	Source          string        // "proxy", "replay", "crawl"
+	Scheme          string        // "http" or "https" (empty = infer from host)
+	Port            int           // original port (0 = infer from scheme)
+	Protocol        string        // "http/1.1", "h2", or empty (defaults to http/1.1)
+	Duration        time.Duration // replay, crawl (zero = not available)
+	FoundOn         string        // crawl only
+	Depth           int           // crawl only
+	Truncated       bool          // crawl only
+}
+
+// DisplayRequest returns the request as shown when retrieved.
+func (f *resolvedFlow) DisplayRequest() []byte {
+	if displayModifiedRequests && f.ModifiedRequest != nil {
+		return f.ModifiedRequest
+	}
+	return f.RawRequest
 }
 
 // resolveFlow looks up a flow by ID across replay, proxy, and crawler backends.
@@ -423,11 +439,14 @@ type resolvedFlow struct {
 func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFlow, *mcp.CallToolResult) {
 	if entry, ok := m.service.replayHistoryStore.Get(flowID); ok {
 		return &resolvedFlow{
-			RawRequest:  entry.RawRequest,
-			RawResponse: slices.Concat(entry.RespHeaders, entry.RespBody),
-			Source:      SourceReplay,
-			Protocol:    entry.Protocol,
-			Duration:    entry.Duration,
+			RawRequest:      entry.RawRequest,
+			ModifiedRequest: entry.ModifiedRequest,
+			RawResponse:     slices.Concat(entry.RespHeaders, entry.RespBody),
+			Source:          SourceReplay,
+			Scheme:          entry.Scheme,
+			Port:            entry.Port,
+			Protocol:        entry.Protocol,
+			Duration:        entry.Duration,
 		}, nil
 	}
 	if offset, ok := m.service.proxyIndex.Offset(flowID); ok {

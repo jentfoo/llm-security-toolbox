@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/url"
 	"strings"
@@ -112,11 +113,32 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	})
 
 	setHeaders := getHeaderArg(req, "set_headers")
+	target := req.GetString("target", "")
+
+	// When no explicit target, reconstruct from stored scheme/port so
+	// replaying an HTTP flow doesn't incorrectly default to HTTPS
+	if target == "" && resolved.Scheme != "" {
+		_, host, _ := extractRequestMeta(string(rawRequest))
+		// Strip any existing port from host before rebuilding
+		if idx := strings.LastIndex(host, ":"); idx > 0 {
+			if _, err := fmt.Sscanf(host[idx+1:], "%d", new(int)); err == nil {
+				host = host[:idx]
+			}
+		}
+		// Omit default ports to avoid Host: example.com:80 pollution
+		if (resolved.Scheme == schemeHTTP && resolved.Port == 80) ||
+			(resolved.Scheme == schemeHTTPS && resolved.Port == 443) {
+			target = fmt.Sprintf("%s://%s", resolved.Scheme, host)
+		} else {
+			target = fmt.Sprintf("%s://%s:%d", resolved.Scheme, host, resolved.Port)
+		}
+	}
+
 	mods := sendModifications{
 		Method:          req.GetString("method", ""),
 		SetHeaders:      setHeaders,
 		RemoveHeaders:   req.GetStringSlice("remove_headers", nil),
-		Target:          req.GetString("target", ""),
+		Target:          target,
 		Body:            req.GetString("body", ""),
 		SetJSON:         getJSONArg(req),
 		RemoveJSON:      req.GetStringSlice("remove_json", nil),
@@ -289,23 +311,27 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 
 	respCode, respStatusLine := parseResponseStatus(result.Headers)
 
-	// Use post-rule request for history so stored state matches what was sent
-	storedRequest := rawRequest
+	// Extract metadata from post-rule request (what was actually sent)
+	displayRequest := rawRequest
 	if result.ModifiedRequest != nil {
-		storedRequest = result.ModifiedRequest
+		displayRequest = result.ModifiedRequest
 	}
-	method, replayHost, replayPath := extractRequestMeta(string(storedRequest))
+	method, replayHost, replayPath := extractRequestMeta(string(displayRequest))
 	log.Printf("send: %s %s://%s:%d status=%d size=%d duration=%v", replayID, scheme, host, port, respCode, len(result.Body), result.Duration)
 
 	// Store in replay history for proxy_poll visibility
+	// RawRequest = pre-rule (base for future replays), ModifiedRequest = post-rule (for display)
 	refOffset, _ := m.service.replayHistoryStore.UpdateReferenceOffset(m.service.proxyLastOffset.Load())
 	m.service.replayHistoryStore.Store(&store.ReplayHistoryEntry{
 		FlowID:          replayID,
 		ReferenceOffset: refOffset,
-		RawRequest:      storedRequest,
+		RawRequest:      rawRequest,
+		ModifiedRequest: result.ModifiedRequest,
 		Method:          method,
 		Host:            replayHost,
 		Path:            replayPath,
+		Scheme:          scheme,
+		Port:            port,
 		Protocol:        httpProtocol,
 		RespHeaders:     result.Headers,
 		RespBody:        result.Body,

@@ -46,12 +46,13 @@ type ProxyServer struct {
 	wsHandler      *webSocketHandler
 
 	// Shutdown coordination
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	closed      atomic.Bool
-	running     atomic.Bool
-	activeConns sync.Map // tracks active connections for force-close on shutdown
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	closed       atomic.Bool
+	serveStarted atomic.Bool
+	running      atomic.Bool
+	activeConns  sync.Map // tracks active connections for force-close on shutdown
 }
 
 // NewProxyServer creates a new proxy server with HTTPS MITM support.
@@ -99,6 +100,10 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage
 		ctx:            ctx,
 		cancel:         cancel,
 	}
+
+	// Pre-increment wg so Shutdown's wg.Wait doesn't race with Serve's wg.Add.
+	// Shutdown decrements this if Serve was never called (see served flag).
+	s.wg.Add(1)
 
 	return s, nil
 }
@@ -155,8 +160,10 @@ func (s *ProxyServer) WaitReady(ctx context.Context) error {
 
 // Serve starts accepting connections. Blocks until shutdown.
 func (s *ProxyServer) Serve() error {
-	s.wg.Add(1) // keep counter > 0 so inner wg.Add is safe vs wg.Wait
-	defer s.wg.Done()
+	// Decrement pre-incremented wg counter from NewProxyServer
+	if s.serveStarted.CompareAndSwap(false, true) {
+		defer s.wg.Done()
+	}
 	s.running.Store(true)
 	for {
 		conn, err := s.listener.Accept()
@@ -226,6 +233,10 @@ func (s *ProxyServer) Shutdown(ctx context.Context) error {
 
 	// Signal handlers to finish
 	s.cancel()
+
+	if s.serveStarted.CompareAndSwap(false, true) {
+		s.wg.Done()
+	}
 
 	// Wait for in-flight connections with timeout
 	done := make(chan struct{})

@@ -966,59 +966,64 @@ func TestApplyWSRules_regex(t *testing.T) {
 	assert.Contains(t, string(modified), `"id": 0`)
 }
 
-func TestApplyMatchReplaceRule_literal(t *testing.T) {
-	t.Parallel()
-
-	rule := nativeStoredRule{
-		ID:      "test",
-		Type:    RuleTypeRequestBody,
-		IsRegex: false,
-		Find:    "old",
-		Replace: "new",
-	}
-
-	input := []byte("This old text has old values")
-	result := applyMatchReplaceRule(input, rule, false)
-
-	assert.Equal(t, "This new text has new values", string(result))
-}
-
-func TestApplyMatchReplaceRule_regex(t *testing.T) {
+func TestApplyMatchReplaceRule(t *testing.T) {
 	t.Parallel()
 
 	compiled, err := regexp.Compile(`\b\d{4}\b`)
 	require.NoError(t, err)
 
-	rule := nativeStoredRule{
-		ID:       "test",
-		Type:     RuleTypeRequestBody,
-		IsRegex:  true,
-		Find:     `\b\d{4}\b`,
-		Replace:  "YEAR",
-		compiled: compiled,
+	tests := []struct {
+		name            string
+		rule            nativeStoredRule
+		input           string
+		caseInsensitive bool
+		want            string
+	}{
+		{
+			name:  "literal_replace",
+			rule:  nativeStoredRule{Find: "old", Replace: "new"},
+			input: "This old text has old values",
+			want:  "This new text has new values",
+		},
+		{
+			name:  "regex_replace",
+			rule:  nativeStoredRule{IsRegex: true, Find: `\b\d{4}\b`, Replace: "YEAR", compiled: compiled},
+			input: "Year 2024 and 1999 are mentioned",
+			want:  "Year YEAR and YEAR are mentioned",
+		},
+		{
+			name:  "no_match",
+			rule:  nativeStoredRule{Find: "nonexistent", Replace: "replacement"},
+			input: "This text has no matches",
+			want:  "This text has no matches",
+		},
+		{
+			name:  "body_append",
+			rule:  nativeStoredRule{Replace: "&appended=true"},
+			input: "username=admin&password=test123",
+			want:  "username=admin&password=test123&appended=true",
+		},
+		{
+			name:            "header_append",
+			rule:            nativeStoredRule{Replace: "X-Added: value\r\n"},
+			input:           "Content-Type: text/plain\r\n",
+			caseInsensitive: true,
+			want:            "Content-Type: text/plain\r\nX-Added: value\r\n",
+		},
+		{
+			name:            "header_append_no_trailing_crlf",
+			rule:            nativeStoredRule{Replace: "X-Added: value\r\n"},
+			input:           "Content-Type: text/plain",
+			caseInsensitive: true,
+			want:            "Content-Type: text/plain\r\nX-Added: value\r\n",
+		},
 	}
 
-	input := []byte("Year 2024 and 1999 are mentioned")
-	result := applyMatchReplaceRule(input, rule, false)
-
-	assert.Equal(t, "Year YEAR and YEAR are mentioned", string(result))
-}
-
-func TestApplyMatchReplaceRule_no_match(t *testing.T) {
-	t.Parallel()
-
-	rule := nativeStoredRule{
-		ID:      "test",
-		Type:    RuleTypeRequestBody,
-		IsRegex: false,
-		Find:    "nonexistent",
-		Replace: "replacement",
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, string(applyMatchReplaceRule([]byte(tt.input), tt.rule, tt.caseInsensitive)))
+		})
 	}
-
-	input := []byte("This text has no matches")
-	result := applyMatchReplaceRule(input, rule, false)
-
-	assert.Equal(t, string(input), string(result))
 }
 
 func TestParseHeadersFromText(t *testing.T) {
