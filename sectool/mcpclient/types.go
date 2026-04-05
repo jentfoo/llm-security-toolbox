@@ -31,7 +31,7 @@ type FlowGetOpts struct {
 // RuleAddOpts are options for ProxyRuleAdd.
 type RuleAddOpts struct {
 	Type    string
-	Match   string
+	Find    string
 	Replace string
 	Label   string
 	IsRegex bool

@@ -848,6 +848,49 @@ func TestSender_SendWithRedirects(t *testing.T) {
 		assert.Equal(t, 10, redirectCount)
 	})
 
+	t.Run("applies_rules_to_redirect", func(t *testing.T) {
+		var receivedHeaders []string
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedHeaders = append(receivedHeaders, r.Header.Get("X-Injected"))
+			if r.URL.Path == "/redirect" {
+				w.Header().Set("Location", "/final")
+				w.WriteHeader(302)
+				return
+			}
+			w.WriteHeader(200)
+		}))
+		t.Cleanup(testServer.Close)
+
+		serverURL, _ := url.Parse(testServer.URL)
+		port, _ := strconv.Atoi(serverURL.Port())
+
+		sender := &Sender{
+			RequestRuleApplier: func(req *RawHTTP1Request) *RawHTTP1Request {
+				req.Headers = append(req.Headers, Header{Name: "X-Injected", Value: "rule-applied"})
+				return req
+			},
+		}
+
+		rawReq := []byte("GET /redirect HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := sender.SendWithRedirects(t.Context(), SendOptions{
+			RawRequest: rawReq,
+			Target: Target{
+				Hostname:  serverURL.Hostname(),
+				Port:      port,
+				UsesHTTPS: false,
+			},
+			Force: true,
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, 200, result.Response.StatusCode)
+		require.Len(t, receivedHeaders, 2)
+		// Initial request is sent as-is (caller applies rules before SendWithRedirects)
+		assert.Empty(t, receivedHeaders[0])
+		// Redirect hop gets rules applied
+		assert.Equal(t, "rule-applied", receivedHeaders[1])
+	})
+
 	t.Run("h2_preserves_protocol", func(t *testing.T) {
 		var redirectCount int
 		testServer := newH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

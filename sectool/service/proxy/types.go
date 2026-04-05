@@ -242,7 +242,7 @@ type Target struct {
 	UsesHTTPS bool
 }
 
-// RuleApplier applies match/replace rules to requests and responses.
+// RuleApplier applies find/replace rules to requests and responses.
 // Implemented by the service layer (NativeProxyBackend).
 // Rules are applied in the order they were added (list order).
 type RuleApplier interface {

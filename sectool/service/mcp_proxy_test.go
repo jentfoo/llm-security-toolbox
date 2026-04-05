@@ -656,7 +656,7 @@ func TestMCP_ProxyRules(t *testing.T) {
 			rule := CallMCPToolJSONOK[protocol.RuleEntry](t, mcpClient, "proxy_rule_add", map[string]interface{}{
 				"type":     RuleTypeRequestBody,
 				"label":    "regex-rule",
-				"match":    "password=.*",
+				"find":     "password=.*",
 				"replace":  "password=REDACTED",
 				"is_regex": true,
 			})
@@ -709,28 +709,28 @@ func TestMCP_ProxyRules(t *testing.T) {
 	t.Run("regex_escaping", func(t *testing.T) {
 		cases := []struct {
 			name      string
-			match     string
+			find      string
 			isRegex   bool
-			wantMatch string
+			wantFind  string
 			rawAssert bool // verify JSON-escaped backslashes in list output
 		}{
 			{
-				name:      "double_escape_corrected",
-				match:     `Accept: \\*/\\*`,
-				isRegex:   true,
-				wantMatch: `Accept: \*/\*`,
+				name:     "double_escape_corrected",
+				find:     `Accept: \\*/\\*`,
+				isRegex:  true,
+				wantFind: `Accept: \*/\*`,
 			},
 			{
 				name:      "single_escape_preserved",
-				match:     `Accept: \*/\*`,
+				find:      `Accept: \*/\*`,
 				isRegex:   true,
-				wantMatch: `Accept: \*/\*`,
+				wantFind:  `Accept: \*/\*`,
 				rawAssert: true,
 			},
 			{
-				name:      "non_regex_preserved",
-				match:     `Accept: \\*/\\*`,
-				wantMatch: `Accept: \\*/\\*`,
+				name:     "non_regex_preserved",
+				find:     `Accept: \\*/\\*`,
+				wantFind: `Accept: \\*/\\*`,
 			},
 		}
 		for _, tc := range cases {
@@ -738,7 +738,7 @@ func TestMCP_ProxyRules(t *testing.T) {
 				args := map[string]interface{}{
 					"type":    RuleTypeRequestHeader,
 					"label":   "escape-" + tc.name,
-					"match":   tc.match,
+					"find":    tc.find,
 					"replace": "Accept: application/json",
 				}
 				if tc.isRegex {
@@ -746,7 +746,7 @@ func TestMCP_ProxyRules(t *testing.T) {
 				}
 
 				addResult := CallMCPToolJSONOK[protocol.RuleEntry](t, mcpClient, "proxy_rule_add", args)
-				assert.Equal(t, tc.wantMatch, addResult.Match)
+				assert.Equal(t, tc.wantFind, addResult.Find)
 
 				if tc.rawAssert {
 					rawText := CallMCPToolTextOK(t, mcpClient, "proxy_rule_list", nil)
@@ -779,12 +779,12 @@ func TestMCP_ProxyRules(t *testing.T) {
 			assert.Contains(t, ExtractMCPText(t, result), "invalid rule type")
 		})
 
-		t.Run("add_missing_match_replace", func(t *testing.T) {
+		t.Run("add_missing_find_replace", func(t *testing.T) {
 			result := CallMCPTool(t, mcpClient, "proxy_rule_add", map[string]interface{}{
 				"type": RuleTypeRequestHeader,
 			})
 			assert.True(t, result.IsError)
-			assert.Contains(t, ExtractMCPText(t, result), "match or replace is required")
+			assert.Contains(t, ExtractMCPText(t, result), "find or replace is required")
 		})
 
 		t.Run("add_duplicate_label", func(t *testing.T) {

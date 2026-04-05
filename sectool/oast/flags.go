@@ -99,8 +99,6 @@ oast list [options]
 oast delete <oast_id|label|domain>
 
   Delete an OAST session.
-
-Use "sectool oast <command> --help" for examples.
 `)
 }
 

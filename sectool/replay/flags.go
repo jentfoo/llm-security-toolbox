@@ -84,8 +84,6 @@ replay create <url> [options]
     --method        HTTP method (default: GET)
     --header        Header in 'Name: Value' format (repeatable)
     --body          Path to body file (- for stdin)
-
-Use "sectool replay <command> --help" for examples.
 `)
 }
 

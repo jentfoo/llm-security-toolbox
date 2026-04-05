@@ -33,6 +33,10 @@ type Sender struct {
 	// If nil, SetJSON/RemoveJSON modifications are ignored.
 	JSONModifier JSONModifier
 
+	// RequestRuleApplier applies find/replace rules to each request before sending.
+	// Called for every request including redirect hops. If nil, no rules are applied.
+	RequestRuleApplier func(req *RawHTTP1Request) *RawHTTP1Request
+
 	// Timeouts holds configurable timeout values for dial, read, and write.
 	// Zero values mean no timeout.
 	Timeouts TimeoutConfig
@@ -70,7 +74,7 @@ type SendResult struct {
 
 // prepareRequest parses raw request bytes, applies modifications, and optionally validates.
 func (s *Sender) prepareRequest(rawRequest []byte, mods *Modifications, force bool) (*RawHTTP1Request, error) {
-	req, err := parseRequest(bytes.NewReader(rawRequest))
+	req, err := ParseRequest(bytes.NewReader(rawRequest))
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
 	}
@@ -106,7 +110,7 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 	if isHTTP11 && isEmptyModifications(opts.Modifications) {
 		// Validate when force=false (parse-only, does not re-serialize)
 		if !opts.Force {
-			req, err := parseRequest(bytes.NewReader(opts.RawRequest))
+			req, err := ParseRequest(bytes.NewReader(opts.RawRequest))
 			if err != nil {
 				return nil, fmt.Errorf("parse request: %w", err)
 			} else if err := validateRequest(req); err != nil {
@@ -188,6 +192,10 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 				Response: resp,
 				Duration: time.Since(start),
 			}, nil
+		}
+
+		if s.RequestRuleApplier != nil {
+			currentReq = s.RequestRuleApplier(currentReq)
 		}
 
 		// Check for cross-origin redirect (different scheme, host, or port).

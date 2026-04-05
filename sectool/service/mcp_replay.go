@@ -18,6 +18,7 @@ import (
 func (m *mcpServer) replaySendTool() mcp.Tool {
 	return mcp.NewTool("replay_send",
 		mcp.WithDescription(`Replay a proxied request (flow_id from proxy_poll) with edits.
+Active proxy rules (proxy_rule_add) are applied before sending.
 
 Returns: flow_id, status, headers, response_preview. Full body via flow_get.
 
@@ -58,6 +59,7 @@ func (m *mcpServer) requestSendTool() mcp.Tool {
 		mcp.WithDescription(`Send a request from scratch (no captured flow required).
 
 Use this when you need to send a request to a URL without first capturing it via proxy.
+Active proxy rules (proxy_rule_add) are applied before sending.
 Returns: flow_id, status, headers, response_preview. Full body via flow_get.
 Sent requests appear in proxy_poll history alongside captured traffic if additional modifications or resending needed.`),
 		mcp.WithString("url", mcp.Required(), mcp.Description("Target URL (e.g., 'https://api.example.com/users')")),
@@ -286,7 +288,13 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 	}
 
 	respCode, respStatusLine := parseResponseStatus(result.Headers)
-	method, replayHost, replayPath := extractRequestMeta(string(rawRequest))
+
+	// Use post-rule request for history so stored state matches what was sent
+	storedRequest := rawRequest
+	if result.ModifiedRequest != nil {
+		storedRequest = result.ModifiedRequest
+	}
+	method, replayHost, replayPath := extractRequestMeta(string(storedRequest))
 	log.Printf("send: %s %s://%s:%d status=%d size=%d duration=%v", replayID, scheme, host, port, respCode, len(result.Body), result.Duration)
 
 	// Store in replay history for proxy_poll visibility
@@ -294,7 +302,7 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 	m.service.replayHistoryStore.Store(&store.ReplayHistoryEntry{
 		FlowID:          replayID,
 		ReferenceOffset: refOffset,
-		RawRequest:      rawRequest,
+		RawRequest:      storedRequest,
 		Method:          method,
 		Host:            replayHost,
 		Path:            replayPath,

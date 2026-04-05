@@ -122,7 +122,7 @@ proxy export <flow_id>
 
 proxy rule <command> [options]
 
-  Manage match/replace rules applied by the proxy to all traffic.
+  Manage rules applied to proxied and sent request/response traffic.
   To modify a rule, delete it and recreate with the new values.
 
   Commands:
@@ -140,24 +140,22 @@ proxy rule list [options]
     --websocket             List WebSocket rules instead of HTTP
     --limit <n>             Maximum rules to display
 
-proxy rule add [options] [match] [replace]
+proxy rule add [options]
 
-  For header add: only replace is needed (adds header).
-  For replacements: both match and replace are needed.
+  Modes:
+    --set <text>                    Append text (e.g., add a header line)
+    --find <text> --replace <text>  Find and replace text
+    --remove <text>                 Remove matching text
 
   Options:
     --type <type>           Rule type (default: request_header)
-    --match <pattern>       Pattern to match (alternative to positional arg)
-    --replace <string>      Replacement string (alternative to positional arg)
-    --regex                 Treat match as regex pattern
+    --regex                 Treat pattern as regex (RE2)
     --label <name>          Optional label for easier reference
 
 proxy rule delete <rule_id>
 
   Delete a rule by ID or label.
   Searches both HTTP and WebSocket rules automatically.
-
-Use "sectool proxy <command> --help" for examples.
 `)
 }
 
@@ -351,7 +349,7 @@ func parseRule(args []string, mcpURL string) error {
 func printRuleUsage() {
 	_, _ = fmt.Fprint(os.Stderr, `Usage: sectool proxy rule <command> [options]
 
-Manage match and replace rules for request/response modification.
+Manage rules for request/response modification.
 To modify a rule, delete it and recreate with the new values.
 
 Commands:
@@ -375,7 +373,7 @@ func parseRuleList(args []string, mcpURL string) error {
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool proxy rule list [options]
 
-List configured match/replace rules.
+List configured find/replace rules.
 
 Options:
 `)
@@ -393,32 +391,37 @@ func parseRuleAdd(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("proxy rule add", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
 	var isRegex bool
-	var ruleType, label, name, match, replace string
+	var ruleType, label, name, find, replace, set, remove string
 
 	fs.StringVar(&ruleType, "type", "request_header", "rule type")
-	fs.BoolVar(&isRegex, "regex", false, "treat match as regex pattern")
+	fs.BoolVar(&isRegex, "regex", false, "treat find as regex pattern (RE2)")
 	fs.StringVar(&label, "label", "", "optional label for easier reference")
 	fs.StringVar(&name, "name", "", "alias for --label")
-	fs.StringVar(&match, "match", "", "pattern to match")
-	fs.StringVar(&replace, "replace", "", "replacement string")
+	fs.StringVar(&set, "set", "", "text to append")
+	fs.StringVar(&find, "find", "", "text or pattern to find")
+	fs.StringVar(&replace, "replace", "", "replacement text")
+	fs.StringVar(&remove, "remove", "", "text or pattern to remove")
 	_ = fs.MarkHidden("name")
 
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool proxy rule add [options] [match] [replace]
+		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool proxy rule add [options]
 
-Add a match/replace rule.
-For header add: only replace is needed (adds header).
-For replacements: both match and replace are needed.
+Add a rule to modify proxied and sent requests/responses.
+
+Modes:
+  --set <text>                    Append text (e.g., add a header line)
+  --find <text> --replace <text>  Find and replace text
+  --remove <text>                 Remove matching text
 
 Types:
   HTTP:      request_header (default), request_body, response_header, response_body
   WebSocket: ws:to-server, ws:to-client, ws:both
 
 Examples:
-  sectool proxy rule add "X-Custom: value"                              # Add request header
-  sectool proxy rule add --type response_header "X-Frame-Options: DENY" # Add response header
-  sectool proxy rule add --regex "^User-Agent.*$" "User-Agent: X"       # Replace User-Agent
-  sectool proxy rule add --type ws:both "old" "new"                     # WebSocket replacement
+  sectool proxy rule add --set "X-Bug-Bounty: HackerOne-12345"                 # Add request header
+  sectool proxy rule add --find "User-Agent: old" --replace "User-Agent: new"  # Replace header
+  sectool proxy rule add --type request_body --find "test" --replace "prod"    # Replace in body
+  sectool proxy rule add --remove "X-Debug-Info:.*\r\n" --regex                # Remove header
 
 Options:
 `)
@@ -433,19 +436,27 @@ Options:
 		label = name
 	}
 
-	// Positional args override empty flags
-	posArgs := fs.Args()
-	if match == "" && replace == "" {
-		switch len(posArgs) {
-		case 1:
-			replace = posArgs[0]
-		case 2:
-			match = posArgs[0]
-			replace = posArgs[1]
-		}
+	// Validate flag combinations
+	if set != "" && (find != "" || replace != "" || remove != "") {
+		return errors.New("--set cannot be combined with --find, --replace, or --remove")
+	}
+	if remove != "" && (find != "" || replace != "" || set != "") {
+		return errors.New("--remove cannot be combined with --find, --replace, or --set")
 	}
 
-	return ruleAdd(mcpURL, ruleType, match, replace, label, isRegex)
+	// Map high-level flags to find/replace pair
+	switch {
+	case set != "":
+		find, replace = "", set
+	case remove != "":
+		find, replace = remove, ""
+	}
+
+	if find == "" && replace == "" {
+		return errors.New("one of --set, --find, or --remove is required")
+	}
+
+	return ruleAdd(mcpURL, ruleType, find, replace, label, isRegex)
 }
 
 func parseRuleDelete(args []string, mcpURL string) error {

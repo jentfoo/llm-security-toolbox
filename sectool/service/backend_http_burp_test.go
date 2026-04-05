@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -118,7 +119,7 @@ func TestBurpBackendRules(t *testing.T) {
 					Label:   "test-add",
 					Type:    tc.ruleType1,
 					IsRegex: false,
-					Match:   "",
+					Find:    "",
 					Replace: "X-Test: value",
 				})
 				require.NoError(t, err)
@@ -142,14 +143,14 @@ func TestBurpBackendRules(t *testing.T) {
 					Label:   "test-regex",
 					Type:    tc.ruleType2,
 					IsRegex: true,
-					Match:   "^X-Remove.*$",
+					Find:    "^X-Remove.*$",
 					Replace: "",
 				})
 				require.NoError(t, err)
 				createdRuleIDs = append(createdRuleIDs, rule.RuleID)
 
 				assert.True(t, rule.IsRegex)
-				assert.Equal(t, "^X-Remove.*$", rule.Match)
+				assert.Equal(t, "^X-Remove.*$", rule.Find)
 			})
 
 			t.Run("duplicate_label_rejected", func(t *testing.T) {
@@ -295,7 +296,7 @@ func TestBurpBackendConfigEditingDisabled(t *testing.T) {
 		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label: "should-fail",
 			Type:  mcp.RuleTypeRequestHeader,
-			Match: "old",
+			Find:  "old",
 		})
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrConfigEditDisabled)
@@ -338,69 +339,87 @@ func newTestBurpBackend(t *testing.T) (*BurpBackend, *TestMCPServer) {
 	return NewBurpBackend(client), mockServer
 }
 
-func TestBurpBackendSendCreatesRepeaterTab(t *testing.T) {
+func TestBurpBackendSendRequest(t *testing.T) {
 	t.Parallel()
 
-	backend, mockServer := newTestBurpBackend(t)
+	t.Run("creates_repeater_tab", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
 
-	_, err := backend.SendRequest(t.Context(), "sectool-abc123", SendRequestInput{
-		RawRequest: []byte("GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-		Target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+		_, err := backend.SendRequest(t.Context(), "sectool-abc123", SendRequestInput{
+			RawRequest: []byte("GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+			Target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+		})
+		require.NoError(t, err)
+
+		log := mockServer.ToolCallLog()
+		require.Len(t, log, 2)
+		assert.Equal(t, "create_repeater_tab", log[0])
+		assert.Equal(t, "send_http1_request", log[1])
 	})
-	require.NoError(t, err)
 
-	log := mockServer.ToolCallLog()
-	require.Len(t, log, 2)
-	assert.Equal(t, "create_repeater_tab", log[0])
-	assert.Equal(t, "send_http1_request", log[1])
+	t.Run("sets_modified_request", func(t *testing.T) {
+		backend, _ := newTestBurpBackend(t)
+
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Type:    RuleTypeRequestHeader,
+			Replace: "X-Injected: from-rule\r\n",
+		})
+		require.NoError(t, err)
+
+		result, err := backend.SendRequest(t.Context(), "sectool-rule1", SendRequestInput{
+			RawRequest: []byte("GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+			Target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.ModifiedRequest)
+		assert.Contains(t, string(result.ModifiedRequest), "X-Injected: from-rule")
+	})
+
+	t.Run("no_match_nil", func(t *testing.T) {
+		backend, _ := newTestBurpBackend(t)
+
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Type:    RuleTypeRequestHeader,
+			Find:    "X-Nonexistent: value",
+			Replace: "X-Replaced: value",
+		})
+		require.NoError(t, err)
+
+		result, err := backend.SendRequest(t.Context(), "sectool-rule2", SendRequestInput{
+			RawRequest: []byte("GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+			Target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, result.ModifiedRequest)
+	})
 }
 
-func TestBurpBackendSendRedirectCreatesTabPerHop(t *testing.T) {
+func TestBurpBackendSendDomainShortening(t *testing.T) {
 	t.Parallel()
 
-	backend, mockServer := newTestBurpBackend(t)
+	tests := []struct {
+		name          string
+		hostname      string
+		wantInTabName string
+	}{
+		{"two_part", "example.com", "example.com"},
+		{"subdomain_stripped", "api.example.com", "example.com"},
+		{"multipart_tld", "app.example.co.uk", "example.co.uk"},
+		{"ip_passthrough", "192.168.1.1", "192.168.1.1"},
+	}
 
-	// First response: 302 redirect
-	mockServer.SetSendResponse(
-		`HttpRequestResponse{httpRequest=GET /old HTTP/1.1, httpResponse=HTTP/1.1 302 Found\r\nLocation: /new\r\n\r\n, messageAnnotations=Annotations{}}`,
-	)
-	// Second response: 200 OK
-	mockServer.SetSendResponse(
-		`HttpRequestResponse{httpRequest=GET /new HTTP/1.1, httpResponse=HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>OK</html>, messageAnnotations=Annotations{}}`,
-	)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, mockServer := newTestBurpBackend(t)
 
-	_, err := backend.SendRequest(t.Context(), "sectool-redir1", SendRequestInput{
-		RawRequest:      []byte("GET /old HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-		Target:          Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
-		FollowRedirects: true,
-	})
-	require.NoError(t, err)
-
-	log := mockServer.ToolCallLog()
-	// Expect: create_repeater_tab, send, create_repeater_tab, send
-	require.Len(t, log, 4)
-	assert.Equal(t, "create_repeater_tab", log[0])
-	assert.Equal(t, "send_http1_request", log[1])
-	assert.Equal(t, "create_repeater_tab", log[2])
-	assert.Equal(t, "send_http1_request", log[3])
-}
-
-func TestBurpBackendSendH2RoutesToH2(t *testing.T) {
-	t.Parallel()
-
-	backend, mockServer := newTestBurpBackend(t)
-
-	_, err := backend.SendRequest(t.Context(), "sectool-h2test", SendRequestInput{
-		RawRequest: []byte("GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-		Target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
-		Protocol:   "h2",
-	})
-	require.NoError(t, err)
-
-	log := mockServer.ToolCallLog()
-	require.Len(t, log, 2)
-	assert.Equal(t, "create_repeater_tab", log[0])
-	assert.Equal(t, "send_http2_request", log[1])
+			_, err := backend.SendRequest(t.Context(), "sectool-dom1", SendRequestInput{
+				RawRequest: []byte("GET /api HTTP/1.1\r\nHost: " + tc.hostname + "\r\n\r\n"),
+				Target:     Target{Hostname: tc.hostname, Port: 443, UsesHTTPS: true},
+			})
+			require.NoError(t, err)
+			assert.Contains(t, mockServer.LastTabName(), tc.wantInTabName)
+		})
+	}
 }
 
 func TestBurpClientClosePrompt(t *testing.T) {
@@ -504,34 +523,6 @@ func TestBurpBackendGetProxyHistory(t *testing.T) {
 		assert.Equal(t, "/api", metas[1].Path)
 		assert.Equal(t, 201, metas[1].Status)
 	})
-}
-
-func TestBurpBackendSendDomainShortening(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		hostname      string
-		wantInTabName string
-	}{
-		{"two_part", "example.com", "example.com"},
-		{"subdomain_stripped", "api.example.com", "example.com"},
-		{"multipart_tld", "app.example.co.uk", "example.co.uk"},
-		{"ip_passthrough", "192.168.1.1", "192.168.1.1"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			backend, mockServer := newTestBurpBackend(t)
-
-			_, err := backend.SendRequest(t.Context(), "sectool-dom1", SendRequestInput{
-				RawRequest: []byte("GET /api HTTP/1.1\r\nHost: " + tc.hostname + "\r\n\r\n"),
-				Target:     Target{Hostname: tc.hostname, Port: 443, UsesHTTPS: true},
-			})
-			require.NoError(t, err)
-			assert.Contains(t, mockServer.LastTabName(), tc.wantInTabName)
-		})
-	}
 }
 
 func TestParseBurpResponse(t *testing.T) {
@@ -659,4 +650,66 @@ func TestRawRequestToH2Params(t *testing.T) {
 			assert.Equal(t, tt.wantBody, params.RequestBody)
 		})
 	}
+}
+
+func TestApplyRequestRulesToRaw(t *testing.T) {
+	t.Parallel()
+
+	t.Run("header_literal", func(t *testing.T) {
+		raw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\nX-Old: value\r\n\r\n")
+		rules := []protocol.RuleEntry{{
+			Type:    RuleTypeRequestHeader,
+			Find:    "X-Old",
+			Replace: "X-New",
+		}}
+
+		result := applyRequestRulesToRaw(raw, rules)
+		assert.Contains(t, string(result), "X-New: value")
+		assert.NotContains(t, string(result), "X-Old")
+	})
+
+	t.Run("header_append", func(t *testing.T) {
+		raw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+		rules := []protocol.RuleEntry{{
+			Type:    RuleTypeRequestHeader,
+			Replace: "X-Added: injected\r\n",
+		}}
+
+		result := applyRequestRulesToRaw(raw, rules)
+		assert.Contains(t, string(result), "X-Added: injected")
+	})
+
+	t.Run("body_regex", func(t *testing.T) {
+		body := `{"token":"abc123"}`
+		raw := []byte("POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body)
+		rules := []protocol.RuleEntry{{
+			Type:    RuleTypeRequestBody,
+			IsRegex: true,
+			Find:    `"token":"[^"]*"`,
+			Replace: `"token":"REDACTED"`,
+		}}
+
+		result := applyRequestRulesToRaw(raw, rules)
+		assert.Contains(t, string(result), `"token":"REDACTED"`)
+		assert.NotContains(t, string(result), "abc123")
+	})
+
+	t.Run("no_request_rules", func(t *testing.T) {
+		raw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+		rules := []protocol.RuleEntry{{
+			Type:    RuleTypeResponseHeader,
+			Find:    "Server",
+			Replace: "Hidden",
+		}}
+
+		result := applyRequestRulesToRaw(raw, rules)
+		assert.Equal(t, raw, result)
+	})
+
+	t.Run("empty_rules", func(t *testing.T) {
+		raw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+		result := applyRequestRulesToRaw(raw, nil)
+		assert.Equal(t, raw, result)
+	})
 }

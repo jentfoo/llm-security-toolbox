@@ -55,29 +55,29 @@ func printRuleTable(rules []protocol.RuleEntry) {
 	tr := util.TruncateString
 
 	if hasLabels {
-		t.AppendHeader(table.Row{"Rule ID", "Label", "Type", "Regex", "Match", "Replace"})
+		t.AppendHeader(table.Row{"Rule ID", "Label", "Type", "Regex", "Find", "Replace"})
 		for _, r := range rules {
 			regex := ""
 			if r.IsRegex {
 				regex = "yes"
 			}
-			t.AppendRow(table.Row{r.RuleID, r.Label, r.Type, regex, tr(r.Match, 30), tr(r.Replace, 30)})
+			t.AppendRow(table.Row{r.RuleID, r.Label, r.Type, regex, tr(r.Find, 30), tr(r.Replace, 30)})
 		}
 	} else {
-		t.AppendHeader(table.Row{"Rule ID", "Type", "Regex", "Match", "Replace"})
+		t.AppendHeader(table.Row{"Rule ID", "Type", "Regex", "Find", "Replace"})
 		for _, r := range rules {
 			regex := ""
 			if r.IsRegex {
 				regex = "yes"
 			}
-			t.AppendRow(table.Row{r.RuleID, r.Type, regex, tr(r.Match, 30), tr(r.Replace, 30)})
+			t.AppendRow(table.Row{r.RuleID, r.Type, regex, tr(r.Find, 30), tr(r.Replace, 30)})
 		}
 	}
 	t.Render()
 	cliutil.Summary(os.Stdout, len(rules), "rule", "rules")
 }
 
-func ruleAdd(mcpURL string, ruleType, match, replace, label string, isRegex bool) error {
+func ruleAdd(mcpURL string, ruleType, find, replace, label string, isRegex bool) error {
 	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
@@ -90,7 +90,7 @@ func ruleAdd(mcpURL string, ruleType, match, replace, label string, isRegex bool
 		Label:   label,
 		Type:    ruleType,
 		IsRegex: isRegex,
-		Match:   match,
+		Find:    find,
 		Replace: replace,
 	})
 	if err != nil {
@@ -105,8 +105,8 @@ func ruleAdd(mcpURL string, ruleType, match, replace, label string, isRegex bool
 	if resp.IsRegex {
 		fmt.Println("Mode: regex")
 	}
-	if resp.Match != "" {
-		fmt.Printf("Match: `%s`\n", resp.Match)
+	if resp.Find != "" {
+		fmt.Printf("Find: `%s`\n", resp.Find)
 	}
 	if resp.Replace != "" {
 		fmt.Printf("Replace: `%s`\n", resp.Replace)

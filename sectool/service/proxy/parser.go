@@ -16,10 +16,10 @@ var (
 	ErrInvalidResponse = errors.New("invalid status line")
 )
 
-// parseRequest parses an HTTP/1.1 request from the reader.
+// ParseRequest parses an HTTP/1.1 request from the reader.
 // Returns error only for truly unparseable input.
 // Tolerant of malformed input to support security testing.
-func parseRequest(r io.Reader) (*RawHTTP1Request, error) {
+func ParseRequest(r io.Reader) (*RawHTTP1Request, error) {
 	br := bufio.NewReader(r)
 
 	line, requestLineBareLF, err := readLineWithEnding(br)

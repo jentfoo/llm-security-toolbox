@@ -256,7 +256,7 @@ func (b *mockHttpBackend) AddRule(ctx context.Context, input protocol.RuleEntry)
 		Label:   input.Label,
 		Type:    input.Type,
 		IsRegex: input.IsRegex,
-		Match:   input.Match,
+		Find:    input.Find,
 		Replace: input.Replace,
 	}
 

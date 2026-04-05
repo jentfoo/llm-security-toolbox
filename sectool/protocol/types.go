@@ -191,13 +191,13 @@ type RuleListResponse struct {
 	Rules []RuleEntry `json:"rules"`
 }
 
-// RuleEntry represents a match/replace rule.
+// RuleEntry represents a find/replace rule.
 type RuleEntry struct {
 	RuleID  string `json:"rule_id"`
 	Type    string `json:"type"`
 	Label   string `json:"label,omitempty"`
 	IsRegex bool   `json:"is_regex,omitempty"`
-	Match   string `json:"match,omitempty"`
+	Find    string `json:"find,omitempty"`
 	Replace string `json:"replace,omitempty"`
 }
 

@@ -179,8 +179,6 @@ crawl stop <session_id>
 crawl export <flow_id>
 
   Export a crawled flow to an editable bundle on disk.
-
-Use "sectool crawl <command> --help" for examples.
 `)
 }
 

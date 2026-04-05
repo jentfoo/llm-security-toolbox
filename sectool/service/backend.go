@@ -17,7 +17,7 @@ var ErrLabelExists = errors.New("label already exists")
 // ErrNotFound is returned when a requested resource (rule, session, etc.) doesn't exist.
 var ErrNotFound = errors.New("not found")
 
-// Rule type constants for match/replace rules.
+// Rule type constants for find/replace rules.
 const (
 	RuleTypeRequestHeader  = "request_header"
 	RuleTypeRequestBody    = "request_body"
@@ -54,11 +54,11 @@ type HttpBackend interface {
 	// The request is raw HTTP bytes. Response is returned as headers and body.
 	SendRequest(ctx context.Context, name string, req SendRequestInput) (*SendRequestResult, error)
 
-	// ListRules returns all enabled match/replace rules managed by sectool.
+	// ListRules returns all enabled find/replace rules managed by sectool.
 	// websocket=true returns WebSocket rules, false returns HTTP rules.
 	ListRules(ctx context.Context, websocket bool) ([]protocol.RuleEntry, error)
 
-	// AddRule creates a new match/replace rule.
+	// AddRule creates a new find/replace rule.
 	// WebSocket vs HTTP is inferred from rule.Type (ws:* types are WebSocket).
 	// RuleID is ignored on input and assigned by the backend.
 	AddRule(ctx context.Context, rule protocol.RuleEntry) (*protocol.RuleEntry, error)
@@ -120,9 +120,10 @@ type SendRequestInput struct {
 
 // SendRequestResult contains the response from a sent request.
 type SendRequestResult struct {
-	Headers  []byte
-	Body     []byte
-	Duration time.Duration
+	Headers         []byte
+	Body            []byte
+	Duration        time.Duration
+	ModifiedRequest []byte // post-rule request bytes; nil if no rules applied
 }
 
 // MaxOastEventsPerSession is the maximum number of events stored per session.

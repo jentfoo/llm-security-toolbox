@@ -68,7 +68,7 @@ Pattern: Regex search within scoped sections; returns match context instead of f
 
 func (m *mcpServer) proxyRuleListTool() mcp.Tool {
 	return mcp.NewTool("proxy_rule_list",
-		mcp.WithDescription("List proxy match/replace rules. Use type_filter to control which rules are returned."),
+		mcp.WithDescription("List proxy find/replace rules. Use type_filter to control which rules are returned."),
 		mcp.WithString("type_filter", mcp.Description("Filter by rule type: 'http', 'websocket', or 'all' (default: 'all')")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of rules to return")),
 	)
@@ -76,25 +76,30 @@ func (m *mcpServer) proxyRuleListTool() mcp.Tool {
 
 func (m *mcpServer) proxyRuleAddTool() mcp.Tool {
 	return mcp.NewTool("proxy_rule_add",
-		mcp.WithDescription(`Add proxy match/replace rule. Applies to proxy-intercepted traffic only. For one-off request edits, use replay_send parameters instead.
+		mcp.WithDescription(`Add a proxy rule that modifies request/response traffic.
+
+Modes (determined by which fields are set):
+  replace only       append text (e.g. add a new header)
+  find + replace     find and replace
+  find only          remove matching text
 
 Types:
   HTTP:      request_header (default), request_body, response_header, response_body
   WebSocket: ws:to-server, ws:to-client, ws:both
 
-Regex: is_regex=true (RE2 regex). Labels must be unique.
+Use is_regex=true for RE2 regex patterns. Labels must be unique.
 To modify a rule, delete it with proxy_rule_delete and recreate.`),
 		mcp.WithString("type", mcp.Required(), mcp.Description("Rule type: request_header, request_body, response_header, response_body, ws:to-server, ws:to-client, ws:both")),
-		mcp.WithString("match", mcp.Description("Pattern to find")),
-		mcp.WithString("replace", mcp.Description("Replacement text")),
+		mcp.WithString("find", mcp.Description("Text or pattern to find. Use without replace to remove matches.")),
+		mcp.WithString("replace", mcp.Description("Replacement text. Use without find to append instead of replace.")),
 		mcp.WithString("label", mcp.Description("Optional unique label (usable as rule_id)")),
-		mcp.WithBoolean("is_regex", mcp.Description("Treat match as regex pattern (RE2)")),
+		mcp.WithBoolean("is_regex", mcp.Description("Treat find as regex pattern (RE2)")),
 	)
 }
 
 func (m *mcpServer) proxyRuleDeleteTool() mcp.Tool {
 	return mcp.NewTool("proxy_rule_delete",
-		mcp.WithDescription("Delete a proxy match/replace rule by rule_id or label (searches HTTP+WS)."),
+		mcp.WithDescription("Delete a proxy find/replace rule by rule_id or label (searches HTTP+WS)."),
 		mcp.WithString("rule_id", mcp.Required(), mcp.Description("Rule ID or label to delete")),
 	)
 }
@@ -594,24 +599,24 @@ func (m *mcpServer) handleProxyRuleAdd(ctx context.Context, req mcp.CallToolRequ
 		return errorResult(err.Error()), nil
 	}
 
-	match := req.GetString("match", "")
+	find := req.GetString("find", "")
 	replace := req.GetString("replace", "")
-	if match == "" && replace == "" {
-		return errorResult("match or replace is required"), nil
+	if find == "" && replace == "" {
+		return errorResult("find or replace is required"), nil
 	}
 	label := req.GetString("label", "")
 
 	isRegex := req.GetBool("is_regex", false)
 	if isRegex {
-		if fixed := unDoubleEscapeRegex(match); fixed != match {
-			match = fixed
+		if fixed := unDoubleEscapeRegex(find); fixed != find {
+			find = fixed
 		}
 	}
 	rule, err := m.service.httpBackend.AddRule(ctx, protocol.RuleEntry{
 		Label:   label,
 		Type:    ruleType,
 		IsRegex: isRegex,
-		Match:   match,
+		Find:    find,
 		Replace: replace,
 	})
 	if err != nil {

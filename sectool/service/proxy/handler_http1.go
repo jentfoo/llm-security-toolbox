@@ -60,7 +60,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	startTime := time.Now()
 	var buf bytes.Buffer
 
-	req, err := parseRequest(clientReader)
+	req, err := ParseRequest(clientReader)
 	if err != nil {
 		if errors.Is(err, ErrInvalidRequest) {
 			log.Printf("proxy: failed to parse request: %v", err)
@@ -326,7 +326,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 	startTime := time.Now()
 	var buf bytes.Buffer
 
-	req, err := parseRequest(clientReader)
+	req, err := ParseRequest(clientReader)
 	if err != nil {
 		if errors.Is(err, ErrInvalidRequest) {
 			// Don't log - browsers routinely send non-HTTP data on TLS connections

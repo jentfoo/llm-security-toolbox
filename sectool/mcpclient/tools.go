@@ -97,8 +97,8 @@ func (c *Client) ProxyRuleAdd(ctx context.Context, opts RuleAddOpts) (*protocol.
 	args := map[string]interface{}{
 		"type": opts.Type,
 	}
-	if opts.Match != "" {
-		args["match"] = opts.Match
+	if opts.Find != "" {
+		args["find"] = opts.Find
 	}
 	if opts.Replace != "" {
 		args["replace"] = opts.Replace

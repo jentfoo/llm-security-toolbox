@@ -128,13 +128,13 @@ func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
 		Label:   "test-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: false,
-		Match:   "old-value",
+		Find:    "old-value",
 		Replace: "new-value",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "test-rule", rule.Label)
 	assert.Equal(t, RuleTypeRequestHeader, rule.Type)
-	assert.Equal(t, "old-value", rule.Match)
+	assert.Equal(t, "old-value", rule.Find)
 
 	// List rules
 	rules, err := backend.ListRules(t.Context(), false)
@@ -164,7 +164,7 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 		Label:   "http-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: false,
-		Match:   "old",
+		Find:    "old",
 		Replace: "new",
 	})
 	require.NoError(t, err)
@@ -173,7 +173,7 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 		Label:   "ws-rule",
 		Type:    "ws:both",
 		IsRegex: true,
-		Match:   `\d+`,
+		Find:    `\d+`,
 		Replace: "NUM",
 	})
 	require.NoError(t, err)
@@ -189,7 +189,7 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, httpRules, 1)
 	assert.Equal(t, "http-rule", httpRules[0].Label)
-	assert.Equal(t, "old", httpRules[0].Match)
+	assert.Equal(t, "old", httpRules[0].Find)
 
 	wsRules, err := backend2.ListRules(t.Context(), true)
 	require.NoError(t, err)
@@ -212,12 +212,12 @@ func TestNativeProxyBackend_Rules_DeletePersists(t *testing.T) {
 
 	_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
 		Label: "to-delete", Type: RuleTypeRequestHeader,
-		IsRegex: false, Match: "a", Replace: "b",
+		IsRegex: false, Find: "a", Replace: "b",
 	})
 	require.NoError(t, err)
 	_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
 		Label: "to-keep", Type: RuleTypeRequestBody,
-		IsRegex: false, Match: "c", Replace: "d",
+		IsRegex: false, Find: "c", Replace: "d",
 	})
 	require.NoError(t, err)
 
@@ -248,7 +248,7 @@ func TestNativeProxyBackend_Rules_LabelUniqueness(t *testing.T) {
 		Label:   "unique-label",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: false,
-		Match:   "a",
+		Find:    "a",
 		Replace: "b",
 	})
 	require.NoError(t, err)
@@ -258,7 +258,7 @@ func TestNativeProxyBackend_Rules_LabelUniqueness(t *testing.T) {
 		Label:   "unique-label",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: false,
-		Match:   "c",
+		Find:    "c",
 		Replace: "d",
 	})
 	require.Error(t, err)
@@ -275,7 +275,7 @@ func TestNativeProxyBackend_Rules_InvalidType(t *testing.T) {
 	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
 		Type:    "invalid_type",
 		IsRegex: false,
-		Match:   "a",
+		Find:    "a",
 		Replace: "b",
 	})
 	require.Error(t, err)
@@ -293,7 +293,7 @@ func TestNativeProxyBackend_Rules_Regex(t *testing.T) {
 	rule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 		Type:    RuleTypeRequestHeader,
 		IsRegex: true,
-		Match:   `\d+`,
+		Find:    `\d+`,
 		Replace: "NUMBER",
 	})
 	require.NoError(t, err)
@@ -303,7 +303,7 @@ func TestNativeProxyBackend_Rules_Regex(t *testing.T) {
 	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
 		Type:    RuleTypeRequestHeader,
 		IsRegex: true,
-		Match:   `[invalid`,
+		Find:    `[invalid`,
 		Replace: "x",
 	})
 	require.Error(t, err)
@@ -350,6 +350,120 @@ func TestNativeProxyBackend_SendRequest(t *testing.T) {
 	assert.NotContains(t, string(result.Headers), "Hello from server")
 	// Headers should end with header terminator
 	assert.True(t, bytes.HasSuffix(result.Headers, []byte("\r\n\r\n")))
+}
+
+func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
+	t.Parallel()
+
+	t.Run("request_header_rule", func(t *testing.T) {
+		t.Parallel()
+
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Received", r.Header.Get("X-Rule-Added"))
+			w.WriteHeader(200)
+		}))
+		t.Cleanup(testServer.Close)
+
+		serverURL, err := url.Parse(testServer.URL)
+		require.NoError(t, err)
+
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Type:    RuleTypeRequestHeader,
+			Replace: "X-Rule-Added: from-rule\r\n",
+		})
+		require.NoError(t, err)
+
+		rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
+			RawRequest: rawReq,
+			Target: Target{
+				Hostname:  serverURL.Hostname(),
+				Port:      mustParsePort(t, serverURL.Port()),
+				UsesHTTPS: false,
+			},
+		})
+		require.NoError(t, err)
+		assert.Contains(t, string(result.Headers), "X-Received: from-rule")
+
+		// ModifiedRequest should contain the post-rule request with the appended header
+		require.NotNil(t, result.ModifiedRequest)
+		assert.Contains(t, string(result.ModifiedRequest), "X-Rule-Added: from-rule")
+	})
+
+	t.Run("no_rules_unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("OK"))
+		}))
+		t.Cleanup(testServer.Close)
+
+		serverURL, err := url.Parse(testServer.URL)
+		require.NoError(t, err)
+
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
+			RawRequest: rawReq,
+			Target: Target{
+				Hostname:  serverURL.Hostname(),
+				Port:      mustParsePort(t, serverURL.Port()),
+				UsesHTTPS: false,
+			},
+		})
+		require.NoError(t, err)
+		assert.Contains(t, string(result.Headers), "200")
+		assert.Equal(t, "OK", string(result.Body))
+
+		// No rules means ModifiedRequest should be nil
+		assert.Nil(t, result.ModifiedRequest)
+	})
+
+	t.Run("rules_no_match", func(t *testing.T) {
+		t.Parallel()
+
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+		}))
+		t.Cleanup(testServer.Close)
+
+		serverURL, err := url.Parse(testServer.URL)
+		require.NoError(t, err)
+
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		// Add a rule that won't match
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Type:    RuleTypeRequestHeader,
+			Find:    "X-Nonexistent: value",
+			Replace: "X-Replaced: value",
+		})
+		require.NoError(t, err)
+
+		rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
+			RawRequest: rawReq,
+			Target: Target{
+				Hostname:  serverURL.Hostname(),
+				Port:      mustParsePort(t, serverURL.Port()),
+				UsesHTTPS: false,
+			},
+		})
+		require.NoError(t, err)
+
+		// Rules exist but didn't match — ModifiedRequest should be nil
+		assert.Nil(t, result.ModifiedRequest)
+	})
 }
 
 func TestNativeProxyBackend_Close(t *testing.T) {
@@ -438,7 +552,7 @@ func TestApplyRequestRules_header_literal(t *testing.T) {
 		Label:   "header-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: false,
-		Match:   "old-value",
+		Find:    "old-value",
 		Replace: "new-value",
 	})
 	require.NoError(t, err)
@@ -472,7 +586,7 @@ func TestApplyRequestRules_header_regex(t *testing.T) {
 		Label:   "regex-header-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: true,
-		Match:   `\d+`,
+		Find:    `\d+`,
 		Replace: "NUMBER",
 	})
 	require.NoError(t, err)
@@ -504,7 +618,7 @@ func TestApplyRequestRules_body_literal(t *testing.T) {
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: false,
-		Match:   "secret",
+		Find:    "secret",
 		Replace: "REDACTED",
 	})
 	require.NoError(t, err)
@@ -539,7 +653,7 @@ func TestApplyRequestRules_no_matching_rules(t *testing.T) {
 		Label:   "no-match-rule",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: false,
-		Match:   "nonexistent",
+		Find:    "nonexistent",
 		Replace: "replacement",
 	})
 	require.NoError(t, err)
@@ -571,7 +685,7 @@ func TestApplyResponseRules_header_literal(t *testing.T) {
 		Label:   "resp-header-rule",
 		Type:    RuleTypeResponseHeader,
 		IsRegex: false,
-		Match:   "Apache/2.4",
+		Find:    "Apache/2.4",
 		Replace: "Hidden",
 	})
 	require.NoError(t, err)
@@ -603,7 +717,7 @@ func TestApplyResponseRules_body_literal(t *testing.T) {
 		Label:   "resp-body-rule",
 		Type:    RuleTypeResponseBody,
 		IsRegex: false,
-		Match:   "internal-error-code-123",
+		Find:    "internal-error-code-123",
 		Replace: "error",
 	})
 	require.NoError(t, err)
@@ -637,7 +751,7 @@ func TestApplyResponseRules_compressed_body(t *testing.T) {
 		Label:   "compressed-body-rule",
 		Type:    RuleTypeResponseBody,
 		IsRegex: false,
-		Match:   "secret",
+		Find:    "secret",
 		Replace: "HIDDEN",
 	})
 	require.NoError(t, err)
@@ -678,7 +792,7 @@ func TestApplyResponseRules_unsupported_encoding_skips_rules(t *testing.T) {
 		Label:   "body-rule",
 		Type:    RuleTypeResponseBody,
 		IsRegex: false,
-		Match:   "test",
+		Find:    "test",
 		Replace: "MODIFIED",
 	})
 	require.NoError(t, err)
@@ -719,7 +833,7 @@ func TestApplyResponseRules_multiple_encoding_skips_rules(t *testing.T) {
 		Label:   "body-rule",
 		Type:    RuleTypeResponseBody,
 		IsRegex: false,
-		Match:   "test",
+		Find:    "test",
 		Replace: "MODIFIED",
 	})
 	require.NoError(t, err)
@@ -758,7 +872,7 @@ func TestApplyWSRules_to_server(t *testing.T) {
 		Label:   "ws-to-server-rule",
 		Type:    "ws:to-server",
 		IsRegex: false,
-		Match:   "client-secret",
+		Find:    "client-secret",
 		Replace: "REDACTED",
 	})
 	require.NoError(t, err)
@@ -786,7 +900,7 @@ func TestApplyWSRules_to_client(t *testing.T) {
 		Label:   "ws-to-client-rule",
 		Type:    "ws:to-client",
 		IsRegex: false,
-		Match:   "server-internal",
+		Find:    "server-internal",
 		Replace: "public",
 	})
 	require.NoError(t, err)
@@ -814,7 +928,7 @@ func TestApplyWSRules_both_directions(t *testing.T) {
 		Label:   "ws-both-rule",
 		Type:    "ws:both",
 		IsRegex: false,
-		Match:   "timestamp",
+		Find:    "timestamp",
 		Replace: "TS",
 	})
 	require.NoError(t, err)
@@ -841,7 +955,7 @@ func TestApplyWSRules_regex(t *testing.T) {
 		Label:   "ws-regex-rule",
 		Type:    "ws:both",
 		IsRegex: true,
-		Match:   `"id":\s*\d+`,
+		Find:    `"id":\s*\d+`,
 		Replace: `"id": 0`,
 	})
 	require.NoError(t, err)
@@ -859,7 +973,7 @@ func TestApplyMatchReplaceRule_literal(t *testing.T) {
 		ID:      "test",
 		Type:    RuleTypeRequestBody,
 		IsRegex: false,
-		Match:   "old",
+		Find:    "old",
 		Replace: "new",
 	}
 
@@ -879,7 +993,7 @@ func TestApplyMatchReplaceRule_regex(t *testing.T) {
 		ID:       "test",
 		Type:     RuleTypeRequestBody,
 		IsRegex:  true,
-		Match:    `\b\d{4}\b`,
+		Find:     `\b\d{4}\b`,
 		Replace:  "YEAR",
 		compiled: compiled,
 	}
@@ -897,7 +1011,7 @@ func TestApplyMatchReplaceRule_no_match(t *testing.T) {
 		ID:      "test",
 		Type:    RuleTypeRequestBody,
 		IsRegex: false,
-		Match:   "nonexistent",
+		Find:    "nonexistent",
 		Replace: "replacement",
 	}
 
@@ -978,7 +1092,7 @@ func TestApplyRequestRules_multiple_rules(t *testing.T) {
 		Label:   "rule1",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: false,
-		Match:   "AAA",
+		Find:    "AAA",
 		Replace: "BBB",
 	})
 	require.NoError(t, err)
@@ -987,7 +1101,7 @@ func TestApplyRequestRules_multiple_rules(t *testing.T) {
 		Label:   "rule2",
 		Type:    RuleTypeRequestHeader,
 		IsRegex: false,
-		Match:   "BBB",
+		Find:    "BBB",
 		Replace: "CCC",
 	})
 	require.NoError(t, err)
@@ -1019,7 +1133,7 @@ func TestApplyRequestRules_empty_body(t *testing.T) {
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: false,
-		Match:   "test",
+		Find:    "test",
 		Replace: "replaced",
 	})
 	require.NoError(t, err)
@@ -1052,7 +1166,7 @@ func TestApplyRequestRules_compressed_body(t *testing.T) {
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: false,
-		Match:   "secret",
+		Find:    "secret",
 		Replace: "HIDDEN",
 	})
 	require.NoError(t, err)
@@ -1095,7 +1209,7 @@ func TestApplyRequestBodyOnlyRules_compression(t *testing.T) {
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: false,
-		Match:   "token",
+		Find:    "token",
 		Replace: "REDACTED",
 	})
 	require.NoError(t, err)
@@ -1130,7 +1244,7 @@ func TestApplyRequestBodyOnlyRules_unsupported_encoding(t *testing.T) {
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: false,
-		Match:   "test",
+		Find:    "test",
 		Replace: "MODIFIED",
 	})
 	require.NoError(t, err)
@@ -1163,7 +1277,7 @@ func TestApplyRequestBodyOnlyRules_no_encoding(t *testing.T) {
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
 		IsRegex: false,
-		Match:   "original",
+		Find:    "original",
 		Replace: "modified",
 	})
 	require.NoError(t, err)

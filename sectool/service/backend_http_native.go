@@ -51,7 +51,7 @@ type nativeStoredRule struct {
 	Label   string `json:"label,omitempty" msgpack:"l,omitempty"`
 	Type    string `json:"type" msgpack:"t"`
 	IsRegex bool   `json:"is_regex" msgpack:"ir"`
-	Match   string `json:"match" msgpack:"m"`
+	Find    string `json:"find" msgpack:"f"`
 	Replace string `json:"replace" msgpack:"r"`
 
 	// compiled is the pre-compiled regex (nil if not a regex rule)
@@ -67,7 +67,7 @@ var _ ResponderBackend = (*NativeProxyBackend)(nil)
 // NewNativeProxyBackend creates a new native proxy backend.
 // Does NOT start serving - call Serve() separately (typically in a goroutine).
 // historyStorage is the storage backend for proxy history entries.
-// ruleStorage is the storage backend for persisting match/replace rules.
+// ruleStorage is the storage backend for persisting find/replace rules.
 // responderStorage is the storage backend for persisting proxy responders.
 func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, historyStorage store.Storage, ruleStorage store.Storage, responderStorage store.Storage, timeouts proxy.TimeoutConfig) (*NativeProxyBackend, error) {
 	server, err := proxy.NewProxyServer(port, configDir, maxBodyBytes, historyStorage, timeouts)
@@ -135,8 +135,8 @@ func (b *NativeProxyBackend) loadRuleList(key string) ([]nativeStoredRule, error
 	// Recompile regexes
 	for i := range rules {
 		if rules[i].IsRegex {
-			if rules[i].compiled, err = regexp.Compile(rules[i].Match); err != nil {
-				return nil, fmt.Errorf("invalid stored regex in rule %s (match=%q): %w", rules[i].ID, rules[i].Match, err)
+			if rules[i].compiled, err = regexp.Compile(rules[i].Find); err != nil {
+				return nil, fmt.Errorf("invalid stored regex in rule %s (find=%q): %w", rules[i].ID, rules[i].Find, err)
 			}
 		}
 	}
@@ -213,8 +213,22 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 		protocol = "http/1.1"
 	}
 
+	rawRequest := req.RawRequest
+
+	// Apply request rules: parse -> apply -> re-serialize
+	// If parse fails (intentionally malformed request), skip rules silently
+	if b.hasRequestRules() {
+		if parsed, parseErr := proxy.ParseRequest(bytes.NewReader(rawRequest)); parseErr == nil {
+			var buf bytes.Buffer
+			modified := b.ApplyRequestRules(parsed).SerializeRaw(&buf, false)
+			if !bytes.Equal(rawRequest, modified) {
+				rawRequest = modified
+			}
+		}
+	}
+
 	opts := proxy.SendOptions{
-		RawRequest: req.RawRequest,
+		RawRequest: rawRequest,
 		Target: proxy.Target{
 			Hostname:  req.Target.Hostname,
 			Port:      req.Target.Port,
@@ -228,6 +242,9 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 		JSONModifier: ModifyJSONBodyMap,
 		Timeouts:     b.timeouts,
 	}
+	if b.hasRequestRules() {
+		sender.RequestRuleApplier = b.ApplyRequestRules
+	}
 
 	var result *proxy.SendResult
 	var err error
@@ -240,11 +257,20 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 		return nil, err
 	}
 
+	// Response rules are NOT applied here, they modify browser-bound proxy traffic,
+	// not programmatic send results where the caller needs raw server responses
+
+	var modifiedRequest []byte
+	if !bytes.Equal(req.RawRequest, rawRequest) {
+		modifiedRequest = rawRequest
+	}
+
 	var buf bytes.Buffer
 	return &SendRequestResult{
-		Headers:  result.Response.SerializeHeaders(&buf),
-		Body:     result.Response.Body,
-		Duration: result.Duration,
+		Headers:         result.Response.SerializeHeaders(&buf),
+		Body:            result.Response.Body,
+		Duration:        result.Duration,
+		ModifiedRequest: modifiedRequest,
 	}, nil
 }
 
@@ -264,7 +290,7 @@ func (b *NativeProxyBackend) ListRules(ctx context.Context, websocket bool) ([]p
 			Label:   r.Label,
 			Type:    r.Type,
 			IsRegex: r.IsRegex,
-			Match:   r.Match,
+			Find:    r.Find,
 			Replace: r.Replace,
 		})
 	}
@@ -280,7 +306,7 @@ func (b *NativeProxyBackend) AddRule(ctx context.Context, input protocol.RuleEnt
 	var compiled *regexp.Regexp
 	if input.IsRegex {
 		var err error
-		compiled, err = regexp.Compile(input.Match)
+		compiled, err = regexp.Compile(input.Find)
 		if err != nil {
 			return nil, fmt.Errorf("invalid regex pattern: %w", err)
 		}
@@ -301,7 +327,7 @@ func (b *NativeProxyBackend) AddRule(ctx context.Context, input protocol.RuleEnt
 		Label:    input.Label,
 		Type:     input.Type,
 		IsRegex:  input.IsRegex,
-		Match:    input.Match,
+		Find:     input.Find,
 		Replace:  input.Replace,
 		compiled: compiled,
 	}
@@ -324,7 +350,7 @@ func (b *NativeProxyBackend) AddRule(ctx context.Context, input protocol.RuleEnt
 		Label:   rule.Label,
 		Type:    rule.Type,
 		IsRegex: rule.IsRegex,
-		Match:   rule.Match,
+		Find:    rule.Find,
 		Replace: rule.Replace,
 	}, nil
 }
@@ -356,6 +382,18 @@ func (b *NativeProxyBackend) DeleteRule(ctx context.Context, idOrLabel string) e
 	return ErrNotFound
 }
 
+// hasRequestRules returns true if any request header or body rules exist.
+func (b *NativeProxyBackend) hasRequestRules() bool {
+	b.rulesMu.RLock()
+	defer b.rulesMu.RUnlock()
+	for _, rule := range b.httpRules {
+		if rule.Type == RuleTypeRequestHeader || rule.Type == RuleTypeRequestBody {
+			return true
+		}
+	}
+	return false
+}
+
 // labelExists checks if a label is already in use. Caller must hold rulesMu.
 func (b *NativeProxyBackend) labelExists(label string) bool {
 	for _, r := range b.httpRules {
@@ -370,10 +408,6 @@ func (b *NativeProxyBackend) labelExists(label string) bool {
 	}
 	return false
 }
-
-// =============================================================================
-// RuleApplier Implementation
-// =============================================================================
 
 // ApplyRequestRules applies request header and body rules.
 // Rules are applied in the order they were added.
@@ -667,11 +701,11 @@ func applyBodyRulesWithCompression(body []byte, encoding string, rules []nativeS
 	return bodyRuleResult{body: modified, modified: true}
 }
 
-// applyMatchReplaceRule applies a single match/replace rule to data.
+// applyMatchReplaceRule applies a single find/replace rule to data.
 // caseInsensitive makes literal (non-regex) matching case-insensitive.
 func applyMatchReplaceRule(input []byte, rule nativeStoredRule, caseInsensitive bool) []byte {
-	// Empty match means "append" - add the replacement at the end
-	if rule.Match == "" {
+	// Empty find means "append" - add the replacement at the end
+	if rule.Find == "" {
 		// For headers, ensure proper line ending before appending
 		if len(input) > 0 && !bytes.HasSuffix(input, []byte("\r\n")) {
 			input = append(input, '\r', '\n')
@@ -681,15 +715,15 @@ func applyMatchReplaceRule(input []byte, rule nativeStoredRule, caseInsensitive 
 
 	if !rule.IsRegex {
 		if caseInsensitive {
-			return replaceCaseInsensitive(input, rule.Match, rule.Replace)
+			return replaceCaseInsensitive(input, rule.Find, rule.Replace)
 		}
-		return bytes.ReplaceAll(input, []byte(rule.Match), []byte(rule.Replace))
+		return bytes.ReplaceAll(input, []byte(rule.Find), []byte(rule.Replace))
 	}
 
 	re := rule.compiled
 	if re == nil {
 		var err error
-		re, err = regexp.Compile(rule.Match)
+		re, err = regexp.Compile(rule.Find)
 		if err != nil {
 			return input
 		}

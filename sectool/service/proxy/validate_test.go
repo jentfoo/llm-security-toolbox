@@ -990,7 +990,7 @@ func TestParseValidationIntegration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, err := parseRequest(strings.NewReader(tt.input))
+			req, err := ParseRequest(strings.NewReader(tt.input))
 
 			if tt.wantParse {
 				require.NoError(t, err)

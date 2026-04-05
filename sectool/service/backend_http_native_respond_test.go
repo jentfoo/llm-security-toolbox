@@ -254,7 +254,7 @@ func TestNativeProxyBackend_Responder_LabelUniqueness(t *testing.T) {
 	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
 		Label: "rule-label",
 		Type:  RuleTypeRequestHeader,
-		Match: "test",
+		Find:  "test",
 	})
 	require.NoError(t, err)
 

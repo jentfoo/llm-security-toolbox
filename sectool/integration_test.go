@@ -473,13 +473,13 @@ func TestIntegration_ProxyRules(t *testing.T) {
 				Type:    service.RuleTypeRequestHeader,
 				Label:   regexLabel,
 				IsRegex: true,
-				Match:   "^X-Old:.*$",
+				Find:    "^X-Old:.*$",
 				Replace: "X-New: replaced",
 			})
 			require.NoError(t, err)
 
 			assert.True(t, rule.IsRegex)
-			assert.Equal(t, "^X-Old:.*$", rule.Match)
+			assert.Equal(t, "^X-Old:.*$", rule.Find)
 
 			t.Cleanup(func() { _ = client.ProxyRuleDelete(context.Background(), rule.RuleID) })
 		})
@@ -1059,7 +1059,7 @@ func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
 				Type:    service.RuleTypeRequestHeader,
 				Label:   label,
 				IsRegex: true,
-				Match:   `User-Agent: .*`,
+				Find:    `User-Agent: .*`,
 				Replace: "User-Agent: Modified-By-Rule",
 			})
 			require.NoError(t, err)
@@ -1107,7 +1107,7 @@ func TestIntegration_RuleRequestBodyVerification(t *testing.T) {
 			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 				Type:    service.RuleTypeRequestBody,
 				Label:   label,
-				Match:   "ORIGINAL_VALUE",
+				Find:    "ORIGINAL_VALUE",
 				Replace: "MODIFIED_BY_RULE",
 			})
 			require.NoError(t, err)
@@ -1154,7 +1154,7 @@ func TestIntegration_RuleResponseHeaderVerification(t *testing.T) {
 			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 				Type:    service.RuleTypeResponseHeader,
 				Label:   label,
-				Match:   "X-Original-Header: original-value",
+				Find:    "X-Original-Header: original-value",
 				Replace: "X-Original-Header: modified-by-rule",
 			})
 			require.NoError(t, err)
@@ -1205,7 +1205,7 @@ func TestIntegration_RuleResponseBodyVerification(t *testing.T) {
 			rule, err := env.mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 				Type:    service.RuleTypeResponseBody,
 				Label:   label,
-				Match:   "SECRET_DATA",
+				Find:    "SECRET_DATA",
 				Replace: "REDACTED",
 			})
 			require.NoError(t, err)
@@ -1787,7 +1787,7 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 			Type:    service.RuleTypeRequestBody,
 			Label:   "h2-req-body-test",
-			Match:   "ORIGINAL_VALUE",
+			Find:    "ORIGINAL_VALUE",
 			Replace: "MODIFIED_BY_RULE",
 		})
 		require.NoError(t, err)
@@ -1817,7 +1817,7 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 			Type:    service.RuleTypeResponseHeader,
 			Label:   "h2-resp-header-test",
-			Match:   "X-Server-Secret: original-secret-value",
+			Find:    "X-Server-Secret: original-secret-value",
 			Replace: "X-Server-Secret: modified-by-proxy",
 		})
 		require.NoError(t, err)
@@ -1835,7 +1835,7 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 			Type:    service.RuleTypeResponseBody,
 			Label:   "h2-resp-body-test",
-			Match:   "SENSITIVE_DATA",
+			Find:    "SENSITIVE_DATA",
 			Replace: "REDACTED",
 		})
 		require.NoError(t, err)
@@ -2912,7 +2912,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 			Type:    service.RuleTypeWSToServer,
 			Label:   "test-ws-to-server",
-			Match:   "CLIENT_SECRET",
+			Find:    "CLIENT_SECRET",
 			Replace: "CLIENT_MODIFIED",
 		})
 		require.NoError(t, err)
@@ -2974,7 +2974,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 		rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 			Type:    service.RuleTypeWSToClient,
 			Label:   "test-ws-to-client",
-			Match:   "SERVER_SECRET",
+			Find:    "SERVER_SECRET",
 			Replace: "SERVER_MODIFIED",
 		})
 		require.NoError(t, err)
@@ -3831,7 +3831,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 			rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 				Type:    service.RuleTypeRequestBody,
 				Label:   label,
-				Match:   "SECRET_TOKEN",
+				Find:    "SECRET_TOKEN",
 				Replace: "REDACTED",
 			})
 			require.NoError(t, err)
@@ -3893,7 +3893,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 			rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 				Type:    service.RuleTypeRequestBody,
 				Label:   label,
-				Match:   "SHOULD_NOT_MATCH",
+				Find:    "SHOULD_NOT_MATCH",
 				Replace: "MODIFIED",
 			})
 			require.NoError(t, err)

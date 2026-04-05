@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,12 +97,24 @@ func (b *BurpBackend) GetProxyHistoryMeta(ctx context.Context, count int, offset
 }
 
 func (b *BurpBackend) SendRequest(ctx context.Context, name string, req SendRequestInput) (*SendRequestResult, error) {
-	return b.doSendRequest(ctx, name, req)
+	original := req.RawRequest
+	var firstHopRequest []byte
+
+	result, err := b.doSendRequest(ctx, name, req, &firstHopRequest)
+	if err != nil {
+		return nil, err
+	}
+	if len(firstHopRequest) > 0 && !bytes.Equal(original, firstHopRequest) {
+		result.ModifiedRequest = firstHopRequest
+	}
+	return result, nil
 }
 
 // doSendRequest builds a closure that creates a Repeater tab for every request
 // (including redirect hops) and sends via the appropriate protocol.
-func (b *BurpBackend) doSendRequest(ctx context.Context, name string, req SendRequestInput) (*SendRequestResult, error) {
+// Rules are applied per-hop inside the closure. firstHopRequest captures the
+// post-rule bytes of the initial request for ModifiedRequest tracking.
+func (b *BurpBackend) doSendRequest(ctx context.Context, name string, req SendRequestInput, firstHopRequest *[]byte) (*SendRequestResult, error) {
 	// Build descriptive tab name: st-domain/path [id]
 	reqPath := extractRequestPath(req.RawRequest)
 	if len(reqPath) > 8 {
@@ -124,8 +138,15 @@ func (b *BurpBackend) doSendRequest(ctx context.Context, name string, req SendRe
 	// Track redirect hop count for tab naming
 	var hopCount int
 
-	// Closure creates a Repeater tab and sends for every request including redirect hops
+	// Closure creates a Repeater tab and sends for every request including redirect hops.
+	// Rules are applied per-hop so redirect requests also get rule modifications.
 	sender := func(ctx context.Context, r SendRequestInput, start time.Time) (*SendRequestResult, error) {
+		if rules, err := b.ListRules(ctx, false); err == nil && len(rules) > 0 {
+			r.RawRequest = applyRequestRulesToRaw(r.RawRequest, rules)
+		}
+		if hopCount == 0 {
+			*firstHopRequest = r.RawRequest
+		}
 		tabName := fmt.Sprintf("st-%s%s [%s]", domain, reqPath, id)
 		if hopCount > 0 {
 			tabName = fmt.Sprintf("st-%s%s [%s R%d]", domain, reqPath, id, hopCount)
@@ -321,7 +342,7 @@ func (b *BurpBackend) ListRules(ctx context.Context, websocket bool) ([]protocol
 			Label:   label,
 			Type:    ruleType,
 			IsRegex: r.Category == mcp.RuleCategoryRegex,
-			Match:   r.StringMatch,
+			Find:    r.StringMatch,
 			Replace: r.StringReplace,
 		})
 	}
@@ -362,7 +383,7 @@ func (b *BurpBackend) AddRule(ctx context.Context, input protocol.RuleEntry) (*p
 		Comment:       formatSectoolComment(id, input.Label),
 		Enabled:       true,
 		RuleType:      ruleType,
-		StringMatch:   input.Match,
+		StringMatch:   input.Find,
 		StringReplace: input.Replace,
 	}
 	if input.IsRegex {
@@ -379,7 +400,7 @@ func (b *BurpBackend) AddRule(ctx context.Context, input protocol.RuleEntry) (*p
 		Label:   input.Label,
 		Type:    input.Type,
 		IsRegex: newRule.Category == mcp.RuleCategoryRegex,
-		Match:   input.Match,
+		Find:    input.Find,
 		Replace: input.Replace,
 	}, nil
 }
@@ -515,4 +536,75 @@ func parseSectoolComment(comment string) (id, label string, ok bool) {
 		label = parts[1]
 	}
 	return id, label, true
+}
+
+// applyRequestRulesToRaw applies protocol-level request rules to raw HTTP bytes.
+// Used by backends that read rules dynamically (e.g., Burp via MCP).
+// Returns the original bytes unchanged if parsing fails (intentionally malformed requests).
+func applyRequestRulesToRaw(rawRequest []byte, rules []protocol.RuleEntry) []byte {
+	var headerRules, bodyRules []nativeStoredRule
+	for _, r := range rules {
+		stored := nativeStoredRule{
+			Find:    r.Find,
+			Replace: r.Replace,
+			IsRegex: r.IsRegex,
+		}
+		if r.IsRegex {
+			compiled, err := regexp.Compile(r.Find)
+			if err != nil {
+				continue
+			}
+			stored.compiled = compiled
+		}
+		switch r.Type {
+		case RuleTypeRequestHeader:
+			headerRules = append(headerRules, stored)
+		case RuleTypeRequestBody:
+			bodyRules = append(bodyRules, stored)
+		}
+	}
+	if len(headerRules) == 0 && len(bodyRules) == 0 {
+		return rawRequest
+	}
+
+	parsed, err := proxy.ParseRequest(bytes.NewReader(rawRequest))
+	if err != nil {
+		return rawRequest
+	}
+
+	// Apply header rules (case-insensitive for HTTP header matching)
+	if len(headerRules) > 0 {
+		var headerBuf bytes.Buffer
+		for _, h := range parsed.Headers {
+			headerBuf.WriteString(h.Name)
+			headerBuf.WriteString(": ")
+			headerBuf.WriteString(h.Value)
+			headerBuf.WriteString("\r\n")
+		}
+		original := headerBuf.Bytes()
+		modified := original
+		for _, rule := range headerRules {
+			modified = applyMatchReplaceRule(modified, rule, true)
+		}
+		if !bytes.Equal(modified, original) {
+			parsed.Headers = parseHeadersFromText(modified)
+		}
+	}
+
+	// Apply body rules with compression handling
+	if len(bodyRules) > 0 && len(parsed.Body) > 0 {
+		encoding := parsed.GetHeader("Content-Encoding")
+		result := applyBodyRulesWithCompression(parsed.Body, encoding, bodyRules)
+		if result.modified && result.err == nil {
+			parsed.Body = result.body
+			parsed.SetHeader("Content-Length", strconv.Itoa(len(result.body)))
+		}
+	}
+
+	var buf bytes.Buffer
+	result := parsed.SerializeRaw(&buf, false)
+	if bytes.Equal(rawRequest, result) {
+		return rawRequest
+	}
+	return result
 }
