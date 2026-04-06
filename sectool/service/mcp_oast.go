@@ -298,7 +298,16 @@ func filterOastDetails(details map[string]interface{}, fields map[string]bool, e
 		}
 		if fields["headers"] {
 			if h, ok := details["headers"]; ok {
-				out["headers"] = h
+				// When target is also requested, strip the request line from headers
+				if fields["target"] {
+					if hs, ok := h.(string); ok {
+						if nl := strings.IndexAny(hs, "\r\n"); nl >= 0 {
+							out["headers"] = strings.TrimLeft(hs[nl:], "\r\n")
+						}
+					}
+				} else {
+					out["headers"] = h
+				}
 			}
 		}
 		if fields["body"] {

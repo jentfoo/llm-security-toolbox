@@ -137,6 +137,46 @@ func TestMCP_OastLifecycleWithMock(t *testing.T) {
 		assert.Nil(t, resp.Details["body"])
 	})
 
+	t.Run("get_fields_target_and_headers", func(t *testing.T) {
+		mockOast.events[oastID] = append(mockOast.events[oastID], OastEventInfo{
+			ID:   "event-target-and-headers",
+			Time: time.Now(),
+			Type: "http",
+			Details: map[string]interface{}{
+				"headers": "GET /callback HTTP/1.1\r\nHost: example.com\r\nAccept: */*",
+				"body":    "should be excluded",
+			},
+		})
+
+		resp := CallMCPToolJSONOK[protocol.OastEvent](t, mcpClient, "oast_get", map[string]interface{}{
+			"event_id": "event-target-and-headers",
+			"fields":   "target,headers",
+		})
+		assert.Equal(t, "GET /callback HTTP/1.1", resp.Details["target"])
+		assert.Equal(t, "Host: example.com\r\nAccept: */*", resp.Details["headers"])
+		assert.Nil(t, resp.Details["body"])
+	})
+
+	t.Run("get_fields_headers_only", func(t *testing.T) {
+		mockOast.events[oastID] = append(mockOast.events[oastID], OastEventInfo{
+			ID:   "event-headers-only",
+			Time: time.Now(),
+			Type: "http",
+			Details: map[string]interface{}{
+				"headers": "GET /callback HTTP/1.1\r\nHost: example.com",
+				"body":    "should be excluded",
+			},
+		})
+
+		resp := CallMCPToolJSONOK[protocol.OastEvent](t, mcpClient, "oast_get", map[string]interface{}{
+			"event_id": "event-headers-only",
+			"fields":   "headers",
+		})
+		assert.Nil(t, resp.Details["target"])
+		assert.Equal(t, "GET /callback HTTP/1.1\r\nHost: example.com", resp.Details["headers"])
+		assert.Nil(t, resp.Details["body"])
+	})
+
 	t.Run("get_fields_body_only", func(t *testing.T) {
 		mockOast.events[oastID] = append(mockOast.events[oastID], OastEventInfo{
 			ID:   "event-body-only",
