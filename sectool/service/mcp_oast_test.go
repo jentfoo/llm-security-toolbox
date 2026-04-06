@@ -163,6 +163,7 @@ func TestMCP_OastLifecycleWithMock(t *testing.T) {
 			Type: "smtp",
 			Details: map[string]interface{}{
 				"smtp_from": "sender@example.com",
+				"smtp_to":   "recipient@example.com",
 				"headers":   "From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: test",
 				"body":      "email body",
 			},
@@ -173,7 +174,7 @@ func TestMCP_OastLifecycleWithMock(t *testing.T) {
 			"fields":   "target",
 		})
 		assert.Equal(t, "sender@example.com", resp.Details["smtp_from"])
-		assert.Equal(t, []interface{}{"recipient@example.com"}, resp.Details["smtp_to"])
+		assert.Equal(t, "recipient@example.com", resp.Details["smtp_to"])
 		assert.Nil(t, resp.Details["headers"])
 		assert.Nil(t, resp.Details["body"])
 	})
@@ -185,6 +186,7 @@ func TestMCP_OastLifecycleWithMock(t *testing.T) {
 			Type: "smtp",
 			Details: map[string]interface{}{
 				"smtp_from": "sender@example.com",
+				"smtp_to":   "recipient@example.com",
 				"headers":   "From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: test",
 				"body":      "email body",
 			},

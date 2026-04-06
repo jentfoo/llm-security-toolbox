@@ -56,7 +56,7 @@ func (m *mcpServer) oastGetTool() mcp.Tool {
 	return mcp.NewTool("oast_get",
 		mcp.WithDescription("Get OAST event details: structured headers/body for HTTP/SMTP, query_type for DNS."),
 		mcp.WithString("event_id", mcp.Required(), mcp.Description("Event ID from oast_poll")),
-		mcp.WithString("fields", mcp.Description("Comma-separated filter (target, headers, body). target = request line (HTTP) or envelope from/to (SMTP). Default: all except target. DNS events ignore fields.")),
+		mcp.WithString("fields", mcp.Description("Comma-separated filter (target, headers, body). target = request line (HTTP) or SMTP envelope addresses (MAIL FROM / RCPT TO). Default: all except target. DNS events ignore fields.")),
 	)
 }
 
@@ -312,7 +312,10 @@ func filterOastDetails(details map[string]interface{}, fields map[string]bool, e
 			if v, ok := details["smtp_from"]; ok {
 				out["smtp_from"] = v
 			}
-			if h, ok := details["headers"].(string); ok {
+			if v, ok := details["smtp_to"]; ok {
+				out["smtp_to"] = v
+			} else if h, ok := details["headers"].(string); ok {
+				// Fallback for ProjectDiscovery/Interactsh servers that don't provide RCPT TO
 				if to := extractEmailTo(h); len(to) > 0 {
 					out["smtp_to"] = to
 				}

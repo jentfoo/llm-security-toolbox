@@ -225,6 +225,9 @@ func (b *InteractshBackend) handleInteraction(interaction *oobclient.Interaction
 		if interaction.SMTPFrom != "" {
 			details["smtp_from"] = interaction.SMTPFrom
 		}
+		if interaction.SMTPTo != "" {
+			details["smtp_to"] = interaction.SMTPTo
+		}
 		if interaction.RawRequest != "" {
 			h, b := splitHeadersBody([]byte(interaction.RawRequest))
 			details["headers"] = string(bytes.TrimRight(h, "\r\n"))

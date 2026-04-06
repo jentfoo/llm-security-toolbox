@@ -1028,6 +1028,7 @@ func TestHandleInteraction(t *testing.T) {
 			FullId:     testCorrelationID + "." + testNonce,
 			Protocol:   "SMTP",
 			SMTPFrom:   "sender@example.com",
+			SMTPTo:     "recipient@example.com",
 			RawRequest: "From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: test\r\n\r\nEmail body here",
 		})
 
@@ -1038,9 +1039,9 @@ func TestHandleInteraction(t *testing.T) {
 		e := sess.events[0]
 		assert.Equal(t, "smtp", e.Type)
 		assert.Equal(t, "sender@example.com", e.Details["smtp_from"])
+		assert.Equal(t, "recipient@example.com", e.Details["smtp_to"])
 		assert.Equal(t, "From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: test", e.Details["headers"])
 		assert.Equal(t, "Email body here", e.Details["body"])
-		assert.Nil(t, e.Details["smtp_to"])
 		assert.Nil(t, e.Details["raw_request"])
 	})
 
