@@ -7,12 +7,18 @@ import (
 	"compress/zlib"
 	"io"
 	"strings"
+
+	"github.com/andybalholm/brotli"
+	"github.com/go-analyze/bulk"
+	"github.com/klauspost/compress/zstd"
 )
 
 // Compression encoding constants
 const (
 	encodingGzip    = "gzip"
 	encodingDeflate = "deflate"
+	encodingBrotli  = "br"
+	encodingZstd    = "zstd"
 )
 
 // NormalizeEncoding normalizes a Content-Encoding header value.
@@ -33,6 +39,10 @@ func NormalizeEncoding(encoding string) (string, bool) {
 		return encodingGzip, true
 	case encodingDeflate:
 		return encodingDeflate, true
+	case encodingBrotli:
+		return encodingBrotli, true
+	case encodingZstd:
+		return encodingZstd, true
 	default:
 		return encoding, false
 	}
@@ -48,6 +58,8 @@ func NormalizeEncoding(encoding string) (string, bool) {
 // - Whitespace: " gzip " trimmed
 // - x-gzip alias: treated as gzip
 // - deflate: tries raw DEFLATE first, then zlib-wrapped
+// - br: Brotli decompression
+// - zstd: Zstandard decompression
 // - Multiple encodings (e.g., "gzip, br"): skipped (can't partially decode)
 func Decompress(data []byte, encoding string) ([]byte, bool) {
 	normalized, supported := NormalizeEncoding(encoding)
@@ -79,6 +91,25 @@ func Decompress(data []byte, encoding string) ([]byte, bool) {
 			return decompressed, true
 		}
 		return nil, true // compressed but failed
+
+	case encodingBrotli:
+		decompressed, err := io.ReadAll(brotli.NewReader(bytes.NewReader(data)))
+		if err != nil {
+			return nil, true // compressed but failed
+		}
+		return decompressed, true
+
+	case encodingZstd:
+		decoder, err := zstd.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, true // compressed but failed
+		}
+		defer decoder.Close()
+		decompressed, err := io.ReadAll(decoder)
+		if err != nil {
+			return nil, true // compressed but failed
+		}
+		return decompressed, true
 
 	default:
 		return data, false // not compressed
@@ -137,7 +168,51 @@ func Compress(data []byte, encoding string) ([]byte, error) {
 		}
 		return buf.Bytes(), nil
 
+	case encodingBrotli:
+		bw := brotli.NewWriter(&buf)
+		if _, err := bw.Write(data); err != nil {
+			_ = bw.Close()
+			return nil, err
+		} else if err := bw.Close(); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+
+	case encodingZstd:
+		encoder, err := zstd.NewWriter(&buf)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := encoder.Write(data); err != nil {
+			_ = encoder.Close()
+			return nil, err
+		}
+		if err := encoder.Close(); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+
 	default:
 		return data, nil
 	}
+}
+
+// FilterSupportedEncodings filters an Accept-Encoding header value to only include encodings the
+// proxy can decompress/recompress. Preserves quality values and ordering.
+// Falls back to all supported encodings when the input contains no encoding supported by the proxy.
+func FilterSupportedEncodings(acceptEncoding string) string {
+	supported := bulk.SliceFilterInPlace(func(part string) bool {
+		trimmed := strings.TrimSpace(part)
+		// Extract encoding name (before optional ;q= quality value)
+		name := trimmed
+		if idx := strings.IndexByte(trimmed, ';'); idx >= 0 {
+			name = strings.TrimSpace(trimmed[:idx])
+		}
+		_, supported := NormalizeEncoding(name)
+		return supported
+	}, strings.Split(acceptEncoding, ","))
+	if len(supported) == 0 {
+		return strings.Join([]string{encodingGzip, encodingDeflate, encodingBrotli, encodingZstd}, ", ")
+	}
+	return strings.Join(supported, ",")
 }

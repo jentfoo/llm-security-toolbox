@@ -540,324 +540,502 @@ func mustParsePort(t *testing.T, portStr string) int {
 // Rule Application Tests
 // =============================================================================
 
-func TestApplyRequestRules_header_literal(t *testing.T) {
+func TestApplyRequestRules(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
+	t.Run("header_literal", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	// Add header rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "header-rule",
-		Type:    RuleTypeRequestHeader,
-		IsRegex: false,
-		Find:    "old-value",
-		Replace: "new-value",
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "header-rule",
+			Type:    RuleTypeRequestHeader,
+			IsRegex: false,
+			Find:    "old-value",
+			Replace: "new-value",
+		})
+		require.NoError(t, err)
+
+		req := &proxy.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "X-Test", Value: "old-value"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		assert.Equal(t, "new-value", modified.GetHeader("X-Test"))
 	})
-	require.NoError(t, err)
 
-	// Create request with header containing "old-value"
-	req := &proxy.RawHTTP1Request{
-		Method:  "GET",
-		Path:    "/test",
-		Version: "HTTP/1.1",
-		Headers: []proxy.Header{
-			{Name: "Host", Value: "example.com"},
-			{Name: "X-Test", Value: "old-value"},
-		},
-	}
+	t.Run("header_regex", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	// Apply rules
-	modified := backend.ApplyRequestRules(req)
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "regex-header-rule",
+			Type:    RuleTypeRequestHeader,
+			IsRegex: true,
+			Find:    `\d+`,
+			Replace: "NUMBER",
+		})
+		require.NoError(t, err)
 
-	assert.Equal(t, "new-value", modified.GetHeader("X-Test"))
+		req := &proxy.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "X-ID", Value: "user-12345-session"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		assert.Equal(t, "user-NUMBER-session", modified.GetHeader("X-ID"))
+	})
+
+	t.Run("body_literal", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "body-rule",
+			Type:    RuleTypeRequestBody,
+			IsRegex: false,
+			Find:    "secret",
+			Replace: "REDACTED",
+		})
+		require.NoError(t, err)
+
+		req := &proxy.RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/api",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Content-Length", Value: "27"},
+			},
+			Body: []byte(`{"password":"secret123"}`),
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		assert.Contains(t, string(modified.Body), "REDACTED123")
+		// Content-Length should be updated
+		assert.Equal(t, "26", modified.GetHeader("Content-Length"))
+	})
+
+	t.Run("no_matching_rules", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "no-match-rule",
+			Type:    RuleTypeRequestHeader,
+			IsRegex: false,
+			Find:    "nonexistent",
+			Replace: "replacement",
+		})
+		require.NoError(t, err)
+
+		req := &proxy.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "X-Test", Value: "unchanged"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		assert.Equal(t, "unchanged", modified.GetHeader("X-Test"))
+	})
+
+	t.Run("strips_unsupported_accept_encoding", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "resp-body",
+			Type:    RuleTypeResponseBody,
+			Find:    "false",
+			Replace: "true",
+		})
+		require.NoError(t, err)
+
+		req := &proxy.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Accept-Encoding", Value: "gzip, deflate, br, zstd, snappy"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		// snappy should be stripped; gzip, deflate, br, zstd are supported
+		assert.Equal(t, "gzip, deflate, br, zstd", modified.GetHeader("Accept-Encoding"))
+	})
+
+	t.Run("preserves_accept_encoding", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "req-header-only",
+			Type:    RuleTypeRequestHeader,
+			Replace: "X-Test: value",
+		})
+		require.NoError(t, err)
+
+		req := &proxy.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Accept-Encoding", Value: "gzip, deflate, br, snappy"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		// No response body rules, Accept-Encoding left as-is
+		assert.Equal(t, "gzip, deflate, br, snappy", modified.GetHeader("Accept-Encoding"))
+	})
+
+	t.Run("multiple_rules", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		// Add multiple rules - they should apply in order
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "rule1",
+			Type:    RuleTypeRequestHeader,
+			IsRegex: false,
+			Find:    "AAA",
+			Replace: "BBB",
+		})
+		require.NoError(t, err)
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "rule2",
+			Type:    RuleTypeRequestHeader,
+			IsRegex: false,
+			Find:    "BBB",
+			Replace: "CCC",
+		})
+		require.NoError(t, err)
+
+		req := &proxy.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "X-Test", Value: "AAA"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		// AAA -> BBB -> CCC (both rules should apply in sequence)
+		assert.Equal(t, "CCC", modified.GetHeader("X-Test"))
+	})
+
+	t.Run("empty_body", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "body-rule",
+			Type:    RuleTypeRequestBody,
+			IsRegex: false,
+			Find:    "test",
+			Replace: "replaced",
+		})
+		require.NoError(t, err)
+
+		// Request with no body
+		req := &proxy.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+			},
+		}
+
+		// Should not panic or error with empty body
+		modified := backend.ApplyRequestRules(req)
+
+		assert.Empty(t, modified.Body)
+	})
+
+	t.Run("compressed_body", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "body-rule",
+			Type:    RuleTypeRequestBody,
+			IsRegex: false,
+			Find:    "secret",
+			Replace: "HIDDEN",
+		})
+		require.NoError(t, err)
+
+		// Create gzip-compressed request body
+		originalBody := []byte(`{"password":"secret123"}`)
+		compressedBody, err := proxy.Compress(originalBody, "gzip")
+		require.NoError(t, err)
+
+		req := &proxy.RawHTTP1Request{
+			Method:  "POST",
+			Path:    "/api",
+			Version: "HTTP/1.1",
+			Headers: []proxy.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Content-Encoding", Value: "gzip"},
+				{Name: "Content-Length", Value: strconv.Itoa(len(compressedBody))},
+			},
+			Body: compressedBody,
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		// Decompress and verify the rule was applied
+		decompressed, wasCompressed := proxy.Decompress(modified.Body, "gzip")
+		assert.True(t, wasCompressed)
+		assert.Contains(t, string(decompressed), "HIDDEN123")
+		assert.NotContains(t, string(decompressed), "secret")
+	})
 }
 
-func TestApplyRequestRules_header_regex(t *testing.T) {
+func TestApplyResponseRules(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
+	t.Run("header_literal", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	// Add regex header rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "regex-header-rule",
-		Type:    RuleTypeRequestHeader,
-		IsRegex: true,
-		Find:    `\d+`,
-		Replace: "NUMBER",
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "resp-header-rule",
+			Type:    RuleTypeResponseHeader,
+			IsRegex: false,
+			Find:    "Apache/2.4",
+			Replace: "Hidden",
+		})
+		require.NoError(t, err)
+
+		resp := &proxy.RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []proxy.Header{
+				{Name: "Server", Value: "Apache/2.4"},
+				{Name: "Content-Type", Value: "text/html"},
+			},
+		}
+
+		modified := backend.ApplyResponseRules(resp)
+
+		assert.Equal(t, "Hidden", modified.GetHeader("Server"))
 	})
-	require.NoError(t, err)
 
-	req := &proxy.RawHTTP1Request{
-		Method:  "GET",
-		Path:    "/test",
-		Version: "HTTP/1.1",
-		Headers: []proxy.Header{
-			{Name: "Host", Value: "example.com"},
-			{Name: "X-ID", Value: "user-12345-session"},
-		},
-	}
+	t.Run("body_literal", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	modified := backend.ApplyRequestRules(req)
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "resp-body-rule",
+			Type:    RuleTypeResponseBody,
+			IsRegex: false,
+			Find:    "internal-error-code-123",
+			Replace: "error",
+		})
+		require.NoError(t, err)
 
-	assert.Equal(t, "user-NUMBER-session", modified.GetHeader("X-ID"))
-}
+		resp := &proxy.RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 500,
+			StatusText: "Internal Server Error",
+			Headers: []proxy.Header{
+				{Name: "Content-Type", Value: "text/plain"},
+				{Name: "Content-Length", Value: "35"},
+			},
+			Body: []byte("Error: internal-error-code-123 here"),
+		}
 
-func TestApplyRequestRules_body_literal(t *testing.T) {
-	t.Parallel()
+		modified := backend.ApplyResponseRules(resp)
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add body rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "body-rule",
-		Type:    RuleTypeRequestBody,
-		IsRegex: false,
-		Find:    "secret",
-		Replace: "REDACTED",
+		assert.Equal(t, "Error: error here", string(modified.Body))
+		assert.Equal(t, "17", modified.GetHeader("Content-Length"))
 	})
-	require.NoError(t, err)
 
-	req := &proxy.RawHTTP1Request{
-		Method:  "POST",
-		Path:    "/api",
-		Version: "HTTP/1.1",
-		Headers: []proxy.Header{
-			{Name: "Host", Value: "example.com"},
-			{Name: "Content-Length", Value: "27"},
-		},
-		Body: []byte(`{"password":"secret123"}`),
-	}
+	t.Run("compressed_body", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	modified := backend.ApplyRequestRules(req)
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "compressed-body-rule",
+			Type:    RuleTypeResponseBody,
+			IsRegex: false,
+			Find:    "secret",
+			Replace: "HIDDEN",
+		})
+		require.NoError(t, err)
 
-	assert.Contains(t, string(modified.Body), "REDACTED123")
-	// Content-Length should be updated
-	assert.Equal(t, "26", modified.GetHeader("Content-Length"))
-}
+		// Create gzip-compressed body
+		originalBody := []byte("The secret data is here")
+		compressedBody, err := proxy.Compress(originalBody, "gzip")
+		require.NoError(t, err)
 
-func TestApplyRequestRules_no_matching_rules(t *testing.T) {
-	t.Parallel()
+		resp := &proxy.RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []proxy.Header{
+				{Name: "Content-Encoding", Value: "gzip"},
+				{Name: "Content-Length", Value: strconv.Itoa(len(compressedBody))},
+			},
+			Body: compressedBody,
+		}
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
+		modified := backend.ApplyResponseRules(resp)
 
-	// Add rule that won't match
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "no-match-rule",
-		Type:    RuleTypeRequestHeader,
-		IsRegex: false,
-		Find:    "nonexistent",
-		Replace: "replacement",
+		// Decompress the result to verify
+		decompressed, wasCompressed := proxy.Decompress(modified.Body, "gzip")
+		assert.True(t, wasCompressed)
+		assert.Equal(t, "The HIDDEN data is here", string(decompressed))
 	})
-	require.NoError(t, err)
 
-	req := &proxy.RawHTTP1Request{
-		Method:  "GET",
-		Path:    "/test",
-		Version: "HTTP/1.1",
-		Headers: []proxy.Header{
-			{Name: "Host", Value: "example.com"},
-			{Name: "X-Test", Value: "unchanged"},
-		},
-	}
+	t.Run("brotli_body", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	modified := backend.ApplyRequestRules(req)
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "brotli-body-rule",
+			Type:    RuleTypeResponseBody,
+			IsRegex: false,
+			Find:    "false",
+			Replace: "true",
+		})
+		require.NoError(t, err)
 
-	assert.Equal(t, "unchanged", modified.GetHeader("X-Test"))
-}
+		originalBody := []byte(`{"admin": false}`)
+		compressedBody, err := proxy.Compress(originalBody, "br")
+		require.NoError(t, err)
 
-func TestApplyResponseRules_header_literal(t *testing.T) {
-	t.Parallel()
+		resp := &proxy.RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []proxy.Header{
+				{Name: "Content-Encoding", Value: "br"},
+				{Name: "Content-Length", Value: strconv.Itoa(len(compressedBody))},
+			},
+			Body: compressedBody,
+		}
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
+		modified := backend.ApplyResponseRules(resp)
 
-	// Add response header rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "resp-header-rule",
-		Type:    RuleTypeResponseHeader,
-		IsRegex: false,
-		Find:    "Apache/2.4",
-		Replace: "Hidden",
+		decompressed, wasCompressed := proxy.Decompress(modified.Body, "br")
+		assert.True(t, wasCompressed)
+		assert.Equal(t, `{"admin": true}`, string(decompressed))
 	})
-	require.NoError(t, err)
 
-	resp := &proxy.RawHTTP1Response{
-		Version:    "HTTP/1.1",
-		StatusCode: 200,
-		StatusText: "OK",
-		Headers: []proxy.Header{
-			{Name: "Server", Value: "Apache/2.4"},
-			{Name: "Content-Type", Value: "text/html"},
-		},
-	}
+	t.Run("invalid_brotli_skips_rules", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	modified := backend.ApplyResponseRules(resp)
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "body-rule",
+			Type:    RuleTypeResponseBody,
+			IsRegex: false,
+			Find:    "test",
+			Replace: "MODIFIED",
+		})
+		require.NoError(t, err)
 
-	assert.Equal(t, "Hidden", modified.GetHeader("Server"))
-}
+		// Invalid brotli data - decompression should fail, body unchanged
+		fakeCompressed := []byte{0x1b, 0x03, 0x00, 0xf8, 0xff}
+		originalBody := make([]byte, len(fakeCompressed))
+		copy(originalBody, fakeCompressed)
 
-func TestApplyResponseRules_body_literal(t *testing.T) {
-	t.Parallel()
+		resp := &proxy.RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []proxy.Header{
+				{Name: "Content-Encoding", Value: "br"},
+				{Name: "Content-Length", Value: strconv.Itoa(len(fakeCompressed))},
+			},
+			Body: fakeCompressed,
+		}
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
+		modified := backend.ApplyResponseRules(resp)
 
-	// Add response body rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "resp-body-rule",
-		Type:    RuleTypeResponseBody,
-		IsRegex: false,
-		Find:    "internal-error-code-123",
-		Replace: "error",
+		assert.Equal(t, originalBody, modified.Body)
 	})
-	require.NoError(t, err)
 
-	resp := &proxy.RawHTTP1Response{
-		Version:    "HTTP/1.1",
-		StatusCode: 500,
-		StatusText: "Internal Server Error",
-		Headers: []proxy.Header{
-			{Name: "Content-Type", Value: "text/plain"},
-			{Name: "Content-Length", Value: "35"},
-		},
-		Body: []byte("Error: internal-error-code-123 here"),
-	}
+	t.Run("multiple_encoding_skips_rules", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	modified := backend.ApplyResponseRules(resp)
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "body-rule",
+			Type:    RuleTypeResponseBody,
+			IsRegex: false,
+			Find:    "test",
+			Replace: "MODIFIED",
+		})
+		require.NoError(t, err)
 
-	assert.Equal(t, "Error: error here", string(modified.Body))
-	assert.Equal(t, "17", modified.GetHeader("Content-Length"))
-}
+		// Multiple encodings should be skipped
+		fakeBody := []byte("some test data")
+		originalBody := make([]byte, len(fakeBody))
+		copy(originalBody, fakeBody)
 
-func TestApplyResponseRules_compressed_body(t *testing.T) {
-	t.Parallel()
+		resp := &proxy.RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []proxy.Header{
+				{Name: "Content-Encoding", Value: "gzip, br"},
+				{Name: "Content-Length", Value: strconv.Itoa(len(fakeBody))},
+			},
+			Body: fakeBody,
+		}
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
+		modified := backend.ApplyResponseRules(resp)
 
-	// Add response body rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "compressed-body-rule",
-		Type:    RuleTypeResponseBody,
-		IsRegex: false,
-		Find:    "secret",
-		Replace: "HIDDEN",
+		// Body should be unchanged since multiple encodings are unsupported
+		assert.Equal(t, originalBody, modified.Body)
 	})
-	require.NoError(t, err)
-
-	// Create gzip-compressed body
-	originalBody := []byte("The secret data is here")
-	compressedBody, err := proxy.Compress(originalBody, "gzip")
-	require.NoError(t, err)
-
-	resp := &proxy.RawHTTP1Response{
-		Version:    "HTTP/1.1",
-		StatusCode: 200,
-		StatusText: "OK",
-		Headers: []proxy.Header{
-			{Name: "Content-Encoding", Value: "gzip"},
-			{Name: "Content-Length", Value: strconv.Itoa(len(compressedBody))},
-		},
-		Body: compressedBody,
-	}
-
-	modified := backend.ApplyResponseRules(resp)
-
-	// Decompress the result to verify
-	decompressed, wasCompressed := proxy.Decompress(modified.Body, "gzip")
-	assert.True(t, wasCompressed)
-	assert.Equal(t, "The HIDDEN data is here", string(decompressed))
-}
-
-func TestApplyResponseRules_unsupported_encoding_skips_rules(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add response body rule that would corrupt brotli if applied
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "body-rule",
-		Type:    RuleTypeResponseBody,
-		IsRegex: false,
-		Find:    "test",
-		Replace: "MODIFIED",
-	})
-	require.NoError(t, err)
-
-	// Simulate brotli-compressed body (unsupported encoding)
-	fakeCompressed := []byte{0x1b, 0x03, 0x00, 0xf8, 0xff} // invalid brotli
-	originalBody := make([]byte, len(fakeCompressed))
-	copy(originalBody, fakeCompressed)
-
-	resp := &proxy.RawHTTP1Response{
-		Version:    "HTTP/1.1",
-		StatusCode: 200,
-		StatusText: "OK",
-		Headers: []proxy.Header{
-			{Name: "Content-Encoding", Value: "br"},
-			{Name: "Content-Length", Value: strconv.Itoa(len(fakeCompressed))},
-		},
-		Body: fakeCompressed,
-	}
-
-	modified := backend.ApplyResponseRules(resp)
-
-	// Body should be unchanged since br is unsupported
-	assert.Equal(t, originalBody, modified.Body)
-	// Content-Encoding should still be present
-	assert.Equal(t, "br", modified.GetHeader("Content-Encoding"))
-}
-
-func TestApplyResponseRules_multiple_encoding_skips_rules(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add response body rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "body-rule",
-		Type:    RuleTypeResponseBody,
-		IsRegex: false,
-		Find:    "test",
-		Replace: "MODIFIED",
-	})
-	require.NoError(t, err)
-
-	// Multiple encodings should be skipped
-	fakeBody := []byte("some test data")
-	originalBody := make([]byte, len(fakeBody))
-	copy(originalBody, fakeBody)
-
-	resp := &proxy.RawHTTP1Response{
-		Version:    "HTTP/1.1",
-		StatusCode: 200,
-		StatusText: "OK",
-		Headers: []proxy.Header{
-			{Name: "Content-Encoding", Value: "gzip, br"},
-			{Name: "Content-Length", Value: strconv.Itoa(len(fakeBody))},
-		},
-		Body: fakeBody,
-	}
-
-	modified := backend.ApplyResponseRules(resp)
-
-	// Body should be unchanged since multiple encodings are unsupported
-	assert.Equal(t, originalBody, modified.Body)
 }
 
 func TestApplyWSRules_to_server(t *testing.T) {
@@ -1085,123 +1263,6 @@ func TestParseHeadersFromText(t *testing.T) {
 	}
 }
 
-func TestApplyRequestRules_multiple_rules(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add multiple rules - they should apply in order
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "rule1",
-		Type:    RuleTypeRequestHeader,
-		IsRegex: false,
-		Find:    "AAA",
-		Replace: "BBB",
-	})
-	require.NoError(t, err)
-
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "rule2",
-		Type:    RuleTypeRequestHeader,
-		IsRegex: false,
-		Find:    "BBB",
-		Replace: "CCC",
-	})
-	require.NoError(t, err)
-
-	req := &proxy.RawHTTP1Request{
-		Method:  "GET",
-		Path:    "/test",
-		Version: "HTTP/1.1",
-		Headers: []proxy.Header{
-			{Name: "X-Test", Value: "AAA"},
-		},
-	}
-
-	modified := backend.ApplyRequestRules(req)
-
-	// AAA -> BBB -> CCC (both rules should apply in sequence)
-	assert.Equal(t, "CCC", modified.GetHeader("X-Test"))
-}
-
-func TestApplyRequestRules_empty_body(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add body rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "body-rule",
-		Type:    RuleTypeRequestBody,
-		IsRegex: false,
-		Find:    "test",
-		Replace: "replaced",
-	})
-	require.NoError(t, err)
-
-	// Request with no body
-	req := &proxy.RawHTTP1Request{
-		Method:  "GET",
-		Path:    "/test",
-		Version: "HTTP/1.1",
-		Headers: []proxy.Header{
-			{Name: "Host", Value: "example.com"},
-		},
-	}
-
-	// Should not panic or error with empty body
-	modified := backend.ApplyRequestRules(req)
-
-	assert.Empty(t, modified.Body)
-}
-
-func TestApplyRequestRules_compressed_body(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add body rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "body-rule",
-		Type:    RuleTypeRequestBody,
-		IsRegex: false,
-		Find:    "secret",
-		Replace: "HIDDEN",
-	})
-	require.NoError(t, err)
-
-	// Create gzip-compressed request body
-	originalBody := []byte(`{"password":"secret123"}`)
-	compressedBody, err := proxy.Compress(originalBody, "gzip")
-	require.NoError(t, err)
-
-	req := &proxy.RawHTTP1Request{
-		Method:  "POST",
-		Path:    "/api",
-		Version: "HTTP/1.1",
-		Headers: []proxy.Header{
-			{Name: "Host", Value: "example.com"},
-			{Name: "Content-Encoding", Value: "gzip"},
-			{Name: "Content-Length", Value: strconv.Itoa(len(compressedBody))},
-		},
-		Body: compressedBody,
-	}
-
-	modified := backend.ApplyRequestRules(req)
-
-	// Decompress and verify the rule was applied
-	decompressed, wasCompressed := proxy.Decompress(modified.Body, "gzip")
-	assert.True(t, wasCompressed)
-	assert.Contains(t, string(decompressed), "HIDDEN123")
-	assert.NotContains(t, string(decompressed), "secret")
-}
-
 func TestApplyRequestBodyOnlyRules_compression(t *testing.T) {
 	t.Parallel()
 
@@ -1237,14 +1298,13 @@ func TestApplyRequestBodyOnlyRules_compression(t *testing.T) {
 	assert.Contains(t, string(decompressed), "REDACTED123")
 }
 
-func TestApplyRequestBodyOnlyRules_unsupported_encoding(t *testing.T) {
+func TestApplyRequestBodyOnlyRules_invalid_compressed(t *testing.T) {
 	t.Parallel()
 
 	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
-	// Add body rule that would corrupt brotli if applied
 	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
 		Label:   "body-rule",
 		Type:    RuleTypeRequestBody,
@@ -1254,7 +1314,7 @@ func TestApplyRequestBodyOnlyRules_unsupported_encoding(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Fake brotli-compressed body (unsupported encoding)
+	// Invalid brotli data - decompression fails, body unchanged
 	fakeCompressed := []byte{0x1b, 0x03, 0x00, 0xf8, 0xff}
 	originalBody := make([]byte, len(fakeCompressed))
 	copy(originalBody, fakeCompressed)
@@ -1265,8 +1325,6 @@ func TestApplyRequestBodyOnlyRules_unsupported_encoding(t *testing.T) {
 
 	modified, modErr := backend.ApplyRequestBodyOnlyRules(fakeCompressed, headers)
 	require.NoError(t, modErr)
-
-	// Body should be unchanged since br is unsupported
 	assert.Equal(t, originalBody, modified)
 }
 

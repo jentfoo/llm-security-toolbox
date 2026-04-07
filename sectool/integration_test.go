@@ -3896,7 +3896,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 		})
 
 		t.Run("unsupported_encoding_skips_rules", func(t *testing.T) {
-			label := "br-req-body-test-" + strconv.FormatInt(rand.Int63(), 10)
+			label := "compress-req-body-test-" + strconv.FormatInt(rand.Int63(), 10)
 			rule, err := mcpClient.ProxyRuleAdd(t.Context(), mcpclient.RuleAddOpts{
 				Type:    service.RuleTypeRequestBody,
 				Label:   label,
@@ -3914,7 +3914,6 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 				<-receivedEncoding
 			}
 
-			// Create fake brotli body (just raw bytes, not real brotli)
 			fakeBody := []byte("SHOULD_NOT_MATCH - raw data")
 
 			// Send through proxy
@@ -3924,7 +3923,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 			}
 
 			req, _ := http.NewRequest("POST", testServer.URL+"/test", bytes.NewReader(fakeBody))
-			req.Header.Set("Content-Encoding", "br") // unsupported
+			req.Header.Set("Content-Encoding", "compress") // unsupported encoding
 			req.Header.Set("Content-Type", "application/octet-stream")
 
 			resp, err := client.Do(req)
@@ -3935,8 +3934,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 			select {
 			case body := <-receivedBody:
 				encoding := <-receivedEncoding
-				assert.Equal(t, "br", encoding, "Content-Encoding should be preserved")
-				// Body should be unchanged since we can't decompress brotli
+				assert.Equal(t, "compress", encoding, "Content-Encoding should be preserved")
 				assert.Equal(t, fakeBody, body)
 			case <-time.After(5 * time.Second):
 				t.Fatal("target server didn't receive request")

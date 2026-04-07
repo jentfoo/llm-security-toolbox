@@ -1939,7 +1939,7 @@ func TestDecompressForDisplay(t *testing.T) {
 		{
 			name:             "unsupported_encoding_passthrough",
 			body:             []byte{0x1f, 0x8b}, // looks like gzip magic but invalid
-			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\n\r\n",
+			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: compress\r\n\r\n",
 			wantBody:         string([]byte{0x1f, 0x8b}),
 			wantDecompressed: false,
 		},
@@ -2290,9 +2290,23 @@ func TestCompressBody(t *testing.T) {
 			wantFailed:   false,
 		},
 		{
+			name:         "brotli_compress",
+			body:         []byte("Brotli test content"),
+			encoding:     "br",
+			wantCompress: true,
+			wantFailed:   false,
+		},
+		{
+			name:         "zstd_compress",
+			body:         []byte("Zstd test content"),
+			encoding:     "zstd",
+			wantCompress: true,
+			wantFailed:   false,
+		},
+		{
 			name:         "unsupported_encoding_passthrough",
 			body:         []byte("Plain text"),
-			encoding:     "br",
+			encoding:     "compress",
 			wantCompress: false,
 			wantFailed:   false,
 		},

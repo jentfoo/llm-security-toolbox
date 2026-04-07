@@ -411,17 +411,22 @@ func (b *NativeProxyBackend) labelExists(label string) bool {
 
 // ApplyRequestRules applies request header and body rules.
 // Rules are applied in the order they were added.
+// When response body rules are active, strips unsupported encodings
+// from Accept-Encoding so the server responds with an encoding we can decompress.
 func (b *NativeProxyBackend) ApplyRequestRules(req *proxy.RawHTTP1Request) *proxy.RawHTTP1Request {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
 	var headerRules, bodyRules []nativeStoredRule
+	var hasRespBodyRules bool
 	for _, rule := range b.httpRules {
 		switch rule.Type {
 		case RuleTypeRequestHeader:
 			headerRules = append(headerRules, rule)
 		case RuleTypeRequestBody:
 			bodyRules = append(bodyRules, rule)
+		case RuleTypeResponseBody:
+			hasRespBodyRules = true
 		}
 	}
 
@@ -433,6 +438,15 @@ func (b *NativeProxyBackend) ApplyRequestRules(req *proxy.RawHTTP1Request) *prox
 	// Apply body rules
 	if len(bodyRules) > 0 && len(req.Body) > 0 {
 		req = b.applyRequestBodyRules(req, bodyRules)
+	}
+
+	// Ensure server responds with an encoding we can decompress for body rules
+	if hasRespBodyRules {
+		if ae := req.GetHeader("Accept-Encoding"); ae != "" {
+			if filtered := proxy.FilterSupportedEncodings(ae); filtered != ae {
+				req.SetHeader("Accept-Encoding", filtered)
+			}
+		}
 	}
 
 	return req

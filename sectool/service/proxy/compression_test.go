@@ -7,6 +7,8 @@ import (
 	"compress/zlib"
 	"testing"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,7 +30,8 @@ func TestNormalizeEncoding(t *testing.T) {
 		{"deflate", "deflate", "deflate", true},
 		{"deflate_uppercase", "DEFLATE", "deflate", true},
 		{"identity", "identity", "identity", false},
-		{"brotli_unsupported", "br", "br", false},
+		{"brotli", "br", "br", true},
+		{"brotli_uppercase", "BR", "br", true},
 		{"empty", "", "", false},
 		{"multiple_encodings", "gzip, br", "", false},
 		{"x_gzip_uppercase", "X-GZIP", "gzip", true},
@@ -37,7 +40,8 @@ func TestNormalizeEncoding(t *testing.T) {
 		{"newline_in_encoding", "\ngzip\n", "gzip", true},
 		{"encoding_with_numbers", "gzip123", "gzip123", false},
 		{"encoding_with_special", "gzip-variant", "gzip-variant", false},
-		{"zstd_unsupported", "zstd", "zstd", false},
+		{"zstd", "zstd", "zstd", true},
+		{"zstd_uppercase", "ZSTD", "zstd", true},
 		{"compress_unsupported", "compress", "compress", false},
 		{"only_whitespace", "   ", "", false},
 		{"leading_zeros", "0gzip", "0gzip", false},
@@ -137,6 +141,34 @@ func TestDecompress(t *testing.T) {
 				wantData:       []byte("Zlib Wrapped"),
 				wantCompressed: true,
 			},
+			{
+				name:           "brotli",
+				data:           brotliBytes(t, []byte("Hello, Brotli!")),
+				encoding:       "br",
+				wantData:       []byte("Hello, Brotli!"),
+				wantCompressed: true,
+			},
+			{
+				name:           "brotli_uppercase",
+				data:           brotliBytes(t, []byte("Upper Brotli")),
+				encoding:       "BR",
+				wantData:       []byte("Upper Brotli"),
+				wantCompressed: true,
+			},
+			{
+				name:           "zstd",
+				data:           zstdBytes(t, []byte("Hello, Zstandard!")),
+				encoding:       "zstd",
+				wantData:       []byte("Hello, Zstandard!"),
+				wantCompressed: true,
+			},
+			{
+				name:           "zstd_uppercase",
+				data:           zstdBytes(t, []byte("Upper Zstd")),
+				encoding:       "ZSTD",
+				wantData:       []byte("Upper Zstd"),
+				wantCompressed: true,
+			},
 		}
 
 		for _, tt := range tests {
@@ -155,7 +187,6 @@ func TestDecompress(t *testing.T) {
 			data     []byte
 			encoding string
 		}{
-			{"brotli", []byte("plain text"), "br"},
 			{"empty", []byte("plain text"), ""},
 			{"identity", []byte("plain text"), "identity"},
 			{"multiple_encodings", gzipBytes(t, []byte("Multi")), "gzip, br"},
@@ -187,6 +218,9 @@ func TestDecompress(t *testing.T) {
 			{"deflate_empty_data", []byte{}, "deflate"},
 			{"gzip_corrupted_middle", append(gzipBytes(t, []byte("Hello"))[:8], []byte{0xFF, 0xFF, 0xFF}...), "gzip"},
 			{"deflate_partial_zlib_header", []byte{0x78, 0x9C, 0xFF}, "deflate"},
+			{"brotli_invalid", []byte("not brotli data"), "br"},
+			{"brotli_empty_data", []byte{}, "br"},
+			{"zstd_invalid", []byte("not zstd data"), "zstd"},
 		}
 
 		for _, tt := range tests {
@@ -215,6 +249,8 @@ func TestCompress(t *testing.T) {
 			{"deflate_empty_body", []byte{}, "deflate"},
 			{"x_gzip", []byte("X-Gzip Test"), "x-gzip"},
 			{"x_gzip_uppercase", []byte("X-GZIP Test"), "X-GZIP"},
+			{"brotli", []byte("Hello, World!"), "br"},
+			{"zstd", []byte("Hello, World!"), "zstd"},
 		}
 
 		for _, tt := range tests {
@@ -234,7 +270,6 @@ func TestCompress(t *testing.T) {
 			encoding string
 		}{
 			{"unknown", []byte("plain text data"), "unknown"},
-			{"brotli", []byte("plain text"), "br"},
 			{"empty", []byte("plain text"), ""},
 		}
 
@@ -260,6 +295,12 @@ func TestCompress(t *testing.T) {
 			{"deflate_binary_data", []byte{0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE}, "deflate"},
 			{"gzip_large_data", bytes.Repeat([]byte("x"), 10000), "gzip"},
 			{"deflate_large_data", bytes.Repeat([]byte("y"), 10000), "deflate"},
+			{"brotli", []byte("Hello, World! This is test data for compression."), "br"},
+			{"brotli_binary_data", []byte{0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE}, "br"},
+			{"brotli_large_data", bytes.Repeat([]byte("b"), 10000), "br"},
+			{"zstd", []byte("Hello, World! This is test data for compression."), "zstd"},
+			{"zstd_binary_data", []byte{0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE}, "zstd"},
+			{"zstd_large_data", bytes.Repeat([]byte("z"), 10000), "zstd"},
 		}
 
 		for _, tt := range tests {
@@ -400,4 +441,53 @@ func zlibBytes(t *testing.T, data []byte) []byte {
 	require.NoError(t, err)
 	require.NoError(t, zw.Close())
 	return buf.Bytes()
+}
+
+func brotliBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	bw := brotli.NewWriter(&buf)
+	_, err := bw.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, bw.Close())
+	return buf.Bytes()
+}
+
+func zstdBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	enc, err := zstd.NewWriter(&buf)
+	require.NoError(t, err)
+	_, err = enc.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, enc.Close())
+	return buf.Bytes()
+}
+
+func TestFilterSupportedEncodings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"all_supported", "gzip, deflate, br, zstd", "gzip, deflate, br, zstd"},
+		{"strips_unknown", "gzip, snappy, br", "gzip, br"},
+		{"only_unsupported", "snappy, lz4", "gzip, deflate, br, zstd"},
+		{"with_quality", "br;q=1.0, gzip;q=0.8, snappy;q=0.5", "br;q=1.0, gzip;q=0.8"},
+		{"single_supported", "gzip", "gzip"},
+		{"single_unsupported", "snappy", "gzip, deflate, br, zstd"},
+		{"identity_stripped", "gzip, identity", "gzip"},
+		{"preserves_x_gzip", "x-gzip, br", "x-gzip, br"},
+		{"empty_after_filter", "compress", "gzip, deflate, br, zstd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, FilterSupportedEncodings(tt.input))
+		})
+	}
 }
