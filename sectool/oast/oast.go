@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -164,29 +165,49 @@ func get(mcpURL string, eventID string, fields string) error {
 	fmt.Printf("Subdomain: %s\n", cliutil.ID(resp.Subdomain))
 
 	if len(resp.Details) > 0 {
-		fmt.Println()
-		for k, v := range resp.Details {
-			// Convert snake_case key to Title Case
-			title := strings.ReplaceAll(k, "_", " ")
-			words := strings.Fields(title)
-			for i, word := range words {
-				if len(word) > 0 {
-					words[i] = strings.ToUpper(word[:1]) + word[1:]
-				}
+		// Display order: smtp envelope, target, headers, body, then remaining keys alphabetically
+		orderedKeys := []string{"smtp_from", "smtp_to", "target", "headers", "body"}
+		printed := make(map[string]bool, len(orderedKeys))
+		for _, k := range orderedKeys {
+			if v, ok := resp.Details[k]; ok {
+				printed[k] = true
+				printDetail(k, v)
 			}
-			title = strings.Join(words, " ")
-
-			if s, ok := v.(string); ok && len(s) > 0 {
-				fmt.Println()
-				fmt.Println(cliutil.Bold(title))
-				fmt.Println(s)
-			} else {
-				fmt.Printf("%s: %v\n", title, v)
+		}
+		// Remaining keys (e.g. dns raw_request/raw_response) in sorted order
+		var extra []string
+		for k := range resp.Details {
+			if !printed[k] {
+				extra = append(extra, k)
 			}
+		}
+		sort.Strings(extra)
+		for _, k := range extra {
+			printDetail(k, resp.Details[k])
 		}
 	}
 
 	return nil
+}
+
+// printDetail renders a single detail key-value pair with title-cased key.
+func printDetail(k string, v interface{}) {
+	title := strings.ReplaceAll(k, "_", " ")
+	words := strings.Fields(title)
+	for i, word := range words {
+		if len(word) > 0 {
+			words[i] = strings.ToUpper(word[:1]) + word[1:]
+		}
+	}
+	title = strings.Join(words, " ")
+
+	if s, ok := v.(string); ok && len(s) > 0 {
+		fmt.Println()
+		fmt.Println(cliutil.Bold(title))
+		fmt.Println(s)
+	} else {
+		fmt.Printf("%s: %v\n", title, v)
+	}
 }
 
 func list(mcpURL string, limit int) error {
