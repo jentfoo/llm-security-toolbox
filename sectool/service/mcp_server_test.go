@@ -360,9 +360,10 @@ func (b *mockHttpBackend) ClearProxyHistory() {
 }
 
 type mockOastBackend struct {
-	sessions map[string]*OastSessionInfo
-	byLabel  map[string]string
-	events   map[string][]OastEventInfo
+	redirectSupported bool
+	sessions          map[string]*OastSessionInfo
+	byLabel           map[string]string
+	events            map[string][]OastEventInfo
 }
 
 func newMockOastBackend() *mockOastBackend {
@@ -373,7 +374,14 @@ func newMockOastBackend() *mockOastBackend {
 	}
 }
 
-func (b *mockOastBackend) CreateSession(ctx context.Context, label string) (*OastSessionInfo, error) {
+func (b *mockOastBackend) SupportsRedirect() bool {
+	return b.redirectSupported
+}
+
+func (b *mockOastBackend) CreateSession(ctx context.Context, label, redirectTarget string) (*OastSessionInfo, error) {
+	if redirectTarget != "" && !b.redirectSupported {
+		return nil, errors.New("OAST server does not support redirect responses")
+	}
 	if label != "" {
 		if _, ok := b.byLabel[label]; ok {
 			return nil, ErrLabelExists
@@ -381,10 +389,11 @@ func (b *mockOastBackend) CreateSession(ctx context.Context, label string) (*Oas
 	}
 	id := "oast-test-" + time.Now().UTC().Format("150405.000000000")
 	info := &OastSessionInfo{
-		ID:        id,
-		Domain:    id + ".test.invalid",
-		Label:     label,
-		CreatedAt: time.Now(),
+		ID:             id,
+		Domain:         id + ".test.invalid",
+		Label:          label,
+		RedirectTarget: redirectTarget,
+		CreatedAt:      time.Now(),
 	}
 	b.sessions[id] = info
 	if label != "" {

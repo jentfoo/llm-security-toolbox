@@ -61,6 +61,9 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 		if _, ok := svc.httpBackend.(ResponderBackend); ok {
 			instructions += workflowRespondSection
 		}
+		if svc.oastBackend.SupportsRedirect() {
+			instructions += workflowOastRedirectSection
+		}
 		if svc.notesEnabled {
 			instructions += workflowNotesSection
 		}
@@ -293,6 +296,9 @@ func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest)
 	if _, ok := m.service.httpBackend.(ResponderBackend); ok {
 		content += workflowRespondSection
 	}
+	if m.service.oastBackend.SupportsRedirect() {
+		content += workflowOastRedirectSection
+	}
 	if m.service.notesEnabled {
 		content += workflowNotesSection
 	}
@@ -308,6 +314,14 @@ const workflowRespondSection = `
 ## Setting Browser State
 
 Use proxy_respond_add to serve custom responses under the target site's origin. This enables collaborative browser state setup - for example, setting authenticated cookies, configuring localStorage. Create the responder, then ask the user to visit the URL in their browser. Static responses can also be used to replace assets or other static responses.`
+
+const workflowOastRedirectSection = `
+
+## OAST Redirect Testing
+
+OAST sessions can return 307 redirects to test if a target's HTTP client follows redirects.
+Pattern: create a collector session, then a redirect session with redirect_target set to the collector's domain.
+Inject the redirect session's domain — if the target follows redirects, both sessions receive interactions.`
 
 const workflowNotesSection = `
 

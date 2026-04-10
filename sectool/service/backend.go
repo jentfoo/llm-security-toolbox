@@ -135,7 +135,11 @@ type OastBackend interface {
 	// CreateSession registers with the OAST provider and starts background polling.
 	// Returns session with short ID and domain.
 	// If label is non-empty, it must be unique across all sessions.
-	CreateSession(ctx context.Context, label string) (*OastSessionInfo, error)
+	// If redirectTarget is non-empty, HTTP requests to the session domain receive a 307 redirect.
+	CreateSession(ctx context.Context, label, redirectTarget string) (*OastSessionInfo, error)
+
+	// SupportsRedirect reports whether this backend supports redirect responses.
+	SupportsRedirect() bool
 
 	// PollSession returns events for a session.
 	// idOrDomain accepts either the short ID or the full domain.
@@ -164,10 +168,11 @@ type OastBackend interface {
 
 // OastSessionInfo represents an active OAST session (internal domain type).
 type OastSessionInfo struct {
-	ID        string    // Short sectool ID (e.g., "a1b2c3")
-	Domain    string    // Full Interactsh domain (e.g., "xyz123.alpha.oastsrv.net")
-	Label     string    // Optional user-provided label for easier reference
-	CreatedAt time.Time // When the session was created
+	ID             string    // Short sectool ID (e.g., "a1b2c3")
+	Domain         string    // Full Interactsh domain (e.g., "xyz123.alpha.oastsrv.net")
+	Label          string    // Optional user-provided label for easier reference
+	RedirectTarget string    // URL to 307 redirect HTTP requests to (empty = no redirect)
+	CreatedAt      time.Time // When the session was created
 }
 
 // OastEventInfo represents a captured out-of-band interaction (internal domain type).

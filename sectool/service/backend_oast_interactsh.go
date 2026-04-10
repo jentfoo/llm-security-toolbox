@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-analyze/bulk"
@@ -22,8 +22,10 @@ import (
 const (
 	// interactshPollInterval is how often the interactsh client polls the server.
 	interactshPollInterval = 4 * time.Second
-	// clientCloseTimeout is how long to wait when closing the shared client.
+	// clientCloseTimeout is how long to wait when closing clients.
 	clientCloseTimeout = 10 * time.Second
+	// clientCleanupInterval is how often to check for idle clients with no active sessions.
+	clientCleanupInterval = 120 * time.Second
 	// maxLabelPrefixLen is the maximum label length to use as a domain prefix.
 	maxLabelPrefixLen = 16
 	// correlationIdNonceLength is the per-URL nonce length passed to the interactsh client.
@@ -37,21 +39,28 @@ var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)?$`)
 // domain format (correlationID.sessionID.serverHost).
 var structuredDomainSuffixes = [...]string{"oastsrv.net", "oastlab.net"}
 
+// isInteractLiteHost reports whether the server host uses the structured domain format.
+func isInteractLiteHost(serverHost string) bool {
+	return slices.ContainsFunc(structuredDomainSuffixes[:], func(suffix string) bool {
+		return serverHost == suffix || strings.HasSuffix(serverHost, "."+suffix)
+	})
+}
+
 // InteractshBackend implements OastBackend using Interactsh.
 type InteractshBackend struct {
-	serverURL string // custom server URL, empty = use defaults
-	mu        sync.RWMutex
-	sessions  map[string]*oastSession // by domain (canonical key)
-	byID      map[string]string       // short ID -> domain
-	byLabel   map[string]string       // label -> domain (only non-empty labels)
-	byNonce   map[string]string       // nonce -> domain (legacy server routing only)
-	closed    bool
+	serverURL         string       // custom server URL, empty = use defaults
+	redirectSupported bool         // whether the server supports redirect responses
+	httpClient        *http.Client // shared HTTP client for all oobclient instances and probes
+	mu                sync.RWMutex
+	sessions          map[string]*oastSession // by domain (canonical key)
+	byID              map[string]string       // short ID -> domain
+	byLabel           map[string]string       // label -> domain (only non-empty labels)
+	byNonce           map[string]string       // nonce -> domain (legacy server routing only)
+	closed            bool
 
-	// Shared client, lazily created on first CreateSession
-	client        atomic.Pointer[oobclient.Client]
-	initMu        sync.Mutex // guards lazy init slow path
-	correlationID string     // from CorrelationID(), immutable after init
-	serverHost    string     // from ServerHost(), immutable after init
+	// Clients keyed by redirect target ("" = default/no-redirect), lazily created.
+	clients map[string]*oobclient.Client
+	initMu  sync.Mutex // guards lazy client creation
 }
 
 // Compile-time check that InteractshBackend implements OastBackend
@@ -75,41 +84,126 @@ type oastSession struct {
 func NewInteractshBackend(serverURL string) *InteractshBackend {
 	return &InteractshBackend{
 		serverURL: serverURL,
-		sessions:  make(map[string]*oastSession),
-		byID:      make(map[string]string),
-		byLabel:   make(map[string]string),
-		byNonce:   make(map[string]string),
+		httpClient: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			Timeout: 10 * time.Second,
+		},
+		sessions: make(map[string]*oastSession),
+		byID:     make(map[string]string),
+		byLabel:  make(map[string]string),
+		byNonce:  make(map[string]string),
+		clients:  make(map[string]*oobclient.Client),
 	}
 }
 
-// ensureClient lazily creates the shared oobclient.Client and starts polling.
-func (b *InteractshBackend) ensureClient(ctx context.Context) (*oobclient.Client, error) {
-	if c := b.client.Load(); c != nil {
+// Start probes the server for capabilities and starts background maintenance.
+// Must be called before creating sessions. Pair with Close() for cleanup.
+func (b *InteractshBackend) Start(ctx context.Context) {
+	b.ProbeRedirectSupport(ctx)
+	go func() {
+		ticker := time.NewTicker(clientCleanupInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			b.mu.Lock()
+			if b.closed {
+				b.mu.Unlock()
+				return
+			}
+			stale := b.cleanupIdleClients()
+			b.mu.Unlock()
+			for _, c := range stale {
+				if err := c.Close(); err != nil {
+					log.Printf("oast: error closing idle client: %v", err)
+				}
+			}
+			if len(stale) > 0 {
+				log.Printf("oast: cleaned up %d idle client(s)", len(stale))
+			}
+		}
+	}()
+}
+
+// SupportsRedirect reports whether the OAST server supports redirect responses.
+func (b *InteractshBackend) SupportsRedirect() bool {
+	return b.redirectSupported
+}
+
+// ProbeRedirectSupport determines whether the OAST server supports redirect responses.
+// Default and known interactsh-lite servers are assumed compatible.
+// Custom servers are probed by registering with a 307 ResponseConfig and verifying the response.
+func (b *InteractshBackend) ProbeRedirectSupport(ctx context.Context) {
+	if b.serverURL == "" || isInteractLiteHost(b.serverURL) {
+		b.redirectSupported = true
+		return
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	c, err := oobclient.New(probeCtx, oobclient.Options{
+		ServerURLs: []string{b.serverURL},
+		HTTPClient: b.httpClient,
+		Response: &oobclient.ResponseConfig{
+			StatusCode: 307,
+			Headers:    []string{"Location: " + b.serverURL},
+		},
+	})
+	if err != nil {
+		log.Printf("oast: redirect probe failed (registration): %v", err)
+		return
+	}
+	defer func() { _ = c.Close() }()
+
+	resp, err := b.httpClient.Get("http://" + c.Domain())
+	if err != nil {
+		log.Printf("oast: redirect probe failed (request): %v", err)
+		return
+	}
+	_ = resp.Body.Close()
+
+	b.redirectSupported = resp.StatusCode == http.StatusTemporaryRedirect
+	log.Printf("oast: redirect probe for %s: supported=%v", b.serverURL, b.redirectSupported)
+}
+
+// ensureClientForRedirectTarget lazily creates an oobclient.Client for the given redirect target.
+// An empty redirectTarget returns the default (no-redirect) client.
+func (b *InteractshBackend) ensureClientForRedirectTarget(ctx context.Context, redirectTarget string) (*oobclient.Client, error) {
+	b.mu.RLock()
+	if c, ok := b.clients[redirectTarget]; ok {
+		b.mu.RUnlock()
 		return c, nil
 	}
+	b.mu.RUnlock()
 
 	b.initMu.Lock()
 	defer b.initMu.Unlock()
 
-	if c := b.client.Load(); c != nil {
+	b.mu.RLock()
+	if c, ok := b.clients[redirectTarget]; ok {
+		b.mu.RUnlock()
 		return c, nil
 	}
-
-	b.mu.RLock()
 	closed := b.closed
 	b.mu.RUnlock()
 	if closed {
 		return nil, errors.New("backend is closed")
 	}
 
-	var opts oobclient.Options
+	opts := oobclient.Options{HTTPClient: b.httpClient}
 	if b.serverURL != "" {
-		// Custom server URL; let oobclient use its default nonce length.
 		opts.ServerURLs = []string{b.serverURL}
 	} else {
-		// Default servers. Shorter nonce for structured domains;
+		// Shorter nonce for structured domains;
 		// oobclient bumps this automatically if it falls back to oast.* servers.
 		opts.CorrelationIdNonceLength = correlationIdNonceLength
+	}
+	if redirectTarget != "" {
+		opts.Response = &oobclient.ResponseConfig{
+			StatusCode: 307,
+			Headers:    []string{"Location: " + redirectTarget},
+		}
 	}
 
 	c, err := oobclient.New(ctx, opts)
@@ -117,16 +211,16 @@ func (b *InteractshBackend) ensureClient(ctx context.Context) (*oobclient.Client
 		return nil, fmt.Errorf("failed to create interactsh client: %w", err)
 	}
 
-	b.correlationID = c.CorrelationID()
-	b.serverHost = c.ServerHost()
-
-	if err := c.StartPolling(interactshPollInterval, b.handleInteraction); err != nil {
+	if err := c.StartPolling(interactshPollInterval, b.makeInteractionHandler(c.CorrelationID(), c.ServerHost())); err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("oast failed to start polling: %w", err)
 	}
 
-	b.client.Store(c)
-	log.Printf("oast: shared client created, polling started (interval=%v)", interactshPollInterval)
+	b.mu.Lock()
+	b.clients[redirectTarget] = c
+	b.mu.Unlock()
+
+	log.Printf("oast: client created and polling (redirect=%q)", redirectTarget)
 	return c, nil
 }
 
@@ -151,121 +245,119 @@ func extractNonce(domain, correlationID string) string {
 	return domain[len(correlationID):dotIdx]
 }
 
-// handleInteraction routes an interaction to the correct session.
+// makeInteractionHandler returns a polling callback bound to a specific client's identity.
+// Each client has its own correlationID, so the closure captures it for routing.
 //
 // Structured servers (oastsrv.net, oastlab.net): FullId is dot-separated
 // ("correlationID.sessionID"), last label is the sessionID routing key.
 //
 // Legacy servers: FullId leaf label is correlationID+nonce concatenated
 // ("correlationIDnonce" or "label.correlationIDnonce").
-func (b *InteractshBackend) handleInteraction(interaction *oobclient.Interaction) {
-	fullId := interaction.FullId
+func (b *InteractshBackend) makeInteractionHandler(correlationID, serverHost string) func(*oobclient.Interaction) {
+	structured := isInteractLiteHost(serverHost)
 
-	var domain string
-	var ok bool
+	return func(interaction *oobclient.Interaction) {
+		fullId := interaction.FullId
 
-	b.mu.RLock()
+		var domain string
+		var ok bool
 
-	structured := slices.ContainsFunc(structuredDomainSuffixes[:], func(suffix string) bool {
-		return b.serverHost == suffix || strings.HasSuffix(b.serverHost, "."+suffix)
-	})
+		b.mu.RLock()
 
-	if structured {
-		// Structured server: last dot-label = sessionID
-		lastDot := strings.LastIndexByte(fullId, '.')
-		if lastDot < 0 {
+		if structured {
+			// Structured server: last dot-label = sessionID
+			lastDot := strings.LastIndexByte(fullId, '.')
+			if lastDot < 0 {
+				b.mu.RUnlock()
+				return
+			}
+			nonce := fullId[lastDot+1:]
+			domain, ok = b.byID[nonce]
+		} else {
+			// Legacy server: leaf label = correlationID + nonce
+			leaf := fullId
+			if dotIdx := strings.LastIndexByte(leaf, '.'); dotIdx >= 0 {
+				leaf = leaf[dotIdx+1:]
+			}
+			if !strings.HasPrefix(leaf, correlationID) || len(leaf) <= len(correlationID) {
+				b.mu.RUnlock()
+				return
+			}
+			nonce := leaf[len(correlationID):]
+			domain, ok = b.byNonce[nonce]
+		}
+
+		if !ok {
 			b.mu.RUnlock()
 			return
 		}
-		nonce := fullId[lastDot+1:]
-		domain, ok = b.byID[nonce]
-	} else {
-		// Legacy server: leaf label = correlationID + nonce
-		leaf := fullId
-		if dotIdx := strings.LastIndexByte(leaf, '.'); dotIdx >= 0 {
-			leaf = leaf[dotIdx+1:]
-		}
-		if !strings.HasPrefix(leaf, b.correlationID) || len(leaf) <= len(b.correlationID) {
-			b.mu.RUnlock()
-			return
-		}
-		nonce := leaf[len(b.correlationID):]
-		domain, ok = b.byNonce[nonce]
-	}
-
-	if !ok {
+		sess := b.sessions[domain]
 		b.mu.RUnlock()
-		return
-	}
-	sess := b.sessions[domain]
-	b.mu.RUnlock()
 
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
 
-	if sess.stopped {
-		return
-	}
-
-	var eventTime time.Time
-	if !interaction.Timestamp.IsZero() {
-		eventTime = interaction.Timestamp
-	} else {
-		eventTime = time.Now()
-	}
-
-	details := make(map[string]interface{}, 4)
-	eventType := strings.ToLower(interaction.Protocol)
-	switch eventType {
-	case "dns":
-		if interaction.QType != "" {
-			details["query_type"] = interaction.QType
+		if sess.stopped {
+			return
 		}
-	case schemeHTTP, schemeHTTPS, "smtp":
-		if interaction.SMTPFrom != "" {
-			details["smtp_from"] = interaction.SMTPFrom
-		}
-		if interaction.SMTPTo != "" {
-			details["smtp_to"] = interaction.SMTPTo
-		}
-		if interaction.RawRequest != "" {
-			h, b := splitHeadersBody([]byte(interaction.RawRequest))
-			details["headers"] = string(bytes.TrimRight(h, "\r\n"))
-			if len(b) > 0 {
-				details["body"] = string(b)
+
+		details := make(map[string]interface{}, 4)
+		eventType := strings.ToLower(interaction.Protocol)
+		switch eventType {
+		case "dns":
+			if interaction.QType != "" {
+				details["query_type"] = interaction.QType
+			}
+		case schemeHTTP, schemeHTTPS, "smtp":
+			if interaction.SMTPFrom != "" {
+				details["smtp_from"] = interaction.SMTPFrom
+			}
+			if interaction.SMTPTo != "" {
+				details["smtp_to"] = interaction.SMTPTo
+			}
+			if interaction.RawRequest != "" {
+				h, b := splitHeadersBody([]byte(interaction.RawRequest))
+				details["headers"] = string(bytes.TrimRight(h, "\r\n"))
+				if len(b) > 0 {
+					details["body"] = string(b)
+				}
+			}
+		default:
+			// Uncommon protocols (ftp, ldap, smb, responder): keep raw
+			if interaction.RawRequest != "" {
+				details["raw_request"] = interaction.RawRequest
 			}
 		}
-	default:
-		// Uncommon protocols (ftp, ldap, smb, responder): keep raw
-		if interaction.RawRequest != "" {
-			details["raw_request"] = interaction.RawRequest
+
+		if len(sess.events) >= MaxOastEventsPerSession {
+			sess.events = sess.events[1:]
+			sess.droppedCount++
+			if sess.lastPollIdx > 0 {
+				sess.lastPollIdx--
+			}
 		}
-	}
-
-	if len(sess.events) >= MaxOastEventsPerSession {
-		sess.events = sess.events[1:]
-		sess.droppedCount++
-		if sess.lastPollIdx > 0 {
-			sess.lastPollIdx--
+		event := OastEventInfo{
+			ID:        ids.Generate(ids.DefaultLength),
+			Time:      interaction.Timestamp,
+			Type:      eventType,
+			SourceIP:  interaction.RemoteAddress,
+			Subdomain: interaction.FullId,
+			Details:   details,
 		}
-	}
-	event := OastEventInfo{
-		ID:        ids.Generate(ids.DefaultLength),
-		Time:      eventTime,
-		Type:      eventType,
-		SourceIP:  interaction.RemoteAddress,
-		Subdomain: interaction.FullId,
-		Details:   details,
-	}
-	sess.events = append(sess.events, event)
+		sess.events = append(sess.events, event)
 
-	close(sess.notify)
-	sess.notify = make(chan struct{})
+		close(sess.notify)
+		sess.notify = make(chan struct{})
 
-	log.Printf("oast: session %s received %s event from %s", sess.info.ID, event.Type, event.SourceIP)
+		log.Printf("oast: session %s received %s event from %s", sess.info.ID, event.Type, event.SourceIP)
+	}
 }
 
-func (b *InteractshBackend) CreateSession(ctx context.Context, label string) (*OastSessionInfo, error) {
+func (b *InteractshBackend) CreateSession(ctx context.Context, label, redirectTarget string) (*OastSessionInfo, error) {
+	if redirectTarget != "" && !b.redirectSupported {
+		return nil, errors.New("OAST server does not support redirect responses")
+	}
+
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -282,20 +374,18 @@ func (b *InteractshBackend) CreateSession(ctx context.Context, label string) (*O
 	}
 	b.mu.Unlock()
 
-	c, err := b.ensureClient(ctx)
+	c, err := b.ensureClientForRedirectTarget(ctx, redirectTarget)
 	if err != nil {
 		return nil, err
 	}
 
-	structured := slices.ContainsFunc(structuredDomainSuffixes[:], func(suffix string) bool {
-		return b.serverHost == suffix || strings.HasSuffix(b.serverHost, "."+suffix)
-	})
+	structured := isInteractLiteHost(c.ServerHost())
 
 	// For legacy servers, generate the base domain outside the lock (c.Domain() uses crypto/rand).
 	var legacyBaseDomain, nonce string
 	if !structured {
 		legacyBaseDomain = c.Domain()
-		nonce = extractNonce(legacyBaseDomain, b.correlationID)
+		nonce = extractNonce(legacyBaseDomain, c.CorrelationID())
 	}
 
 	b.mu.Lock()
@@ -321,7 +411,7 @@ func (b *InteractshBackend) CreateSession(ctx context.Context, label string) (*O
 		for b.byID[sessionID] != "" {
 			sessionID = strings.ToLower(ids.Generate(ids.EntityLength))
 		}
-		domain = buildStructuredOASTDomain(b.correlationID, label, sessionID, b.serverHost)
+		domain = buildStructuredOASTDomain(c.CorrelationID(), label, sessionID, c.ServerHost())
 	} else {
 		sessionID = ids.Generate(ids.EntityLength)
 		for b.byID[sessionID] != "" {
@@ -337,10 +427,11 @@ func (b *InteractshBackend) CreateSession(ctx context.Context, label string) (*O
 
 	sess := &oastSession{
 		info: OastSessionInfo{
-			ID:        sessionID,
-			Domain:    domain,
-			Label:     label,
-			CreatedAt: time.Now(),
+			ID:             sessionID,
+			Domain:         domain,
+			Label:          label,
+			RedirectTarget: redirectTarget,
+			CreatedAt:      time.Now(),
 		},
 		nonce:  nonce,
 		notify: make(chan struct{}),
@@ -551,11 +642,10 @@ func (b *InteractshBackend) Close() error {
 		return nil
 	}
 	b.closed = true
-	sessions := bulk.MapValuesSlice(b.sessions)
 
 	// Stop all sessions under the lock.
 	// Safe: sess.mu is a leaf lock, never held while acquiring b.mu.
-	for _, sess := range sessions {
+	for _, sess := range b.sessions {
 		sess.mu.Lock()
 		if !sess.stopped {
 			sess.stopped = true
@@ -564,32 +654,55 @@ func (b *InteractshBackend) Close() error {
 		sess.mu.Unlock()
 	}
 
-	// Clear maps and nil atomic pointer so ensureClient's fast path
-	// falls through to the slow path where it sees b.closed.
-	b.sessions = make(map[string]*oastSession)
-	b.byID = make(map[string]string)
-	b.byLabel = make(map[string]string)
-	b.byNonce = make(map[string]string)
-	c := b.client.Load()
-	b.client.Store(nil)
+	// Close all clients in parallel (deregistration makes HTTP calls)
+	var wg sync.WaitGroup
+	for _, c := range b.clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := c.Close(); err != nil {
+				log.Printf("oast: error closing client: %v", err)
+			}
+		}()
+	}
+
+	b.sessions = nil
+	b.byID = nil
+	b.byLabel = nil
+	b.byNonce = nil
+	b.clients = nil
 	b.mu.Unlock()
 
-	// Close shared client outside the lock (deregistration makes an HTTP call)
-	if c != nil {
-		done := make(chan error, 1)
-		go func() { done <- c.Close() }()
-
-		select {
-		case err := <-done:
-			if err != nil {
-				log.Printf("oast: error closing shared client: %v", err)
-			}
-		case <-time.After(clientCloseTimeout):
-			log.Printf("oast: timeout closing shared client")
-		}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(clientCloseTimeout):
+		log.Printf("oast: timeout closing clients")
 	}
 
 	return nil
+}
+
+// cleanupIdleClients removes clients with no active sessions from the map.
+// Caller must hold b.mu. Returns removed clients for closing outside the lock.
+func (b *InteractshBackend) cleanupIdleClients() []*oobclient.Client {
+	activeTargets := make(map[string]bool, len(b.sessions))
+	for _, sess := range b.sessions {
+		activeTargets[sess.info.RedirectTarget] = true
+	}
+
+	var stale []*oobclient.Client
+	for target, c := range b.clients {
+		if target == "" {
+			continue // never clean up the default (no-redirect) client
+		}
+		if !activeTargets[target] {
+			stale = append(stale, c)
+			delete(b.clients, target)
+		}
+	}
+	return stale
 }
 
 // resolveSession finds a session by ID, label, or domain.

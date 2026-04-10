@@ -16,7 +16,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
-func create(mcpURL string, label string) error {
+func create(mcpURL string, label, redirect string) error {
 	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)
@@ -25,7 +25,7 @@ func create(mcpURL string, label string) error {
 	}
 	defer func() { _ = client.Close() }()
 
-	resp, err := client.OastCreate(ctx, label)
+	resp, err := client.OastCreate(ctx, label, redirect)
 	if err != nil {
 		return fmt.Errorf("oast create failed: %w", err)
 	}
@@ -36,6 +36,9 @@ func create(mcpURL string, label string) error {
 	fmt.Printf("Domain: %s\n", cliutil.ID(resp.Domain))
 	if resp.Label != "" {
 		fmt.Printf("Label: %s\n", cliutil.ID(resp.Label))
+	}
+	if redirect != "" {
+		fmt.Printf("Redirect: %s\n", cliutil.ID(redirect))
 	}
 	fmt.Println()
 	if resp.Label == "" {

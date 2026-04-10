@@ -811,7 +811,7 @@ func TestIntegration_OAST(t *testing.T) {
 	var oastDomain string
 
 	t.Run("create_session", func(t *testing.T) {
-		resp, err := client.OastCreate(t.Context(), testLabel)
+		resp, err := client.OastCreate(t.Context(), testLabel, "")
 		require.NoError(t, err)
 
 		assert.NotEmpty(t, resp.OastID)

@@ -196,7 +196,7 @@ Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body place
 - `crawl_stop` - stop a running crawl session
 - `replay_send` - send with modifications; returns flow_id for use with flow_get
 - `request_send` - send new HTTP request from scratch; returns flow_id for use with flow_get
-- `oast_create` - create OAST session for out-of-band testing
+- `oast_create` - create OAST session for out-of-band testing; optional `redirect_target` for 307 redirect responses (server-dependent)
 - `oast_poll` - poll events: summary or list
 - `oast_get` - structured event details; optional `fields` filter (dest, headers, body)
 - `oast_list` - list active OAST sessions

@@ -220,10 +220,13 @@ func (c *Client) RequestSend(ctx context.Context, opts RequestSendOpts) (*protoc
 }
 
 // OastCreate calls oast_create and returns the session.
-func (c *Client) OastCreate(ctx context.Context, label string) (*protocol.OastCreateResponse, error) {
+func (c *Client) OastCreate(ctx context.Context, label, redirectTarget string) (*protocol.OastCreateResponse, error) {
 	args := make(map[string]interface{})
 	if label != "" {
 		args["label"] = label
+	}
+	if redirectTarget != "" {
+		args["redirect_target"] = redirectTarget
 	}
 
 	var resp protocol.OastCreateResponse

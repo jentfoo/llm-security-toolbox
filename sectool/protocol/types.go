@@ -176,10 +176,11 @@ type OastListResponse struct {
 
 // OastSession represents an active OAST session.
 type OastSession struct {
-	OastID    string `json:"oast_id"`
-	Domain    string `json:"domain"`
-	Label     string `json:"label,omitempty"`
-	CreatedAt string `json:"created_at"`
+	OastID         string `json:"oast_id"`
+	Domain         string `json:"domain"`
+	Label          string `json:"label,omitempty"`
+	RedirectTarget string `json:"redirect_target,omitempty"`
+	CreatedAt      string `json:"created_at"`
 }
 
 // =============================================================================

@@ -15,16 +15,27 @@ import (
 )
 
 func (m *mcpServer) oastCreateTool() mcp.Tool {
-	return mcp.NewTool("oast_create",
-		mcp.WithDescription(`Create OAST (Out-of-Band Application Security Testing) session.
+	desc := `Create OAST (Out-of-Band Application Security Testing) session.
 
 Returns {oast_id, domain} for blind out-of-band detection (DNS/HTTP/SMTP).
 Workflow: create -> inject domain in payload -> trigger target -> oast_poll -> oast_get for details.
 Use cases: blind SSRF, blind XXE, DNS exfiltration, email verification (use oast_get fields=body to extract email content).
 
-Prefer OAST domains over invented random strings. They double as unique tokens with built-in callback detection.`),
+Prefer OAST domains over invented random strings. They double as unique tokens with built-in callback detection.`
+
+	opts := []mcp.ToolOption{
 		mcp.WithString("label", mcp.Description("Optional unique label for this session")),
-	)
+	}
+
+	if m.service.oastBackend.SupportsRedirect() {
+		desc += `
+
+Set redirect_target to make OAST domain return a redirect with the location header of the target. This is most useful with two sessions to detect if the http client is willing to follow redirects to the second session.`
+		opts = append(opts, mcp.WithString("redirect_target",
+			mcp.Description("URL location for 307 redirect, can force http or https, or leave scheme blank to match the request scheme.")))
+	}
+
+	return mcp.NewTool("oast_create", append([]mcp.ToolOption{mcp.WithDescription(desc)}, opts...)...)
 }
 
 func (m *mcpServer) oastPollTool() mcp.Tool {
@@ -79,13 +90,14 @@ func (m *mcpServer) handleOastCreate(ctx context.Context, req mcp.CallToolReques
 	}
 
 	label := req.GetString("label", "")
+	redirectTarget := req.GetString("redirect_target", "")
 
-	sess, err := m.service.oastBackend.CreateSession(ctx, label)
+	sess, err := m.service.oastBackend.CreateSession(ctx, label, redirectTarget)
 	if err != nil {
 		return errorResultFromErr("failed to create OAST session: ", err), nil
 	}
 
-	log.Printf("oast/create: session %s domain=%s label=%q", sess.ID, sess.Domain, sess.Label)
+	log.Printf("oast/create: session %s domain=%s label=%q redirect=%q", sess.ID, sess.Domain, sess.Label, sess.RedirectTarget)
 	return jsonResult(protocol.OastCreateResponse{
 		OastID: sess.ID,
 		Domain: sess.Domain,
@@ -373,10 +385,11 @@ func (m *mcpServer) handleOastList(ctx context.Context, req mcp.CallToolRequest)
 	apiSessions := make([]protocol.OastSession, len(sessions))
 	for i, sess := range sessions {
 		apiSessions[i] = protocol.OastSession{
-			OastID:    sess.ID,
-			Domain:    sess.Domain,
-			Label:     sess.Label,
-			CreatedAt: sess.CreatedAt.UTC().Format(time.RFC3339),
+			OastID:         sess.ID,
+			Domain:         sess.Domain,
+			Label:          sess.Label,
+			RedirectTarget: sess.RedirectTarget,
+			CreatedAt:      sess.CreatedAt.UTC().Format(time.RFC3339),
 		}
 	}
 

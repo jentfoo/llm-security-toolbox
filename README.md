@@ -140,6 +140,7 @@ Use `sectool <command> --help` for detailed options.
 - **Flow diffing** - Structured, content-type-aware comparison of two flows (JSON path-level, unified text, binary size) for fast report validation
 - **Reflection detection** - Find request parameter values reflected in responses across multiple encoding variants to surface injection points
 - **OAST** - Out-of-band interaction testing via Interactsh; create domains, poll for DNS/HTTP/SMTP callbacks
+- **Redirect probing** - OAST sessions can return 307 redirects to detect if a target follows redirects, useful for SSRF chains and validation bypasses
 - **Crawling** - Discover endpoints, forms, and application structure; seed from proxy history or URLs
 - **WebSocket support** - Frame-level interception, proxying, and match/replace for WebSocket messages
 - **Workflow modes** - Task-specific agent guidance (explore, test-report) to improve collaboration quality and reduce token waste

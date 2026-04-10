@@ -108,10 +108,11 @@ oast delete <oast_id|label|domain>
 func parseCreate(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("oast create", pflag.ContinueOnError)
 	fs.SetInterspersed(true)
-	var label, name string
+	var label, name, redirect string
 
 	fs.StringVar(&label, "label", "", "optional label for easier reference")
 	fs.StringVar(&name, "name", "", "alias for --label")
+	fs.StringVar(&redirect, "redirect", "", "URL to 307 redirect HTTP requests to")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool oast create [options]
@@ -131,7 +132,7 @@ Options:
 		label = name
 	}
 
-	return create(mcpURL, label)
+	return create(mcpURL, label, redirect)
 }
 
 func parseSummary(args []string, mcpURL string) error {

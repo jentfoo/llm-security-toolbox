@@ -183,7 +183,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 	if s.oastBackend == nil {
-		s.oastBackend = NewInteractshBackend(s.cfg.InteractshServerURL)
+		ib := NewInteractshBackend(s.cfg.InteractshServerURL)
+		ib.Start(ctx)
+		s.oastBackend = ib
 	}
 	if s.crawlerBackend == nil {
 		s.crawlerBackend = NewCollyBackend(s.cfg, s.proxyIndex, s.httpBackend)
@@ -324,7 +326,7 @@ func (s *Server) setupHttpBackend(ctx context.Context) error {
 
 	// Case 4: Try Burp, fall back to built-in proxy
 	if err := s.connectBurpMCP(ctx); err != nil {
-		log.Printf("Burp MCP not available (%v), falling back to built-in proxy", err)
+		log.Printf("Burp MCP not available, falling back to built-in proxy")
 		return s.startBuiltinProxy()
 	}
 	return nil

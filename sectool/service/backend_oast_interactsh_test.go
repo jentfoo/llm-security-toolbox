@@ -24,7 +24,7 @@ func TestInteractshBackend_CreateAndClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	sess, err := backend.CreateSession(ctx, "")
+	sess, err := backend.CreateSession(ctx, "", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, sess.ID)
 	require.NotEmpty(t, sess.Domain)
@@ -71,7 +71,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		t.Cleanup(cancel)
 
-		sess, err := backend.CreateSession(ctx, "")
+		sess, err := backend.CreateSession(ctx, "", "")
 		require.NoError(t, err)
 
 		// Should be able to poll by domain
@@ -193,8 +193,10 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	})
 
 	// Helper to create a backend with a mock session
-	setupBackend := func(id, domain string) (*InteractshBackend, *oastSession, func()) {
+	setupBackend := func(t *testing.T, id, domain string) (*InteractshBackend, *oastSession) {
+		t.Helper()
 		backend := NewInteractshBackend("")
+		t.Cleanup(func() { _ = backend.Close() })
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        id,
@@ -205,21 +207,11 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 		}
 		backend.sessions[domain] = sess
 		backend.byID[id] = domain
-
-		cleanup := func() {
-			backend.mu.Lock()
-			backend.sessions = make(map[string]*oastSession)
-			backend.byID = make(map[string]string)
-			backend.byLabel = make(map[string]string)
-			backend.byNonce = make(map[string]string)
-			backend.mu.Unlock()
-		}
-		return backend, sess, cleanup
+		return backend, sess
 	}
 
 	t.Run("context_cancellation_returns_promptly", func(t *testing.T) {
-		backend, _, cleanup := setupBackend("testctx", "ctx.alpha.oastsrv.net")
-		t.Cleanup(cleanup)
+		backend, _ := setupBackend(t, "testctx", "ctx.alpha.oastsrv.net")
 
 		ctx, cancel := context.WithCancel(t.Context())
 		type pollResult struct {
@@ -245,8 +237,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	})
 
 	t.Run("wait_returns_when_events_arrive", func(t *testing.T) {
-		backend, sess, cleanup := setupBackend("testwait", "wait.alpha.oastsrv.net")
-		t.Cleanup(cleanup)
+		backend, sess := setupBackend(t, "testwait", "wait.alpha.oastsrv.net")
 
 		type pollResult struct {
 			result *OastPollResultInfo
@@ -280,8 +271,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	})
 
 	t.Run("zero_wait_returns_immediately", func(t *testing.T) {
-		backend, _, cleanup := setupBackend("testzero", "zero.alpha.oastsrv.net")
-		t.Cleanup(cleanup)
+		backend, _ := setupBackend(t, "testzero", "zero.alpha.oastsrv.net")
 
 		start := time.Now()
 		result, err := backend.PollSession(t.Context(), "testzero", "", "", 0, 0)
@@ -293,8 +283,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	})
 
 	t.Run("stopped_session_returns_error", func(t *testing.T) {
-		backend, sess, cleanup := setupBackend("teststopped", "stopped.alpha.oastsrv.net")
-		t.Cleanup(cleanup)
+		backend, sess := setupBackend(t, "teststopped", "stopped.alpha.oastsrv.net")
 
 		sess.mu.Lock()
 		sess.stopped = true
@@ -307,8 +296,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 	})
 
 	t.Run("updates_lastPollIdx_after_poll", func(t *testing.T) {
-		backend, sess, cleanup := setupBackend("testidx", "idx.alpha.oastsrv.net")
-		t.Cleanup(cleanup)
+		backend, sess := setupBackend(t, "testidx", "idx.alpha.oastsrv.net")
 
 		sess.events = []OastEventInfo{
 			{ID: "e1", Time: time.Now(), Type: "dns"},
@@ -350,7 +338,7 @@ func TestInteractshBackend_CreateAfterClose(t *testing.T) {
 	backend := NewInteractshBackend("")
 	require.NoError(t, backend.Close())
 
-	_, err := backend.CreateSession(t.Context(), "")
+	_, err := backend.CreateSession(t.Context(), "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "closed")
 }
@@ -845,7 +833,7 @@ func TestInteractshBackend_LivePoll(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	t.Cleanup(cancel)
 
-	sess, err := backend.CreateSession(ctx, "")
+	sess, err := backend.CreateSession(ctx, "", "")
 	require.NoError(t, err)
 	t.Logf("session created: id=%s domain=%s", sess.ID, sess.Domain)
 
@@ -885,10 +873,12 @@ func TestHandleInteraction(t *testing.T) {
 	const testCorrelationID = "testcorrelation"
 	const testNonce = "nonce1aa"
 
-	setup := func() (*InteractshBackend, *oastSession) {
+	const testServerHost = "alpha.oastsrv.net"
+
+	setup := func(t *testing.T) (func(*oobclient.Interaction), *oastSession) {
+		t.Helper()
 		b := NewInteractshBackend("")
-		b.correlationID = testCorrelationID
-		b.serverHost = "alpha.oastsrv.net"
+		t.Cleanup(func() { _ = b.Close() })
 
 		sess := &oastSession{
 			info: OastSessionInfo{
@@ -900,13 +890,13 @@ func TestHandleInteraction(t *testing.T) {
 		}
 		b.sessions["test.oastsrv.net"] = sess
 		b.byID[testNonce] = "test.oastsrv.net"
-		return b, sess
+		return b.makeInteractionHandler(testCorrelationID, testServerHost), sess
 	}
 
 	t.Run("routes_by_nonce", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   testCorrelationID + "." + testNonce,
 			Protocol: "DNS",
 		})
@@ -917,9 +907,9 @@ func TestHandleInteraction(t *testing.T) {
 	})
 
 	t.Run("prefix_subdomains", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   "ssrf." + testCorrelationID + "." + testNonce,
 			Protocol: "HTTP",
 		})
@@ -930,9 +920,9 @@ func TestHandleInteraction(t *testing.T) {
 	})
 
 	t.Run("unknown_nonce", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   testCorrelationID + "." + "unkno99z",
 			Protocol: "DNS",
 		})
@@ -943,9 +933,9 @@ func TestHandleInteraction(t *testing.T) {
 	})
 
 	t.Run("no_dot_separator", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   testCorrelationID + testNonce,
 			Protocol: "DNS",
 		})
@@ -956,14 +946,14 @@ func TestHandleInteraction(t *testing.T) {
 	})
 
 	t.Run("stopped_session", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
 		sess.mu.Lock()
 		sess.stopped = true
 		close(sess.notify)
 		sess.mu.Unlock()
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   testCorrelationID + "." + testNonce,
 			Protocol: "DNS",
 		})
@@ -974,11 +964,11 @@ func TestHandleInteraction(t *testing.T) {
 	})
 
 	t.Run("http_headers_only", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
 		ts := time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC)
 		fullId := testCorrelationID + "." + testNonce
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:        fullId,
 			Protocol:      "HTTP",
 			RemoteAddress: "10.0.0.1",
@@ -1004,9 +994,9 @@ func TestHandleInteraction(t *testing.T) {
 	})
 
 	t.Run("http_headers_and_body", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:     testCorrelationID + "." + testNonce,
 			Protocol:   "HTTP",
 			RawRequest: "POST /callback HTTP/1.1\r\nHost: example.com\r\n\r\n{\"key\":\"value\"}",
@@ -1022,9 +1012,9 @@ func TestHandleInteraction(t *testing.T) {
 	})
 
 	t.Run("smtp_structured", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:     testCorrelationID + "." + testNonce,
 			Protocol:   "SMTP",
 			SMTPFrom:   "sender@example.com",
@@ -1046,9 +1036,9 @@ func TestHandleInteraction(t *testing.T) {
 	})
 
 	t.Run("dns_unchanged", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   testCorrelationID + "." + testNonce,
 			Protocol: "DNS",
 			QType:    "A",
@@ -1117,15 +1107,17 @@ func TestHandleInteraction_CustomServer(t *testing.T) {
 	const testCorrelationID = "abcdefghijklmnopqrst"
 	const testNonce = "xy8qr1abzz99w"
 
-	setup := func() (*InteractshBackend, *oastSession) {
-		b := NewInteractshBackend("custom.example.com")
-		b.correlationID = testCorrelationID
-		b.serverHost = "custom.example.com"
+	const testServerHost = "custom.example.com"
+
+	setup := func(t *testing.T) (func(*oobclient.Interaction), *oastSession) {
+		t.Helper()
+		b := NewInteractshBackend(testServerHost)
+		t.Cleanup(func() { _ = b.Close() })
 
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        "sA1b",
-				Domain:    testCorrelationID + testNonce + ".custom.example.com",
+				Domain:    testCorrelationID + testNonce + "." + testServerHost,
 				CreatedAt: time.Now(),
 			},
 			nonce:  testNonce,
@@ -1134,13 +1126,13 @@ func TestHandleInteraction_CustomServer(t *testing.T) {
 		b.sessions[sess.info.Domain] = sess
 		b.byID["sA1b"] = sess.info.Domain
 		b.byNonce[testNonce] = sess.info.Domain
-		return b, sess
+		return b.makeInteractionHandler(testCorrelationID, testServerHost), sess
 	}
 
 	t.Run("routes_by_nonce", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   testCorrelationID + testNonce,
 			Protocol: "DNS",
 		})
@@ -1151,9 +1143,9 @@ func TestHandleInteraction_CustomServer(t *testing.T) {
 	})
 
 	t.Run("routes_with_prefix", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   "ssrf." + testCorrelationID + testNonce,
 			Protocol: "HTTP",
 		})
@@ -1164,9 +1156,9 @@ func TestHandleInteraction_CustomServer(t *testing.T) {
 	})
 
 	t.Run("unknown_nonce_ignored", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   testCorrelationID + "zzzzzzzzzzzz9",
 			Protocol: "DNS",
 		})
@@ -1177,9 +1169,9 @@ func TestHandleInteraction_CustomServer(t *testing.T) {
 	})
 
 	t.Run("wrong_correlation_id", func(t *testing.T) {
-		b, sess := setup()
+		handler, sess := setup(t)
 
-		b.handleInteraction(&oobclient.Interaction{
+		handler(&oobclient.Interaction{
 			FullId:   "wrongcorrelationidxx" + testNonce,
 			Protocol: "DNS",
 		})
