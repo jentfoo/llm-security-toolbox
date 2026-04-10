@@ -527,20 +527,10 @@ func TestCollyBackend_CreateSession_follows_links(t *testing.T) {
 
 	sessionID := info.ID
 
-	// Poll until completed or timeout
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		status, err := b.GetStatus(ctx, sessionID)
-		require.NoError(t, err)
-		if status.State == crawlStateCompleted {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	status, err := b.GetStatus(ctx, sessionID)
-	require.NoError(t, err)
-	assert.Equal(t, crawlStateCompleted, status.State)
+		return err == nil && status.State == crawlStateCompleted
+	}, 20*time.Second, 10*time.Millisecond)
 
 	// Should have visited at least 4 pages: /, /page1, /page2, /page3
 	flows, err := b.ListFlows(ctx, sessionID, CrawlListOptions{})

@@ -260,6 +260,7 @@ Structure and conventions:
 Assertions and validation:
 - Assertions rely on `testify` (`require` for setup, `assert` for assertions)
 - Don't include messages unless the message provides context outside of the test point
+- Do NOT use time.Sleep for tests, instead use require.Eventually or deterministic triggers
 
 Test helpers:
 - Mock MCP server available via `service.NewTestMCPServer()`

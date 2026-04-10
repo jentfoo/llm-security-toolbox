@@ -543,8 +543,10 @@ func mustParsePort(t *testing.T, portStr string) int {
 func TestApplyRequestRules(t *testing.T) {
 	t.Parallel()
 
+	configDir := t.TempDir() // shared so CA cert is generated once
+
 	t.Run("header_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -573,7 +575,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("header_regex", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -602,7 +604,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("body_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -634,7 +636,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("no_matching_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -663,7 +665,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("strips_unsupported_accept_encoding", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -692,7 +694,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("preserves_accept_encoding", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -720,7 +722,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("multiple_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -759,7 +761,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("empty_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -789,7 +791,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("compressed_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -832,8 +834,10 @@ func TestApplyRequestRules(t *testing.T) {
 func TestApplyResponseRules(t *testing.T) {
 	t.Parallel()
 
+	configDir := t.TempDir() // shared so CA cert is generated once
+
 	t.Run("header_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -862,7 +866,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("body_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -893,7 +897,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("compressed_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -931,7 +935,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("brotli_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -967,7 +971,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("invalid_brotli_skips_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1002,7 +1006,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("multiple_encoding_skips_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1038,110 +1042,108 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 }
 
-func TestApplyWSRules_to_server(t *testing.T) {
+func TestApplyWSRules(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
+	configDir := t.TempDir() // shared so CA cert is generated once
 
-	// Add WebSocket rule for to-server direction
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "ws-to-server-rule",
-		Type:    "ws:to-server",
-		IsRegex: false,
-		Find:    "client-secret",
-		Replace: "REDACTED",
+	t.Run("to_server", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		// Add WebSocket rule for to-server direction
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "ws-to-server-rule",
+			Type:    "ws:to-server",
+			IsRegex: false,
+			Find:    "client-secret",
+			Replace: "REDACTED",
+		})
+		require.NoError(t, err)
+
+		payload := []byte(`{"message":"client-secret"}`)
+
+		// Should apply to ws:to-server
+		modified := backend.ApplyWSRules(payload, "ws:to-server")
+		assert.Contains(t, string(modified), "REDACTED")
+
+		// Should not apply to ws:to-client
+		unmodified := backend.ApplyWSRules(payload, "ws:to-client")
+		assert.Equal(t, string(payload), string(unmodified))
 	})
-	require.NoError(t, err)
 
-	payload := []byte(`{"message":"client-secret"}`)
+	t.Run("to_client", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	// Should apply to ws:to-server
-	modified := backend.ApplyWSRules(payload, "ws:to-server")
-	assert.Contains(t, string(modified), "REDACTED")
+		// Add WebSocket rule for to-client direction
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "ws-to-client-rule",
+			Type:    "ws:to-client",
+			IsRegex: false,
+			Find:    "server-internal",
+			Replace: "public",
+		})
+		require.NoError(t, err)
 
-	// Should not apply to ws:to-client
-	unmodified := backend.ApplyWSRules(payload, "ws:to-client")
-	assert.Equal(t, string(payload), string(unmodified))
-}
+		payload := []byte(`{"data":"server-internal-info"}`)
 
-func TestApplyWSRules_to_client(t *testing.T) {
-	t.Parallel()
+		// Should apply to ws:to-client
+		modified := backend.ApplyWSRules(payload, "ws:to-client")
+		assert.Contains(t, string(modified), "public-info")
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add WebSocket rule for to-client direction
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "ws-to-client-rule",
-		Type:    "ws:to-client",
-		IsRegex: false,
-		Find:    "server-internal",
-		Replace: "public",
+		// Should not apply to ws:to-server
+		unmodified := backend.ApplyWSRules(payload, "ws:to-server")
+		assert.Equal(t, string(payload), string(unmodified))
 	})
-	require.NoError(t, err)
 
-	payload := []byte(`{"data":"server-internal-info"}`)
+	t.Run("both_directions", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	// Should apply to ws:to-client
-	modified := backend.ApplyWSRules(payload, "ws:to-client")
-	assert.Contains(t, string(modified), "public-info")
+		// Add WebSocket rule for both directions
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "ws-both-rule",
+			Type:    "ws:both",
+			IsRegex: false,
+			Find:    "timestamp",
+			Replace: "TS",
+		})
+		require.NoError(t, err)
 
-	// Should not apply to ws:to-server
-	unmodified := backend.ApplyWSRules(payload, "ws:to-server")
-	assert.Equal(t, string(payload), string(unmodified))
-}
+		payload := []byte(`{"timestamp":"123456"}`)
 
-func TestApplyWSRules_both_directions(t *testing.T) {
-	t.Parallel()
+		// Should apply to both directions
+		toServer := backend.ApplyWSRules(payload, "ws:to-server")
+		assert.Contains(t, string(toServer), "TS")
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add WebSocket rule for both directions
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "ws-both-rule",
-		Type:    "ws:both",
-		IsRegex: false,
-		Find:    "timestamp",
-		Replace: "TS",
+		toClient := backend.ApplyWSRules(payload, "ws:to-client")
+		assert.Contains(t, string(toClient), "TS")
 	})
-	require.NoError(t, err)
 
-	payload := []byte(`{"timestamp":"123456"}`)
+	t.Run("regex", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	// Should apply to both directions
-	toServer := backend.ApplyWSRules(payload, "ws:to-server")
-	assert.Contains(t, string(toServer), "TS")
+		// Add regex WebSocket rule
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "ws-regex-rule",
+			Type:    "ws:both",
+			IsRegex: true,
+			Find:    `"id":\s*\d+`,
+			Replace: `"id": 0`,
+		})
+		require.NoError(t, err)
 
-	toClient := backend.ApplyWSRules(payload, "ws:to-client")
-	assert.Contains(t, string(toClient), "TS")
-}
+		payload := []byte(`{"id": 12345, "data": "test"}`)
 
-func TestApplyWSRules_regex(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add regex WebSocket rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "ws-regex-rule",
-		Type:    "ws:both",
-		IsRegex: true,
-		Find:    `"id":\s*\d+`,
-		Replace: `"id": 0`,
+		modified := backend.ApplyWSRules(payload, "ws:to-server")
+		assert.Contains(t, string(modified), `"id": 0`)
 	})
-	require.NoError(t, err)
-
-	payload := []byte(`{"id": 12345, "data": "test"}`)
-
-	modified := backend.ApplyWSRules(payload, "ws:to-server")
-	assert.Contains(t, string(modified), `"id": 0`)
 }
 
 func TestApplyMatchReplaceRule(t *testing.T) {
@@ -1263,93 +1265,93 @@ func TestParseHeadersFromText(t *testing.T) {
 	}
 }
 
-func TestApplyRequestBodyOnlyRules_compression(t *testing.T) {
+func TestApplyRequestBodyOnlyRules(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
+	configDir := t.TempDir() // shared so CA cert is generated once
 
-	// Add body rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "body-rule",
-		Type:    RuleTypeRequestBody,
-		IsRegex: false,
-		Find:    "token",
-		Replace: "REDACTED",
+	t.Run("compression", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		// Add body rule
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "body-rule",
+			Type:    RuleTypeRequestBody,
+			IsRegex: false,
+			Find:    "token",
+			Replace: "REDACTED",
+		})
+		require.NoError(t, err)
+
+		// Create gzip-compressed body
+		originalBody := []byte(`{"auth":"token123"}`)
+		compressedBody, err := proxy.Compress(originalBody, "gzip")
+		require.NoError(t, err)
+
+		headers := []proxy.Header{
+			{Name: "Content-Encoding", Value: "gzip"},
+		}
+
+		modified, modErr := backend.ApplyRequestBodyOnlyRules(compressedBody, headers)
+		require.NoError(t, modErr)
+
+		// Decompress and verify the rule was applied
+		decompressed, wasCompressed := proxy.Decompress(modified, "gzip")
+		assert.True(t, wasCompressed)
+		assert.Contains(t, string(decompressed), "REDACTED123")
 	})
-	require.NoError(t, err)
 
-	// Create gzip-compressed body
-	originalBody := []byte(`{"auth":"token123"}`)
-	compressedBody, err := proxy.Compress(originalBody, "gzip")
-	require.NoError(t, err)
+	t.Run("invalid_compressed", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	headers := []proxy.Header{
-		{Name: "Content-Encoding", Value: "gzip"},
-	}
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "body-rule",
+			Type:    RuleTypeRequestBody,
+			IsRegex: false,
+			Find:    "test",
+			Replace: "MODIFIED",
+		})
+		require.NoError(t, err)
 
-	modified, modErr := backend.ApplyRequestBodyOnlyRules(compressedBody, headers)
-	require.NoError(t, modErr)
+		// Invalid brotli data - decompression fails, body unchanged
+		fakeCompressed := []byte{0x1b, 0x03, 0x00, 0xf8, 0xff}
+		originalBody := make([]byte, len(fakeCompressed))
+		copy(originalBody, fakeCompressed)
 
-	// Decompress and verify the rule was applied
-	decompressed, wasCompressed := proxy.Decompress(modified, "gzip")
-	assert.True(t, wasCompressed)
-	assert.Contains(t, string(decompressed), "REDACTED123")
-}
+		headers := []proxy.Header{
+			{Name: "Content-Encoding", Value: "br"},
+		}
 
-func TestApplyRequestBodyOnlyRules_invalid_compressed(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "body-rule",
-		Type:    RuleTypeRequestBody,
-		IsRegex: false,
-		Find:    "test",
-		Replace: "MODIFIED",
+		modified, modErr := backend.ApplyRequestBodyOnlyRules(fakeCompressed, headers)
+		require.NoError(t, modErr)
+		assert.Equal(t, originalBody, modified)
 	})
-	require.NoError(t, err)
 
-	// Invalid brotli data - decompression fails, body unchanged
-	fakeCompressed := []byte{0x1b, 0x03, 0x00, 0xf8, 0xff}
-	originalBody := make([]byte, len(fakeCompressed))
-	copy(originalBody, fakeCompressed)
+	t.Run("no_encoding", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
 
-	headers := []proxy.Header{
-		{Name: "Content-Encoding", Value: "br"},
-	}
+		// Add body rule
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "body-rule",
+			Type:    RuleTypeRequestBody,
+			IsRegex: false,
+			Find:    "original",
+			Replace: "modified",
+		})
+		require.NoError(t, err)
 
-	modified, modErr := backend.ApplyRequestBodyOnlyRules(fakeCompressed, headers)
-	require.NoError(t, modErr)
-	assert.Equal(t, originalBody, modified)
-}
+		body := []byte(`{"data":"original-value"}`)
+		headers := []proxy.Header{} // no Content-Encoding
 
-func TestApplyRequestBodyOnlyRules_no_encoding(t *testing.T) {
-	t.Parallel()
+		modified, modErr := backend.ApplyRequestBodyOnlyRules(body, headers)
+		require.NoError(t, modErr)
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close() })
-
-	// Add body rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "body-rule",
-		Type:    RuleTypeRequestBody,
-		IsRegex: false,
-		Find:    "original",
-		Replace: "modified",
+		assert.JSONEq(t, `{"data":"modified-value"}`, string(modified))
 	})
-	require.NoError(t, err)
-
-	body := []byte(`{"data":"original-value"}`)
-	headers := []proxy.Header{} // no Content-Encoding
-
-	modified, modErr := backend.ApplyRequestBodyOnlyRules(body, headers)
-	require.NoError(t, modErr)
-
-	assert.JSONEq(t, `{"data":"modified-value"}`, string(modified))
 }

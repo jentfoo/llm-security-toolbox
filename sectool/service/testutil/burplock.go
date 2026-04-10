@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
@@ -20,20 +21,12 @@ func AcquireBurpLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open lock file: %v", err)
 	}
-
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		if err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
-			break
-		} else if time.Now().After(deadline) {
-			_ = file.Close()
-			t.Fatalf("timeout waiting for Burp MCP lock")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
 	t.Cleanup(func() {
 		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
 		_ = file.Close()
 	})
+
+	require.Eventually(t, func() bool {
+		return unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil
+	}, 60*time.Second, 10*time.Millisecond, "timeout waiting for Burp MCP lock")
 }

@@ -429,9 +429,6 @@ func TestBurpClientClosePrompt(t *testing.T) {
 	client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(200*time.Millisecond))
 	require.NoError(t, client.Connect(t.Context()))
 
-	// Let the health loop fire at least once
-	time.Sleep(300 * time.Millisecond)
-
 	done := make(chan error, 1)
 	go func() { done <- client.Close() }()
 
