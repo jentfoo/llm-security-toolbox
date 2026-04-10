@@ -251,6 +251,8 @@ func startMCPServerAndClient(t *testing.T, backendType httpBackendType, httpBack
 }
 
 func TestIntegration_ProxySummary(t *testing.T) {
+	t.Parallel()
+
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
 
@@ -269,6 +271,8 @@ func TestIntegration_ProxySummary(t *testing.T) {
 }
 
 func TestIntegration_ProxySummaryWithFilters(t *testing.T) {
+	t.Parallel()
+
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
 
@@ -323,6 +327,8 @@ func TestIntegration_ProxySummaryWithFilters(t *testing.T) {
 }
 
 func TestIntegration_ProxyList(t *testing.T) {
+	t.Parallel()
+
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
 
@@ -378,6 +384,8 @@ func TestIntegration_ProxyList(t *testing.T) {
 }
 
 func TestIntegration_FlowGet(t *testing.T) {
+	t.Parallel()
+
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
 
@@ -507,6 +515,8 @@ func TestIntegration_ProxyRules(t *testing.T) {
 }
 
 func TestIntegration_Replay(t *testing.T) {
+	t.Parallel()
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Test-Header", "test-value")
 		_, _ = io.WriteString(w, "test response")
@@ -604,6 +614,8 @@ func TestIntegration_Replay(t *testing.T) {
 }
 
 func TestIntegration_ReplayWithQueryMods(t *testing.T) {
+	t.Parallel()
+
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
 
@@ -755,6 +767,8 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 }
 
 func TestIntegration_RequestSend(t *testing.T) {
+	t.Parallel()
+
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
 
@@ -1008,6 +1022,8 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 }
 
 func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
+	t.Parallel()
+
 	receivedHeaders := make(chan http.Header, 10)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1085,6 +1101,8 @@ func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
 }
 
 func TestIntegration_RuleRequestBodyVerification(t *testing.T) {
+	t.Parallel()
+
 	receivedBody := make(chan []byte, 10)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1135,6 +1153,8 @@ func TestIntegration_RuleRequestBodyVerification(t *testing.T) {
 }
 
 func TestIntegration_RuleResponseHeaderVerification(t *testing.T) {
+	t.Parallel()
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Original-Header", "original-value")
 		w.Header().Set("X-Server-Token", "secret-token-abc")
@@ -1189,6 +1209,8 @@ func TestIntegration_RuleResponseHeaderVerification(t *testing.T) {
 }
 
 func TestIntegration_RuleResponseBodyVerification(t *testing.T) {
+	t.Parallel()
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("Response contains SECRET_DATA that should be modified"))
@@ -1224,6 +1246,8 @@ func TestIntegration_RuleResponseBodyVerification(t *testing.T) {
 }
 
 func TestIntegration_ReplayBodyReplacement(t *testing.T) {
+	t.Parallel()
+
 	receivedBody := make(chan []byte, 10)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1293,6 +1317,8 @@ func TestIntegration_ReplayBodyReplacement(t *testing.T) {
 }
 
 func TestIntegration_ReplayJSONModifications(t *testing.T) {
+	t.Parallel()
+
 	receivedBody := make(chan []byte, 10)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1398,6 +1424,8 @@ func TestIntegration_ReplayJSONModifications(t *testing.T) {
 }
 
 func TestIntegration_ReplayMethodOverride(t *testing.T) {
+	t.Parallel()
+
 	receivedMethod := make(chan string, 10)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1478,6 +1506,8 @@ func TestIntegration_ReplayMethodOverride(t *testing.T) {
 }
 
 func TestIntegration_ReplayFollowRedirects(t *testing.T) {
+	t.Parallel()
+
 	var redirectCount int
 	var mu sync.Mutex
 
@@ -1973,6 +2003,8 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 }
 
 func TestIntegration_ChunkedEncoding(t *testing.T) {
+	t.Parallel()
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -2492,6 +2524,8 @@ func TestIntegration_ContentLengthMismatch(t *testing.T) {
 }
 
 func TestIntegration_LargeBodies(t *testing.T) {
+	t.Parallel()
+
 	const bodySize = 1024 * 1024 // 1MB
 	largeBody := strings.Repeat("X", bodySize)
 
@@ -2529,6 +2563,8 @@ func TestIntegration_LargeBodies(t *testing.T) {
 }
 
 func TestIntegration_BinaryContent(t *testing.T) {
+	t.Parallel()
+
 	// Create binary data with all byte values
 	binaryData := make([]byte, 256)
 	for i := range binaryData {
@@ -2766,6 +2802,8 @@ func encodeWebSocketFrame(payload []byte, opcode byte, masked bool) []byte {
 }
 
 func TestIntegration_ReplayPathModification(t *testing.T) {
+	t.Parallel()
+
 	receivedPath := make(chan string, 10)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3026,6 +3064,8 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 }
 
 func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
+	t.Parallel()
+
 	receivedBody := make(chan []byte, 10)
 	receivedMethod := make(chan string, 10)
 
@@ -3166,6 +3206,8 @@ func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
 
 // TestIntegration_CrossOriginRedirectAuthPreserved tests that Authorization headers are preserved on cross-origin redirects.
 func TestIntegration_CrossOriginRedirectAuthPreserved(t *testing.T) {
+	t.Parallel()
+
 	receivedAuth := make(chan string, 10)
 
 	// Create target server that captures Authorization header

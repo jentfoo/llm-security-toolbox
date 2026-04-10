@@ -207,6 +207,8 @@ func TestApplyBodyRules(t *testing.T) {
 }
 
 func TestCopyToHistoryBuffer(t *testing.T) {
+	t.Parallel()
+
 	handler := newHTTP2Handler(newHistoryStore(store.NewMemStorage()), 10, TimeoutConfig{})
 	stream := &h2Stream{id: 1}
 	p := &h2Proxy{handler: handler}
