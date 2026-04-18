@@ -220,7 +220,7 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 	if b.hasRequestRules() {
 		if parsed, parseErr := proxy.ParseRequest(bytes.NewReader(rawRequest)); parseErr == nil {
 			var buf bytes.Buffer
-			modified := b.ApplyRequestRules(parsed).SerializeRaw(&buf, false)
+			modified := b.ApplyRequestRules(parsed).SerializeRaw(&buf)
 			if !bytes.Equal(rawRequest, modified) {
 				rawRequest = modified
 			}
@@ -603,8 +603,10 @@ func (b *NativeProxyBackend) applyRequestBodyRules(req *proxy.RawHTTP1Request, r
 		return req
 	}
 
-	req.Body = result.body
-	req.SetHeader("Content-Length", strconv.Itoa(len(result.body)))
+	req.SetBody(result.body)
+	if req.Wire == nil || !req.Wire.WasChunked {
+		req.SetHeader("Content-Length", strconv.Itoa(len(result.body)))
+	}
 	return req
 }
 
@@ -652,8 +654,10 @@ func (b *NativeProxyBackend) applyResponseBodyRules(resp *proxy.RawHTTP1Response
 		resp.RemoveHeader("Content-Encoding")
 	}
 
-	resp.Body = result.body
-	resp.SetHeader("Content-Length", strconv.Itoa(len(result.body)))
+	resp.SetBody(result.body)
+	if resp.Wire == nil || !resp.Wire.WasChunked {
+		resp.SetHeader("Content-Length", strconv.Itoa(len(result.body)))
+	}
 	return resp
 }
 

@@ -18,11 +18,10 @@ var (
 
 // ParseRequest parses an HTTP/1.1 request from the reader.
 // Returns error only for truly unparseable input.
-// Tolerant of malformed input to support security testing.
 func ParseRequest(r io.Reader) (*RawHTTP1Request, error) {
 	br := bufio.NewReader(r)
 
-	line, requestLineBareLF, err := readLineWithEnding(br)
+	line, requestLineEnding, err := readLineWithEnding(br)
 	if err != nil {
 		if errors.Is(err, io.EOF) && len(line) == 0 {
 			return nil, ErrEmptyRequest
@@ -39,33 +38,59 @@ func ParseRequest(r io.Reader) (*RawHTTP1Request, error) {
 	}
 
 	req := &RawHTTP1Request{
-		Method:   method,
-		Path:     path,
-		Query:    query,
-		Version:  version,
-		Protocol: strings.ToLower(version),
+		Method:            method,
+		Path:              path,
+		Query:             query,
+		Version:           version,
+		Protocol:          strings.ToLower(version),
+		RequestLineEnding: requestLineEnding,
 	}
 
-	var headersBareLF bool
-	if req.Headers, headersBareLF, err = readHeadersWithWire(br); err != nil && !errors.Is(err, io.EOF) {
+	var headersBareLF, headersBareCR bool
+	if req.Headers, headersBareLF, headersBareCR, req.HeaderBlockEnding, err = readHeadersWithWire(br); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 
 	// Determine body handling
-	var wasChunked bool
-	if req.Body, req.Trailers, wasChunked, err = readRequestBodyWithWire(br, req); err != nil && !errors.Is(err, io.EOF) {
+	var wasChunked, trailersBareLF, trailersBareCR bool
+	if req.Body, req.Trailers, wasChunked, req.Chunks, trailersBareLF, trailersBareCR, err = readRequestBodyWithWire(br, req); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 
-	// Track wire format if any non-standard encoding was detected
-	if requestLineBareLF || headersBareLF || wasChunked {
+	// Track wire format, headersBare* already cover HeaderBlockEnding's terminator
+	// Chunked framing terminators are derived from req.Chunks
+	// Trailer-line terminators are reported separately since they are preserved verbatim in req.Trailers
+	chunksBareLF, chunksBareCR := chunksBareFlags(req.Chunks)
+	usedBareLF := requestLineEnding == EndingBareLF || headersBareLF || chunksBareLF || trailersBareLF
+	usedBareCR := requestLineEnding == EndingBareCR || headersBareCR || chunksBareCR || trailersBareCR
+	if usedBareLF || usedBareCR || wasChunked {
 		req.Wire = &WireFormat{
 			WasChunked: wasChunked,
-			UsedBareLF: requestLineBareLF || headersBareLF,
+			UsedBareLF: usedBareLF,
+			UsedBareCR: usedBareCR,
 		}
 	}
 
 	return req, nil
+}
+
+// chunksBareFlags returns whether any chunk framing line used bare LF or bare CR.
+func chunksBareFlags(chunks []ChunkFrame) (bareLF, bareCR bool) {
+	for _, c := range chunks {
+		switch c.SizeEnding {
+		case EndingBareLF:
+			bareLF = true
+		case EndingBareCR:
+			bareCR = true
+		}
+		switch c.DataEnding {
+		case EndingBareLF:
+			bareLF = true
+		case EndingBareCR:
+			bareCR = true
+		}
+	}
+	return bareLF, bareCR
 }
 
 // parseResponse parses an HTTP/1.1 response from the reader.
@@ -74,7 +99,7 @@ func parseResponse(r io.Reader, requestMethod string) (*RawHTTP1Response, error)
 	br := bufio.NewReader(r)
 
 	// Read status line
-	line, statusLineBareLF, err := readLineWithEnding(br)
+	line, statusLineEnding, err := readLineWithEnding(br)
 	if err != nil {
 		if errors.Is(err, io.EOF) && len(line) == 0 {
 			return nil, ErrEmptyResponse
@@ -89,78 +114,69 @@ func parseResponse(r io.Reader, requestMethod string) (*RawHTTP1Response, error)
 	}
 
 	resp := &RawHTTP1Response{
-		Version:    version,
-		StatusCode: code,
-		StatusText: text,
+		Version:          version,
+		StatusCode:       code,
+		StatusText:       text,
+		StatusLineEnding: statusLineEnding,
 	}
 
-	var headersBareLF bool
-	if resp.Headers, headersBareLF, err = readHeadersWithWire(br); err != nil && !errors.Is(err, io.EOF) {
+	var headersBareLF, headersBareCR bool
+	if resp.Headers, headersBareLF, headersBareCR, resp.HeaderBlockEnding, err = readHeadersWithWire(br); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 
-	// Track bare LF usage in headers
-	usedBareLF := statusLineBareLF || headersBareLF
-
-	// Determine body handling - HEAD responses have no body
-	if requestMethod == "HEAD" {
-		if usedBareLF {
-			resp.Wire = &WireFormat{UsedBareLF: true}
-		}
-		return resp, nil
-	}
-
-	// 1xx, 204, 304 responses have no body
-	if code < 200 || code == 204 || code == 304 {
-		if usedBareLF {
-			resp.Wire = &WireFormat{UsedBareLF: true}
-		}
-		return resp, nil
-	}
+	// headersBare* already cover HeaderBlockEnding's terminator
+	usedBareLF := statusLineEnding == EndingBareLF || headersBareLF
+	usedBareCR := statusLineEnding == EndingBareCR || headersBareCR
 
 	var wasChunked bool
-	if resp.Body, resp.Trailers, wasChunked, err = readResponseBodyWithWire(br, resp); err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+	// HEAD and 1xx/204/304 responses have no body
+	if requestMethod != "HEAD" && code >= 200 && code != 204 && code != 304 {
+		var trailersBareLF, trailersBareCR bool
+		if resp.Body, resp.Trailers, wasChunked, resp.Chunks, trailersBareLF, trailersBareCR, err = readResponseBodyWithWire(br, resp); err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		chunksBareLF, chunksBareCR := chunksBareFlags(resp.Chunks)
+		usedBareLF = usedBareLF || chunksBareLF || trailersBareLF
+		usedBareCR = usedBareCR || chunksBareCR || trailersBareCR
 	}
 
-	// Track wire format if any non-standard encoding was detected
-	if usedBareLF || wasChunked {
+	if usedBareLF || usedBareCR || wasChunked {
 		resp.Wire = &WireFormat{
 			WasChunked: wasChunked,
 			UsedBareLF: usedBareLF,
+			UsedBareCR: usedBareCR,
 		}
 	}
 
 	return resp, nil
 }
 
-// readLine reads a line from the reader, handling both CRLF and bare LF.
-// Returns the line without the line ending.
-func readLine(br *bufio.Reader) ([]byte, error) {
-	line, _, err := readLineWithEnding(br)
-	return line, err
-}
-
-// readLineWithEnding reads a line and returns (content, usedBareLF, error).
-// content excludes the line ending; usedBareLF is true if \n was used without \r.
-func readLineWithEnding(br *bufio.Reader) (content []byte, usedBareLF bool, err error) {
-	// TODO - Consider handling bare CR (\r without \n) as line ending per HTTP spec edge case
-	line, err := br.ReadBytes('\n')
-	if err != nil {
-		// No \n found - trim any trailing CR and return
-		line = bytes.TrimSuffix(line, []byte("\r"))
-		return line, false, err
+func readLineWithEnding(br *bufio.Reader) (content []byte, ending LineEnding, err error) {
+	var buf []byte
+	for {
+		b, readErr := br.ReadByte()
+		if readErr != nil {
+			return buf, EndingNone, readErr
+		}
+		switch b {
+		case '\n':
+			return buf, EndingBareLF, nil
+		case '\r':
+			next, peekErr := br.Peek(1)
+			if peekErr == nil && next[0] == '\n' {
+				_, _ = br.ReadByte()
+				return buf, EndingCRLF, nil
+			}
+			return buf, EndingBareCR, nil
+		default:
+			buf = append(buf, b)
+		}
 	}
-	line = line[:len(line)-1] // remove \n
-	if bytes.HasSuffix(line, []byte("\r")) {
-		line = line[:len(line)-1] // remove \r
-		return line, false, nil   // CRLF
-	}
-	return line, true, nil // bare LF
 }
 
 // ParseRequestLine extracts method, path, query, version from request line.
-// Tolerant: accepts malformed lines if method and path are extractable.
+// Accepts malformed lines if method and path are extractable.
 func ParseRequestLine(line []byte) (method, path, query, version string, err error) {
 	s := string(line)
 	parts := strings.SplitN(s, " ", 3)
@@ -220,45 +236,51 @@ func parseStatusLine(line []byte) (version string, code int, text string, err er
 	return version, code, text, nil
 }
 
-// readHeadersWithWire reads headers and returns (headers, usedBareLF, error).
-// Each header's RawLine is populated with the original wire bytes (including obs-fold).
-func readHeadersWithWire(br *bufio.Reader) (Headers, bool, error) {
-	var headers Headers
-	var sawBareLF bool
-	var rawAccum []byte // accumulates raw bytes for current header (including obs-fold lines)
+// readHeadersWithWire reads headers and returns headers plus wire info including the
+// terminator of the blank line that ends the header block. Each header's RawLine holds
+// original wire bytes (including obs-fold continuations and their inter-line terminators).
+func readHeadersWithWire(br *bufio.Reader) (headers Headers, usedBareLF, usedBareCR bool, blockEnding LineEnding, err error) {
+	blockEnding = EndingNone  // stays None if loop exits without a blank-line terminator
+	var rawAccum []byte       // raw bytes for current header including obs-fold lines
+	var prevEnding LineEnding // ending of the most recent physical line, used as obs-fold separator
+
+	aggregate := func(e LineEnding) {
+		switch e {
+		case EndingBareLF:
+			usedBareLF = true
+		case EndingBareCR:
+			usedBareCR = true
+		}
+	}
 
 	for {
-		line, bareLF, err := readLineWithEnding(br)
-		if bareLF {
-			sawBareLF = true
-		}
-		if err != nil && !errors.Is(err, io.EOF) {
-			return headers, sawBareLF, err
+		line, ending, readErr := readLineWithEnding(br)
+		aggregate(ending)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return headers, usedBareLF, usedBareCR, blockEnding, readErr
 		}
 
-		// Empty line signals end of headers
+		// Empty line signals end of headers, its terminator is the block ending
 		if len(line) == 0 {
-			return headers, sawBareLF, nil
+			blockEnding = ending
+			return headers, usedBareLF, usedBareCR, blockEnding, nil
 		}
 
 		// Check for obs-fold (continuation line)
-		if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
-			// Append to previous header's raw bytes and value
+		if line[0] == ' ' || line[0] == '\t' {
 			if len(headers) > 0 {
-				// Append continuation to RawLine with line ending
-				if bareLF {
-					rawAccum = append(rawAccum, '\n')
-				} else {
-					rawAccum = append(rawAccum, '\r', '\n')
-				}
+				// Terminator between prior physical line and this continuation
+				rawAccum = append(rawAccum, prevEnding.Bytes()...)
 				rawAccum = append(rawAccum, line...)
 				headers[len(headers)-1].RawLine = make([]byte, len(rawAccum))
 				copy(headers[len(headers)-1].RawLine, rawAccum)
+				headers[len(headers)-1].LineEnding = ending
 				// Join with a single space, trimming the leading whitespace
 				headers[len(headers)-1].Value += " " + strings.TrimLeft(string(line), " \t")
 			}
-			if errors.Is(err, io.EOF) {
-				return headers, sawBareLF, nil
+			prevEnding = ending
+			if errors.Is(readErr, io.EOF) {
+				return headers, usedBareLF, usedBareCR, blockEnding, nil
 			}
 			continue
 		}
@@ -269,16 +291,17 @@ func readHeadersWithWire(br *bufio.Reader) (Headers, bool, error) {
 
 		header := parseHeaderLine(line)
 		header.RawLine = rawAccum
+		header.LineEnding = ending
 		headers = append(headers, header)
+		prevEnding = ending
 
-		if errors.Is(err, io.EOF) {
-			return headers, sawBareLF, nil
+		if errors.Is(readErr, io.EOF) {
+			return headers, usedBareLF, usedBareCR, blockEnding, nil
 		}
 	}
 }
 
-// parseHeaderLine parses "Name: Value" into Header struct.
-// Preserves whitespace anomalies in header name (e.g., "Header " with trailing space).
+// parseHeaderLine parses "Name: Value" into Header struct. Preserves whitespace anomalies in header name.
 func parseHeaderLine(line []byte) Header {
 	idx := bytes.IndexByte(line, ':')
 	if idx < 0 {
@@ -295,37 +318,38 @@ func parseHeaderLine(line []byte) Header {
 	return Header{Name: name, Value: value}
 }
 
-// readRequestBodyWithWire reads the request body and returns wasChunked flag.
-func readRequestBodyWithWire(br *bufio.Reader, req *RawHTTP1Request) (body, trailers []byte, wasChunked bool, err error) {
+// readRequestBodyWithWire reads the request body and returns wasChunked, per-chunk
+// framing, and bare-LF/CR flags observed inside trailer lines.
+func readRequestBodyWithWire(br *bufio.Reader, req *RawHTTP1Request) (body, trailers []byte, wasChunked bool, chunks []ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
 	// Check for chunked encoding first (takes precedence over Content-Length)
 	te := req.GetHeader("Transfer-Encoding")
 	if strings.Contains(strings.ToLower(te), "chunked") {
-		body, trailers, err = readChunkedBody(br)
-		return body, trailers, true, err
+		body, trailers, chunks, trailersBareLF, trailersBareCR, err = readChunkedBody(br)
+		return body, trailers, true, chunks, trailersBareLF, trailersBareCR, err
 	}
 
 	clStr := req.GetHeader("Content-Length")
 	if clStr != "" {
 		cl, err := strconv.ParseInt(clStr, 10, 64)
 		if err != nil || cl <= 0 {
-			return nil, nil, false, nil
+			return nil, nil, false, nil, false, false, nil
 		}
 		body = make([]byte, cl)
 		_, err = io.ReadFull(br, body)
-		return body, nil, false, err
+		return body, nil, false, nil, false, false, err
 	}
 
 	// No body indicator for requests
-	return nil, nil, false, nil
+	return nil, nil, false, nil, false, false, nil
 }
 
-// readResponseBodyWithWire reads the response body and returns wasChunked flag.
-func readResponseBodyWithWire(br *bufio.Reader, resp *RawHTTP1Response) (body, trailers []byte, wasChunked bool, err error) {
-	// Check for chunked encoding first
+// readResponseBodyWithWire reads the response body and returns wasChunked, per-chunk
+// framing, and bare-LF/CR flags observed inside trailer lines.
+func readResponseBodyWithWire(br *bufio.Reader, resp *RawHTTP1Response) (body, trailers []byte, wasChunked bool, chunks []ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
 	te := resp.GetHeader("Transfer-Encoding")
 	if strings.Contains(strings.ToLower(te), "chunked") {
-		body, trailers, err = readChunkedBody(br)
-		return body, trailers, true, err
+		body, trailers, chunks, trailersBareLF, trailersBareCR, err = readChunkedBody(br)
+		return body, trailers, true, chunks, trailersBareLF, trailersBareCR, err
 	}
 
 	clStr := resp.GetHeader("Content-Length")
@@ -334,28 +358,29 @@ func readResponseBodyWithWire(br *bufio.Reader, resp *RawHTTP1Response) (body, t
 		if err != nil || cl < 0 {
 			// Invalid CL, try reading to EOF
 			body, err := io.ReadAll(br)
-			return body, nil, false, err
+			return body, nil, false, nil, false, false, err
 		} else if cl == 0 {
-			return nil, nil, false, nil
+			return nil, nil, false, nil, false, false, nil
 		}
 		body = make([]byte, cl)
 		_, err = io.ReadFull(br, body)
-		return body, nil, false, err
+		return body, nil, false, nil, false, false, err
 	}
 
 	// No Content-Length or chunked: read until EOF
 	body, err = io.ReadAll(br)
-	return body, nil, false, err
+	return body, nil, false, nil, false, false, err
 }
 
-// readChunkedBody reads chunked transfer encoding.
-// Returns decoded body and any trailing headers as raw bytes.
-func readChunkedBody(br *bufio.Reader) (body, trailers []byte, err error) {
+// readChunkedBody reads chunked transfer encoding, returning the decoded body,
+// trailers, per-chunk framing, and bare-LF/CR flags observed in trailer lines.
+func readChunkedBody(br *bufio.Reader) (body, trailers []byte, chunks []ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
 	var bodyBuf bytes.Buffer
+
 	for {
-		sizeLine, err := readLine(br)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return bodyBuf.Bytes(), nil, err
+		sizeLine, sizeEnding, readErr := readLineWithEnding(br)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return bodyBuf.Bytes(), nil, chunks, trailersBareLF, trailersBareCR, readErr
 		}
 
 		// Parse chunk size (may have chunk extensions after ;)
@@ -368,46 +393,72 @@ func readChunkedBody(br *bufio.Reader) (body, trailers []byte, err error) {
 		size, parseErr := strconv.ParseInt(sizeStr, 16, 64)
 		if parseErr != nil {
 			// Invalid chunk size - return what we have
-			return bodyBuf.Bytes(), nil, nil
+			return bodyBuf.Bytes(), nil, chunks, trailersBareLF, trailersBareCR, nil
 		}
+
+		// Preserve original size-line bytes (including chunk extensions)
+		sizeLineCopy := make([]byte, len(sizeLine))
+		copy(sizeLineCopy, sizeLine)
 
 		if size == 0 {
-			// Last chunk - read trailers
-			trailers, _ = readTrailers(br)
-			return bodyBuf.Bytes(), trailers, nil
+			// Final chunk terminator; read trailers next
+			// DataEnding of the 0-chunk records the blank-line terminator that closes the trailer block
+			var trailerBlockEnd LineEnding
+			trailers, trailerBlockEnd, trailersBareLF, trailersBareCR, _ = readTrailers(br)
+			chunks = append(chunks, ChunkFrame{
+				SizeLine:   sizeLineCopy,
+				SizeEnding: sizeEnding,
+				Size:       0,
+				DataEnding: trailerBlockEnd,
+			})
+			return bodyBuf.Bytes(), trailers, chunks, trailersBareLF, trailersBareCR, nil
 		}
 
-		// Read chunk data
 		chunk := make([]byte, size)
 		if _, err = io.ReadFull(br, chunk); err != nil {
-			return bodyBuf.Bytes(), nil, err
+			return bodyBuf.Bytes(), nil, chunks, trailersBareLF, trailersBareCR, err
 		}
 		bodyBuf.Write(chunk)
 
-		// Read trailing CRLF after chunk data
-		_, _ = readLine(br)
+		// Trailing terminator after chunk data
+		_, dataEnding, _ := readLineWithEnding(br)
+
+		chunks = append(chunks, ChunkFrame{
+			SizeLine:   sizeLineCopy,
+			SizeEnding: sizeEnding,
+			Size:       int(size),
+			DataEnding: dataEnding,
+		})
 	}
 }
 
-// readTrailers reads trailer headers after the last chunk.
-func readTrailers(br *bufio.Reader) ([]byte, error) {
+// readTrailers reads trailer headers after the last chunk, preserving each line's terminator.
+// Returns the trailer bytes, the terminator of the blank line that ends the trailer block,
+// and whether any trailer content line used bare LF or bare CR.
+func readTrailers(br *bufio.Reader) (body []byte, blockEnding LineEnding, usedBareLF, usedBareCR bool, err error) {
 	var buf bytes.Buffer
 	for {
-		line, err := readLine(br)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return buf.Bytes(), err
+		line, ending, readErr := readLineWithEnding(br)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return buf.Bytes(), EndingNone, usedBareLF, usedBareCR, readErr
 		}
 
 		if len(line) == 0 {
-			// Empty line ends trailers
-			return buf.Bytes(), nil
+			return buf.Bytes(), ending, usedBareLF, usedBareCR, nil
+		}
+
+		switch ending {
+		case EndingBareLF:
+			usedBareLF = true
+		case EndingBareCR:
+			usedBareCR = true
 		}
 
 		buf.Write(line)
-		buf.WriteString("\r\n")
+		buf.WriteString(ending.Bytes())
 
-		if errors.Is(err, io.EOF) {
-			return buf.Bytes(), nil
+		if errors.Is(readErr, io.EOF) {
+			return buf.Bytes(), EndingNone, usedBareLF, usedBareCR, nil
 		}
 	}
 }
@@ -450,18 +501,27 @@ func (r *RawHTTP1Response) SerializeHeaders(buf *bytes.Buffer) []byte {
 	return buf.Bytes()
 }
 
-// SerializeRaw reconstructs wire bytes preserving original formatting when available.
-// If preserveChunked is true and Wire.WasChunked is true, emits chunked encoding.
-// Uses Header.RawLine when available to preserve exact original bytes including obs-fold.
-// Uses bare LF line endings when Wire.UsedBareLF is true.
-// Falls back to standard formatting when Wire is nil or RawLine is not available.
-func (r *RawHTTP1Request) SerializeRaw(buf *bytes.Buffer, preserveChunked bool) []byte {
-	buf.Reset()
-
-	lineEnd := "\r\n"
-	if r.Wire != nil && r.Wire.UsedBareLF {
-		lineEnd = "\n"
+// summaryLineEnd returns the line terminator for injected lines. Picks the most desync-relevant
+// terminator seen so injected lines match the ambiguity of the original: bare CR > bare LF > CRLF.
+func summaryLineEnd(w *WireFormat) string {
+	if w == nil {
+		return "\r\n"
 	}
+	if w.UsedBareCR {
+		return "\r"
+	}
+	if w.UsedBareLF {
+		return "\n"
+	}
+	return "\r\n"
+}
+
+// SerializeRaw reconstructs wire bytes preserving original formatting when available.
+// Per-line terminators come from RequestLineEnding and each Header.LineEnding;
+// injected lines use the Wire summary (bare CR > bare LF > CRLF). Chunked encoding
+// is preserved when Wire.WasChunked is set.
+func (r *RawHTTP1Request) SerializeRaw(buf *bytes.Buffer) []byte {
+	buf.Reset()
 
 	// Request line
 	buf.WriteString(r.Method)
@@ -473,60 +533,18 @@ func (r *RawHTTP1Request) SerializeRaw(buf *bytes.Buffer, preserveChunked bool) 
 	}
 	buf.WriteByte(' ')
 	buf.WriteString(r.Version)
-	buf.WriteString(lineEnd)
+	buf.WriteString(r.RequestLineEnding.Bytes())
 
-	useChunked := preserveChunked && r.Wire != nil && r.Wire.WasChunked
-	convertingFromChunked := !useChunked && r.Wire != nil && r.Wire.WasChunked // stale CL must be replaced
-
-	// Write headers preserving raw bytes when available
-	for _, h := range r.Headers {
-		// Skip Transfer-Encoding: chunked if not using chunked mode
-		if strings.EqualFold(h.Name, "Transfer-Encoding") &&
-			strings.Contains(strings.ToLower(h.Value), "chunked") {
-			if useChunked {
-				writeHeaderRaw(buf, h, lineEnd)
-			}
-			continue
-		}
-		// Skip Content-Length if chunked mode or converting (correct value added below)
-		if strings.EqualFold(h.Name, "Content-Length") && (useChunked || convertingFromChunked) {
-			continue
-		}
-		writeHeaderRaw(buf, h, lineEnd)
-	}
-
-	// Add Content-Length when not using chunked and body present
-	if !useChunked && len(r.Body) > 0 {
-		if convertingFromChunked || r.GetHeader("Content-Length") == "" {
-			buf.WriteString("Content-Length: ")
-			buf.WriteString(strconv.Itoa(len(r.Body)))
-			buf.WriteString(lineEnd)
-		}
-	}
-
-	buf.WriteString(lineEnd) // Header terminator
-
-	if useChunked {
-		writeChunkedBody(buf, r.Body, r.Trailers, lineEnd)
-	} else {
-		buf.Write(r.Body)
-	}
-
+	writeRawHTTP1Body(buf, r.Headers, r.Body, r.Trailers, r.Chunks, r.Wire, r.HeaderBlockEnding)
 	return buf.Bytes()
 }
 
 // SerializeRaw reconstructs wire bytes preserving original formatting when available.
-// If preserveChunked is true and Wire.WasChunked is true, emits chunked encoding.
-// Uses Header.RawLine when available to preserve exact original bytes including obs-fold.
-// Uses bare LF line endings when Wire.UsedBareLF is true.
-// Falls back to standard formatting when Wire is nil or RawLine is not available.
-func (r *RawHTTP1Response) SerializeRaw(buf *bytes.Buffer, preserveChunked bool) []byte {
+// Per-line terminators come from StatusLineEnding and each Header.LineEnding;
+// injected lines use the Wire summary (bare CR > bare LF > CRLF). Chunked encoding
+// is preserved when Wire.WasChunked is set.
+func (r *RawHTTP1Response) SerializeRaw(buf *bytes.Buffer) []byte {
 	buf.Reset()
-
-	lineEnd := "\r\n"
-	if r.Wire != nil && r.Wire.UsedBareLF {
-		lineEnd = "\n"
-	}
 
 	// Status line
 	buf.WriteString(r.Version)
@@ -536,50 +554,51 @@ func (r *RawHTTP1Response) SerializeRaw(buf *bytes.Buffer, preserveChunked bool)
 		buf.WriteByte(' ')
 		buf.WriteString(r.StatusText)
 	}
-	buf.WriteString(lineEnd)
+	buf.WriteString(r.StatusLineEnding.Bytes())
 
-	useChunked := preserveChunked && r.Wire != nil && r.Wire.WasChunked
-	convertingFromChunked := !useChunked && r.Wire != nil && r.Wire.WasChunked // stale CL must be replaced
-
-	// Write headers preserving raw bytes when available
-	for _, h := range r.Headers {
-		// Skip Transfer-Encoding: chunked if not using chunked mode
-		if strings.EqualFold(h.Name, "Transfer-Encoding") &&
-			strings.Contains(strings.ToLower(h.Value), "chunked") {
-			if useChunked {
-				writeHeaderRaw(buf, h, lineEnd)
-			}
-			continue
-		}
-		// Skip Content-Length if chunked mode or converting (correct value added below)
-		if strings.EqualFold(h.Name, "Content-Length") && (useChunked || convertingFromChunked) {
-			continue
-		}
-		writeHeaderRaw(buf, h, lineEnd)
-	}
-
-	// Add Content-Length when not using chunked and body present
-	if !useChunked && len(r.Body) > 0 {
-		if convertingFromChunked || r.GetHeader("Content-Length") == "" {
-			buf.WriteString("Content-Length: ")
-			buf.WriteString(strconv.Itoa(len(r.Body)))
-			buf.WriteString(lineEnd)
-		}
-	}
-
-	buf.WriteString(lineEnd) // Header terminator
-
-	if useChunked {
-		writeChunkedBody(buf, r.Body, r.Trailers, lineEnd)
-	} else {
-		buf.Write(r.Body)
-	}
-
+	writeRawHTTP1Body(buf, r.Headers, r.Body, r.Trailers, r.Chunks, r.Wire, r.HeaderBlockEnding)
 	return buf.Bytes()
 }
 
-// writeHeaderRaw writes a header using RawLine if available, else standard format.
-func writeHeaderRaw(buf *bytes.Buffer, h Header, lineEnd string) {
+// writeRawHTTP1Body writes headers, header-block terminator, and body for an HTTP/1
+// message whose start line has already been written.
+func writeRawHTTP1Body(buf *bytes.Buffer, headers Headers, body, trailers []byte, chunks []ChunkFrame, wire *WireFormat, blockEnding LineEnding) {
+	useChunked := wire != nil && wire.WasChunked
+
+	for _, h := range headers {
+		// Drop mismatched TE:chunked if we're emitting a non-chunked body
+		if strings.EqualFold(h.Name, "Transfer-Encoding") &&
+			strings.Contains(strings.ToLower(h.Value), "chunked") {
+			if useChunked {
+				writeHeaderRaw(buf, h)
+			}
+			continue
+		}
+		// Chunked framing supersedes Content-Length
+		if useChunked && strings.EqualFold(h.Name, "Content-Length") {
+			continue
+		}
+		writeHeaderRaw(buf, h)
+	}
+
+	// Inject Content-Length when not chunked, body present, and header missing
+	if !useChunked && len(body) > 0 && headers.Get("Content-Length") == "" {
+		buf.WriteString("Content-Length: ")
+		buf.WriteString(strconv.Itoa(len(body)))
+		buf.WriteString(summaryLineEnd(wire))
+	}
+
+	buf.WriteString(blockEnding.Bytes()) // Header terminator
+
+	if useChunked {
+		writeChunkedBody(buf, body, trailers, chunks, summaryLineEnd(wire))
+	} else {
+		buf.Write(body)
+	}
+}
+
+// writeHeaderRaw writes a header preserving wire fidelity.
+func writeHeaderRaw(buf *bytes.Buffer, h Header) {
 	if len(h.RawLine) > 0 {
 		buf.Write(h.RawLine)
 	} else {
@@ -587,11 +606,34 @@ func writeHeaderRaw(buf *bytes.Buffer, h Header, lineEnd string) {
 		buf.WriteString(": ")
 		buf.WriteString(h.Value)
 	}
-	buf.WriteString(lineEnd)
+	buf.WriteString(h.LineEnding.Bytes())
 }
 
 // writeChunkedBody writes body in chunked transfer encoding format.
-func writeChunkedBody(buf *bytes.Buffer, body, trailers []byte, lineEnd string) {
+func writeChunkedBody(buf *bytes.Buffer, body, trailers []byte, chunks []ChunkFrame, lineEnd string) {
+	if canReuseChunks(chunks, len(body)) {
+		var off int
+		var trailerBlockEnd string
+		for _, c := range chunks {
+			buf.Write(c.SizeLine)
+			buf.WriteString(c.SizeEnding.Bytes())
+			if c.Size == 0 {
+				// Final 0-chunk: DataEnding carries the terminator of the blank
+				// line that closes the trailer block (empty when truncated at EOF)
+				trailerBlockEnd = c.DataEnding.Bytes()
+				continue
+			}
+			buf.Write(body[off : off+c.Size])
+			buf.WriteString(c.DataEnding.Bytes())
+			off += c.Size
+		}
+		if len(trailers) > 0 {
+			buf.Write(trailers)
+		}
+		buf.WriteString(trailerBlockEnd)
+		return
+	}
+
 	if len(body) > 0 {
 		buf.WriteString(strconv.FormatInt(int64(len(body)), 16))
 		buf.WriteString(lineEnd)
@@ -606,4 +648,16 @@ func writeChunkedBody(buf *bytes.Buffer, body, trailers []byte, lineEnd string) 
 		buf.Write(trailers)
 	}
 	buf.WriteString(lineEnd)
+}
+
+// canReuseChunks reports whether recorded chunk frames still describe the current body.
+func canReuseChunks(chunks []ChunkFrame, bodyLen int) bool {
+	if len(chunks) == 0 {
+		return false
+	}
+	var sum int
+	for _, c := range chunks {
+		sum += c.Size
+	}
+	return sum == bodyLen
 }

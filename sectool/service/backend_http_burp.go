@@ -596,13 +596,15 @@ func applyRequestRulesToRaw(rawRequest []byte, rules []protocol.RuleEntry) []byt
 		encoding := parsed.GetHeader("Content-Encoding")
 		result := applyBodyRulesWithCompression(parsed.Body, encoding, bodyRules)
 		if result.modified && result.err == nil {
-			parsed.Body = result.body
-			parsed.SetHeader("Content-Length", strconv.Itoa(len(result.body)))
+			parsed.SetBody(result.body)
+			if parsed.Wire == nil || !parsed.Wire.WasChunked {
+				parsed.SetHeader("Content-Length", strconv.Itoa(len(result.body)))
+			}
 		}
 	}
 
 	var buf bytes.Buffer
-	result := parsed.SerializeRaw(&buf, false)
+	result := parsed.SerializeRaw(&buf)
 	if bytes.Equal(rawRequest, result) {
 		return rawRequest
 	}

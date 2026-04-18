@@ -35,7 +35,7 @@ type http1Handler struct {
 // Handle processes HTTP/1.1 proxy requests with keep-alive support.
 // Each request may target a different upstream server (proxy-form URLs).
 func (h *http1Handler) Handle(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader) {
-	// Close connection when context is cancelled to unblock blocking reads.
+	// Close connection when context is cancelled to unblock blocking reads
 	go func() {
 		<-ctx.Done()
 		_ = clientConn.Close()
@@ -86,16 +86,16 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 			target.Hostname, target.Port, PathWithoutQuery(req.Path), req.Method,
 		); intercepted != nil {
 			resp := BuildInterceptedH1Response(intercepted)
-			_, _ = clientConn.Write(resp.SerializeRaw(&buf, false))
+			_, _ = clientConn.Write(resp.SerializeRaw(&buf))
 			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
-				req.Body = req.Body[:h.maxBodyBytes]
+				req.SetBody(req.Body[:h.maxBodyBytes])
 			}
 			h.storeEntry(req, resp, startTime)
 			return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
 		}
 	}
 
-	// Apply request rules BEFORE WebSocket detection to affect Upgrade header, etc.
+	// Apply request rules BEFORE WebSocket detection to affect Upgrade header, etc
 	if h.ruleApplier != nil {
 		req = h.ruleApplier.ApplyRequestRules(req)
 	}
@@ -124,9 +124,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		_ = upstreamConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
 	}
 
-	// TODO - preserveChunked=false converts chunked to Content-Length
-	//        future we should retain chunked encoding forfull wire fidelity
-	if _, err := upstreamConn.Write(req.SerializeRaw(&buf, false)); err != nil {
+	if _, err := upstreamConn.Write(req.SerializeRaw(&buf)); err != nil {
 		log.Printf("proxy: failed to send request to %s: %v", upstreamAddr, err)
 		if isTimeoutError(err) {
 			h.sendError(clientConn, 504, "Gateway Timeout: write timeout")
@@ -159,18 +157,18 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	}
 
 	// Serialize response before storage so truncation doesn't affect the wire copy
-	respBytes := resp.SerializeRaw(&buf, false)
+	respBytes := resp.SerializeRaw(&buf)
 
 	// Truncate bodies before storing
 	if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
-		req.Body = req.Body[:h.maxBodyBytes]
+		req.SetBody(req.Body[:h.maxBodyBytes])
 	}
 	if h.maxBodyBytes > 0 && resp != nil && len(resp.Body) > h.maxBodyBytes {
-		resp.Body = resp.Body[:h.maxBodyBytes]
+		resp.SetBody(resp.Body[:h.maxBodyBytes])
 	}
 
-	// Store before forwarding so history is visible by the time the client sees the response.
-	// Avoids a race with query history after the response arrives but before storeEntry.
+	// Store before forwarding so history is visible by the time the client sees the response
+	// Avoids a race with query history after the response arrives but before storeEntry
 	h.storeEntry(req, resp, startTime)
 
 	// Forward response to client
@@ -219,7 +217,7 @@ func (h *http1Handler) parseHostPort(hostPort string, usesHTTPS bool) (*Target, 
 	host, portStr, err := net.SplitHostPort(hostPort)
 	if err != nil {
 		// No port specified, use default
-		// Handle IPv6 addresses with brackets but no port (e.g., "[::1]")
+		// Handle IPv6 addresses with brackets but no port ("[::1]")
 		host = strings.TrimSuffix(strings.TrimPrefix(hostPort, "["), "]")
 		if usesHTTPS {
 			portStr = "443"
@@ -281,7 +279,7 @@ func (h *http1Handler) sendError(conn net.Conn, code int, message string) {
 		},
 		Body: []byte(message + "\n"),
 	}
-	_, _ = conn.Write(resp.SerializeRaw(bytes.NewBuffer(nil), false))
+	_, _ = conn.Write(resp.SerializeRaw(bytes.NewBuffer(nil)))
 }
 
 // storeEntry saves the request/response pair to history.
@@ -304,8 +302,8 @@ func (h *http1Handler) storeEntry(req *RawHTTP1Request, resp *RawHTTP1Response, 
 // Loops handling request/response pairs until connection closes.
 // target is needed for WebSocket upgrade detection (wss://).
 func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader *bufio.Reader, upstreamReader *bufio.Reader, target *Target) {
-	// Close connections when context is cancelled to unblock blocking reads.
-	// parseRequest doesn't accept context, so closing is the only way to interrupt it.
+	// Close connections when context is cancelled to unblock blocking reads
+	// parseRequest doesn't accept context, so closing is the only way to interrupt it
 	go func() {
 		<-ctx.Done()
 		_ = clientConn.Close()
@@ -352,9 +350,9 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 			if h.timeouts.WriteTimeout > 0 {
 				_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
 			}
-			_, _ = clientConn.Write(resp.SerializeRaw(&buf, false))
+			_, _ = clientConn.Write(resp.SerializeRaw(&buf))
 			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
-				req.Body = req.Body[:h.maxBodyBytes]
+				req.SetBody(req.Body[:h.maxBodyBytes])
 			}
 			h.storeEntry(req, resp, startTime)
 			return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
@@ -376,7 +374,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		_ = upstreamConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
 	}
 
-	if _, err := upstreamConn.Write(req.SerializeRaw(&buf, false)); err != nil {
+	if _, err := upstreamConn.Write(req.SerializeRaw(&buf)); err != nil {
 		log.Printf("proxy: failed to send TLS request: %v", err)
 		if isTimeoutError(err) {
 			h.sendError(clientConn, 504, "Gateway Timeout: write timeout")
@@ -412,17 +410,17 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 	if h.timeouts.WriteTimeout > 0 {
 		_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
 	}
-	if _, err := clientConn.Write(resp.SerializeRaw(&buf, false)); err != nil {
+	if _, err := clientConn.Write(resp.SerializeRaw(&buf)); err != nil {
 		log.Printf("proxy: failed to send TLS response to client: %v", err)
 		return false
 	}
 
 	// Truncate bodies before storing in history
 	if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
-		req.Body = req.Body[:h.maxBodyBytes]
+		req.SetBody(req.Body[:h.maxBodyBytes])
 	}
 	if h.maxBodyBytes > 0 && len(resp.Body) > h.maxBodyBytes {
-		resp.Body = resp.Body[:h.maxBodyBytes]
+		resp.SetBody(resp.Body[:h.maxBodyBytes])
 	}
 
 	h.storeEntry(req, resp, startTime)

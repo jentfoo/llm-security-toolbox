@@ -235,7 +235,7 @@ func (e *HistoryEntry) FormatRequest(buf *bytes.Buffer) []byte {
 		if e.Request == nil {
 			return nil
 		}
-		return e.Request.SerializeRaw(buf, false)
+		return e.Request.SerializeRaw(buf)
 	}
 }
 
@@ -255,7 +255,7 @@ func (e *HistoryEntry) FormatResponse(buf *bytes.Buffer) []byte {
 		if e.Response == nil {
 			return nil
 		}
-		return e.Response.SerializeRaw(buf, false)
+		return e.Response.SerializeRaw(buf)
 	}
 }
 

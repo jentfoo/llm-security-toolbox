@@ -308,7 +308,7 @@ func TestParseRequest(t *testing.T) {
 
 	t.Run("non_eof_error_partial", func(t *testing.T) {
 		// Reader returns partial data then a non-EOF error;
-		// parseRequest should return the error, not attempt to parse.
+		// parseRequest should return the error, not attempt to parse
 		r := io.MultiReader(strings.NewReader("GET /"), iotest.ErrReader(errors.New("connection reset")))
 		_, err := ParseRequest(r)
 		require.Error(t, err)
@@ -408,7 +408,7 @@ func TestParseRequest(t *testing.T) {
 				req, err := ParseRequest(strings.NewReader(tc.input))
 				require.NoError(t, err)
 
-				assert.Equal(t, tc.input, string(req.SerializeRaw(&buf, false)))
+				assert.Equal(t, tc.input, string(req.SerializeRaw(&buf)))
 			})
 		}
 	})
@@ -515,6 +515,74 @@ func TestParseRequest(t *testing.T) {
 		req, err := ParseRequest(strings.NewReader(input))
 		require.NoError(t, err)
 		assert.Len(t, req.Headers, 100)
+	})
+
+	t.Run("bare_cr_request_line", func(t *testing.T) {
+		input := "GET / HTTP/1.1\rHost: example.com\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, "GET", req.Method)
+		assert.Equal(t, "/", req.Path)
+		assert.Equal(t, EndingBareCR, req.RequestLineEnding)
+		assert.Equal(t, EndingCRLF, req.Headers[0].LineEnding)
+	})
+
+	t.Run("bare_cr_header", func(t *testing.T) {
+		input := "GET / HTTP/1.1\r\nHost: example.com\rAccept: */*\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		require.Len(t, req.Headers, 2)
+		assert.Equal(t, EndingCRLF, req.RequestLineEnding)
+		assert.Equal(t, EndingBareCR, req.Headers[0].LineEnding)
+		assert.Equal(t, EndingCRLF, req.Headers[1].LineEnding)
+	})
+
+	t.Run("mixed_crlf_and_bare_cr", func(t *testing.T) {
+		input := "GET / HTTP/1.1\r\nA: 1\r\nB: 2\rC: 3\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		require.Len(t, req.Headers, 3)
+		assert.Equal(t, EndingCRLF, req.Headers[0].LineEnding)
+		assert.Equal(t, EndingBareCR, req.Headers[1].LineEnding)
+		assert.Equal(t, EndingCRLF, req.Headers[2].LineEnding)
+	})
+
+	t.Run("obs_fold_bare_cr", func(t *testing.T) {
+		// Obs-folded header: one continuation terminated by bare CR
+		input := "GET / HTTP/1.1\r\nX-Fold: first\r part2\r end\r\nHost: example.com\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		require.Len(t, req.Headers, 2)
+		assert.Equal(t, "first part2 end", req.Headers[0].Value)
+		// Last physical line's ending is CRLF (the " end\r\n" line)
+		assert.Equal(t, EndingCRLF, req.Headers[0].LineEnding)
+	})
+
+	t.Run("truncated_request_line", func(t *testing.T) {
+		// No terminator on request line; message truncated at EOF
+		input := "GET / HTTP/1.1"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, EndingNone, req.RequestLineEnding)
+		assert.Equal(t, EndingNone, req.HeaderBlockEnding)
+		// Round-trip preserves truncation (no synthetic CRLF appended)
+		var buf bytes.Buffer
+		got := req.SerializeRaw(&buf)
+		assert.Equal(t, input, string(got))
+	})
+
+	t.Run("truncated_mid_header", func(t *testing.T) {
+		// Last header lacks a terminator and no blank line ends the header block
+		input := "GET / HTTP/1.1\r\nHost: example.com\r\nX-Trunc: value"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		require.Len(t, req.Headers, 2)
+		assert.Equal(t, EndingCRLF, req.Headers[0].LineEnding)
+		assert.Equal(t, EndingNone, req.Headers[1].LineEnding)
+		assert.Equal(t, EndingNone, req.HeaderBlockEnding)
+		var buf bytes.Buffer
+		got := req.SerializeRaw(&buf)
+		assert.Equal(t, input, string(got))
 	})
 }
 
@@ -722,6 +790,15 @@ func TestParseResponse(t *testing.T) {
 		// Parser rejects extra whitespace in status line
 		require.Error(t, err)
 	})
+
+	t.Run("bare_cr_status_line", func(t *testing.T) {
+		input := "HTTP/1.1 200 OK\rContent-Length: 5\r\n\r\nHello"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.Equal(t, "OK", resp.StatusText)
+		assert.Equal(t, EndingBareCR, resp.StatusLineEnding)
+	})
 }
 
 func TestRawHTTP1Request_Serialize(t *testing.T) {
@@ -803,7 +880,7 @@ func TestRawHTTP1Request_Serialize(t *testing.T) {
 	var buf bytes.Buffer
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, string(tt.req.SerializeRaw(&buf, false)))
+			assert.Equal(t, tt.want, string(tt.req.SerializeRaw(&buf)))
 		})
 	}
 
@@ -819,7 +896,7 @@ func TestRawHTTP1Request_Serialize(t *testing.T) {
 			Body: []byte("Hello"),
 		}
 
-		serialized := string(req.SerializeRaw(bytes.NewBuffer(nil), false))
+		serialized := string(req.SerializeRaw(bytes.NewBuffer(nil)))
 
 		assert.NotContains(t, serialized, "Transfer-Encoding")
 		assert.Contains(t, serialized, "Content-Length: 5")
@@ -837,9 +914,9 @@ func TestRawHTTP1Request_Serialize(t *testing.T) {
 			Body: []byte("test"),
 		}
 
-		first := req.SerializeRaw(bytes.NewBuffer(nil), false)
-		second := req.SerializeRaw(bytes.NewBuffer(nil), false)
-		third := req.SerializeRaw(bytes.NewBuffer(nil), false)
+		first := req.SerializeRaw(bytes.NewBuffer(nil))
+		second := req.SerializeRaw(bytes.NewBuffer(nil))
+		third := req.SerializeRaw(bytes.NewBuffer(nil))
 
 		assert.Equal(t, first, second)
 		assert.Equal(t, second, third)
@@ -896,7 +973,7 @@ func TestRawHTTP1Response_Serialize(t *testing.T) {
 	var buf bytes.Buffer
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, string(tt.resp.SerializeRaw(&buf, false)))
+			assert.Equal(t, tt.want, string(tt.resp.SerializeRaw(&buf)))
 		})
 	}
 
@@ -911,8 +988,8 @@ func TestRawHTTP1Response_Serialize(t *testing.T) {
 			Body: []byte("test"),
 		}
 
-		first := resp.SerializeRaw(bytes.NewBuffer(nil), false)
-		second := resp.SerializeRaw(bytes.NewBuffer(nil), false)
+		first := resp.SerializeRaw(bytes.NewBuffer(nil))
+		second := resp.SerializeRaw(bytes.NewBuffer(nil))
 
 		assert.Equal(t, first, second)
 		assert.Len(t, resp.Headers, 1)
@@ -1383,7 +1460,7 @@ func TestReadChunkedBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			br := bufio.NewReader(bytes.NewReader([]byte(tt.input)))
-			body, trailers, err := readChunkedBody(br)
+			body, trailers, _, _, _, err := readChunkedBody(br)
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.wantBody, string(body))
@@ -1395,7 +1472,7 @@ func TestReadChunkedBody(t *testing.T) {
 	t.Run("invalid_hex_chunk_size", func(t *testing.T) {
 		input := "GG\r\nHello\r\n0\r\n\r\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		body, _, err := readChunkedBody(br)
+		body, _, _, _, _, err := readChunkedBody(br)
 		// Permissive parsing: returns empty body and no error on invalid hex
 		require.NoError(t, err)
 		assert.Empty(t, body)
@@ -1405,7 +1482,7 @@ func TestReadChunkedBody(t *testing.T) {
 		// Very large chunk size - should handle gracefully
 		input := "FFFFF\r\n" // Declares ~1MB chunk but has no data
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		_, _, err := readChunkedBody(br)
+		_, _, _, _, _, err := readChunkedBody(br)
 		// Should error due to missing data
 		assert.Error(t, err)
 	})
@@ -1413,17 +1490,57 @@ func TestReadChunkedBody(t *testing.T) {
 	t.Run("chunk_extension_with_quotes", func(t *testing.T) {
 		input := "5;name=\"val;ue\"\r\nHello\r\n0\r\n\r\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		body, _, err := readChunkedBody(br)
+		body, _, chunks, _, _, err := readChunkedBody(br)
 		require.NoError(t, err)
 		assert.Equal(t, "Hello", string(body))
+		require.GreaterOrEqual(t, len(chunks), 1)
+		assert.Equal(t, `5;name="val;ue"`, string(chunks[0].SizeLine))
 	})
 
 	t.Run("bare_lf_in_chunked", func(t *testing.T) {
 		input := "5\nHello\n0\n\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		body, _, err := readChunkedBody(br)
+		body, _, chunks, _, _, err := readChunkedBody(br)
 		require.NoError(t, err)
 		assert.Equal(t, "Hello", string(body))
+		bareLF, bareCR := chunksBareFlags(chunks)
+		assert.True(t, bareLF)
+		assert.False(t, bareCR)
+	})
+
+	t.Run("bare_cr_in_chunk_size", func(t *testing.T) {
+		// Chunk-size line terminated with bare CR — classic desync primitive
+		input := "5\rHello\r\n0\r\n\r\n"
+		br := bufio.NewReader(bytes.NewReader([]byte(input)))
+		body, _, chunks, _, _, err := readChunkedBody(br)
+		require.NoError(t, err)
+		assert.Equal(t, "Hello", string(body))
+		bareLF, bareCR := chunksBareFlags(chunks)
+		assert.False(t, bareLF)
+		assert.True(t, bareCR)
+	})
+
+	t.Run("bare_cr_in_trailer", func(t *testing.T) {
+		// Trailer header uses bare CR terminator; flag and trailer bytes both preserve it
+		input := "5\r\nHello\r\n0\r\nX-Trailer: end\r\r\n"
+		br := bufio.NewReader(bytes.NewReader([]byte(input)))
+		body, trailers, _, trailersBareLF, trailersBareCR, err := readChunkedBody(br)
+		require.NoError(t, err)
+		assert.Equal(t, "Hello", string(body))
+		assert.False(t, trailersBareLF)
+		assert.True(t, trailersBareCR)
+		assert.Contains(t, string(trailers), "X-Trailer: end\r")
+	})
+
+	t.Run("bare_lf_trailer_round_trip", func(t *testing.T) {
+		// Regression for the readTrailers hardcoded CRLF fix
+		// a bare-LF trailer line must serialize back as bare LF, not CRLF
+		input := "5\r\nHello\r\n0\r\nX-Trailer: end\n\r\n"
+		br := bufio.NewReader(bytes.NewReader([]byte(input)))
+		_, trailers, _, trailersBareLF, _, err := readChunkedBody(br)
+		require.NoError(t, err)
+		assert.True(t, trailersBareLF)
+		assert.Equal(t, "X-Trailer: end\n", string(trailers))
 	})
 }
 
@@ -1442,7 +1559,7 @@ func TestSerializeRequestWithTrailers(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	serialized := req.SerializeRaw(&buf, false)
+	serialized := req.SerializeRaw(&buf)
 
 	assert.Contains(t, string(serialized), "POST /upload HTTP/1.1")
 	assert.Contains(t, string(serialized), "Content-Length: 5")
@@ -1454,52 +1571,87 @@ func TestReadLineWithEnding(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		input      string
-		wantLine   string
-		wantBareLF bool
+		name        string
+		input       string
+		wantLine    string
+		wantEnding  LineEnding
+		wantNextRem string // remaining bytes left in reader after the call
 	}{
 		{
 			name:       "crlf",
 			input:      "hello\r\n",
 			wantLine:   "hello",
-			wantBareLF: false,
+			wantEnding: EndingCRLF,
 		},
 		{
 			name:       "bare_lf",
 			input:      "hello\n",
 			wantLine:   "hello",
-			wantBareLF: true,
+			wantEnding: EndingBareLF,
 		},
 		{
 			name:       "empty_crlf",
 			input:      "\r\n",
 			wantLine:   "",
-			wantBareLF: false,
+			wantEnding: EndingCRLF,
 		},
 		{
 			name:       "empty_lf",
 			input:      "\n",
 			wantLine:   "",
-			wantBareLF: true,
+			wantEnding: EndingBareLF,
 		},
 		{
-			name:       "content_with_cr",
-			input:      "hello\rworld\r\n",
-			wantLine:   "hello\rworld",
-			wantBareLF: false,
+			name:        "bare_cr_followed_by_content",
+			input:       "abc\rdef\n",
+			wantLine:    "abc",
+			wantEnding:  EndingBareCR,
+			wantNextRem: "def\n",
+		},
+		{
+			name:        "cr_then_crlf",
+			input:       "a\r\r\nb",
+			wantLine:    "a",
+			wantEnding:  EndingBareCR,
+			wantNextRem: "\r\nb",
+		},
+		{
+			name:       "cr_at_eof",
+			input:      "abc\r",
+			wantLine:   "abc",
+			wantEnding: EndingBareCR,
+		},
+		{
+			name:       "empty_bare_cr",
+			input:      "\rabc",
+			wantLine:   "",
+			wantEnding: EndingBareCR,
+			// \r consumed, "abc" remains
+			wantNextRem: "abc",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			br := bufio.NewReader(strings.NewReader(tt.input))
-			line, bareLF, err := readLineWithEnding(br)
+			line, ending, err := readLineWithEnding(br)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantLine, string(line))
-			assert.Equal(t, tt.wantBareLF, bareLF)
+			assert.Equal(t, tt.wantEnding, ending)
+			if tt.wantNextRem != "" {
+				rem, _ := io.ReadAll(br)
+				assert.Equal(t, tt.wantNextRem, string(rem))
+			}
 		})
 	}
+
+	t.Run("eof_mid_line", func(t *testing.T) {
+		br := bufio.NewReader(strings.NewReader("abc"))
+		line, ending, err := readLineWithEnding(br)
+		assert.Equal(t, "abc", string(line))
+		assert.Equal(t, EndingNone, ending)
+		assert.ErrorIs(t, err, io.EOF)
+	})
 }
 
 func TestHeaderRawLinePreservation(t *testing.T) {
@@ -1586,6 +1738,36 @@ func TestWireFormatTracking(t *testing.T) {
 		require.NotNil(t, resp.Wire)
 		assert.True(t, resp.Wire.WasChunked)
 	})
+
+	t.Run("bare_cr_request", func(t *testing.T) {
+		input := "GET / HTTP/1.1\rHost: example.com\r\r"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		require.NotNil(t, req.Wire)
+		assert.True(t, req.Wire.UsedBareCR)
+		assert.False(t, req.Wire.UsedBareLF)
+		assert.Equal(t, EndingBareCR, req.RequestLineEnding)
+	})
+
+	t.Run("bare_cr_response", func(t *testing.T) {
+		input := "HTTP/1.1 200 OK\rContent-Length: 5\r\rHello"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		require.NotNil(t, resp.Wire)
+		assert.True(t, resp.Wire.UsedBareCR)
+		assert.False(t, resp.Wire.UsedBareLF)
+		assert.Equal(t, EndingBareCR, resp.StatusLineEnding)
+	})
+
+	t.Run("mixed_endings", func(t *testing.T) {
+		// Request line bare LF; one header bare CR; others CRLF
+		input := "GET / HTTP/1.1\nHost: example.com\r\nX-Smuggle: yes\rAccept: */*\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		require.NotNil(t, req.Wire)
+		assert.True(t, req.Wire.UsedBareLF)
+		assert.True(t, req.Wire.UsedBareCR)
+	})
 }
 
 func TestSerializeRawBareLF(t *testing.T) {
@@ -1597,13 +1779,15 @@ func TestSerializeRawBareLF(t *testing.T) {
 			Path:    "/",
 			Version: "HTTP/1.1",
 			Headers: []Header{
-				{Name: "Host", Value: "example.com"},
+				{Name: "Host", Value: "example.com", LineEnding: EndingBareLF},
 			},
-			Wire: &WireFormat{UsedBareLF: true},
+			RequestLineEnding: EndingBareLF,
+			HeaderBlockEnding: EndingBareLF,
+			Wire:              &WireFormat{UsedBareLF: true},
 		}
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, false)
+		serialized := req.SerializeRaw(&buf)
 
 		assert.Equal(t, "GET / HTTP/1.1\nHost: example.com\n\n", string(serialized))
 	})
@@ -1614,18 +1798,61 @@ func TestSerializeRawBareLF(t *testing.T) {
 			StatusCode: 200,
 			StatusText: "OK",
 			Headers: []Header{
-				{Name: "X-Test", Value: "value"},
+				{Name: "X-Test", Value: "value", LineEnding: EndingBareLF},
 			},
-			Body: []byte("Hi"),
-			Wire: &WireFormat{UsedBareLF: true},
+			Body:              []byte("Hi"),
+			StatusLineEnding:  EndingBareLF,
+			HeaderBlockEnding: EndingBareLF,
+			Wire:              &WireFormat{UsedBareLF: true},
 		}
 
 		var buf bytes.Buffer
-		serialized := resp.SerializeRaw(&buf, false)
+		serialized := resp.SerializeRaw(&buf)
 
 		assert.Contains(t, string(serialized), "HTTP/1.1 200 OK\n")
 		assert.Contains(t, string(serialized), "X-Test: value\n")
 		assert.NotContains(t, string(serialized), "\r\n")
+	})
+
+	t.Run("request_bare_cr", func(t *testing.T) {
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/",
+			Version: "HTTP/1.1",
+			Headers: []Header{
+				{Name: "Host", Value: "example.com", LineEnding: EndingBareCR},
+			},
+			RequestLineEnding: EndingBareCR,
+			HeaderBlockEnding: EndingBareCR,
+			Wire:              &WireFormat{UsedBareCR: true},
+		}
+
+		var buf bytes.Buffer
+		serialized := req.SerializeRaw(&buf)
+
+		assert.Equal(t, "GET / HTTP/1.1\rHost: example.com\r\r", string(serialized))
+	})
+
+	t.Run("response_bare_cr", func(t *testing.T) {
+		resp := &RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []Header{
+				{Name: "X-Test", Value: "value", LineEnding: EndingBareCR},
+			},
+			Body:              []byte("Hi"),
+			StatusLineEnding:  EndingBareCR,
+			HeaderBlockEnding: EndingBareCR,
+			Wire:              &WireFormat{UsedBareCR: true},
+		}
+
+		var buf bytes.Buffer
+		serialized := resp.SerializeRaw(&buf)
+
+		assert.Contains(t, string(serialized), "HTTP/1.1 200 OK\r")
+		assert.Contains(t, string(serialized), "X-Test: value\r")
+		assert.NotContains(t, string(serialized), "\n")
 	})
 }
 
@@ -1646,7 +1873,7 @@ func TestSerializeRawChunked(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, true)
+		serialized := req.SerializeRaw(&buf)
 
 		assert.Contains(t, string(serialized), "Transfer-Encoding: chunked")
 		assert.Contains(t, string(serialized), "5\r\nHello\r\n0\r\n\r\n")
@@ -1668,7 +1895,7 @@ func TestSerializeRawChunked(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, true)
+		serialized := req.SerializeRaw(&buf)
 
 		assert.Contains(t, string(serialized), "5\r\nHello\r\n0\r\nChecksum: abc\r\n\r\n")
 	})
@@ -1686,10 +1913,57 @@ func TestSerializeRawChunked(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		serialized := resp.SerializeRaw(&buf, true)
+		serialized := resp.SerializeRaw(&buf)
 
 		assert.Contains(t, string(serialized), "Transfer-Encoding: chunked")
 		assert.Contains(t, string(serialized), "5\r\nHello\r\n0\r\n\r\n")
+	})
+}
+
+func TestChunkedRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	t.Run("preserves_extensions_and_terminators", func(t *testing.T) {
+		// Mixed chunk framing: first chunk has an extension and bare-LF terminators,
+		// second chunk uses CRLF. Round-trip must emit the original bytes verbatim
+		body := "HTTP/1.1 200 OK\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"\r\n" +
+			"4;foo=bar\n" + "wiki\n" +
+			"3\r\n" + "pes\r\n" +
+			"0\r\n\r\n"
+		resp, err := parseResponse(strings.NewReader(body), "GET")
+		require.NoError(t, err)
+		assert.Equal(t, "wikipes", string(resp.Body))
+		require.Len(t, resp.Chunks, 3) // two data chunks + final 0
+		assert.Equal(t, "4;foo=bar", string(resp.Chunks[0].SizeLine))
+		assert.Equal(t, EndingBareLF, resp.Chunks[0].SizeEnding)
+		assert.Equal(t, EndingBareLF, resp.Chunks[0].DataEnding)
+
+		var buf bytes.Buffer
+		got := resp.SerializeRaw(&buf)
+		assert.Equal(t, body, string(got))
+	})
+
+	t.Run("modified_body_falls_back", func(t *testing.T) {
+		// Parse a chunked response, mutate the body so recorded chunk sizes are stale
+		// verify the serializer falls back to a single chunk
+		body := "HTTP/1.1 200 OK\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"\r\n" +
+			"5\r\nHello\r\n" +
+			"0\r\n\r\n"
+		resp, err := parseResponse(strings.NewReader(body), "GET")
+		require.NoError(t, err)
+		require.NotEmpty(t, resp.Chunks)
+
+		// Mutate body without invalidating Chunks to simulate a buggy caller
+		resp.Body = []byte("Hello, world")
+
+		var buf bytes.Buffer
+		got := resp.SerializeRaw(&buf)
+		// Fallback path: single chunk with correct size for the new body
+		assert.Contains(t, string(got), "c\r\nHello, world\r\n0\r\n\r\n")
 	})
 }
 
@@ -1707,7 +1981,7 @@ func TestSerializeRawFallback(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, false)
+		serialized := req.SerializeRaw(&buf)
 
 		// Should use CRLF when Wire is nil
 		assert.Equal(t, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", string(serialized))
@@ -1725,7 +1999,7 @@ func TestSerializeRawFallback(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, false)
+		serialized := req.SerializeRaw(&buf)
 
 		// Should use Name: Value format when RawLine is nil
 		assert.Contains(t, string(serialized), "X-New: added\r\n")
@@ -1742,7 +2016,7 @@ func TestSerializeRawFallback(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, false)
+		serialized := req.SerializeRaw(&buf)
 
 		// Should use RawLine when available
 		assert.Contains(t, string(serialized), "Header : value\r\n")
@@ -1758,7 +2032,7 @@ func TestSerializeRawRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, false)
+		serialized := req.SerializeRaw(&buf)
 
 		assert.Equal(t, input, string(serialized))
 	})
@@ -1769,9 +2043,37 @@ func TestSerializeRawRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, false)
+		serialized := req.SerializeRaw(&buf)
 
 		assert.Equal(t, input, string(serialized))
+	})
+
+	t.Run("bare_cr_round_trip", func(t *testing.T) {
+		input := "GET / HTTP/1.1\rHost: example.com\rAccept: */*\r\r"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+
+		var buf bytes.Buffer
+		assert.Equal(t, input, string(req.SerializeRaw(&buf)))
+	})
+
+	t.Run("mixed_endings_round_trip", func(t *testing.T) {
+		input := "GET / HTTP/1.1\nA: 1\r\nB: 2\rC: 3\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+
+		var buf bytes.Buffer
+		assert.Equal(t, input, string(req.SerializeRaw(&buf)))
+	})
+
+	t.Run("obs_fold_with_bare_cr_continuation", func(t *testing.T) {
+		// Physical lines: "X-Fold: first" (CRLF), " more" (bare CR), "Host: ..." (CRLF)
+		input := "GET / HTTP/1.1\r\nX-Fold: first\r\n more\rHost: example.com\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+
+		var buf bytes.Buffer
+		assert.Equal(t, input, string(req.SerializeRaw(&buf)))
 	})
 }
 
@@ -1785,11 +2087,11 @@ func TestCompareSerializeRedirect(t *testing.T) {
 	require.NoError(t, err)
 
 	var buf bytes.Buffer
-	serialized := resp.SerializeRaw(&buf, false)
+	serialized := resp.SerializeRaw(&buf)
 	t.Logf("Serialize output (%d bytes):\n%s", len(serialized), string(serialized))
 
 	buf.Reset()
-	serializedRaw := resp.SerializeRaw(&buf, false)
+	serializedRaw := resp.SerializeRaw(&buf)
 	t.Logf("SerializeRaw output (%d bytes):\n%s", len(serializedRaw), string(serializedRaw))
 
 	// Check that both produce valid HTTP responses
@@ -1822,7 +2124,7 @@ func TestHeadersSetClearsRawLine(t *testing.T) {
 
 		// SerializeRaw should use new value, not old RawLine
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, false)
+		serialized := req.SerializeRaw(&buf)
 		assert.Contains(t, string(serialized), "Content-Length: 50")
 		assert.NotContains(t, string(serialized), "Content-Length: 100")
 	})
@@ -1844,7 +2146,7 @@ func TestHeadersSetClearsRawLine(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		serialized := req.SerializeRaw(&buf, false)
+		serialized := req.SerializeRaw(&buf)
 		assert.Contains(t, string(serialized), "X-New: value")
 	})
 }

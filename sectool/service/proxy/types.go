@@ -7,6 +7,31 @@ import (
 	"github.com/go-analyze/bulk"
 )
 
+// LineEnding identifies the terminator used on a single HTTP line.
+// Zero value is EndingCRLF so unset fields emit the HTTP default.
+type LineEnding uint8
+
+const (
+	EndingCRLF   LineEnding = 0 // "\r\n"
+	EndingBareLF LineEnding = 1 // "\n"
+	EndingBareCR LineEnding = 2 // "\r" — HTTP desync vector
+	EndingNone   LineEnding = 3 // no terminator observed (EOF / truncation)
+)
+
+// Bytes returns the wire terminator for this line ending.
+func (e LineEnding) Bytes() string {
+	switch e {
+	case EndingBareLF:
+		return "\n"
+	case EndingBareCR:
+		return "\r"
+	case EndingNone:
+		return ""
+	default:
+		return "\r\n"
+	}
+}
+
 // Header represents a single HTTP header preserving original formatting.
 type Header struct {
 	// Name preserves original casing and whitespace anomalies
@@ -20,17 +45,40 @@ type Header struct {
 	// Used by SerializeRaw() to preserve exact wire format including obs-fold.
 	// nil when header was programmatically created or Wire format not tracked.
 	RawLine []byte `json:"raw_line,omitempty" msgpack:"rl,omitempty"`
+
+	// LineEnding is the terminator observed for this header's final physical line.
+	LineEnding LineEnding `json:"line_ending,omitempty" msgpack:"le,omitempty"`
 }
 
-// WireFormat stores metadata about the original wire encoding.
+// ChunkFrame preserves per-chunk wire framing for chunked messages.
+// Invariant: non-final Size values sum to len(Body); the final frame has Size=0.
+type ChunkFrame struct {
+	// SizeLine is the raw size line without terminator, preserving extensions (e.g. "4;foo=bar") and hex casing.
+	SizeLine []byte `json:"size_line,omitempty" msgpack:"sl,omitempty"`
+
+	// SizeEnding is the terminator after the size line.
+	SizeEnding LineEnding `json:"size_ending,omitempty" msgpack:"se,omitempty"`
+
+	// Size is the chunk payload length in bytes (0 for final terminator chunk).
+	Size int `json:"size,omitempty" msgpack:"sz,omitempty"`
+
+	// DataEnding is the terminator after the chunk data. On the final 0-chunk it
+	// is the trailer block's closing blank-line terminator, or EndingNone if truncated.
+	DataEnding LineEnding `json:"data_ending,omitempty" msgpack:"de,omitempty"`
+}
+
+// WireFormat stores summary metadata about the original wire encoding.
+// Per-line terminators are tracked on the LineEnding fields; these flags are
+// informational and drive chunked re-emission (UsedBareCR > UsedBareLF > CRLF).
 type WireFormat struct {
-	// WasChunked indicates the body was received with chunked transfer encoding.
-	// When true, SerializeRaw can optionally re-emit chunked encoding.
+	// WasChunked indicates chunked transfer encoding was received.
 	WasChunked bool `json:"was_chunked,omitempty" msgpack:"wc,omitempty"`
 
-	// UsedBareLF indicates the message used bare LF (\n) instead of CRLF (\r\n).
-	// When true, SerializeRaw uses bare LF for line endings.
+	// UsedBareLF is true when any line used bare LF (\n) as terminator.
 	UsedBareLF bool `json:"used_bare_lf,omitempty" msgpack:"lf,omitempty"`
+
+	// UsedBareCR is true when any line used bare CR (\r) as terminator.
+	UsedBareCR bool `json:"used_bare_cr,omitempty" msgpack:"cr,omitempty"`
 }
 
 // Headers is a slice of Header with helper methods for case-insensitive access.
@@ -56,6 +104,9 @@ func (h *Headers) Set(name, value string) {
 		if strings.EqualFold(hdr.Name, name) {
 			(*h)[i].Value = value
 			(*h)[i].RawLine = nil // Clear RawLine since value changed
+			if (*h)[i].LineEnding == EndingNone {
+				(*h)[i].LineEnding = EndingCRLF
+			}
 			return
 		}
 	}
@@ -89,8 +140,18 @@ type RawHTTP1Request struct {
 	// TODO - FUTURE - Parse trailers into []Header if trailer rules are needed
 	Trailers []byte `json:"trailers,omitempty" msgpack:"t,omitempty"`
 
+	// Chunks preserves per-chunk wire framing for chunked messages.
+	// When body is mutated, callers must set to nil to avoid stale state being re-emitted.
+	Chunks []ChunkFrame `json:"chunks,omitempty" msgpack:"ck,omitempty"`
+
 	// Protocol metadata for replay fidelity
 	Protocol string `json:"protocol" msgpack:"pr"` // "http/1.1" - stored for history/replay
+
+	// RequestLineEnding is the terminator observed on the request line.
+	RequestLineEnding LineEnding `json:"request_line_ending,omitempty" msgpack:"rle,omitempty"`
+
+	// HeaderBlockEnding is the terminator observed on the blank line that ends the header block.
+	HeaderBlockEnding LineEnding `json:"header_block_ending,omitempty" msgpack:"hbe,omitempty"`
 
 	// Wire contains metadata about the original wire encoding.
 	// Used by SerializeRaw() to preserve exact wire format.
@@ -114,6 +175,16 @@ type RawHTTP1Response struct {
 	// TODO - FUTURE - Parse trailers into []Header if trailer rules are needed
 	Trailers []byte `json:"trailers,omitempty" msgpack:"t,omitempty"`
 
+	// Chunks preserves per-chunk wire framing for chunked messages.
+	// When body is mutated, callers must set to nil to avoid stale state being re-emitted.
+	Chunks []ChunkFrame `json:"chunks,omitempty" msgpack:"ck,omitempty"`
+
+	// StatusLineEnding is the terminator observed on the status line.
+	StatusLineEnding LineEnding `json:"status_line_ending,omitempty" msgpack:"sle,omitempty"`
+
+	// HeaderBlockEnding is the terminator observed on the blank line that ends the header block.
+	HeaderBlockEnding LineEnding `json:"header_block_ending,omitempty" msgpack:"hbe,omitempty"`
+
 	// Wire contains metadata about the original wire encoding.
 	// Used by SerializeRaw() to preserve exact wire format.
 	Wire *WireFormat `json:"wire,omitempty" msgpack:"w,omitempty"`
@@ -128,6 +199,12 @@ func (r *RawHTTP1Request) SetHeader(name, value string) { r.Headers.Set(name, va
 // RemoveHeader removes all headers with the given name (case-insensitive).
 func (r *RawHTTP1Request) RemoveHeader(name string) { r.Headers.Remove(name) }
 
+// SetBody replaces the body and clears wire state which can't be replicated with a body change.
+func (r *RawHTTP1Request) SetBody(b []byte) {
+	r.Body = b
+	r.Chunks = nil
+}
+
 // GetHeader returns the first header value with the given name (case-insensitive).
 func (r *RawHTTP1Response) GetHeader(name string) string { return r.Headers.Get(name) }
 
@@ -136,6 +213,12 @@ func (r *RawHTTP1Response) SetHeader(name, value string) { r.Headers.Set(name, v
 
 // RemoveHeader removes all headers with the given name (case-insensitive).
 func (r *RawHTTP1Response) RemoveHeader(name string) { r.Headers.Remove(name) }
+
+// SetBody replaces the body and clears wire state which can't be replicated with a body change.
+func (r *RawHTTP1Response) SetBody(b []byte) {
+	r.Body = b
+	r.Chunks = nil
+}
 
 // HistoryEntry represents a stored request/response pair.
 // Embeds the parsed types directly for memory efficiency.

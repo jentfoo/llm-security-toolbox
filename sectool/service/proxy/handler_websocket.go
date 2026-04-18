@@ -151,7 +151,7 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 	var buf bytes.Buffer
 
 	// Forward upgrade request to upstream
-	if _, err := upstreamConn.Write(req.SerializeRaw(&buf, false)); err != nil {
+	if _, err := upstreamConn.Write(req.SerializeRaw(&buf)); err != nil {
 		log.Printf("proxy: websocket upgrade send failed: %v", err)
 		h.sendError(clientConn, 502, "Bad Gateway: failed to send upgrade")
 		return
@@ -172,7 +172,7 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 			resp = h.ruleApplier.ApplyResponseRules(resp)
 		}
 		// Forward error response to client
-		if _, err := clientConn.Write(resp.SerializeRaw(&buf, false)); err != nil {
+		if _, err := clientConn.Write(resp.SerializeRaw(&buf)); err != nil {
 			log.Printf("proxy: failed to send websocket error response: %v", err)
 		}
 		// Store failed upgrade in history
@@ -192,7 +192,7 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 	historyEntry := h.storeHandshake(req, resp, startTime)
 
 	// Send 101 to client
-	if _, err := clientConn.Write(resp.SerializeRaw(&buf, false)); err != nil {
+	if _, err := clientConn.Write(resp.SerializeRaw(&buf)); err != nil {
 		log.Printf("proxy: failed to send websocket upgrade response: %v", err)
 		return
 	}
@@ -232,7 +232,7 @@ func (h *webSocketHandler) sendError(conn net.Conn, code int, message string) {
 		},
 		Body: []byte(message + "\n"),
 	}
-	_, _ = conn.Write(resp.SerializeRaw(bytes.NewBuffer(nil), false))
+	_, _ = conn.Write(resp.SerializeRaw(bytes.NewBuffer(nil)))
 }
 
 // storeHandshake stores the WebSocket upgrade handshake in history.

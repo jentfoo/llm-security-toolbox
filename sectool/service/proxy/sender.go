@@ -299,7 +299,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 		_ = conn.SetWriteDeadline(time.Now().Add(s.Timeouts.WriteTimeout))
 	}
 	var buf bytes.Buffer
-	if _, err := conn.Write(req.SerializeRaw(&buf, false)); err != nil {
+	if _, err := conn.Write(req.SerializeRaw(&buf)); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 
@@ -359,20 +359,20 @@ func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications, f
 	shouldAutoUpdateCL := !userSetContentLength && !hasTE
 
 	if mods.Body != nil {
-		req.Body = mods.Body
+		req.SetBody(mods.Body)
 		if shouldAutoUpdateCL {
 			req.SetHeader("Content-Length", strconv.Itoa(len(mods.Body)))
 		}
 	} else if len(mods.SetJSON) > 0 || len(mods.RemoveJSON) > 0 {
 		if s.JSONModifier != nil {
 			if len(req.Body) == 0 && len(mods.SetJSON) > 0 {
-				req.Body = []byte("{}")
+				req.SetBody([]byte("{}"))
 			}
 			modified, err := s.JSONModifier(req.Body, mods.SetJSON, mods.RemoveJSON)
 			if err != nil {
 				return fmt.Errorf("JSON modification failed: %w", err)
 			}
-			req.Body = modified
+			req.SetBody(modified)
 			if shouldAutoUpdateCL {
 				req.SetHeader("Content-Length", strconv.Itoa(len(modified)))
 			}
@@ -480,7 +480,11 @@ func buildRedirectRequest(originalReq *RawHTTP1Request, location string, current
 		newReq.Method = originalReq.Method
 	}
 	if preserveBody {
+		// Preserve wire encoding so the redirect-follow request retains the same protocol shape
 		newReq.Body = originalReq.Body
+		newReq.Trailers = originalReq.Trailers
+		newReq.Chunks = originalReq.Chunks
+		newReq.Wire = originalReq.Wire
 	}
 
 	// Build Host header
@@ -510,7 +514,7 @@ func buildRedirectRequest(originalReq *RawHTTP1Request, location string, current
 	newReq.SetHeader("Host", host)
 
 	// Update Content-Length if body changed
-	if preserveBody && len(newReq.Body) > 0 {
+	if preserveBody && len(newReq.Body) > 0 && (newReq.Wire == nil || !newReq.Wire.WasChunked) {
 		newReq.SetHeader("Content-Length", strconv.Itoa(len(newReq.Body)))
 	}
 
@@ -863,9 +867,8 @@ func (s *Sender) readH2SettingsAndAck(framer *http2.Framer, h2c *h2Conn) error {
 			if err := framer.WriteSettingsAck(); err != nil {
 				return fmt.Errorf("send SETTINGS ACK: %w", err)
 			}
-			// Handshake complete - we've received server settings and sent our ACK.
-			// Server's ACK of our settings (if it arrives) will be handled during
-			// response reading.
+			// Handshake complete - we've received server settings and sent our ACK
+			// Server's ACK of our settings (if it arrives) will be handled during response reading
 			return nil
 
 		case *http2.GoAwayFrame:
@@ -880,17 +883,16 @@ func (s *Sender) readH2SettingsAndAck(framer *http2.Framer, h2c *h2Conn) error {
 	}
 }
 
-// readH2Response reads an HTTP/2 response from the framer.
-// It first processes any frames buffered during flow control waiting,
-// then continues reading from the framer.
+// readH2Response reads an HTTP/2 response from the framer. It first processes any
+// frames buffered during flow control waiting, then continues reading from the framer.
 func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint32, bufferedFrames []http2.Frame) (*RawHTTP1Response, error) {
 	var headers, trailers Headers
 	var statusCode int
 	var body bytes.Buffer
 	var gotInitialHeaders bool
 
-	// Header block accumulator for HEADERS + CONTINUATION reassembly.
-	// HPACK requires decoding the complete block, not individual fragments.
+	// Header block accumulator for HEADERS + CONTINUATION reassembly
+	// HPACK requires decoding the complete block, not individual fragments
 	var headerBlock bytes.Buffer
 	var headersEndStream bool
 
@@ -907,8 +909,8 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 		return framer.ReadFrame()
 	}
 
-	// processHeaderBlock decodes the accumulated header block when END_HEADERS is set.
-	// Returns a response if stream is complete, nil otherwise.
+	// processHeaderBlock decodes the accumulated header block when END_HEADERS is set
+	// Returns a response if stream is complete, nil otherwise
 	processHeaderBlock := func() (*RawHTTP1Response, error) {
 		pseudos, hdrs, err := h2c.decodeHeaders(headerBlock.Bytes())
 		if err != nil {
