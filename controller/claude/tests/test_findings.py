@@ -4,8 +4,8 @@ import os
 import tempfile
 import unittest
 
-from findings import FindingWriter, _canonical_endpoint, slugify
-from tools import FindingFiled
+from findings import FindingWriter, _canonical_endpoint, match_pending_candidates, slugify
+from tools import FindingCandidate, FindingFiled
 
 
 def _make(title, endpoint="GET /x", severity="high"):
@@ -84,6 +84,46 @@ class TestFindingWriter(unittest.TestCase):
             out = w.summary_for_orchestrator()
             self.assertIn("1. [high] XSS in X — /x", out)
             self.assertIn("2. [critical] SQLi in Y — /y", out)
+
+
+def _candidate(cid: str, title: str, endpoint: str) -> FindingCandidate:
+    return FindingCandidate(
+        candidate_id=cid, worker_id=1, title=title, severity="high",
+        endpoint=endpoint, flow_ids=["aaaa11"], summary="s",
+        evidence_notes="e", reproduction_hint="r",
+    )
+
+
+class TestMatchPendingCandidates(unittest.TestCase):
+    def test_matches_by_endpoint_and_title(self):
+        filed = _make("Reflected XSS in search", endpoint="GET /search")
+        pending = [_candidate("c001", "Reflected XSS in search results", "get /search/")]
+        self.assertEqual(match_pending_candidates(filed, pending), ["c001"])
+
+    def test_requires_both_endpoint_and_title(self):
+        filed = _make("Reflected XSS in search", endpoint="GET /search")
+        pending = [
+            _candidate("c001", "Reflected XSS in search", "POST /login"),  # title ok, endpoint wrong
+            _candidate("c002", "SQL injection", "GET /search"),             # endpoint ok, title wrong
+        ]
+        self.assertEqual(match_pending_candidates(filed, pending), [])
+
+    def test_empty_when_no_overlap(self):
+        filed = _make("Reflected XSS", endpoint="GET /search")
+        self.assertEqual(match_pending_candidates(filed, []), [])
+
+    def test_returns_multiple_matches(self):
+        filed = _make("Reflected XSS in search", endpoint="GET /search")
+        pending = [
+            _candidate("c001", "Reflected XSS in search", "GET /search"),
+            _candidate("c002", "Reflected XSS in search results", "get /search/"),
+        ]
+        self.assertEqual(match_pending_candidates(filed, pending), ["c001", "c002"])
+
+    def test_empty_endpoint_returns_empty(self):
+        filed = _make("Reflected XSS", endpoint="")
+        pending = [_candidate("c001", "Reflected XSS", "GET /search")]
+        self.assertEqual(match_pending_candidates(filed, pending), [])
 
 
 if __name__ == "__main__":

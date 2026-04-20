@@ -8,7 +8,7 @@ produces well-formed fields directly.
 import os
 import re
 
-from tools import FindingFiled
+from tools import FindingCandidate, FindingFiled
 
 
 def slugify(text: str) -> str:
@@ -44,6 +44,27 @@ def _titles_similar(a: str, b: str) -> bool:
         return False
     overlap = len(wa & wb) / max(len(wa), len(wb))
     return overlap > 0.8
+
+
+def match_pending_candidates(
+    filed: FindingFiled, pending: list[FindingCandidate],
+) -> list[str]:
+    """Return candidate_ids from `pending` whose endpoint and title match `filed`.
+
+    Used when the verifier files a finding without `supersedes_candidate_ids`
+    so the controller can still mark the originating candidate(s) resolved.
+    """
+    filed_ep = _canonical_endpoint(filed.endpoint)
+    if not filed_ep or not filed.title:
+        return []
+    matched: list[str] = []
+    for c in pending:
+        if _canonical_endpoint(c.endpoint) != filed_ep:
+            continue
+        if not _titles_similar(c.title, filed.title):
+            continue
+        matched.append(c.candidate_id)
+    return matched
 
 
 _MARKDOWN_TEMPLATE = """\

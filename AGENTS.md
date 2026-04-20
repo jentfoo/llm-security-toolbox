@@ -150,7 +150,7 @@ Python-based autonomous security exploration controller using the Claude Agent S
 - `controller/claude/tests/` - pytest suite: `test_controller_loop.py`, `test_tools.py`, `test_findings.py`, `conftest.py` (scripted fake `ClaudeSDKClient`; no real SDK or network)
 - `controller/claude/requirements.txt`, `pyproject.toml` - Python deps (Python 3.10+, `claude-agent-sdk`)
 
-Verification-side sectool tools exposed to the orchestrator are an allowlist in `controller.py:ORCH_SECTOOL_READ_TOOLS` — destructive tools (`proxy_rule_*`, `crawl_stop`, `oast_delete`) are intentionally withheld to avoid disrupting workers. Stall thresholds: `STALL_WARN_AFTER=3`, `STALL_STOP_AFTER=4` consecutive `progress=none` turns. Max workers capped at 5 by `config.parse_args`. See `controller/claude/README.md` for usage.
+The verifier gets the full sectool tool surface via the `mcp__sectool__*` glob (`controller.py:ORCH_SECTOOL_TOOLS_GLOB`) — same access as workers. Its system prompt directs it to prefer non-destructive reproduction and clean up any rules/responders/sessions it introduces. Stall thresholds: `STALL_WARN_AFTER=3`, `STALL_STOP_AFTER=4` consecutive `progress=none` turns. Max workers capped at 5 by `config.parse_args`. See `controller/claude/README.md` for usage.
 
 ### Config
 
