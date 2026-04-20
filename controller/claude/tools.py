@@ -7,6 +7,7 @@ controller loop.
 
 from __future__ import annotations
 
+import contextvars
 import re
 import threading
 from dataclasses import dataclass, field
@@ -17,6 +18,30 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 SEVERITIES = ("critical", "high", "medium", "low", "informational")
 PROGRESS_TAGS = ("none", "incremental", "new")
+DEFAULT_AUTONOMOUS_BUDGET = 5
+MAX_AUTONOMOUS_BUDGET = 20
+
+# Per-task active worker id. Each worker's concurrent drain runs in its own
+# asyncio task; ContextVar isolates attribution across concurrent runs.
+_ACTIVE_WORKER_ID: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "active_worker_id", default=None,
+)
+
+
+def set_active_worker(worker_id: int | None):
+    """Set the active worker in the current asyncio task context.
+
+    Returns the contextvars Token for use with `reset_active_worker`.
+    """
+    return _ACTIVE_WORKER_ID.set(worker_id)
+
+
+def reset_active_worker(token) -> None:
+    _ACTIVE_WORKER_ID.reset(token)
+
+
+def current_worker_id() -> int | None:
+    return _ACTIVE_WORKER_ID.get()
 
 
 # ---------------------------------------------------------------------------
@@ -67,16 +92,18 @@ class FindingCandidate:
 
 
 class CandidatePool:
-    """Thread-safe pool of worker-reported finding candidates."""
+    """Thread-safe pool of worker-reported finding candidates.
+
+    Worker attribution is read from the `_ACTIVE_WORKER_ID` ContextVar set by
+    the controller around each worker's drain. This keeps attribution correct
+    under concurrent worker runs.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._by_id: dict[str, FindingCandidate] = {}
         self._order: list[str] = []
         self._counter = 0
-        # Controller sets this before awaiting a worker response so any
-        # candidates raised during that turn are attributed to the worker.
-        self.active_worker_id: int | None = None
 
     def add(
         self,
@@ -89,12 +116,13 @@ class CandidatePool:
         evidence_notes: str,
         reproduction_hint: str,
     ) -> str:
+        worker_id = current_worker_id()
         with self._lock:
             self._counter += 1
             cid = f"c{self._counter:03d}"
             cand = FindingCandidate(
                 candidate_id=cid,
-                worker_id=self.active_worker_id,
+                worker_id=worker_id,
                 title=title,
                 severity=severity,
                 endpoint=endpoint,
@@ -126,6 +154,21 @@ class CandidatePool:
         with self._lock:
             return [f"c{i:03d}" for i in range(counter_before + 1, self._counter + 1)]
 
+    def ids_since_for_worker(self, counter_before: int, worker_id: int) -> list[str]:
+        """IDs minted after `counter_before` attributed to `worker_id`.
+
+        Race-safe under concurrent worker runs when combined with the
+        `_ACTIVE_WORKER_ID` ContextVar.
+        """
+        with self._lock:
+            out: list[str] = []
+            for i in range(counter_before + 1, self._counter + 1):
+                cid = f"c{i:03d}"
+                c = self._by_id.get(cid)
+                if c is not None and c.worker_id == worker_id:
+                    out.append(cid)
+            return out
+
     @property
     def counter(self) -> int:
         with self._lock:
@@ -146,6 +189,7 @@ class WorkerDecision:
     instruction: str = ""
     progress: str = "none"
     reason: str = ""
+    autonomous_budget: int = DEFAULT_AUTONOMOUS_BUDGET
 
 
 @dataclass
@@ -173,8 +217,18 @@ class CandidateDismissal:
     reason: str
 
 
+PHASE_IDLE = "idle"
+PHASE_VERIFICATION = "verification"
+PHASE_DIRECTION = "direction"
+
+
 class DecisionQueue:
-    """Collects orchestrator tool calls within a single orchestrator turn."""
+    """Collects orchestrator tool calls across a two-phase orchestrator turn.
+
+    Phases: idle → verification → direction → idle (next iteration).
+    Within a phase, tool calls across substeps accumulate; `reset()` at
+    iteration start clears everything.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -183,6 +237,9 @@ class DecisionQueue:
         self.findings: list[FindingFiled] = []
         self.dismissals: list[CandidateDismissal] = []
         self.done_summary: str | None = None
+        self.phase: str = PHASE_IDLE
+        self.verification_done_summary: str | None = None
+        self.direction_done_summary: str | None = None
 
     def reset(self) -> None:
         with self._lock:
@@ -191,6 +248,18 @@ class DecisionQueue:
             self.findings = []
             self.dismissals = []
             self.done_summary = None
+            self.phase = PHASE_IDLE
+            self.verification_done_summary = None
+            self.direction_done_summary = None
+
+    def begin_phase(self, phase: str) -> None:
+        """Transition into a phase. Clears only that phase's done flag."""
+        with self._lock:
+            self.phase = phase
+            if phase == PHASE_VERIFICATION:
+                self.verification_done_summary = None
+            elif phase == PHASE_DIRECTION:
+                self.direction_done_summary = None
 
     def set_plan(self, plan: list[PlanEntry]) -> None:
         with self._lock:
@@ -211,6 +280,19 @@ class DecisionQueue:
     def set_done(self, summary: str) -> None:
         with self._lock:
             self.done_summary = summary
+
+    def set_verification_done(self, summary: str) -> None:
+        with self._lock:
+            self.verification_done_summary = summary
+
+    def set_direction_done(self, summary: str) -> None:
+        with self._lock:
+            self.direction_done_summary = summary
+
+    @property
+    def current_phase(self) -> str:
+        with self._lock:
+            return self.phase
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +449,30 @@ def build_worker_mcp_server(candidates: CandidatePool) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _reject_wrong_phase(expected: str, current: str, tool_name: str) -> dict[str, Any]:
+    hint = ""
+    if current == PHASE_VERIFICATION and expected == PHASE_DIRECTION:
+        hint = " Call `verification_done(summary)` first."
+    elif current == PHASE_DIRECTION and expected == PHASE_VERIFICATION:
+        hint = " Direction phase cannot file findings; verification already ended this iteration."
+    return {
+        "content": [{
+            "type": "text",
+            "text": (
+                f"Rejected: `{tool_name}` is not allowed in phase '{current}'. "
+                f"Expected phase '{expected}'.{hint}"
+            ),
+        }],
+        "is_error": True,
+    }
+
+
 def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
-    """SDK MCP server with the orchestrator's decision + finding tools."""
+    """SDK MCP server with the orchestrator's decision + finding tools.
+
+    Tools are phase-gated by `decisions.phase`; calling the wrong tool in the
+    wrong phase returns an is_error=True response.
+    """
 
     @tool(
         "plan_workers",
@@ -398,6 +502,8 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         },
     )
     async def plan_workers(args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_DIRECTION:
+            return _reject_wrong_phase(PHASE_DIRECTION, decisions.current_phase, "plan_workers")
         raw = args.get("plans") or []
         if not isinstance(raw, list) or not raw:
             return {
@@ -427,6 +533,8 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         }
 
     def _record_worker_decision(kind: str, args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_DIRECTION:
+            return _reject_wrong_phase(PHASE_DIRECTION, decisions.current_phase, f"{kind}_worker")
         try:
             wid = int(args["worker_id"])
         except (KeyError, TypeError, ValueError):
@@ -446,11 +554,24 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
                 "content": [{"type": "text", "text": "Rejected: instruction is required."}],
                 "is_error": True,
             }
+        budget = args.get("autonomous_budget", DEFAULT_AUTONOMOUS_BUDGET)
+        try:
+            budget = int(budget)
+        except (TypeError, ValueError):
+            budget = DEFAULT_AUTONOMOUS_BUDGET
+        budget = max(1, min(MAX_AUTONOMOUS_BUDGET, budget))
         decisions.add_decision(WorkerDecision(
-            kind=kind, worker_id=wid, instruction=instruction, progress=progress,
+            kind=kind, worker_id=wid, instruction=instruction,
+            progress=progress, autonomous_budget=budget,
         ))
         return {
-            "content": [{"type": "text", "text": f"{kind} recorded for worker {wid} (progress={progress})."}],
+            "content": [{
+                "type": "text",
+                "text": (
+                    f"{kind} recorded for worker {wid} "
+                    f"(progress={progress}, autonomous_budget={budget})."
+                ),
+            }],
         }
 
     _worker_directive_schema = {
@@ -459,6 +580,17 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
             "worker_id": {"type": "integer", "minimum": 1},
             "instruction": {"type": "string"},
             "progress": {"type": "string", "enum": list(PROGRESS_TAGS)},
+            "autonomous_budget": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_AUTONOMOUS_BUDGET,
+                "description": (
+                    "Consecutive autonomous turns this worker may run before "
+                    "escalating back for review. Use 5-10 for productive workers "
+                    "on a clear path, 2-3 for exploratory or uncertain "
+                    f"assignments. Default {DEFAULT_AUTONOMOUS_BUDGET}."
+                ),
+            },
         },
         "required": ["worker_id", "instruction", "progress"],
     }
@@ -504,6 +636,8 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         },
     )
     async def stop_worker(args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_DIRECTION:
+            return _reject_wrong_phase(PHASE_DIRECTION, decisions.current_phase, "stop_worker")
         try:
             wid = int(args["worker_id"])
         except (KeyError, TypeError, ValueError):
@@ -545,6 +679,14 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
                     "type": "array",
                     "items": {"type": "string"},
                     "default": [],
+                    "description": (
+                        "Pending candidate IDs this finding resolves. Omit "
+                        "only if the issue surfaced during verification and "
+                        "does not correspond to any pending candidate — the "
+                        "controller will auto-match by endpoint and similar "
+                        "title as a safety net, but an explicit list is "
+                        "preferred."
+                    ),
                 },
             },
             "required": [
@@ -560,6 +702,8 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         },
     )
     async def file_finding(args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_VERIFICATION:
+            return _reject_wrong_phase(PHASE_VERIFICATION, decisions.current_phase, "file_finding")
         severity = str(args.get("severity", "")).lower()
         if severity not in SEVERITIES:
             return {
@@ -614,6 +758,8 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         },
     )
     async def dismiss_candidate(args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_VERIFICATION:
+            return _reject_wrong_phase(PHASE_VERIFICATION, decisions.current_phase, "dismiss_candidate")
         cid = str(args.get("candidate_id", "")).strip()
         reason = str(args.get("reason", "")).strip()
         if not cid or not reason:
@@ -638,6 +784,8 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         },
     )
     async def done(args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_DIRECTION:
+            return _reject_wrong_phase(PHASE_DIRECTION, decisions.current_phase, "done")
         summary = str(args.get("summary", "")).strip()
         if not summary:
             return {
@@ -646,6 +794,59 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
             }
         decisions.set_done(summary)
         return {"content": [{"type": "text", "text": "Run end signaled."}]}
+
+    @tool(
+        "verification_done",
+        (
+            "Signal that the verification phase is complete. Call this after "
+            "every pending candidate has been resolved via `file_finding` or "
+            "`dismiss_candidate`. Provide a 1-3 sentence summary of what you "
+            "verified, dismissed, and any open questions to pass along to the "
+            "direction phase."
+        ),
+        {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+        },
+    )
+    async def verification_done(args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_VERIFICATION:
+            return _reject_wrong_phase(PHASE_VERIFICATION, decisions.current_phase, "verification_done")
+        summary = str(args.get("summary", "")).strip()
+        if not summary:
+            return {
+                "content": [{"type": "text", "text": "Rejected: summary is required."}],
+                "is_error": True,
+            }
+        decisions.set_verification_done(summary)
+        return {"content": [{"type": "text", "text": "Verification phase complete."}]}
+
+    @tool(
+        "direction_done",
+        (
+            "Signal that per-worker direction is complete for this iteration. "
+            "Call only after every alive worker has a continue/expand/stop "
+            "decision or is covered by a `plan_workers` entry. Provide a brief "
+            "summary of what was assigned."
+        ),
+        {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+        },
+    )
+    async def direction_done(args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_DIRECTION:
+            return _reject_wrong_phase(PHASE_DIRECTION, decisions.current_phase, "direction_done")
+        summary = str(args.get("summary", "")).strip()
+        if not summary:
+            return {
+                "content": [{"type": "text", "text": "Rejected: summary is required."}],
+                "is_error": True,
+            }
+        decisions.set_direction_done(summary)
+        return {"content": [{"type": "text", "text": "Direction phase complete."}]}
 
     return create_sdk_mcp_server(
         name="orch_tools",
@@ -658,19 +859,33 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
             file_finding,
             dismiss_candidate,
             done,
+            verification_done,
+            direction_done,
         ],
     )
 
 
 # Public allowed-tool names (use with ClaudeAgentOptions.allowed_tools).
 WORKER_TOOL_ALLOWED = "mcp__worker_tools__report_finding_candidate"
-ORCH_TOOL_NAMES = (
+
+# Tools available during the verification phase.
+VERIFIER_TOOL_NAMES = (
+    "file_finding",
+    "dismiss_candidate",
+    "verification_done",
+)
+
+# Tools available during the direction phase.
+DIRECTOR_TOOL_NAMES = (
     "plan_workers",
     "continue_worker",
     "expand_worker",
     "stop_worker",
-    "file_finding",
-    "dismiss_candidate",
+    "direction_done",
     "done",
 )
+
+ORCH_TOOL_NAMES = VERIFIER_TOOL_NAMES + DIRECTOR_TOOL_NAMES
 ORCH_TOOL_ALLOWED = [f"mcp__orch_tools__{n}" for n in ORCH_TOOL_NAMES]
+VERIFIER_TOOL_ALLOWED = [f"mcp__orch_tools__{n}" for n in VERIFIER_TOOL_NAMES]
+DIRECTOR_TOOL_ALLOWED = [f"mcp__orch_tools__{n}" for n in DIRECTOR_TOOL_NAMES]

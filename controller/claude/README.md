@@ -1,21 +1,29 @@
 # sectool Controller — Claude Agent SDK
 
-Autonomous security exploration controller that runs two (or more) Claude
+Autonomous security exploration controller that runs multiple Claude
 instances with different responsibilities:
 
 - **Worker(s)** — Claude Code connected to sectool's MCP server and a small
   in-process `worker_tools` MCP server. Workers execute security tests with
   sectool (proxy, replay, crawl, OAST, analysis tools) and, when they find
   something suspicious, call `report_finding_candidate(...)` to flag it.
-- **Orchestrator** — Claude Code connected to sectool's MCP server and an
-  in-process `orch_tools` MCP server. The orchestrator **independently
-  verifies** every worker-reported candidate by using sectool tools itself
-  (`flow_get`, `replay_send`, `request_send`, `diff_flow`, etc.) before
-  filing a formal finding. It directs workers via tool calls
-  (`continue_worker`, `expand_worker`, `stop_worker`, `plan_workers`,
-  `file_finding`, `dismiss_candidate`, `done`).
+- **Verifier** — dedicated Claude instance whose only job is to reproduce
+  worker-reported candidates using the full sectool tool surface
+  (`flow_get`, `replay_send`, `request_send`, `diff_flow`, `find_reflected`,
+  `proxy_rule_*`, `crawl_*`, `oast_*`, …) and either `file_finding` or
+  `dismiss_candidate`. Runs over multiple substeps per iteration so it can
+  reflect between reproductions.
+- **Director** — dedicated Claude instance whose only job is to decide what
+  each alive worker should do next (`continue_worker`, `expand_worker`,
+  `stop_worker`, `plan_workers`, `done`) and how long it may run
+  autonomously before escalating back (`autonomous_budget`). Also runs over
+  multiple substeps per iteration.
 
-Both instances authenticate via Claude Code's built-in OAuth — no API key
+Splitting verification and direction into separate clients with separate
+system prompts forces each role to do its job thoroughly — the single-turn
+orchestrator of earlier versions tended to short-circuit both.
+
+All instances authenticate via Claude Code's built-in OAuth — no API key
 required.
 
 ## Prerequisites
@@ -78,52 +86,101 @@ python controller.py \
 
 1. **Build & launch MCP** — unless `--external`, runs `make build`, then
    starts `bin/sectool mcp` as a subprocess on `--mcp-port`.
-2. **Connect worker 1 and the orchestrator** — both share the sectool MCP
-   server; each gets its own in-process SDK MCP server for control tools
-   (`worker_tools` for workers, `orch_tools` for the orchestrator).
+2. **Connect worker 1, verifier, and director** — all three share the
+   sectool MCP server; the workers get an in-process `worker_tools` MCP
+   server (exposing `report_finding_candidate`), and the verifier and
+   director each connect to the shared in-process `orch_tools` MCP server
+   (tools are phase-gated — see below). The verifier gets the full sectool
+   tool surface; the director gets only worker-control tools.
 3. **Initial prompt** — the user's prompt is sent to worker 1 for
    discovery.
-4. **Iteration loop**:
-   - Workers run until they stop producing output this turn.
-   - The controller builds a structured summary per worker: assistant
-     text, tool calls made (with truncated inputs/results), flow IDs
-     referenced, and any candidates raised this turn.
-   - All summaries + a status line (iter, cost, findings) + pending
-     candidates + stall warnings are sent to the orchestrator.
-   - The orchestrator may call any number of tools in response:
-     - Verification tools (`flow_get`, `replay_send`, `diff_flow`, …) —
-       used to independently reproduce candidate behavior.
-     - Decision tools — every per-worker decision and every finding is
-       expressed as a tool call; the controller consumes them
-       deterministically (no prose parsing).
-   - The controller then applies decisions: files/dismisses candidates,
-     dispatches worker instructions, spawns or retargets workers per
-     `plan_workers`, or ends the run on `done`.
-5. **Stall detection** — every worker-directed decision carries a
-   `progress` tag (`none`/`incremental`/`new`) chosen by the
-   orchestrator. Three consecutive `none` tags triggers a stall warning
-   in the next orchestrator prompt; one more forces `stop_worker` (or
-   ends single-worker runs).
-6. **Teardown** — terminates the MCP server (unless `--external`) and
+4. **Per-iteration anatomy** (three phases):
+
+   **Phase 1: Autonomous worker run.** Each alive worker runs concurrently
+   for up to its `autonomous_budget` turns (default 5). Between turns, the
+   controller sends a generic `"Continue your current testing plan."`
+   prompt — no orchestrator intervention. A worker **escalates back**
+   early if it reports a finding candidate, produces a silent turn (no
+   tool calls, no new flow IDs), or hits a connection error. Each turn's
+   summary (tool calls, flow IDs touched, candidates raised) is recorded
+   on the worker. Controller waits until every worker has escalated.
+
+   **Phase 2: Verification (multi-substep).** The verifier client receives
+   the list of pending candidates + every worker's full autonomous-run
+   transcript, and reproduces each candidate using sectool tools. It may
+   take up to `VERIFICATION_MAX_SUBSTEPS` (6) query/drain substeps —
+   between substeps the controller applies any `file_finding` /
+   `dismiss_candidate` decisions and prompts again with the updated
+   pending list. Phase ends on `verification_done(summary)`, when no
+   pending candidates remain, or at the cap.
+
+   **Phase 3: Direction (multi-substep).** The director client receives
+   the verification summary + every worker's autonomous-run transcript,
+   and issues `continue_worker` / `expand_worker` / `stop_worker` /
+   `plan_workers` decisions — each with an `autonomous_budget` for the
+   next iteration. Up to `DIRECTION_MAX_SUBSTEPS` (4) substeps. Phase ends
+   on `direction_done(summary)`, on `done(summary)` to end the run, when
+   every alive worker has a decision, or at the cap.
+
+   **Apply.** Controller applies the plan diff (spawn/retarget), sends
+   each worker its instruction + updated budget, and starts the next
+   iteration.
+
+5. **Phase gating.** Each orch tool checks `decisions.phase` and rejects
+   calls made in the wrong phase. Verification phase may call
+   `file_finding`, `dismiss_candidate`, and `verification_done` (plus
+   sectool read/replay tools). Direction phase may call `plan_workers`,
+   `continue_worker`, `expand_worker`, `stop_worker`, `direction_done`,
+   and `done`.
+6. **Stall detection** — controller-observed via each worker's
+   `escalation_reason`. `silent` escalations increment
+   `progress_none_streak`; `candidate` escalations or turns that touched
+   new flow IDs reset it. Three consecutive silent escalations triggers a
+   stall warning in the director prompt; four forces `stop_worker`.
+7. **Teardown** — terminates the MCP server (unless `--external`) and
    prints a summary.
 
-## Orchestrator Tools (decision surface)
+## Orchestrator Tools (phase-gated decision surface)
+
+**Verification phase tools:**
 
 | Tool | Purpose |
 |------|---------|
-| `plan_workers(plans)` | Spawn/retarget workers. Callable any turn. |
-| `continue_worker(worker_id, instruction, progress)` | Keep worker N going. |
-| `expand_worker(worker_id, instruction, progress)` | Pivot worker N's plan. |
-| `stop_worker(worker_id, reason)` | Retire worker N. |
-| `file_finding(...)` | Record a *verified* finding; must cite verification flows. |
+| `file_finding(...)` | Record a *verified* finding; `verification_notes` must cite reproduction flows. |
 | `dismiss_candidate(candidate_id, reason)` | Mark a worker candidate as not-a-finding. |
+| `verification_done(summary)` | Signal verification complete; transitions to direction. |
+
+Plus the **full sectool tool surface** (same as workers): `flow_get`,
+`proxy_poll`, `replay_send`, `request_send`, `diff_flow`, `find_reflected`,
+`cookie_jar`, `jwt_decode`, `encode`, `decode`, `hash`, `crawl_*`,
+`oast_*`, `proxy_rule_*`, `proxy_respond_*`, `notes_save`, `notes_list`.
+The verifier prompt reminds it to prefer non-destructive reproduction and
+to clean up any rules/responders/sessions it introduces.
+
+**Direction phase tools:**
+
+| Tool | Purpose |
+|------|---------|
+| `plan_workers(plans)` | Spawn/retarget workers. |
+| `continue_worker(worker_id, instruction, progress, autonomous_budget?)` | Keep worker N going with the specified budget. |
+| `expand_worker(worker_id, instruction, progress, autonomous_budget?)` | Pivot worker N's plan. |
+| `stop_worker(worker_id, reason)` | Retire worker N. |
+| `direction_done(summary)` | Signal that all alive workers have a decision. |
 | `done(summary)` | End the run. |
 
-The orchestrator also has read/reproduce access to the sectool MCP server
-for verification (proxy history, replay, diff, reflection detection, etc.).
-Destructive sectool tools (`proxy_rule_*`, `crawl_stop`, `oast_delete`)
-are **not** exposed to the orchestrator to prevent unintentional
-disruption of running workers.
+Calling a tool in the wrong phase returns an `is_error=True` response
+directing the orchestrator to transition phases first.
+
+### `autonomous_budget` parameter
+
+`continue_worker` and `expand_worker` accept an optional
+`autonomous_budget` (integer, 1–20, default 5) that sets how many
+consecutive autonomous turns the worker may run before escalating back.
+Typical values:
+
+- **5–10** — productive workers on a clear exploitation path.
+- **3–5** — general exploration (default).
+- **2–3** — exploratory/uncertain assignments where you want to review sooner.
 
 ## Worker Tool
 
@@ -153,17 +210,23 @@ confirm the issue.
 
 ## Safety Bounds
 
-- **Max iterations**: Configurable hard cap (default 30).
+- **Max iterations**: `--max-iterations` caps the outer loop (default 30).
+  Each iteration runs one autonomous worker phase + verification +
+  direction, so an iteration can involve many underlying Claude turns.
 - **Cost ceiling**: Optional `--max-cost` flag halts the loop if total USD
-  cost is exceeded.
-- **Stall detection**: Driven by the orchestrator's self-reported
-  `progress` tag. Three consecutive `progress=none` decisions issue a
-  warning; four force a worker stop.
-- **Worker timeout**: If a worker produces no response within 5 minutes,
-  it is interrupted and the orchestrator is consulted.
-- **Orchestrator verification required**: findings are only filed after
-  the orchestrator calls `file_finding` with non-empty
-  `verification_notes`.
+  cost is exceeded. Checked after each phase.
+- **Autonomous budget per worker**: 1–20 turns, default 5, settable by
+  the director via `continue_worker` / `expand_worker`.
+- **Phase substep caps**: `VERIFICATION_MAX_SUBSTEPS=6`,
+  `DIRECTION_MAX_SUBSTEPS=4` bound each orchestrator phase.
+- **Stall detection**: controller-observed via each worker's
+  `escalation_reason`. Three consecutive silent escalations (no tool
+  calls, no new flow IDs) issue a warning in the director prompt; four
+  force a worker stop.
+- **Worker turn timeout**: 5 minutes per turn. Timed-out turns are
+  interrupted and treated as silent escalations.
+- **Verification required**: findings are only filed after the verifier
+  calls `file_finding` with non-empty `verification_notes`.
 
 ## Running the tests
 
@@ -173,5 +236,7 @@ python -m pytest tests/
 ```
 
 The tests do not touch the network or the real SDK — they exercise the
-queue types, the finding writer, the flow-ID extractor, and the worker-
-turn collector against a scripted fake `ClaudeSDKClient`.
+queue types (including phase transitions), the finding writer, the
+flow-ID extractor, the worker-turn collector, the autonomous-run loop,
+the stall-streak logic, and the verification/direction phase drivers
+against a scripted fake `ClaudeSDKClient`.

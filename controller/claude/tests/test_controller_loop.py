@@ -1,7 +1,8 @@
 """Smoke tests for controller loop internals.
 
-These tests exercise the message-building and decision-dispatch paths
-with a scripted fake ClaudeSDKClient — no network, no real SDK.
+Covers the autonomous-worker turn classification and loop, stall updates,
+apply_decision dispatch, and verifier/director prompt contents — using a
+scripted fake ClaudeSDKClient (no network, no real SDK).
 """
 
 import asyncio
@@ -27,6 +28,8 @@ from tools import (
     ToolCallRecord,
     WorkerDecision,
     WorkerTurnSummary,
+    set_active_worker,
+    reset_active_worker,
 )
 
 
@@ -43,19 +46,36 @@ def _result(cost: float = 0.01) -> ResultMessage:
 
 
 class FakeSDKClient:
-    """Minimal async fake of ClaudeSDKClient for testing."""
+    """Minimal async fake of ClaudeSDKClient.
 
-    def __init__(self, scripts: list[list[Any]]):
-        self._scripts = list(scripts)
+    Scripts can be supplied as a list (popped left-to-right per
+    receive_response call) or a dict keyed by query index (0-based).
+    """
+
+    def __init__(self, scripts):
+        if isinstance(scripts, dict):
+            self._scripts: Any = dict(scripts)
+        else:
+            self._scripts = list(scripts)
         self.queries: list[str] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
 
     async def query(self, content: str) -> None:
         self.queries.append(content)
 
     def receive_response(self):
-        if not self._scripts:
-            raise AssertionError("No more scripted turns")
-        messages = self._scripts.pop(0)
+        if isinstance(self._scripts, dict):
+            idx = max(0, len(self.queries) - 1)
+            messages = self._scripts[idx]
+        else:
+            if not self._scripts:
+                raise AssertionError("No more scripted turns")
+            messages = self._scripts.pop(0)
 
         async def gen():
             for m in messages:
@@ -77,6 +97,11 @@ class _StubClient:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# Turn collection
+# ---------------------------------------------------------------------------
 
 
 class TestCollectWorkerTurn(unittest.TestCase):
@@ -116,9 +141,13 @@ class TestCollectWorkerTurn(unittest.TestCase):
 
     def test_attributes_candidates_to_active_worker(self):
         pool = CandidatePool()
-        # Pre-seed a prior candidate to verify ids_since returns only new ones
-        pool.add(title="old", severity="low", endpoint="/a",
-                 flow_ids=["aaaa11"], summary="", evidence_notes="", reproduction_hint="")
+        # Pre-seed a prior candidate (other worker) to verify filtering.
+        token = set_active_worker(99)
+        try:
+            pool.add(title="other", severity="low", endpoint="/a",
+                     flow_ids=["aaaa11"], summary="", evidence_notes="", reproduction_hint="")
+        finally:
+            reset_active_worker(token)
 
         class PoolSideEffectClient(FakeSDKClient):
             def receive_response(self_inner):
@@ -130,7 +159,8 @@ class TestCollectWorkerTurn(unittest.TestCase):
                             and b.name == "mcp__worker_tools__report_finding_candidate"
                             for b in m.content
                         ):
-                            # Simulate tool handler side effect
+                            # Simulate tool handler side effect — CandidatePool.add
+                            # reads from the contextvar set by collect_worker_turn.
                             pool.add(title="new", severity="high", endpoint="/b",
                                      flow_ids=["bbbb22"], summary="",
                                      evidence_notes="", reproduction_hint="")
@@ -161,28 +191,260 @@ class TestCollectWorkerTurn(unittest.TestCase):
         self.assertEqual(pool.get("c002").worker_id, 2)
 
 
+# ---------------------------------------------------------------------------
+# Autonomous worker run
+# ---------------------------------------------------------------------------
+
+
+def _productive_turn(flow_id: str = "prod01") -> list:
+    return [
+        AssistantMessage(
+            content=[
+                TextBlock(text="Probing."),
+                ToolUseBlock(id="u", name="mcp__sectool__replay_send",
+                             input={"flow_id": flow_id, "mutations": {}}),
+            ],
+            model="test",
+        ),
+        UserMessage(content=[
+            ToolResultBlock(tool_use_id="u",
+                            content=[{"type": "text", "text": f"Replayed {flow_id}"}]),
+        ]),
+        _result(0.01),
+    ]
+
+
+def _silent_turn() -> list:
+    return [
+        AssistantMessage(content=[], model="test"),
+        _result(0.0),
+    ]
+
+
+def _candidate_turn(pool: CandidatePool, wid: int) -> list:
+    # The FakeSDKClient doesn't trigger tool handlers; simulate side effect by
+    # letting the test script mutate pool via a custom subclass. For tests
+    # below we instead use a specialised client that adds to the pool.
+    return [
+        AssistantMessage(
+            content=[
+                TextBlock(text="Found something."),
+                ToolUseBlock(id="u", name="mcp__worker_tools__report_finding_candidate",
+                             input={"title": "x"}),
+            ],
+            model="test",
+        ),
+        UserMessage(content=[
+            ToolResultBlock(tool_use_id="u",
+                            content=[{"type": "text", "text": "Candidate recorded."}]),
+        ]),
+        _result(0.01),
+    ]
+
+
+class _CandidateInjectingClient(FakeSDKClient):
+    """FakeSDKClient that triggers pool.add() when it sees a candidate tool."""
+
+    def __init__(self, scripts, pool: CandidatePool, add_on_turn_indexes: list[int]):
+        super().__init__(scripts)
+        self._pool = pool
+        self._add_on = set(add_on_turn_indexes)
+        self._turn_idx = -1
+
+    def receive_response(self):
+        self._turn_idx += 1
+        if isinstance(self._scripts, dict):
+            idx = max(0, len(self.queries) - 1)
+            messages = self._scripts[idx]
+        else:
+            if not self._scripts:
+                raise AssertionError("No more scripted turns")
+            messages = self._scripts.pop(0)
+        add_this_turn = self._turn_idx in self._add_on
+
+        async def gen():
+            for m in messages:
+                yield m
+                if add_this_turn and isinstance(m, AssistantMessage):
+                    for b in m.content:
+                        if isinstance(b, ToolUseBlock) and b.name == "mcp__worker_tools__report_finding_candidate":
+                            self._pool.add(
+                                title="injected", severity="high", endpoint="/x",
+                                flow_ids=["ijct01"], summary="", evidence_notes="",
+                                reproduction_hint="",
+                            )
+        return gen()
+
+
+class TestRunWorkerAutonomousTurn(unittest.TestCase):
+    def _make_worker(self, client):
+        w = controller.WorkerState(worker_id=5, options=None)
+        w.client = client
+        return w
+
+    def test_productive_returns_none_reason(self):
+        pool = CandidatePool()
+        client = FakeSDKClient([_productive_turn()])
+        w = self._make_worker(client)
+        s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
+        self.assertIsNotNone(s)
+        self.assertIsNone(reason)
+
+    def test_silent_returns_silent(self):
+        pool = CandidatePool()
+        client = FakeSDKClient([_silent_turn()])
+        w = self._make_worker(client)
+        s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
+        self.assertEqual(reason, "silent")
+        self.assertEqual(s.tool_calls, [])
+
+    def test_candidate_returns_candidate(self):
+        pool = CandidatePool()
+        client = _CandidateInjectingClient(
+            [_candidate_turn(pool, 5)], pool, add_on_turn_indexes=[0],
+        )
+        w = self._make_worker(client)
+        s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
+        self.assertEqual(reason, "candidate")
+        self.assertEqual(len(s.candidate_ids), 1)
+
+
+class TestRunWorkerUntilEscalation(unittest.TestCase):
+    def _make_worker(self, client, budget: int = 3):
+        w = controller.WorkerState(worker_id=9, options=None)
+        w.client = client
+        w.autonomous_budget = budget
+        return w
+
+    def test_budget_exhausted_sets_budget(self):
+        pool = CandidatePool()
+        # All three turns productive → budget reached
+        scripts = [_productive_turn("pp01a"), _productive_turn("pp01b"), _productive_turn("pp01c")]
+        client = FakeSDKClient(scripts)
+        w = self._make_worker(client, budget=3)
+        runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
+        self.assertEqual(len(runs), 3)
+        self.assertEqual(w.escalation_reason, "budget")
+        # First turn does not send a Continue query; subsequent ones do.
+        self.assertEqual(client.queries, [
+            "Continue your current testing plan.",
+            "Continue your current testing plan.",
+        ])
+
+    def test_silent_turn_escalates_early(self):
+        pool = CandidatePool()
+        scripts = [_productive_turn("aa01"), _silent_turn(), _productive_turn("aa02")]
+        client = FakeSDKClient(scripts)
+        w = self._make_worker(client, budget=3)
+        runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(w.escalation_reason, "silent")
+
+    def test_candidate_escalates_early(self):
+        pool = CandidatePool()
+        scripts = [_productive_turn("xyz01"), _candidate_turn(pool, 9), _productive_turn("no01")]
+        client = _CandidateInjectingClient(scripts, pool, add_on_turn_indexes=[1])
+        w = self._make_worker(client, budget=3)
+        runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(w.escalation_reason, "candidate")
+
+    def test_tracks_autonomous_turns_on_worker(self):
+        pool = CandidatePool()
+        scripts = [_productive_turn("tt01"), _silent_turn()]
+        client = FakeSDKClient(scripts)
+        w = self._make_worker(client, budget=4)
+        _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
+        self.assertEqual(len(w.autonomous_turns), 2)
+
+
+# ---------------------------------------------------------------------------
+# Stall streak updates
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateWorkerStreaks(unittest.TestCase):
+    def _make(self):
+        w = controller.WorkerState(worker_id=1, options=None)
+        w.alive = True
+        return w
+
+    def test_silent_increments_streak(self):
+        w = self._make()
+        w.progress_none_streak = 2
+        w.escalation_reason = "silent"
+        w.autonomous_turns = [WorkerTurnSummary(worker_id=1, iteration=1)]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 3)
+
+    def test_candidate_resets_streak(self):
+        w = self._make()
+        w.progress_none_streak = 3
+        w.stall_warned = True
+        w.escalation_reason = "candidate"
+        w.autonomous_turns = [WorkerTurnSummary(worker_id=1, iteration=1)]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 0)
+        self.assertFalse(w.stall_warned)
+
+    def test_productive_flows_reset_streak(self):
+        w = self._make()
+        w.progress_none_streak = 2
+        w.stall_warned = True
+        w.escalation_reason = "budget"
+        s = WorkerTurnSummary(worker_id=1, iteration=1)
+        s.flow_ids_touched = ["aaaa11"]
+        w.autonomous_turns = [s]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 0)
+        self.assertFalse(w.stall_warned)
+
+    def test_budget_without_flows_unchanged(self):
+        """Budget escalation with no flow activity leaves streak intact."""
+        w = self._make()
+        w.progress_none_streak = 1
+        w.escalation_reason = "budget"
+        w.autonomous_turns = [WorkerTurnSummary(worker_id=1, iteration=1)]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 1)
+
+
+# ---------------------------------------------------------------------------
+# apply_decision (simplified — no more streak mutation)
+# ---------------------------------------------------------------------------
+
+
 class TestApplyDecision(unittest.TestCase):
     def _make_worker(self):
         w = controller.WorkerState(worker_id=7, options=None)
         w.client = _StubClient()
         return w
 
-    def test_continue_with_none_increments_streak(self):
+    def test_continue_applies_budget_and_query(self):
         w = self._make_worker()
-        d = WorkerDecision(kind="continue", worker_id=7, instruction="go", progress="none")
+        d = WorkerDecision(kind="continue", worker_id=7, instruction="go",
+                           progress="new", autonomous_budget=7)
         _run(controller.apply_decision(d, w, iteration=5))
-        self.assertEqual(w.progress_none_streak, 1)
         self.assertEqual(w.last_instruction, "go")
         self.assertEqual(w.client.queries, ["go"])
+        self.assertEqual(w.autonomous_budget, 7)
 
-    def test_new_progress_resets_streak_and_warning(self):
+    def test_continue_does_not_touch_streak(self):
         w = self._make_worker()
-        w.progress_none_streak = 3
+        w.progress_none_streak = 4
         w.stall_warned = True
-        d = WorkerDecision(kind="expand", worker_id=7, instruction="pivot", progress="new")
+        d = WorkerDecision(kind="continue", worker_id=7, instruction="go",
+                           progress="new", autonomous_budget=5)
         _run(controller.apply_decision(d, w, iteration=5))
-        self.assertEqual(w.progress_none_streak, 0)
-        self.assertFalse(w.stall_warned)
+        self.assertEqual(w.progress_none_streak, 4)  # unchanged
+        self.assertTrue(w.stall_warned)
+
+    def test_expand_applies_budget(self):
+        w = self._make_worker()
+        d = WorkerDecision(kind="expand", worker_id=7, instruction="pivot",
+                           progress="new", autonomous_budget=3)
+        _run(controller.apply_decision(d, w, iteration=5))
+        self.assertEqual(w.autonomous_budget, 3)
 
     def test_stop_tears_down(self):
         w = self._make_worker()
@@ -190,8 +452,28 @@ class TestApplyDecision(unittest.TestCase):
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertFalse(w.alive)
 
+    def test_budget_clamped(self):
+        w = self._make_worker()
+        d = WorkerDecision(kind="continue", worker_id=7, instruction="go",
+                           progress="new", autonomous_budget=999)
+        _run(controller.apply_decision(d, w, iteration=5))
+        self.assertLessEqual(w.autonomous_budget, 20)
 
-class TestMessageFormatting(unittest.TestCase):
+
+# ---------------------------------------------------------------------------
+# Prompt formatting
+# ---------------------------------------------------------------------------
+
+
+def _turn(worker_id: int, iteration: int, tools: list[str], flows: list[str], cands: list[str]) -> WorkerTurnSummary:
+    s = WorkerTurnSummary(worker_id=worker_id, iteration=iteration, assistant_text="ran tests")
+    s.tool_calls = [ToolCallRecord(name=n, input_summary="{}", result_summary="ok") for n in tools]
+    s.flow_ids_touched = list(flows)
+    s.candidate_ids = list(cands)
+    return s
+
+
+class TestPromptFormatting(unittest.TestCase):
     def test_pending_candidates_empty(self):
         pool = CandidatePool()
         self.assertEqual(controller._format_pending_candidates(pool), "No pending finding candidates.")
@@ -206,33 +488,398 @@ class TestMessageFormatting(unittest.TestCase):
         self.assertIn("XSS in search", out)
         self.assertIn("abcdef", out)
 
-    def test_build_orch_message_contents(self):
+    def test_format_autonomous_run(self):
+        turns = [
+            _turn(1, 3, ["mcp__sectool__proxy_poll"], ["fl0w01"], []),
+            _turn(1, 3, ["mcp__sectool__replay_send"], ["fl0w02"], ["c001"]),
+        ]
+        out = controller._format_autonomous_run(1, turns, "candidate")
+        self.assertIn("Worker 1", out)
+        self.assertIn("escalated: candidate", out)
+        self.assertIn("Turn 1", out)
+        self.assertIn("Turn 2", out)
+        self.assertIn("fl0w02", out)
+        self.assertIn("c001", out)
+
+    def test_build_verifier_prompt(self):
         pool = CandidatePool()
         pool.add(title="T", severity="low", endpoint="/x",
                  flow_ids=["zz1122"], summary="s",
                  evidence_notes="e", reproduction_hint="r")
-        ws = WorkerTurnSummary(
-            worker_id=1, iteration=2,
-            assistant_text="ran tests",
-            tool_calls=[ToolCallRecord(name="mcp__sectool__proxy_poll",
-                                       input_summary="{}",
-                                       result_summary="5 flows")],
-            flow_ids_touched=["zz1122"],
-        )
-        msg = controller._build_orch_message(
+        w = controller.WorkerState(worker_id=1, options=None)
+        w.escalation_reason = "candidate"
+        turns = [_turn(1, 2, ["mcp__sectool__proxy_poll"], ["zz1122"], ["c001"])]
+
+        msg = controller._build_verifier_prompt(
+            workers=[w],
+            worker_runs={1: turns},
+            pending=pool.pending(),
+            findings_summary="No findings filed yet.",
             iteration=2, max_iter=10,
             total_cost=0.5, max_cost=5.0,
-            findings_summary="No findings filed yet.",
             findings_count=0,
-            pending_candidates_text=controller._format_pending_candidates(pool),
-            stall_warnings="",
-            worker_summaries=[ws],
         )
         self.assertIn("iteration 2/10", msg)
         self.assertIn("cost $0.50/$5.00", msg)
-        self.assertIn("findings filed: 0", msg)
         self.assertIn("Pending finding candidates", msg)
         self.assertIn("mcp__sectool__proxy_poll", msg)
+        self.assertIn("verification_done", msg)
+
+    def test_build_director_prompt(self):
+        w = controller.WorkerState(worker_id=2, options=None)
+        w.escalation_reason = "budget"
+        turns = [_turn(2, 5, ["mcp__sectool__replay_send"], ["fl0w01"], [])]
+
+        msg = controller._build_director_prompt(
+            workers=[w],
+            worker_runs={2: turns},
+            verification_summary="Filed 1, dismissed 0.",
+            findings_summary="1 finding so far.",
+            iteration=5, max_iter=10,
+            total_cost=1.25, max_cost=None,
+            findings_count=1,
+            stall_warnings="",
+        )
+        self.assertIn("iteration 5/10", msg)
+        self.assertIn("Filed 1, dismissed 0.", msg)
+        self.assertIn("Alive workers awaiting direction:** 2", msg)
+        self.assertIn("direction_done", msg)
+        self.assertIn("continue_worker", msg)
+
+    def test_verifier_system_prompt_covers_core_tools(self):
+        """The verifier prompt must mention the core sectool tools it relies on.
+
+        The verifier has access to the full `mcp__sectool__*` glob, but the
+        prompt should still enumerate the tools central to reproduction so the
+        model knows to use them.
+        """
+        from prompts import orchestrator_verifier
+
+        prompt = orchestrator_verifier.build_system_prompt(max_workers=2)
+        core_tools = [
+            "flow_get", "proxy_poll", "replay_send", "request_send",
+            "diff_flow", "find_reflected", "cookie_jar",
+            "proxy_rule_list", "proxy_rule_add", "proxy_rule_delete",
+            "crawl_poll", "crawl_status", "crawl_sessions",
+            "oast_poll", "oast_get", "oast_list",
+            "encode", "decode", "hash", "jwt_decode",
+            "notes_save", "notes_list",
+        ]
+        for name in core_tools:
+            self.assertIn(name, prompt, f"verifier prompt missing `{name}`")
+
+    def test_verifier_allowed_tools_uses_sectool_glob(self):
+        """The verifier's allowed_tools must include the full sectool glob."""
+        self.assertEqual(controller.ORCH_SECTOOL_TOOLS_GLOB, "mcp__sectool__*")
+
+    def test_build_director_continue_prompt(self):
+        msg = controller._build_director_continue_prompt(
+            pending_wids={1, 3}, substep=2, max_substeps=4,
+        )
+        self.assertIn("substep 2 of 4", msg)
+        self.assertIn("1, 3", msg)
+        self.assertIn("direction_done", msg)
+
+
+# ---------------------------------------------------------------------------
+# Phase drivers (integration over FakeSDKClient)
+# ---------------------------------------------------------------------------
+
+
+def _orch_result(cost: float = 0.01) -> ResultMessage:
+    return _result(cost)
+
+
+def _orch_tool_turn(tool_name: str, tool_input: dict, cost: float = 0.01) -> list:
+    """Produce an orchestrator turn that calls one orch tool."""
+    return [
+        AssistantMessage(
+            content=[
+                TextBlock(text=f"Calling {tool_name}."),
+                ToolUseBlock(id="t1", name=f"mcp__orch_tools__{tool_name}", input=tool_input),
+            ],
+            model="test",
+        ),
+        UserMessage(content=[
+            ToolResultBlock(tool_use_id="t1",
+                            content=[{"type": "text", "text": "ok"}]),
+        ]),
+        _orch_result(cost),
+    ]
+
+
+class _OrchSideEffectClient(FakeSDKClient):
+    """FakeSDKClient that invokes `decisions.<method>` before yielding messages.
+
+    The driver breaks out on ResultMessage so side effects attached AFTER the
+    final yield never fire — we run them up-front instead. Simulates the MCP
+    tool handler having already populated `decisions` by the time the turn
+    completes.
+    """
+
+    def __init__(self, scripts, decisions: DecisionQueue, actions_per_turn: list):
+        super().__init__(scripts)
+        self._decisions = decisions
+        self._actions = list(actions_per_turn)
+
+    def receive_response(self):
+        if isinstance(self._scripts, dict):
+            idx = max(0, len(self.queries) - 1)
+            messages = self._scripts[idx]
+        else:
+            if not self._scripts:
+                raise AssertionError("No more scripted turns")
+            messages = self._scripts.pop(0)
+        action = self._actions.pop(0) if self._actions else None
+        if action is not None:
+            action(self._decisions)
+
+        async def gen():
+            for m in messages:
+                yield m
+        return gen()
+
+
+class TestVerificationPhase(unittest.TestCase):
+    def _seed_pool(self, pool: CandidatePool) -> str:
+        return pool.add(title="XSS", severity="high", endpoint="/s",
+                        flow_ids=["fl0w01"], summary="", evidence_notes="",
+                        reproduction_hint="")
+
+    def test_ends_on_verification_done(self):
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="XSS", severity="high", endpoint="/s",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w01",
+                supersedes_candidate_ids=[cid],
+            ))
+            d.set_verification_done("one filed")
+
+        client = _OrchSideEffectClient([_orch_tool_turn("verification_done", {"summary": "x"})],
+                                       decisions, [action])
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            new_client, cost, summary = _run(controller.run_verification_phase(
+                client, None, decisions, pool, fw,
+                worker_runs={}, workers=[],
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(summary, "one filed")
+        self.assertEqual(fw.count, 1)
+        self.assertEqual(pool.get(cid).status, "verified")
+
+    def test_ends_when_no_pending_left(self):
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_dismissal(cid, "false positive")
+
+        client = _OrchSideEffectClient([_orch_tool_turn("dismiss_candidate", {"candidate_id": cid, "reason": "fp"})],
+                                       decisions, [action])
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                client, None, decisions, pool, fw,
+                worker_runs={}, workers=[],
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertIn("dismissed", summary)
+        self.assertEqual(pool.get(cid).status, "dismissed")
+
+    def test_file_finding_without_supersedes_auto_resolves_matching_candidate(self):
+        pool = CandidatePool()
+        cid = pool.add(title="Reflected XSS in search", severity="high",
+                       endpoint="GET /search", flow_ids=["fl0w01"],
+                       summary="", evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="Reflected XSS in search results", severity="high",
+                endpoint="get /search/",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w01",
+                supersedes_candidate_ids=[],  # forgotten — should auto-resolve
+            ))
+            d.set_verification_done("one filed")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _run(controller.run_verification_phase(
+                client, None, decisions, pool, fw,
+                worker_runs={}, workers=[],
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(fw.count, 1)
+        self.assertEqual(pool.get(cid).status, "verified")
+
+    def test_file_finding_without_supersedes_leaves_unrelated_candidate_pending(self):
+        pool = CandidatePool()
+        c_match = pool.add(title="Reflected XSS in search", severity="high",
+                           endpoint="GET /search", flow_ids=["fl0w01"],
+                           summary="", evidence_notes="", reproduction_hint="")
+        c_other = pool.add(title="SQL injection in login", severity="high",
+                           endpoint="POST /login", flow_ids=["fl0w02"],
+                           summary="", evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="Reflected XSS in search", severity="high",
+                endpoint="GET /search",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w01",
+                supersedes_candidate_ids=[],
+            ))
+            d.add_dismissal(c_other, "insufficient evidence")
+            d.set_verification_done("one filed, one dismissed")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _run(controller.run_verification_phase(
+                client, None, decisions, pool, fw,
+                worker_runs={}, workers=[],
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(pool.get(c_match).status, "verified")
+        self.assertEqual(pool.get(c_other).status, "dismissed")
+
+    def test_explicit_supersedes_beats_auto_match(self):
+        """If verifier lists supersedes, only those are resolved — no heuristic."""
+        pool = CandidatePool()
+        c_explicit = pool.add(title="Some other title", severity="high",
+                              endpoint="POST /login", flow_ids=["fl0w01"],
+                              summary="", evidence_notes="", reproduction_hint="")
+        c_similar = pool.add(title="Reflected XSS", severity="high",
+                             endpoint="GET /search", flow_ids=["fl0w02"],
+                             summary="", evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="Reflected XSS", severity="high", endpoint="GET /search",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="v",
+                supersedes_candidate_ids=[c_explicit],
+            ))
+            d.add_dismissal(c_similar, "cleanup")
+            d.set_verification_done("ok")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _run(controller.run_verification_phase(
+                client, None, decisions, pool, fw,
+                worker_runs={}, workers=[],
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        # Explicit one is verified; similar-but-not-listed one was dismissed (not auto-verified)
+        self.assertEqual(pool.get(c_explicit).status, "verified")
+        self.assertEqual(pool.get(c_similar).status, "dismissed")
+
+    def test_skips_phase_when_no_pending(self):
+        pool = CandidatePool()
+        decisions = DecisionQueue()
+        client = FakeSDKClient([])  # must never be queried
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, cost, summary = _run(controller.run_verification_phase(
+                client, None, decisions, pool, fw,
+                worker_runs={}, workers=[],
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(cost, 0.0)
+        self.assertEqual(client.queries, [])
+        self.assertIn("No pending candidates", summary)
+
+
+class TestDirectionPhase(unittest.TestCase):
+    def _make_worker(self, wid: int):
+        w = controller.WorkerState(worker_id=wid, options=None)
+        w.alive = True
+        return w
+
+    def test_ends_when_all_workers_covered(self):
+        decisions = DecisionQueue()
+        w1 = self._make_worker(1)
+        w2 = self._make_worker(2)
+
+        def action(d: DecisionQueue):
+            d.add_decision(WorkerDecision(kind="continue", worker_id=1,
+                                          instruction="keep", progress="new"))
+            d.add_decision(WorkerDecision(kind="continue", worker_id=2,
+                                          instruction="keep", progress="new"))
+            # Note: NO direction_done called — driver should still exit because all covered.
+
+        client = _OrchSideEffectClient([_orch_tool_turn("continue_worker",
+                                                        {"worker_id": 1, "instruction": "k",
+                                                         "progress": "new"})],
+                                       decisions, [action])
+        new_client, cost = _run(controller.run_direction_phase(
+            client, None, decisions, [w1, w2], worker_runs={},
+            verification_summary="ok", findings_summary="x",
+            iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
+            findings_count=0, stall_warnings="", verbose=False,
+        ))
+        self.assertEqual(len(decisions.worker_decisions), 2)
+
+    def test_ends_on_direction_done(self):
+        decisions = DecisionQueue()
+        w1 = self._make_worker(1)
+
+        def action(d: DecisionQueue):
+            d.set_direction_done("done")
+
+        client = _OrchSideEffectClient([_orch_tool_turn("direction_done", {"summary": "d"})],
+                                       decisions, [action])
+        new_client, cost = _run(controller.run_direction_phase(
+            client, None, decisions, [w1], worker_runs={},
+            verification_summary="ok", findings_summary="x",
+            iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
+            findings_count=0, stall_warnings="", verbose=False,
+        ))
+        self.assertEqual(decisions.direction_done_summary, "done")
+
+    def test_reaches_substep_cap(self):
+        decisions = DecisionQueue()
+        w1 = self._make_worker(1)
+
+        # Script DIRECTION_MAX_SUBSTEPS turns, none covering w1 or calling done
+        empty_turn = [
+            AssistantMessage(content=[TextBlock(text="thinking")], model="test"),
+            _orch_result(0.001),
+        ]
+        client = FakeSDKClient([list(empty_turn) for _ in range(controller.DIRECTION_MAX_SUBSTEPS)])
+        _, cost = _run(controller.run_direction_phase(
+            client, None, decisions, [w1], worker_runs={},
+            verification_summary="ok", findings_summary="x",
+            iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
+            findings_count=0, stall_warnings="", verbose=False,
+        ))
+        self.assertEqual(len(client.queries), controller.DIRECTION_MAX_SUBSTEPS)
+
+
+# ---------------------------------------------------------------------------
+# Finding lifecycle (retained)
+# ---------------------------------------------------------------------------
 
 
 class TestFindingLifecycle(unittest.TestCase):
@@ -272,9 +919,6 @@ class TestFindingLifecycle(unittest.TestCase):
         self.assertEqual(decisions.done_summary, "coverage complete")
 
     def test_duplicate_finding_still_resolves_candidates(self):
-        """If a finding's doc is a dup, its candidates must still be marked
-        verified — otherwise they stay pending forever and pollute every
-        subsequent orchestrator prompt."""
         pool = CandidatePool()
         c1 = pool.add(title="XSS", severity="high", endpoint="GET /s",
                       flow_ids=["aaaa11"], summary="", evidence_notes="",
@@ -296,14 +940,13 @@ class TestFindingLifecycle(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
-            # Replicate controller loop's finding application.
             for filed in (filed_first, filed_dup):
                 if not fw.is_duplicate(filed):
                     fw.write(filed)
                 for cid in filed.supersedes_candidate_ids:
                     pool.mark(cid, "verified")
 
-        self.assertEqual(fw.count, 1)  # second one was a dup
+        self.assertEqual(fw.count, 1)
         self.assertEqual(pool.get(c1).status, "verified")
         self.assertEqual(pool.get(c2).status, "verified")
         self.assertEqual(pool.pending(), [])

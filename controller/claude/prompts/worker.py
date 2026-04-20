@@ -63,6 +63,24 @@ Every candidate must include:
 4. **Track progress.** State what you've tested and what remains at the
    end of each response.
 5. **Stay in scope.** Work within the assignment given by the orchestrator.
+
+## Autonomous continuation
+
+You will often receive the prompt `"Continue your current testing plan."`
+with no new instructions. That means the orchestrator is letting you run
+autonomously — it trusts you to pick the next concrete step from your
+plan, execute it with tool calls, and keep going. Do not wait to be told
+what to do; drill further into whatever thread you were pursuing.
+
+- End each response with **tool calls**, not just prose — a response with
+  no tool calls signals that you have nothing productive to do and will
+  escalate you back to the orchestrator.
+- If you truly have exhausted your current assignment, say so in a single
+  short text block and emit no tool calls. That is the correct way to
+  request new direction.
+- When you find something suspicious, call `report_finding_candidate`
+  immediately rather than batching. The orchestrator will verify it; you
+  keep testing.
 """
 
 MULTI_WORKER_ADDENDUM = """\
