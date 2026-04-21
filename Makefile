@@ -9,11 +9,17 @@ test test-all: .SHELLFLAGS := -o pipefail -c
 _FILTER := | grep -v "no test files"
 endif
 
-.PHONY: build build-cross clean test test-all test-cover bench lint
+.PHONY: build build-sectool build-secagent build-cross clean test test-all test-cover bench lint
 
-build:
+build: build-sectool build-secagent
+
+build-sectool:
 	@mkdir -p bin
 	go build $(LDFLAGS) -o bin/sectool ./sectool
+
+build-secagent:
+	@mkdir -p bin
+	cd controller/secagent && go build -o ../../bin/secagent ./cmd/secagent
 
 PLATFORMS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64
 
@@ -38,9 +44,11 @@ clean:
 
 test:
 	go test -short ./... $(_FILTER)
+	cd controller/secagent && go test -short ./... $(_FILTER)
 
 test-all:
 	go test -race -cover ./... $(_FILTER)
+	cd controller/secagent && go test -race -cover ./... $(_FILTER)
 
 test-cover:
 	go test -race -coverprofile=test.out ./... && go tool cover --html=test.out
@@ -50,3 +58,4 @@ bench:
 
 lint:
 	golangci-lint run --timeout=600s && go vet ./...
+	cd controller/secagent && golangci-lint run --timeout=600s --config=$(CURDIR)/.golangci.yml && go vet ./...
