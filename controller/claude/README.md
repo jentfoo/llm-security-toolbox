@@ -97,7 +97,7 @@ python controller.py \
 4. **Per-iteration anatomy** (three phases):
 
    **Phase 1: Autonomous worker run.** Each alive worker runs concurrently
-   for up to its `autonomous_budget` turns (default 5). Between turns, the
+   for up to its `autonomous_budget` turns (default 8). Between turns, the
    controller sends a generic `"Continue your current testing plan."`
    prompt — no orchestrator intervention. A worker **escalates back**
    early if it reports a finding candidate, produces a silent turn (no
@@ -118,9 +118,16 @@ python controller.py \
    the verification summary + every worker's autonomous-run transcript,
    and issues `continue_worker` / `expand_worker` / `stop_worker` /
    `plan_workers` decisions — each with an `autonomous_budget` for the
-   next iteration. Up to `DIRECTION_MAX_SUBSTEPS` (4) substeps. Phase ends
-   on `direction_done(summary)`, on `done(summary)` to end the run, when
-   every alive worker has a decision, or at the cap.
+   next iteration. Up to `DIRECTION_MAX_SUBSTEPS` (4) substeps followed
+   by one mandatory **self-review** substep prompting the director to
+   check for uncovered or misassigned workers before closing the phase.
+   Phase ends on `direction_done(summary)`, on `done(summary)` to end the
+   run, when every alive worker has a decision, or at the cap.
+
+   A `done(summary)` called before iteration `MIN_ITERATIONS_FOR_DONE`
+   (5) with zero findings filed is rejected as premature — this mirrors
+   the secagent guardrail against models that confuse `done` with
+   `direction_done` on early iterations.
 
    **Apply.** Controller applies the plan diff (spawn/retarget), sends
    each worker its instruction + updated budget, and starts the next
@@ -174,12 +181,12 @@ directing the orchestrator to transition phases first.
 ### `autonomous_budget` parameter
 
 `continue_worker` and `expand_worker` accept an optional
-`autonomous_budget` (integer, 1–20, default 5) that sets how many
+`autonomous_budget` (integer, 1–20, default 8) that sets how many
 consecutive autonomous turns the worker may run before escalating back.
 Typical values:
 
-- **5–10** — productive workers on a clear exploitation path.
-- **3–5** — general exploration (default).
+- **5–10** — productive workers on a clear exploitation path (default 8).
+- **3–5** — general exploration.
 - **2–3** — exploratory/uncertain assignments where you want to review sooner.
 
 ## Worker Tool
@@ -223,8 +230,6 @@ confirm the issue.
   `escalation_reason`. Three consecutive silent escalations (no tool
   calls, no new flow IDs) issue a warning in the director prompt; four
   force a worker stop.
-- **Worker turn timeout**: 5 minutes per turn. Timed-out turns are
-  interrupted and treated as silent escalations.
 - **Verification required**: findings are only filed after the verifier
   calls `file_finding` with non-empty `verification_notes`.
 

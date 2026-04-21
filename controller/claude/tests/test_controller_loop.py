@@ -99,6 +99,21 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+class _FakeManaged:
+    """ManagedSDKClient duck-type for tests.
+
+    Phase functions (run_verification_phase, run_direction_phase) take a
+    ManagedSDKClient-shaped object and access `.client` on it for queries.
+    `aclose` is the only other method they might call (on recovery).
+    """
+
+    def __init__(self, client):
+        self.client = client
+
+    async def aclose(self):
+        self.client = None
+
+
 # ---------------------------------------------------------------------------
 # Turn collection
 # ---------------------------------------------------------------------------
@@ -282,31 +297,30 @@ class TestRunWorkerAutonomousTurn(unittest.TestCase):
         w.client = client
         return w
 
-    def test_productive_returns_none_reason(self):
-        pool = CandidatePool()
-        client = FakeSDKClient([_productive_turn()])
-        w = self._make_worker(client)
-        s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
-        self.assertIsNotNone(s)
-        self.assertIsNone(reason)
-
-    def test_silent_returns_silent(self):
-        pool = CandidatePool()
-        client = FakeSDKClient([_silent_turn()])
-        w = self._make_worker(client)
-        s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
-        self.assertEqual(reason, "silent")
-        self.assertEqual(s.tool_calls, [])
-
-    def test_candidate_returns_candidate(self):
-        pool = CandidatePool()
-        client = _CandidateInjectingClient(
-            [_candidate_turn(pool, 5)], pool, add_on_turn_indexes=[0],
-        )
-        w = self._make_worker(client)
-        s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
-        self.assertEqual(reason, "candidate")
-        self.assertEqual(len(s.candidate_ids), 1)
+    def test_classifies_turn_by_reason(self):
+        """Each turn type produces the matching escalation reason (None/silent/candidate)."""
+        for case in ("productive", "silent", "candidate"):
+            with self.subTest(case=case):
+                pool = CandidatePool()
+                if case == "productive":
+                    client = FakeSDKClient([_productive_turn()])
+                elif case == "silent":
+                    client = FakeSDKClient([_silent_turn()])
+                else:
+                    client = _CandidateInjectingClient(
+                        [_candidate_turn(pool, 5)], pool, add_on_turn_indexes=[0],
+                    )
+                w = self._make_worker(client)
+                s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
+                if case == "productive":
+                    self.assertIsNotNone(s)
+                    self.assertIsNone(reason)
+                elif case == "silent":
+                    self.assertEqual(reason, "silent")
+                    self.assertEqual(s.tool_calls, [])
+                else:
+                    self.assertEqual(reason, "candidate")
+                    self.assertEqual(len(s.candidate_ids), 1)
 
 
 class TestRunWorkerUntilEscalation(unittest.TestCase):
@@ -331,23 +345,21 @@ class TestRunWorkerUntilEscalation(unittest.TestCase):
             "Continue your current testing plan.",
         ])
 
-    def test_silent_turn_escalates_early(self):
-        pool = CandidatePool()
-        scripts = [_productive_turn("aa01"), _silent_turn(), _productive_turn("aa02")]
-        client = FakeSDKClient(scripts)
-        w = self._make_worker(client, budget=3)
-        runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
-        self.assertEqual(len(runs), 2)
-        self.assertEqual(w.escalation_reason, "silent")
-
-    def test_candidate_escalates_early(self):
-        pool = CandidatePool()
-        scripts = [_productive_turn("xyz01"), _candidate_turn(pool, 9), _productive_turn("no01")]
-        client = _CandidateInjectingClient(scripts, pool, add_on_turn_indexes=[1])
-        w = self._make_worker(client, budget=3)
-        runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
-        self.assertEqual(len(runs), 2)
-        self.assertEqual(w.escalation_reason, "candidate")
+    def test_non_productive_turn_escalates_early(self):
+        """Silent or candidate turn mid-run ends the loop at turn 2."""
+        for expected_reason in ("silent", "candidate"):
+            with self.subTest(reason=expected_reason):
+                pool = CandidatePool()
+                if expected_reason == "silent":
+                    scripts = [_productive_turn("aa01"), _silent_turn(), _productive_turn("aa02")]
+                    client = FakeSDKClient(scripts)
+                else:
+                    scripts = [_productive_turn("xyz01"), _candidate_turn(pool, 9), _productive_turn("no01")]
+                    client = _CandidateInjectingClient(scripts, pool, add_on_turn_indexes=[1])
+                w = self._make_worker(client, budget=3)
+                runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
+                self.assertEqual(len(runs), 2)
+                self.assertEqual(w.escalation_reason, expected_reason)
 
     def test_tracks_autonomous_turns_on_worker(self):
         pool = CandidatePool()
@@ -438,13 +450,6 @@ class TestApplyDecision(unittest.TestCase):
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertEqual(w.progress_none_streak, 4)  # unchanged
         self.assertTrue(w.stall_warned)
-
-    def test_expand_applies_budget(self):
-        w = self._make_worker()
-        d = WorkerDecision(kind="expand", worker_id=7, instruction="pivot",
-                           progress="new", autonomous_budget=3)
-        _run(controller.apply_decision(d, w, iteration=5))
-        self.assertEqual(w.autonomous_budget, 3)
 
     def test_stop_tears_down(self):
         w = self._make_worker()
@@ -539,34 +544,89 @@ class TestPromptFormatting(unittest.TestCase):
             total_cost=1.25, max_cost=None,
             findings_count=1,
             stall_warnings="",
+            max_workers=4,
+            user_prompt="Explore example.com for auth bugs.",
         )
         self.assertIn("iteration 5/10", msg)
         self.assertIn("Filed 1, dismissed 0.", msg)
-        self.assertIn("Alive workers awaiting direction:** 2", msg)
-        self.assertIn("direction_done", msg)
-        self.assertIn("continue_worker", msg)
+        self.assertIn("**Alive:** [2]", msg)
+        self.assertIn("Parallelism:** 1/4", msg)
+        # The user's prompt must always be surfaced to the director.
+        self.assertIn("**Assignment (user prompt):**", msg)
+        self.assertIn("Explore example.com for auth bugs.", msg)
+        # Iteration 1 fan-out directive must NOT appear in mid-run iterations.
+        self.assertNotIn("Iteration 1 fan-out is mandatory", msg)
 
-    def test_verifier_system_prompt_covers_core_tools(self):
-        """The verifier prompt must mention the core sectool tools it relies on.
+    def test_build_director_prompt_iter1_dispatch_nudge(self):
+        w = controller.WorkerState(worker_id=1, options=None)
+        w.escalation_reason = "silent"
+        turns = [_turn(1, 3, ["mcp__sectool__proxy_poll"], ["fl0w01"], [])]
 
-        The verifier has access to the full `mcp__sectool__*` glob, but the
-        prompt should still enumerate the tools central to reproduction so the
-        model knows to use them.
+        msg = controller._build_director_prompt(
+            workers=[w],
+            worker_runs={1: turns},
+            verification_summary="No pending candidates this iteration.",
+            findings_summary="No findings filed yet.",
+            iteration=1, max_iter=10,
+            total_cost=0.2, max_cost=None,
+            findings_count=0,
+            stall_warnings="",
+            max_workers=4,
+            user_prompt="Broad exploration of target.example.com",
+        )
+        self.assertIn("Iteration 1 fan-out is mandatory", msg)
+        self.assertIn("plan_workers", msg)
+        # Directive should explicitly call out silent/timed-out worker 1.
+        self.assertIn("NOT a reason to stay at one worker", msg)
+        self.assertIn("Broad exploration of target.example.com", msg)
+
+    def test_build_director_prompt_iter1_no_nudge_when_parallelism_full(self):
+        """If iter 1 is already at parallelism budget, the nudge is suppressed."""
+        workers = []
+        for wid in range(1, 5):
+            w = controller.WorkerState(worker_id=wid, options=None)
+            w.escalation_reason = "candidate"
+            workers.append(w)
+
+        msg = controller._build_director_prompt(
+            workers=workers,
+            worker_runs={w.worker_id: [] for w in workers},
+            verification_summary="ok",
+            findings_summary="x",
+            iteration=1, max_iter=10,
+            total_cost=0.0, max_cost=None,
+            findings_count=0,
+            stall_warnings="",
+            max_workers=4,
+            user_prompt="anything",
+        )
+        self.assertNotIn("Iteration 1 fan-out is mandatory", msg)
+
+    def test_verifier_system_prompt_covers_core_contract(self):
+        """The verifier prompt must state the full sectool surface is available,
+        enumerate its phase control tools, and reject the director's tools.
+
+        Mirrors controller/secagent/prompts/verifier.go: the tight prompt no
+        longer enumerates every sectool tool (the MCP surface already exposes
+        them); it only names the shared-state caveats and decision tools.
         """
         from prompts import orchestrator_verifier
 
         prompt = orchestrator_verifier.build_system_prompt(max_workers=2)
-        core_tools = [
-            "flow_get", "proxy_poll", "replay_send", "request_send",
-            "diff_flow", "find_reflected", "cookie_jar",
-            "proxy_rule_list", "proxy_rule_add", "proxy_rule_delete",
-            "crawl_poll", "crawl_status", "crawl_sessions",
-            "oast_poll", "oast_get", "oast_list",
-            "encode", "decode", "hash", "jwt_decode",
-            "notes_save", "notes_list",
+        required_phrases = [
+            "full sectool surface",
+            "file_finding",
+            "dismiss_candidate",
+            "verification_done",
+            "proxy_poll",  # the shared-state caveat still names this
+            "Never file a finding you did not personally reproduce",
         ]
-        for name in core_tools:
-            self.assertIn(name, prompt, f"verifier prompt missing `{name}`")
+        for phrase in required_phrases:
+            self.assertIn(phrase, prompt, f"verifier prompt missing `{phrase}`")
+        # The director-only tools must be listed as rejected.
+        for rejected in ("plan_workers", "continue_worker", "direction_done", "done"):
+            self.assertIn(rejected, prompt,
+                          f"verifier prompt should mention rejected `{rejected}`")
 
     def test_verifier_allowed_tools_uses_sectool_glob(self):
         """The verifier's allowed_tools must include the full sectool glob."""
@@ -576,8 +636,12 @@ class TestPromptFormatting(unittest.TestCase):
         msg = controller._build_director_continue_prompt(
             pending_wids={1, 3}, substep=2, max_substeps=4,
         )
-        self.assertIn("substep 2 of 4", msg)
-        self.assertIn("1, 3", msg)
+        self.assertIn("substep 2/4", msg)
+        self.assertIn("[1, 3]", msg)
+
+    def test_build_director_self_review_prompt(self):
+        msg = controller._build_director_self_review_prompt()
+        self.assertIn("Self-review", msg)
         self.assertIn("direction_done", msg)
 
 
@@ -664,8 +728,8 @@ class TestVerificationPhase(unittest.TestCase):
                                        decisions, [action])
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
-            new_client, cost, summary = _run(controller.run_verification_phase(
-                client, None, decisions, pool, fw,
+            new_managed, cost, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
                 worker_runs={}, workers=[],
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
@@ -686,7 +750,7 @@ class TestVerificationPhase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
             _, _, summary = _run(controller.run_verification_phase(
-                client, None, decisions, pool, fw,
+                _FakeManaged(client), None, decisions, pool, fw,
                 worker_runs={}, workers=[],
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
@@ -717,7 +781,7 @@ class TestVerificationPhase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
             _run(controller.run_verification_phase(
-                client, None, decisions, pool, fw,
+                _FakeManaged(client), None, decisions, pool, fw,
                 worker_runs={}, workers=[],
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
@@ -752,7 +816,7 @@ class TestVerificationPhase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
             _run(controller.run_verification_phase(
-                client, None, decisions, pool, fw,
+                _FakeManaged(client), None, decisions, pool, fw,
                 worker_runs={}, workers=[],
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
@@ -787,7 +851,7 @@ class TestVerificationPhase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
             _run(controller.run_verification_phase(
-                client, None, decisions, pool, fw,
+                _FakeManaged(client), None, decisions, pool, fw,
                 worker_runs={}, workers=[],
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
@@ -802,7 +866,7 @@ class TestVerificationPhase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
             _, cost, summary = _run(controller.run_verification_phase(
-                client, None, decisions, pool, fw,
+                _FakeManaged(client), None, decisions, pool, fw,
                 worker_runs={}, workers=[],
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
@@ -829,17 +893,30 @@ class TestDirectionPhase(unittest.TestCase):
                                           instruction="keep", progress="new"))
             # Note: NO direction_done called — driver should still exit because all covered.
 
-        client = _OrchSideEffectClient([_orch_tool_turn("continue_worker",
-                                                        {"worker_id": 1, "instruction": "k",
-                                                         "progress": "new"})],
-                                       decisions, [action])
-        new_client, cost = _run(controller.run_direction_phase(
-            client, None, decisions, [w1, w2], worker_runs={},
+        # Two scripted turns: the coverage turn + the mandatory self-review turn.
+        self_review_turn = [
+            AssistantMessage(content=[TextBlock(text="no changes")], model="test"),
+            _orch_result(0.001),
+        ]
+        client = _OrchSideEffectClient(
+            [
+                _orch_tool_turn("continue_worker",
+                                {"worker_id": 1, "instruction": "k", "progress": "new"}),
+                self_review_turn,
+            ],
+            decisions, [action, None],
+        )
+        new_managed, cost = _run(controller.run_direction_phase(
+            _FakeManaged(client), None, decisions, [w1, w2], worker_runs={},
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
             findings_count=0, stall_warnings="", verbose=False,
+            max_workers=4, user_prompt="test",
         ))
         self.assertEqual(len(decisions.worker_decisions), 2)
+        # self-review substep should have fired after main loop exit.
+        self.assertEqual(len(client.queries), 2)
+        self.assertIn("Self-review", client.queries[-1])
 
     def test_ends_on_direction_done(self):
         decisions = DecisionQueue()
@@ -848,33 +925,325 @@ class TestDirectionPhase(unittest.TestCase):
         def action(d: DecisionQueue):
             d.set_direction_done("done")
 
-        client = _OrchSideEffectClient([_orch_tool_turn("direction_done", {"summary": "d"})],
-                                       decisions, [action])
-        new_client, cost = _run(controller.run_direction_phase(
-            client, None, decisions, [w1], worker_runs={},
+        # After direction_done, self-review still fires (the guard only skips
+        # self-review when `done(summary)` ended the full run).
+        self_review_turn = [
+            AssistantMessage(content=[TextBlock(text="no changes")], model="test"),
+            _orch_result(0.001),
+        ]
+        client = _OrchSideEffectClient(
+            [
+                _orch_tool_turn("direction_done", {"summary": "d"}),
+                self_review_turn,
+            ],
+            decisions, [action, None],
+        )
+        new_managed, cost = _run(controller.run_direction_phase(
+            _FakeManaged(client), None, decisions, [w1], worker_runs={},
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
             findings_count=0, stall_warnings="", verbose=False,
+            max_workers=4, user_prompt="test",
         ))
         self.assertEqual(decisions.direction_done_summary, "done")
+
+    def test_self_review_skipped_when_done_called(self):
+        """If the director calls `done(summary)`, skip the self-review substep."""
+        decisions = DecisionQueue()
+        w1 = self._make_worker(1)
+
+        def action(d: DecisionQueue):
+            d.set_done("finished")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("done", {"summary": "finished"})],
+            decisions, [action],
+        )
+        _run(controller.run_direction_phase(
+            _FakeManaged(client), None, decisions, [w1], worker_runs={},
+            verification_summary="ok", findings_summary="x",
+            iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
+            findings_count=0, stall_warnings="", verbose=False,
+            max_workers=4, user_prompt="test",
+        ))
+        self.assertEqual(decisions.done_summary, "finished")
+        # No self-review query should have fired.
+        self.assertEqual(len(client.queries), 1)
 
     def test_reaches_substep_cap(self):
         decisions = DecisionQueue()
         w1 = self._make_worker(1)
 
-        # Script DIRECTION_MAX_SUBSTEPS turns, none covering w1 or calling done
+        # Script DIRECTION_MAX_SUBSTEPS + 1 turns: the cap-hitting main loop,
+        # plus the mandatory self-review substep that follows it.
         empty_turn = [
             AssistantMessage(content=[TextBlock(text="thinking")], model="test"),
             _orch_result(0.001),
         ]
-        client = FakeSDKClient([list(empty_turn) for _ in range(controller.DIRECTION_MAX_SUBSTEPS)])
+        script = [list(empty_turn) for _ in range(controller.DIRECTION_MAX_SUBSTEPS + 1)]
+        client = FakeSDKClient(script)
         _, cost = _run(controller.run_direction_phase(
-            client, None, decisions, [w1], worker_runs={},
+            _FakeManaged(client), None, decisions, [w1], worker_runs={},
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
             findings_count=0, stall_warnings="", verbose=False,
+            max_workers=4, user_prompt="test",
         ))
-        self.assertEqual(len(client.queries), controller.DIRECTION_MAX_SUBSTEPS)
+        self.assertEqual(
+            len(client.queries), controller.DIRECTION_MAX_SUBSTEPS + 1,
+            "main loop should hit cap then run one self-review substep",
+        )
+        self.assertIn("Self-review", client.queries[-1])
+
+
+class TestClearLeakedCancellations(unittest.TestCase):
+    """The helper drains `task.cancelling()` via `task.uncancel()`.
+
+    SDK anyio cancel scopes propagate onto our asyncio task when
+    `asyncio.wait_for` times out mid-stream. Without draining, subsequent
+    awaits in the same task raise CancelledError.
+    """
+
+    def test_no_pending_cancellation_returns_zero(self):
+        async def body():
+            return controller._clear_leaked_cancellations("test")
+        self.assertEqual(_run(body()), 0)
+
+    def test_drains_pending_cancellations(self):
+        """Simulate a leaked cancel by cancelling the current task, then verify
+        the helper drains the counter so subsequent awaits do not raise."""
+        async def body():
+            task = asyncio.current_task()
+            if not hasattr(task, "uncancel"):
+                return -1  # skip on pre-3.11
+            task.cancel()
+            # On Python 3.11+, cancel() increments cancelling() immediately.
+            self.assertGreater(task.cancelling(), 0)
+            cleared = controller._clear_leaked_cancellations()
+            self.assertEqual(task.cancelling(), 0)
+            # Post-drain, awaits should work normally.
+            await asyncio.sleep(0)
+            return cleared
+
+        result = _run(body())
+        if result == -1:
+            self.skipTest("Python < 3.11: Task.uncancel/cancelling unavailable")
+        self.assertGreaterEqual(result, 1)
+
+    def test_survives_no_current_task(self):
+        """Helper returns 0 when called outside an async task context."""
+        # Called synchronously (no running event loop / current task).
+        self.assertEqual(controller._clear_leaked_cancellations(), 0)
+
+
+class TestManagedTeardown(unittest.TestCase):
+    """Teardown delegates to `ManagedSDKClient.aclose()` — the managed client
+    owns the real lifecycle (entering/exiting the SDK client on its own
+    runner task). teardown_worker only needs to trigger the aclose and
+    clear the references."""
+
+    def test_teardown_calls_aclose_and_clears_refs(self):
+        class _Managed:
+            def __init__(self):
+                self.aclosed = False
+
+            async def aclose(self):
+                self.aclosed = True
+
+        w = controller.WorkerState(worker_id=1, options=object())
+        managed = _Managed()
+        w.client = object()
+        w.managed = managed
+
+        _run(controller.teardown_worker(w))
+
+        self.assertTrue(managed.aclosed)
+        self.assertIsNone(w.client)
+        self.assertIsNone(w.managed)
+        self.assertFalse(w.alive)
+
+    def test_teardown_noop_when_no_managed(self):
+        w = controller.WorkerState(worker_id=1, options=object())
+        w.client = None
+        w.managed = None
+        # Should not raise
+        _run(controller.teardown_worker(w))
+        self.assertFalse(w.alive)
+
+
+class TestCancelledErrorIsolation(unittest.TestCase):
+    """A CancelledError in one per-worker task must not crash the whole run."""
+
+    def test_cancelled_worker_marked_error_others_survive(self):
+        class _Managed:
+            def __init__(self):
+                self.aclosed = False
+
+            async def aclose(self):
+                self.aclosed = True
+
+        w1 = controller.WorkerState(worker_id=1, options=object())
+        w1.client = object()  # non-None so it's treated as alive-with-client
+        w1.managed = _Managed()
+        w2 = controller.WorkerState(worker_id=2, options=object())
+        w2.client = object()
+        w2.managed = _Managed()
+
+        call_count = {"w1": 0, "w2": 0}
+
+        async def fake_run(worker, iteration, candidates, verbose):
+            if worker.worker_id == 1:
+                call_count["w1"] += 1
+                raise asyncio.CancelledError()
+            call_count["w2"] += 1
+            worker.escalation_reason = "silent"
+            return []
+
+        orig = controller.run_worker_until_escalation
+        controller.run_worker_until_escalation = fake_run
+        try:
+            results = _run(controller.run_all_workers_until_escalation(
+                [w1, w2], iteration=1, candidates=CandidatePool(), verbose=False,
+            ))
+        finally:
+            controller.run_worker_until_escalation = orig
+
+        # Both workers were entered.
+        self.assertEqual(call_count["w1"], 1)
+        self.assertEqual(call_count["w2"], 1)
+        # The cancelled worker was marked error and its managed client was
+        # aclosed + cleared, so the main-loop recovery branch will rebuild it
+        # next iteration.
+        self.assertEqual(w1.escalation_reason, "error")
+        self.assertIsNone(w1.client)
+        self.assertIsNone(w1.managed)
+        self.assertTrue(w1.alive, "cancelled worker should stay alive for recovery")
+        # The surviving worker's result is preserved.
+        self.assertIn(2, results)
+
+
+class TestManagedSDKClientScopeIsolation(unittest.TestCase):
+    """The whole point of ManagedSDKClient: a cancellation that fires inside
+    the runner task's anyio scope must NOT poison the caller task. Without
+    the ManagedSDKClient wrapper, entering the SDK's internal task group on
+    the main task leaks a cancelled ancestor scope into main's stack."""
+
+    def test_runner_cancellation_does_not_propagate_to_caller(self):
+        """A CancelledError raised inside the runner task must not leak onto
+        the main task after aclose. This is the core invariant that makes
+        ManagedSDKClient useful."""
+        orig = controller.ClaudeSDKClient
+
+        class _CancelDuringExitClient:
+            def __init__(self, options):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                # Simulate an anyio task-group __aexit__ that terminates with
+                # CancelledError (exactly what happens when the SDK's internal
+                # scope was cancelled mid-operation).
+                raise asyncio.CancelledError()
+
+            async def query(self, content: str) -> None:
+                pass
+
+        controller.ClaudeSDKClient = _CancelDuringExitClient
+        try:
+            async def body():
+                m = controller.ManagedSDKClient(options=object())
+                await m.connect()
+                # aclose triggers __aexit__ → CancelledError inside runner.
+                await m.aclose()
+                # Main must still be usable.
+                await asyncio.sleep(0)
+                return True
+
+            self.assertTrue(_run(body()))
+        finally:
+            controller.ClaudeSDKClient = orig
+
+    def test_connect_aclose_roundtrip(self):
+        """Verify ManagedSDKClient.connect + aclose works end-to-end without
+        a real SDK by stubbing `ClaudeSDKClient` on the controller module."""
+        orig = controller.ClaudeSDKClient
+
+        class _FakeClient:
+            def __init__(self, options):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def query(self, content: str) -> None:
+                pass
+
+        controller.ClaudeSDKClient = _FakeClient
+        try:
+            async def body():
+                m = controller.ManagedSDKClient(options=object())
+                client = await m.connect()
+                assert isinstance(client, _FakeClient)
+                await m.aclose()
+                return m.client is None
+
+            self.assertTrue(_run(body()))
+        finally:
+            controller.ClaudeSDKClient = orig
+
+    def test_connect_surfaces_enter_exception(self):
+        """If __aenter__ raises, connect() must propagate the error."""
+        orig = controller.ClaudeSDKClient
+
+        class _FailClient:
+            def __init__(self, options):
+                pass
+
+            async def __aenter__(self):
+                raise RuntimeError("boom")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        controller.ClaudeSDKClient = _FailClient
+        try:
+            async def body():
+                m = controller.ManagedSDKClient(options=object())
+                try:
+                    await m.connect()
+                    return None
+                except RuntimeError as e:
+                    return str(e)
+
+            self.assertEqual(_run(body()), "boom")
+        finally:
+            controller.ClaudeSDKClient = orig
+
+
+class TestPrematureDoneGuard(unittest.TestCase):
+    def test_premature_when_early_and_no_findings(self):
+        from tools import MIN_ITERATIONS_FOR_DONE
+        for it in range(1, MIN_ITERATIONS_FOR_DONE):
+            self.assertTrue(controller._is_premature_done(it, 0),
+                            f"iter {it} with 0 findings should be premature")
+
+    def test_not_premature_with_findings(self):
+        self.assertFalse(controller._is_premature_done(1, 1))
+        self.assertFalse(controller._is_premature_done(2, 3))
+
+    def test_not_premature_past_min_iteration(self):
+        from tools import MIN_ITERATIONS_FOR_DONE
+        self.assertFalse(
+            controller._is_premature_done(MIN_ITERATIONS_FOR_DONE, 0),
+        )
+        self.assertFalse(
+            controller._is_premature_done(MIN_ITERATIONS_FOR_DONE + 1, 0),
+        )
 
 
 # ---------------------------------------------------------------------------

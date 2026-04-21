@@ -18,8 +18,16 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 SEVERITIES = ("critical", "high", "medium", "low", "informational")
 PROGRESS_TAGS = ("none", "incremental", "new")
-DEFAULT_AUTONOMOUS_BUDGET = 5
+DEFAULT_AUTONOMOUS_BUDGET = 8
 MAX_AUTONOMOUS_BUDGET = 20
+
+# Bounded tool-dispatch rounds inside the director's mandatory self-review substep.
+DIRECTION_SELF_REVIEW_MAX_ROUNDS = 2
+
+# Earliest iteration at which a director `done` with zero findings is accepted.
+# Mirrors secagent's guardrail: models routinely confuse `done` with
+# `direction_done` on early iterations.
+MIN_ITERATIONS_FOR_DONE = 5
 
 # Per-task active worker id. Each worker's concurrent drain runs in its own
 # asyncio task; ContextVar isolates attribution across concurrent runs.
@@ -262,8 +270,21 @@ class DecisionQueue:
                 self.direction_done_summary = None
 
     def set_plan(self, plan: list[PlanEntry]) -> None:
+        """Merge plan entries into the current plan, accumulating across calls.
+
+        Multiple `plan_workers` calls within one direction phase are additive:
+        entries with new `worker_id` values are appended, entries with an
+        existing `worker_id` overwrite that slot (last-wins per-id). This
+        matches what models expect when they make several tool calls to
+        build up a plan incrementally.
+        """
         with self._lock:
-            self.plan = list(plan)
+            if self.plan is None:
+                self.plan = []
+            by_id: dict[int, PlanEntry] = {p.worker_id: p for p in self.plan}
+            for entry in plan:
+                by_id[entry.worker_id] = entry
+            self.plan = sorted(by_id.values(), key=lambda p: p.worker_id)
 
     def add_decision(self, d: WorkerDecision) -> None:
         with self._lock:
@@ -481,7 +502,10 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
             "{worker_id, assignment} entries; worker IDs start at 1. Callable any "
             "turn. The controller diffs against the current worker set: new IDs "
             "are spawned, existing IDs are retargeted, and omitted alive workers "
-            "are left running (use stop_worker to retire)."
+            "are left running (use stop_worker to retire). Multiple calls within "
+            "one direction phase accumulate: entries with new worker_ids are "
+            "added; entries with an existing worker_id overwrite (last-wins). "
+            "Prefer ONE call with all entries for clarity."
         ),
         {
             "type": "object",
@@ -528,8 +552,19 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
                 "is_error": True,
             }
         decisions.set_plan(entries)
+        # Post-merge count reflects accumulation across multiple calls in
+        # this phase (set_plan merges by worker_id).
+        total = len(decisions.plan) if decisions.plan is not None else 0
+        ids_this_call = ", ".join(str(e.worker_id) for e in entries)
         return {
-            "content": [{"type": "text", "text": f"Plan recorded: {len(entries)} worker assignment(s)."}],
+            "content": [{
+                "type": "text",
+                "text": (
+                    f"Plan recorded: this call added/updated worker_ids "
+                    f"[{ids_this_call}]; current plan covers {total} worker(s) "
+                    f"total this phase."
+                ),
+            }],
         }
 
     def _record_worker_decision(kind: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -661,8 +696,9 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         (
             "File a verified security finding. Call ONLY after independently "
             "reproducing the issue with sectool tools (flow_get, replay_send, "
-            "request_send, diff_flow, etc). The verification_notes field "
-            "should cite the flow IDs you used to confirm the behavior."
+            "request_send, diff_flow, etc). All fields must be session-agnostic: "
+            "describe endpoints, payloads, headers, and observed behavior — "
+            "never cite flow IDs, OAST session IDs, or other ephemeral test state."
         ),
         {
             "type": "object",
@@ -671,10 +707,19 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
                 "severity": {"type": "string", "enum": list(SEVERITIES)},
                 "endpoint": {"type": "string"},
                 "description": {"type": "string"},
-                "reproduction_steps": {"type": "string"},
-                "evidence": {"type": "string"},
+                "reproduction_steps": {
+                    "type": "string",
+                    "description": "Step-by-step reproduction using endpoint, method, headers, and payload — no flow IDs or session references.",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "Observable proof: response content, status codes, headers, behavior — no flow IDs or session references.",
+                },
                 "impact": {"type": "string"},
-                "verification_notes": {"type": "string"},
+                "verification_notes": {
+                    "type": "string",
+                    "description": "How you reproduced the issue: tools used, mutations applied, what you observed — no flow IDs or session IDs.",
+                },
                 "supersedes_candidate_ids": {
                     "type": "array",
                     "items": {"type": "string"},
