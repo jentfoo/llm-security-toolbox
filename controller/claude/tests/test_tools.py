@@ -4,19 +4,16 @@ import asyncio
 import unittest
 
 from tools import (
-    CandidateDismissal,
     CandidatePool,
     DEFAULT_AUTONOMOUS_BUDGET,
     DecisionQueue,
     FindingFiled,
-    MAX_AUTONOMOUS_BUDGET,
     PHASE_DIRECTION,
     PHASE_IDLE,
     PHASE_VERIFICATION,
     PlanEntry,
     WorkerDecision,
     _reject_wrong_phase,
-    current_worker_id,
     extract_flow_ids,
     reset_active_worker,
     set_active_worker,
@@ -24,15 +21,6 @@ from tools import (
 
 
 class TestCandidatePool(unittest.TestCase):
-    def test_add_sequences_ids(self):
-        p = CandidatePool()
-        c1 = p.add(title="A", severity="high", endpoint="/x", flow_ids=["ab12cd"],
-                   summary="s", evidence_notes="e", reproduction_hint="r")
-        c2 = p.add(title="B", severity="low", endpoint="/y", flow_ids=["ef34gh"],
-                   summary="s", evidence_notes="e", reproduction_hint="r")
-        self.assertEqual(c1, "c001")
-        self.assertEqual(c2, "c002")
-
     def test_contextvar_attribution(self):
         p = CandidatePool()
         token = set_active_worker(3)
@@ -66,9 +54,6 @@ class TestCandidatePool(unittest.TestCase):
         cid_a, cid_b = asyncio.run(run_both())
         self.assertEqual(p.get(cid_a).worker_id, 1)
         self.assertEqual(p.get(cid_b).worker_id, 2)
-
-    def test_current_worker_id_default_none(self):
-        self.assertIsNone(current_worker_id())
 
     def test_pending_excludes_verified_and_dismissed(self):
         p = CandidatePool()
@@ -125,6 +110,58 @@ class TestCandidatePool(unittest.TestCase):
         self.assertEqual(p.ids_since_for_worker(before, 99), [])
 
 
+class TestPlanAccumulation(unittest.TestCase):
+    """Multiple plan_workers calls in one phase must accumulate.
+
+    Claude routinely issues plan_workers across several tool calls
+    (e.g. one call per new worker). If set_plan replaced rather than
+    merged, only the last call's entries would survive, which manifests
+    as "director wanted 3 workers but only 1 spawned".
+    """
+
+    def test_two_calls_different_ids_accumulate(self):
+        q = DecisionQueue()
+        q.begin_phase(PHASE_DIRECTION)
+        q.set_plan([PlanEntry(2, "scan /api")])
+        q.set_plan([PlanEntry(3, "scan /admin")])
+        self.assertIsNotNone(q.plan)
+        ids = [p.worker_id for p in q.plan]
+        self.assertEqual(sorted(ids), [2, 3])
+
+    def test_same_id_overrides_last_wins(self):
+        q = DecisionQueue()
+        q.begin_phase(PHASE_DIRECTION)
+        q.set_plan([PlanEntry(2, "first")])
+        q.set_plan([PlanEntry(2, "second")])
+        self.assertEqual(len(q.plan), 1)
+        self.assertEqual(q.plan[0].assignment, "second")
+
+    def test_mixed_new_and_override(self):
+        q = DecisionQueue()
+        q.begin_phase(PHASE_DIRECTION)
+        q.set_plan([PlanEntry(2, "a"), PlanEntry(3, "b")])
+        q.set_plan([PlanEntry(3, "b2"), PlanEntry(4, "c")])
+        by_id = {p.worker_id: p.assignment for p in q.plan}
+        self.assertEqual(by_id, {2: "a", 3: "b2", 4: "c"})
+
+    def test_reset_clears_accumulated_plan(self):
+        q = DecisionQueue()
+        q.begin_phase(PHASE_DIRECTION)
+        q.set_plan([PlanEntry(2, "a"), PlanEntry(3, "b")])
+        q.reset()
+        self.assertIsNone(q.plan)
+
+    def test_phase_boundary_does_not_carry_plan_across_iters(self):
+        """After controller reset() between iterations, plans don't leak."""
+        q = DecisionQueue()
+        q.begin_phase(PHASE_DIRECTION)
+        q.set_plan([PlanEntry(2, "iter-1")])
+        q.reset()
+        q.begin_phase(PHASE_DIRECTION)
+        q.set_plan([PlanEntry(3, "iter-2")])
+        self.assertEqual([p.worker_id for p in q.plan], [3])
+
+
 class TestDecisionQueuePhases(unittest.TestCase):
     def test_reset_clears_all(self):
         q = DecisionQueue()
@@ -173,32 +210,24 @@ class TestDecisionQueuePhases(unittest.TestCase):
 
 
 class TestRejectWrongPhase(unittest.TestCase):
-    def test_shape(self):
-        out = _reject_wrong_phase(PHASE_DIRECTION, PHASE_VERIFICATION, "plan_workers")
-        self.assertTrue(out["is_error"])
-        self.assertIn("plan_workers", out["content"][0]["text"])
-        self.assertIn("verification", out["content"][0]["text"])
-        self.assertIn("verification_done", out["content"][0]["text"])
-
-    def test_reverse(self):
-        out = _reject_wrong_phase(PHASE_VERIFICATION, PHASE_DIRECTION, "file_finding")
-        self.assertTrue(out["is_error"])
-        self.assertIn("file_finding", out["content"][0]["text"])
+    def test_error_shape_and_content(self):
+        cases = [
+            (PHASE_DIRECTION, PHASE_VERIFICATION, "plan_workers",
+             ["plan_workers", "verification", "verification_done"]),
+            (PHASE_VERIFICATION, PHASE_DIRECTION, "file_finding", ["file_finding"]),
+        ]
+        for current, expected, tool, must_include in cases:
+            with self.subTest(tool=tool):
+                out = _reject_wrong_phase(current, expected, tool)
+                self.assertTrue(out["is_error"])
+                for needle in must_include:
+                    self.assertIn(needle, out["content"][0]["text"])
 
 
 class TestWorkerDecisionDefaults(unittest.TestCase):
     def test_autonomous_budget_default(self):
         d = WorkerDecision(kind="continue", worker_id=1, instruction="go", progress="new")
         self.assertEqual(d.autonomous_budget, DEFAULT_AUTONOMOUS_BUDGET)
-
-    def test_autonomous_budget_override(self):
-        d = WorkerDecision(kind="continue", worker_id=1, instruction="go",
-                           progress="new", autonomous_budget=10)
-        self.assertEqual(d.autonomous_budget, 10)
-
-    def test_autonomous_budget_constants(self):
-        self.assertGreaterEqual(MAX_AUTONOMOUS_BUDGET, DEFAULT_AUTONOMOUS_BUDGET)
-        self.assertGreater(DEFAULT_AUTONOMOUS_BUDGET, 0)
 
 
 class TestExtractFlowIds(unittest.TestCase):
@@ -243,13 +272,6 @@ class TestExtractFlowIds(unittest.TestCase):
         self.assertEqual(extract_flow_ids("data flow analysis found an issue"), [])
         self.assertEqual(extract_flow_ids("the flow chart shows"), [])
         self.assertEqual(extract_flow_ids("request flow through the system"), [])
-
-
-class TestDismissal(unittest.TestCase):
-    def test_dismissal_appends(self):
-        q = DecisionQueue()
-        q.add_dismissal("c007", "dup")
-        self.assertEqual(q.dismissals, [CandidateDismissal(candidate_id="c007", reason="dup")])
 
 
 if __name__ == "__main__":

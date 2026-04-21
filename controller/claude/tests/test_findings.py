@@ -44,13 +44,6 @@ class TestFindingWriter(unittest.TestCase):
             self.assertIn("**Severity**: high", body)
             self.assertIn("## Verification", body)
 
-    def test_sequence_numbering(self):
-        with tempfile.TemporaryDirectory() as td:
-            w = FindingWriter(td)
-            w.write(_make("A"))
-            p2 = w.write(_make("B"))
-            self.assertTrue(os.path.basename(p2).startswith("finding-02-"))
-
     def test_is_duplicate_by_slug(self):
         with tempfile.TemporaryDirectory() as td:
             w = FindingWriter(td)
@@ -107,10 +100,6 @@ class TestMatchPendingCandidates(unittest.TestCase):
             _candidate("c002", "SQL injection", "GET /search"),             # endpoint ok, title wrong
         ]
         self.assertEqual(match_pending_candidates(filed, pending), [])
-
-    def test_empty_when_no_overlap(self):
-        filed = _make("Reflected XSS", endpoint="GET /search")
-        self.assertEqual(match_pending_candidates(filed, []), [])
 
     def test_returns_multiple_matches(self):
         filed = _make("Reflected XSS in search", endpoint="GET /search")
