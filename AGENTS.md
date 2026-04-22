@@ -137,20 +137,65 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/cliutil/suggest.go` - "Did you mean" levenshtein suggestions for unknown commands
 - `sectool/util/strutil.go` - TruncateString and other shared string utilities
 
-### Controller (`controller/claude/`)
+### Controllers (`controller/`)
 
-Python-based autonomous security exploration controller using the Claude Agent SDK. Runs a worker/orchestrator multi-agent loop against a running sectool MCP server; workers test, orchestrator independently verifies candidates and files findings.
+Two sibling autonomous security exploration controllers drive a sectool MCP server with a worker/verifier/director multi-agent loop. Both share the same agent contract (workers run sectool tools and call `report_finding_candidate`; the verifier independently reproduces candidates and calls `file_finding` or `dismiss_candidate`; the director decides what each worker does next). They differ only in language and LLM backend. See `controller/README.md` for the comparison and recommendation (`secagent` is the default; `claude` is for users who want to bill the work to a Claude Code subscription).
 
-- `controller/claude/controller.py` - Main loop: build, MCP server lifecycle, worker/orchestrator clients, turn collection, decision application, stall detection, recovery
-- `controller/claude/config.py` - `Config` dataclass, CLI arg parsing, model alias map (sonnet/opus/haiku → model IDs)
-- `controller/claude/tools.py` - SDK MCP servers (`worker_tools` with `report_finding_candidate`; `orch_tools` with `plan_workers`/`continue_worker`/`expand_worker`/`stop_worker`/`file_finding`/`dismiss_candidate`/`done`). Hosts `CandidatePool`, `DecisionQueue`, `WorkerTurnSummary`, `ToolCallRecord`, `FindingCandidate`, `FindingFiled`, `PlanEntry`, `WorkerDecision`, and `extract_flow_ids`
+Outer loop (both controllers): **autonomous worker turns → verification → direction**, repeated per iteration. Phases are tool-gated — calling a tool outside its phase returns an `is_error=true` response.
+
+#### secagent — Go controller (`controller/secagent/`)
+
+Go module (`github.com/go-appsec/secagent`) targeting any OpenAI-compatible chat-completions endpoint. Built to `bin/secagent` by `make build` / `make build-secagent`. Entry point in `cmd/secagent/main.go` resolves the repo root, parses `config.Config`, and hands off to `orchestrator.Run`.
+
+- `controller/secagent/cmd/secagent/main.go` - CLI entry; repo-root detection, signal handling, invokes `orchestrator.Run`
+- `controller/secagent/config/config.go` - `Config` struct and `Parse` (connection/pool, context/compaction, sectool, loop, stall, logging flags); caps `MaxWorkers` at 5
+- `controller/secagent/agent/agent.go` - `Agent` interface, `ToolDef`/`ToolCall`/`TurnSummary`/`EscalationReason` types, role constants
+- `controller/secagent/agent/openai_agent.go` - `OpenAIAgent`: OpenAI chat-completions driver, tool-call dispatch loop, `Drain` chain, truncation notice
+- `controller/secagent/agent/openai_client.go` - `ChatClient` HTTP implementation against the OpenAI-compatible endpoint
+- `controller/secagent/agent/pool.go` - `ClientPool`: bounded-concurrency gate; one pool per base URL, shared across workers/verifier/director
+- `controller/secagent/agent/history.go` - Message history storage (system + turn messages + tool results)
+- `controller/secagent/agent/compact.go` - Context compaction: high/low watermark passes, `KeepTurns` trailing guard, stubbing of old tool results
+- `controller/secagent/agent/turn.go` - `TurnSummary` construction from tool calls and flow IDs
+- `controller/secagent/agent/status.go` - Periodic one-line status summary prompt (`ProgressLogInterval`-gated)
+- `controller/secagent/agent/think.go` - Reasoning/thinking message handling for models that emit it
+- `controller/secagent/agent/repair.go` - Malformed-tool-call repair (reprompts with schema hints)
+- `controller/secagent/agent/fake_agent.go` - Scripted `FakeAgent` used throughout the orchestrator test suite
+- `controller/secagent/mcp/client.go` - `mark3labs/mcp-go` streamable-HTTP wrapper; converts sectool MCP tools to `agent.ToolDef`
+- `controller/secagent/mcp/dispatch.go` - `TruncateResult`: per-tool-result byte cap with the instructive truncation notice
+- `controller/secagent/orchestrator/controller.go` - `Run` entry + `AgentFactory` (`OpenAIFactory` builds real agents; tests inject fakes); top-level iteration loop
+- `controller/secagent/orchestrator/autonomous.go` - Phase 1: runs every alive worker concurrently up to its `autonomous_budget`; emits `continuePrompt` between turns; escalates on candidate/silent/error
+- `controller/secagent/orchestrator/verify.go` - Phase 2: `RunVerificationPhase` up to `VerificationMaxSubsteps` (6); applies `file_finding`/`dismiss_candidate` between substeps; ends on `verification_done` or empty pending list
+- `controller/secagent/orchestrator/direct.go` - Phase 3: `RunDirectionPhase` up to `DirectionMaxSubsteps` (4) + mandatory self-review substep (`DirectionSelfReviewMaxRounds=2`); applies `plan_workers`/`continue_worker`/`expand_worker`/`stop_worker`; ends on `direction_done` or `done`
+- `controller/secagent/orchestrator/tools.go` - `WorkerToolDefs` (`report_finding_candidate`) and `OrchestratorToolDefs`: phase-gated verifier/director tool set with severity + progress-tag validation
+- `controller/secagent/orchestrator/candidates.go` - `FindingCandidate`, `CandidatePool` (thread-safe, pending/verified/dismissed)
+- `controller/secagent/orchestrator/decisions.go` - `DecisionQueue` (per-phase accumulation, `BeginPhase`, verification/direction done summaries), `WorkerDecision`, `PlanEntry`, `FindingFiled`, `CandidateDismissal`
+- `controller/secagent/orchestrator/findings.go` - `FindingWriter`: `Slugify`, `CanonicalEndpoint`, dedup by title-slug + canonical endpoint, `finding-NN-slug.md` numbering
+- `controller/secagent/orchestrator/worker.go` - `WorkerState` lifecycle, `AutonomousTurns`, `EscalationReason`, `ProgressNoneStreak`
+- `controller/secagent/orchestrator/stall.go` - `UpdateStallStreaks`: increments on silent escalations, resets on candidate or new-flow turns; `--stall-warn-after` / `--stall-stop-after` thresholds
+- `controller/secagent/orchestrator/narrator.go` - Human-readable narration of each iteration's phases for the log
+- `controller/secagent/orchestrator/flowids.go` - Flow-ID extraction regex shared with worker turn summaries
+- `controller/secagent/orchestrator/prompts.go` - Per-iteration prompt assembly (worker continue, verifier substep, director substep)
+- `controller/secagent/orchestrator/logging.go` - `Logger`: structured JSON events to `--log-file`
+- `controller/secagent/orchestrator/server.go` - `StartSectool`: runs `make build-sectool` (unless `--skip-build`), launches `bin/sectool mcp`, waits for HTTP readiness; terminates on teardown (unless `--external`)
+- `controller/secagent/orchestrator/constants.go` - Phase names, substep caps, stall defaults
+- `controller/secagent/prompts/worker.go`, `prompts/verifier.go`, `prompts/director.go` - Role system prompts (phase-aware tool contracts)
+- `controller/secagent/tests/` and `*_test.go` alongside each file - `FakeAgent`-driven unit/integration tests; no network or real LLM
+
+#### claude — Python controller (`controller/claude/`)
+
+Python 3.10+ module using the Claude Agent SDK; authenticates via the `claude` CLI's OAuth session (no API key). Same worker/verifier/director architecture as secagent, implemented in-process with SDK MCP servers.
+
+- `controller/claude/controller.py` - Main loop: build, MCP server lifecycle, worker/verifier/director SDK clients, per-phase drain, decision application, stall detection, recovery, `MIN_ITERATIONS_FOR_DONE` guard
+- `controller/claude/config.py` - `Config` dataclass, CLI arg parsing, model alias map (`sonnet`/`opus`/`haiku` → model IDs)
+- `controller/claude/tools.py` - SDK MCP servers. `worker_tools` exposes `report_finding_candidate`. `orch_tools` is phase-gated by `DecisionQueue.phase`: verification-phase tools are `file_finding`/`dismiss_candidate`/`verification_done`; direction-phase tools are `plan_workers`/`continue_worker`/`expand_worker`/`stop_worker`/`direction_done`/`done`; wrong-phase calls return an `is_error=true` response with transition guidance. Hosts `CandidatePool`, `DecisionQueue` (tracks `phase`, `verification_done_summary`, `direction_done_summary`), `WorkerTurnSummary`, `ToolCallRecord`, `FindingCandidate`, `FindingFiled`, `CandidateDismissal`, `PlanEntry`, `WorkerDecision`, and `extract_flow_ids`
 - `controller/claude/findings.py` - `FindingWriter`: slug-based filename generation, dedup by title/endpoint similarity, markdown template with Verification section
-- `controller/claude/prompts/worker.py` - Worker agent system prompt (sectool tool surface + candidate reporting contract)
-- `controller/claude/prompts/orchestrator.py` - Orchestrator agent system prompt (verification duty + decision tool contract)
+- `controller/claude/prompts/worker.py` - Worker system prompt (sectool tool surface + candidate reporting contract)
+- `controller/claude/prompts/orchestrator_verifier.py` - Verifier system prompt (reproduce candidates with full sectool surface; file or dismiss; non-destructive + cleanup)
+- `controller/claude/prompts/orchestrator_director.py` - Director system prompt (plan/continue/expand/stop workers; set per-iteration `autonomous_budget`)
 - `controller/claude/tests/` - pytest suite: `test_controller_loop.py`, `test_tools.py`, `test_findings.py`, `conftest.py` (scripted fake `ClaudeSDKClient`; no real SDK or network)
-- `controller/claude/requirements.txt`, `pyproject.toml` - Python deps (Python 3.10+, `claude-agent-sdk`)
+- `controller/claude/requirements.txt`, `pyproject.toml` - Python deps (`claude-agent-sdk`)
 
-The verifier gets the full sectool tool surface via the `mcp__sectool__*` glob (`controller.py:ORCH_SECTOOL_TOOLS_GLOB`) — same access as workers. Its system prompt directs it to prefer non-destructive reproduction and clean up any rules/responders/sessions it introduces. Stall thresholds: `STALL_WARN_AFTER=3`, `STALL_STOP_AFTER=4` consecutive `progress=none` turns. Max workers capped at 5 by `config.parse_args`. See `controller/claude/README.md` for usage.
+The verifier gets the full sectool tool surface via the `mcp__sectool__*` glob (`controller.py:ORCH_SECTOOL_TOOLS_GLOB`) — same access as workers. Its system prompt directs it to prefer non-destructive reproduction and clean up any rules/responders/sessions it introduces. Stall thresholds: `STALL_WARN_AFTER=3`, `STALL_STOP_AFTER=4` consecutive silent escalations. Verification cap `VERIFICATION_MAX_SUBSTEPS=6`; direction cap `DIRECTION_MAX_SUBSTEPS=4` followed by one mandatory self-review substep. Max workers capped at 5 by `config.parse_args`. `done(summary)` before `MIN_ITERATIONS_FOR_DONE` (5) with zero findings is rejected as premature. See `controller/claude/README.md` for usage and `controller/README.md` for the secagent-vs-claude comparison.
 
 ### Config
 
