@@ -12,6 +12,7 @@ import (
 
 var nonSlugChar = regexp.MustCompile(`[^a-z0-9\s-]+`)
 var slugDashes = regexp.MustCompile(`[-\s]+`)
+var findingIndexRe = regexp.MustCompile(`^finding-(\d+)-.*\.md$`)
 
 var httpMethods = map[string]bool{
 	"GET": true, "POST": true, "PUT": true, "PATCH": true,
@@ -151,8 +152,35 @@ type findingIndexEntry struct {
 }
 
 // NewFindingWriter constructs a FindingWriter for the given output directory.
+// Seeds Count from the highest existing finding-NN-*.md file so new findings
+// get unique indexes across process restarts.
 func NewFindingWriter(findingsDir string) *FindingWriter {
-	return &FindingWriter{findingsDir: findingsDir}
+	return &FindingWriter{findingsDir: findingsDir, Count: maxExistingFindingIndex(findingsDir)}
+}
+
+func maxExistingFindingIndex(findingsDir string) int {
+	entries, err := os.ReadDir(findingsDir)
+	if err != nil {
+		return 0
+	}
+	max := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		m := findingIndexRe.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		if n > max {
+			max = n
+		}
+	}
+	return max
 }
 
 // IsDuplicate returns true when filed matches a previously written finding.
