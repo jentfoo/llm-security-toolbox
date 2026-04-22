@@ -696,8 +696,9 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         (
             "File a verified security finding. Call ONLY after independently "
             "reproducing the issue with sectool tools (flow_get, replay_send, "
-            "request_send, diff_flow, etc). The verification_notes field "
-            "should cite the flow IDs you used to confirm the behavior."
+            "request_send, diff_flow, etc). All fields must be session-agnostic: "
+            "describe endpoints, payloads, headers, and observed behavior — "
+            "never cite flow IDs, OAST session IDs, or other ephemeral test state."
         ),
         {
             "type": "object",
@@ -706,10 +707,19 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
                 "severity": {"type": "string", "enum": list(SEVERITIES)},
                 "endpoint": {"type": "string"},
                 "description": {"type": "string"},
-                "reproduction_steps": {"type": "string"},
-                "evidence": {"type": "string"},
+                "reproduction_steps": {
+                    "type": "string",
+                    "description": "Step-by-step reproduction using endpoint, method, headers, and payload — no flow IDs or session references.",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "Observable proof: response content, status codes, headers, behavior — no flow IDs or session references.",
+                },
                 "impact": {"type": "string"},
-                "verification_notes": {"type": "string"},
+                "verification_notes": {
+                    "type": "string",
+                    "description": "How you reproduced the issue: tools used, mutations applied, what you observed — no flow IDs or session IDs.",
+                },
                 "supersedes_candidate_ids": {
                     "type": "array",
                     "items": {"type": "string"},
