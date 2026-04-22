@@ -118,18 +118,28 @@ func VerifierToolDefs(decisions *DecisionQueue) []agent.ToolDef {
 		{
 			Name: "file_finding",
 			Description: `File a verified security finding. Call ONLY after independently reproducing
-the issue with sectool tools. The verification_notes field should cite the flow IDs you used.`,
+the issue with sectool tools. All fields must be session-agnostic: describe endpoints, payloads,
+headers, and observed behavior — never cite flow IDs, OAST session IDs, or other ephemeral test state.`,
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"title":              map[string]any{"type": "string"},
-					"severity":           map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "informational"}},
-					"endpoint":           map[string]any{"type": "string"},
-					"description":        map[string]any{"type": "string"},
-					"reproduction_steps": map[string]any{"type": "string"},
-					"evidence":           map[string]any{"type": "string"},
-					"impact":             map[string]any{"type": "string"},
-					"verification_notes": map[string]any{"type": "string"},
+					"title":       map[string]any{"type": "string"},
+					"severity":    map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "informational"}},
+					"endpoint":    map[string]any{"type": "string"},
+					"description": map[string]any{"type": "string"},
+					"reproduction_steps": map[string]any{
+						"type":        "string",
+						"description": "Step-by-step reproduction using endpoint, method, headers, and payload — no flow IDs or session references.",
+					},
+					"evidence": map[string]any{
+						"type":        "string",
+						"description": "Observable proof: response content, status codes, headers, behavior — no flow IDs or session references.",
+					},
+					"impact": map[string]any{"type": "string"},
+					"verification_notes": map[string]any{
+						"type":        "string",
+						"description": "How you reproduced the issue: tools used, mutations applied, what you observed — no flow IDs or session IDs.",
+					},
 					"supersedes_candidate_ids": map[string]any{
 						"type":  "array",
 						"items": map[string]any{"type": "string"},

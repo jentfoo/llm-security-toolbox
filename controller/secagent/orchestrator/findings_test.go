@@ -72,6 +72,40 @@ func TestFindingWriter(t *testing.T) {
 	assert.False(t, w.IsDuplicate(other))
 }
 
+func TestNewFindingWriter_SeedsCountFromExistingFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"finding-03-foo.md", "finding-07-bar.md", "unrelated.md"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
+	}
+	w := NewFindingWriter(dir)
+	assert.Equal(t, 7, w.Count)
+
+	path, err := w.Write(FindingFiled{Title: "New Finding", Severity: "low", Endpoint: "GET /"})
+	require.NoError(t, err)
+	assert.Equal(t, "finding-08-new-finding.md", filepath.Base(path))
+}
+
+func TestNewFindingWriter_MissingDirStartsAtZero(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+	w := NewFindingWriter(dir)
+	assert.Equal(t, 0, w.Count)
+
+	path, err := w.Write(FindingFiled{Title: "First", Severity: "low", Endpoint: "GET /"})
+	require.NoError(t, err)
+	assert.Equal(t, "finding-01-first.md", filepath.Base(path))
+}
+
+func TestNewFindingWriter_IgnoresMalformedNames(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"finding-ab-x.md", "finding-.md", "other.md"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
+	}
+	assert.Equal(t, 0, NewFindingWriter(dir).Count)
+}
+
 func TestMatchPendingCandidates(t *testing.T) {
 	t.Parallel()
 	filed := FindingFiled{Title: "Reflected XSS in search", Endpoint: "GET /search"}
