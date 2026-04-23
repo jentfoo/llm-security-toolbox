@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,50 +65,106 @@ func TestLogger_PrettyOutput(t *testing.T) {
 
 func TestLogger_StderrAllowlist(t *testing.T) {
 	t.Parallel()
+	// mirrorMarker is a substring unique to this case's pretty line, used to
+	// distinguish cases that share the same [tag] msg prefix (e.g. tool done
+	// with error=true vs error=false).
+	cases := []struct {
+		name         string
+		tag          string
+		msg          string
+		fields       map[string]any
+		mirrorMarker string
+		wantMirrored bool
+	}{
+		{"controller_phase", "controller", "transition phase a to b", nil, "[controller] transition phase a to b", true},
+		{"finding_written", "finding", "written", map[string]any{"path": "f.md"}, "[finding] written", true},
+		{"narrate", "narrate", "worker scanning", nil, "[narrate] worker scanning", true},
+		{"server_models", "server", "models", map[string]any{"worker": "m"}, "[server] models", true},
+		{"worker_turn", "worker", "turn", map[string]any{"worker_id": 1}, "[worker] turn", true},
+		{"tool_slow", "tool", "slow", map[string]any{"name": "crawl_poll", "elapsed": "7s"}, "[tool] slow", true},
+		{"tool_done_error", "tool", "done", map[string]any{"name": "quick", "elapsed": "1s", "error": true}, "name=quick", true},
+		{"agent_request", "agent", "request", map[string]any{"role": "worker-1"}, "[agent] request", false},
+		{"agent_response", "agent", "response", map[string]any{"role": "worker-1", "tokens_in": 7}, "[agent] response", false},
+		{"tool_start", "tool", "start", map[string]any{"name": "proxy_poll"}, "[tool] start", false},
+		{"tool_done_success", "tool", "done", map[string]any{"name": "proxy_poll", "elapsed": "1s", "error": false}, "name=proxy_poll", false},
+	}
+
 	l, path, buf := newCapturedLogger(t)
-	// Mirrored: controller phase, finding, narrate, server, worker turn, slow tool.
-	l.Log("controller", "phase", map[string]any{"from": "a", "to": "b"})
-	l.Log("finding", "written", map[string]any{"path": "f.md"})
-	l.Log("narrate", "worker scanning", nil)
-	l.Log("server", "models", map[string]any{"worker": "m"})
-	l.Log("worker", "turn", map[string]any{"worker_id": 1})
-	l.Log("tool", "slow", map[string]any{"name": "crawl_poll", "elapsed": "7s"})
-	l.Log("tool", "done", map[string]any{"name": "quick", "elapsed": "1s", "error": true})
-	// Not mirrored: per-request telemetry, tool start/done-success, info-only agent.
-	l.Log("agent", "request", map[string]any{"role": "worker-1"})
-	l.Log("agent", "response", map[string]any{"role": "worker-1", "tokens_in": 7})
-	l.Log("tool", "start", map[string]any{"name": "proxy_poll"})
-	l.Log("tool", "done", map[string]any{"name": "proxy_poll", "elapsed": "1s", "error": false})
+	for _, c := range cases {
+		l.Log(c.tag, c.msg, c.fields)
+	}
 	require.NoError(t, l.Close())
 
 	out := buf.String()
-	// Mirrored:
-	assert.Contains(t, out, "[controller] phase")
-	assert.Contains(t, out, "[finding] written")
-	assert.Contains(t, out, "[narrate] worker scanning")
-	assert.Contains(t, out, "[server] models")
-	assert.Contains(t, out, "[worker] turn")
-	assert.Contains(t, out, "[tool] slow")
-	assert.Contains(t, out, "[tool] done")
-	// Not mirrored:
-	assert.NotContains(t, out, "[agent] request")
-	assert.NotContains(t, out, "[agent] response")
-	assert.NotContains(t, out, "[tool] start")
-
-	// File gets everything regardless.
 	file := mustReadFile(t, path)
-	assert.Contains(t, file, `"msg":"request"`)
-	assert.Contains(t, file, `"msg":"start"`)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.wantMirrored {
+				assert.Contains(t, out, c.mirrorMarker)
+			} else {
+				assert.NotContains(t, out, c.mirrorMarker)
+			}
+			// File always gets every record regardless of mirror policy.
+			assert.Contains(t, file, `"msg":"`+c.msg+`"`)
+		})
+	}
 }
 
 func TestLogger_PrettyDoesNotDuplicateJSON(t *testing.T) {
 	t.Parallel()
 	l, _, buf := newCapturedLogger(t)
-	l.Log("controller", "phase", map[string]any{"from": "idle", "to": "autonomous"})
+	l.Log("controller", "transition phase idle to autonomous", nil)
 	out := buf.String()
 	// Must be the pretty line, not JSON
-	assert.NotContains(t, out, `"msg":"phase"`)
-	assert.Contains(t, out, "[controller] phase from=idle to=autonomous")
+	assert.NotContains(t, out, `"msg":"transition phase idle to autonomous"`)
+	assert.Contains(t, out, "[controller] transition phase idle to autonomous")
+}
+
+func TestLogger_ColoredOutput(t *testing.T) {
+	withColors(t, true)
+	l, _, buf := newCapturedLogger(t)
+	l.Log("worker", "turn", map[string]any{"worker_id": 1})
+	l.Log("narrate", "orchestrator: running scans", nil)
+	l.Log("narrate", "agent (worker-2): probing login", nil)
+	l.Log("narrate", "empty-ish line", nil)
+
+	out := buf.String()
+	// gray timestamp
+	assert.Contains(t, out, ansiGray)
+	// blue tag
+	assert.Contains(t, out, "["+ansiBlue+"worker"+ansiReset+"]")
+	assert.Contains(t, out, "["+ansiBlue+"narrate"+ansiReset+"]")
+	// gray field key=value
+	assert.Contains(t, out, " "+ansiGray+"worker_id=1"+ansiReset)
+	// green narrate prefix
+	assert.Contains(t, out, ansiMedGreen+"orchestrator:"+ansiReset+" running scans")
+	assert.Contains(t, out, ansiMedGreen+"agent (worker-2):"+ansiReset+" probing login")
+	// passthrough non-prefix messages
+	assert.Contains(t, out, "] empty-ish line")
+}
+
+func TestWriteNarrateMsg(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		colored bool
+		want    string
+	}{
+		{"orchestrator_plain", "orchestrator: did a thing", false, "orchestrator: did a thing"},
+		{"orchestrator_colored", "orchestrator: did a thing", true, ansiMedGreen + "orchestrator:" + ansiReset + " did a thing"},
+		{"agent_plain", "agent (worker-1): probing", false, "agent (worker-1): probing"},
+		{"agent_colored", "agent (worker-1): probing", true, ansiMedGreen + "agent (worker-1):" + ansiReset + " probing"},
+		{"unmatched_passthrough", "some other narrate", true, "some other narrate"},
+		{"agent_open_no_close", "agent (oops no close", true, "agent (oops no close"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			withColors(t, c.colored)
+			var b strings.Builder
+			writeNarrateMsg(&b, c.in)
+			assert.Equal(t, c.want, b.String())
+		})
+	}
 }
 
 func TestFormatPrettyValue(t *testing.T) {
@@ -148,7 +205,7 @@ func TestMalformedCounter_ObserveAndFlush(t *testing.T) {
 	assert.Contains(t, content, `"msg":"malformed-args"`)
 	assert.Contains(t, content, `"model":"m1"`)
 	assert.Contains(t, content, `"msg":"malformed-summary"`)
-	assert.Contains(t, content, `"m1":2`, "summary must show m1 count 2")
+	assert.Contains(t, content, `"m1":2`)
 }
 
 func TestMalformedCounter_FlushNoopWhenEmpty(t *testing.T) {

@@ -12,6 +12,15 @@ import (
 	"time"
 )
 
+// Tool-lifecycle event messages. Shared by the factory that emits them
+// (controller.go toolCallbacks), the narrator allowlists, and the arming
+// check so the vocabulary stays consistent in one place.
+const (
+	toolMsgDone    = "done"
+	toolMsgSlow    = "slow"
+	toolMsgTimeout = "timeout"
+)
+
 // Logger emits structured JSON lines to a log file and human-readable
 // lines to stderr. When a Narrator is attached, every Log call also feeds
 // the narrator's event buffer so operator-facing summaries can be generated
@@ -84,7 +93,7 @@ func shouldNarrate(tag, msg string) bool {
 	case "controller", "decision", "finding", "plan", "verify", "worker":
 		return true
 	case "tool":
-		return msg == "start" || msg == "done" || msg == "timeout" || msg == "slow"
+		return msg == "start" || msg == toolMsgDone || msg == toolMsgTimeout || msg == toolMsgSlow
 	case "agent":
 		return msg == "response" || msg == "response timeout" || msg == "response error"
 	}
@@ -95,8 +104,13 @@ func shouldNarrate(tag, msg string) bool {
 // The JSON file always gets every event; stderr gets only the signal.
 func shouldMirror(tag, msg string, fields map[string]any) bool {
 	switch tag {
-	case "server", "controller", "decision", "finding", "summary", "narrate", "plan", "verify":
+	case "server", "controller", "decision", "finding", "summary", "plan", "verify":
 		return true
+	case "narrate":
+		// "empty" fires every tick when a reasoning model burns its whole
+		// token budget inside an unclosed think block with no truncated-think
+		// fallback either. Noisy on stderr; keep the JSON record for diagnostics.
+		return !strings.HasSuffix(msg, ": empty")
 	case "worker":
 		// per-turn escalation lines anchor human reading; drain-error is signal.
 		return msg == "turn" || msg == "seeded" || strings.Contains(msg, "error")
@@ -105,9 +119,9 @@ func shouldMirror(tag, msg string, fields map[string]any) bool {
 	case "tool":
 		// tool lifecycle is chatty; only surface slow/timeout/error outcomes.
 		switch msg {
-		case "timeout", "slow":
+		case toolMsgTimeout, toolMsgSlow:
 			return true
-		case "done":
+		case toolMsgDone:
 			if b, ok := fields["error"].(bool); ok && b {
 				return true
 			}
@@ -144,11 +158,15 @@ func buildJSONLine(now time.Time, tag, msg string, fields map[string]any) []byte
 
 func buildPrettyLine(now time.Time, tag, msg string, fields map[string]any) []byte {
 	var b strings.Builder
-	b.WriteString(now.Format("15:04:05.000"))
+	styleAppend(&b, ansiGray, now.Format("15:04:05.000"))
 	b.WriteString(" [")
-	b.WriteString(tag)
+	styleAppend(&b, ansiBlue, tag)
 	b.WriteString("] ")
-	b.WriteString(msg)
+	if tag == "narrate" {
+		writeNarrateMsg(&b, msg)
+	} else {
+		b.WriteString(msg)
+	}
 	if len(fields) > 0 {
 		keys := make([]string, 0, len(fields))
 		for k := range fields {
@@ -157,13 +175,32 @@ func buildPrettyLine(now time.Time, tag, msg string, fields map[string]any) []by
 		sort.Strings(keys)
 		for _, k := range keys {
 			b.WriteByte(' ')
-			b.WriteString(k)
-			b.WriteByte('=')
-			b.WriteString(formatPrettyValue(fields[k]))
+			styleAppend(&b, ansiGray, k+"="+formatPrettyValue(fields[k]))
 		}
 	}
 	b.WriteByte('\n')
 	return []byte(b.String())
+}
+
+// writeNarrateMsg colors the "orchestrator:" / "agent (name):" prefix
+// used by the narrator's orchestrator- and per-agent summary lines. The
+// remainder of the message is written plain so only the role label stands
+// out.
+func writeNarrateMsg(b *strings.Builder, msg string) {
+	const orchPrefix = "orchestrator:"
+	if strings.HasPrefix(msg, orchPrefix) {
+		styleAppend(b, ansiMedGreen, orchPrefix)
+		b.WriteString(msg[len(orchPrefix):])
+		return
+	}
+	if strings.HasPrefix(msg, "agent (") {
+		if end := strings.Index(msg, "):"); end != -1 {
+			styleAppend(b, ansiMedGreen, msg[:end+2])
+			b.WriteString(msg[end+2:])
+			return
+		}
+	}
+	b.WriteString(msg)
 }
 
 func formatPrettyValue(v any) string {

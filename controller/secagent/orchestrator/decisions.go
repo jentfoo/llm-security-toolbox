@@ -33,12 +33,14 @@ type FindingFiled struct {
 	Impact                 string
 	VerificationNotes      string
 	SupersedesCandidateIDs []string
+	FollowUpHint           string
 }
 
 // CandidateDismissal records a dismissal.
 type CandidateDismissal struct {
-	CandidateID string
-	Reason      string
+	CandidateID  string
+	Reason       string
+	FollowUpHint string
 }
 
 // DecisionQueue holds cross-phase orchestrator tool-call state.
@@ -49,8 +51,8 @@ type DecisionQueue struct {
 	WorkerDecisions         []WorkerDecision
 	Findings                []FindingFiled
 	Dismissals              []CandidateDismissal
-	DoneSummary             string
-	HasDone                 bool
+	EndRunSummary           string
+	HasEndRun               bool
 	VerificationDoneSummary string
 	HasVerificationDone     bool
 	DirectionDoneSummary    string
@@ -71,7 +73,7 @@ func (q *DecisionQueue) Reset() {
 	q.WorkerDecisions = nil
 	q.Findings = nil
 	q.Dismissals = nil
-	q.DoneSummary, q.HasDone = "", false
+	q.EndRunSummary, q.HasEndRun = "", false
 	q.VerificationDoneSummary, q.HasVerificationDone = "", false
 	q.DirectionDoneSummary, q.HasDirectionDone = "", false
 	q.phase = agent.PhaseIdle
@@ -122,18 +124,18 @@ func (q *DecisionQueue) AddFinding(f FindingFiled) {
 }
 
 // AddDismissal records a dismissal.
-func (q *DecisionQueue) AddDismissal(id, reason string) {
+func (q *DecisionQueue) AddDismissal(d CandidateDismissal) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.Dismissals = append(q.Dismissals, CandidateDismissal{CandidateID: id, Reason: reason})
+	q.Dismissals = append(q.Dismissals, d)
 }
 
-// SetDone signals run end.
-func (q *DecisionQueue) SetDone(summary string) {
+// SetEndRun signals run end.
+func (q *DecisionQueue) SetEndRun(summary string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.DoneSummary = summary
-	q.HasDone = true
+	q.EndRunSummary = summary
+	q.HasEndRun = true
 }
 
 // SetVerificationDone marks the verification phase complete.
@@ -150,4 +152,50 @@ func (q *DecisionQueue) SetDirectionDone(summary string) {
 	defer q.mu.Unlock()
 	q.DirectionDoneSummary = summary
 	q.HasDirectionDone = true
+}
+
+// coalesceDecisions reduces per-worker duplicates from the director's tool calls.
+//
+// The director often re-invokes continue_worker/expand_worker/stop_worker on
+// the same worker across substeps (and even multiple times within a single
+// turn), which would otherwise queue duplicate instruction messages into the
+// worker's history. Rules:
+//   - Last decision per worker_id wins (pure last-writer-wins). A later
+//     continue after stop resurrects the worker intent; a later stop after
+//     continue kills it.
+//   - A worker already covered by a Plan entry gets its continue/expand
+//     dropped entirely — the plan's spawn/retarget carries the instruction.
+//     A stop still survives (contradictory, but explicit).
+//
+// Order is preserved based on the final position of each worker's surviving
+// decision.
+func coalesceDecisions(decisions []WorkerDecision, plan []PlanEntry) []WorkerDecision {
+	if len(decisions) == 0 {
+		return nil
+	}
+	inPlan := map[int]bool{}
+	for _, p := range plan {
+		inPlan[p.WorkerID] = true
+	}
+	lastIdx := map[int]int{}
+	for i, d := range decisions {
+		if inPlan[d.WorkerID] && d.Kind != "stop" {
+			continue
+		}
+		lastIdx[d.WorkerID] = i
+	}
+	if len(lastIdx) == 0 {
+		return nil
+	}
+	keep := make([]bool, len(decisions))
+	for _, i := range lastIdx {
+		keep[i] = true
+	}
+	out := make([]WorkerDecision, 0, len(lastIdx))
+	for i, d := range decisions {
+		if keep[i] {
+			out = append(out, d)
+		}
+	}
+	return out
 }

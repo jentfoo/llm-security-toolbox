@@ -67,13 +67,36 @@ func (p *CandidatePool) Add(in AddInput) string {
 	return cid
 }
 
-// Mark sets the status of a candidate if present.
+// Mark sets the status of a candidate if present. Only pending → verified and
+// pending → dismissed transitions are accepted; verified and dismissed are
+// terminal and cannot be overwritten.
 func (p *CandidatePool) Mark(id, status string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if c := p.byID[id]; c != nil {
-		c.Status = status
+	c := p.byID[id]
+	if c == nil {
+		return
 	}
+	if c.Status != "pending" {
+		return
+	}
+	if status != "verified" && status != "dismissed" {
+		return
+	}
+	c.Status = status
+}
+
+// ByID returns a copy of the candidate with the given id, or nil if not found.
+func (p *CandidatePool) ByID(id string) *FindingCandidate {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c := p.byID[id]
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	cp.FlowIDs = slices.Clone(c.FlowIDs)
+	return &cp
 }
 
 // Pending returns a snapshot of pending candidates in insertion order.

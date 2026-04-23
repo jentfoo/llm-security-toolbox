@@ -8,27 +8,43 @@ import (
 
 func TestExtractFlowIDs(t *testing.T) {
 	t.Parallel()
-	t.Run("plain_text", func(t *testing.T) {
-		got := ExtractFlowIDs("flow_id=abc123 and flow_id=def456")
-		assert.Equal(t, []string{"abc123", "def456"}, got)
-	})
-	t.Run("dict_keys", func(t *testing.T) {
-		got := ExtractFlowIDs(map[string]any{"flow_id": "aaaa11", "other": "ignore"})
-		assert.Equal(t, []string{"aaaa11"}, got)
-	})
-	t.Run("nested_slice", func(t *testing.T) {
-		got := ExtractFlowIDs([]any{
-			map[string]any{"flow_a": "ID_AAA1"},
-			map[string]any{"flow_b": "ID_BBB2"},
+	cases := []struct {
+		name   string
+		inputs []any
+		want   []string
+	}{
+		{
+			name:   "plain_text",
+			inputs: []any{"flow_id=abc123 and flow_id=def456"},
+			want:   []string{"abc123", "def456"},
+		},
+		{
+			name:   "dict_keys",
+			inputs: []any{map[string]any{"flow_id": "aaaa11", "other": "ignore"}},
+			want:   []string{"aaaa11"},
+		},
+		{
+			name: "nested_slice",
+			inputs: []any{[]any{
+				map[string]any{"flow_a": "ID_AAA1"},
+				map[string]any{"flow_b": "ID_BBB2"},
+			}},
+			want: []string{"ID_AAA1", "ID_BBB2"},
+		},
+		{
+			name:   "dedup",
+			inputs: []any{"flow_id=abc123", "flow_id=abc123"},
+			want:   []string{"abc123"},
+		},
+		{
+			name:   "rejects_bare_flow_word",
+			inputs: []any{"the flow chart shows details"},
+			want:   nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, ExtractFlowIDs(c.inputs...))
 		})
-		assert.Equal(t, []string{"ID_AAA1", "ID_BBB2"}, got)
-	})
-	t.Run("dedup", func(t *testing.T) {
-		got := ExtractFlowIDs("flow_id=abc123", "flow_id=abc123")
-		assert.Equal(t, []string{"abc123"}, got)
-	})
-	t.Run("rejects_bare_flow_word", func(t *testing.T) {
-		got := ExtractFlowIDs("the flow chart shows details")
-		assert.Empty(t, got)
-	})
+	}
 }

@@ -21,7 +21,7 @@ func RunDirectionPhase(
 	decisions *DecisionQueue,
 	workers []*WorkerState,
 	workerRuns map[int][]agent.TurnSummary,
-	verificationSummary, findingsSummary, stallWarnings string,
+	verificationSummary, findingsSummary, stallWarnings, followUpHints string,
 	iteration, maxIter, findingsCount, maxWorkers int,
 	log *Logger,
 ) {
@@ -33,6 +33,11 @@ func RunDirectionPhase(
 		}
 	}
 
+	// Track consecutive substeps where the director's cumulative decision
+	// state didn't change, so we can short-circuit when the director is
+	// just re-pondering without producing any new action.
+	noProgressStreak := 0
+	var lastDecisionCount int
 	for substep := 1; substep <= DirectionMaxSubsteps; substep++ {
 		covered := coveredIDs(decisions)
 		pendingWIDs := diffSet(aliveIDs, covered)
@@ -40,7 +45,7 @@ func RunDirectionPhase(
 		var prompt string
 		if substep == 1 {
 			prompt = BuildDirectorPrompt(
-				workers, workerRuns, verificationSummary, findingsSummary, stallWarnings,
+				workers, workerRuns, verificationSummary, findingsSummary, stallWarnings, followUpHints,
 				iteration, maxIter, findingsCount, maxWorkers,
 			)
 		} else {
@@ -54,13 +59,41 @@ func RunDirectionPhase(
 			break
 		}
 		emitStatusIfDue(ctx, director, "direct", substep, log)
-		if decisions.HasDirectionDone || decisions.HasDone {
+		if decisions.HasDirectionDone || decisions.HasEndRun {
 			break
 		}
 		covered = coveredIDs(decisions)
 		if len(diffSet(aliveIDs, covered)) == 0 {
 			break
 		}
+
+		// D1: break after two consecutive no-progress substeps.
+		current := totalDecisionCount(decisions)
+		if current == lastDecisionCount {
+			noProgressStreak++
+			if noProgressStreak >= 2 {
+				if log != nil {
+					log.Log("direct", "early-exit no progress", map[string]any{
+						"iter": iteration, "substep": substep,
+					})
+				}
+				break
+			}
+		} else {
+			noProgressStreak = 0
+		}
+		lastDecisionCount = current
+	}
+
+	// D2: skip the self-review substep entirely when the phase produced no
+	// decisions — nothing to review, and the director would just re-enter
+	// the same narration loop.
+	if len(decisions.WorkerDecisions) == 0 && len(decisions.Plan) == 0 {
+		if log != nil {
+			log.Log("direct", "self-review skipped no decisions", map[string]any{"iter": iteration})
+		}
+		emitStatusIfDue(ctx, director, "direct", DirectionMaxSubsteps+1, log)
+		return
 	}
 
 	// self-review substep, bounded to 2 tool-call rounds per spec §7.5
@@ -72,6 +105,12 @@ func RunDirectionPhase(
 		return
 	}
 	emitStatusIfDue(ctx, director, "direct", DirectionMaxSubsteps+1, log)
+}
+
+// totalDecisionCount returns the cumulative count of director-produced
+// actions this phase, used to detect no-progress substeps.
+func totalDecisionCount(d *DecisionQueue) int {
+	return len(d.WorkerDecisions) + len(d.Plan) + len(d.Findings) + len(d.Dismissals)
 }
 
 func coveredIDs(d *DecisionQueue) map[int]bool {

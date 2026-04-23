@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -10,19 +11,43 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// narratorSystemPrompt instructs the summary model to emit one sentence of
-// operator-facing status. The body after "Events" is filled in by
-// buildNarratorPrompt().
+// narratorSystemPrompt is the summary-model system message. Word-count
+// constraints are deliberately avoided — reasoning models echo them as
+// "(17 words)" in output.
 const narratorSystemPrompt = `You narrate autonomous security-testing agent activity to a human operator.
-Given the event log that follows, respond with ONE short sentence describing what the agent is currently doing and what it just did.
-No preamble, no bullets, no markdown. Under 40 words.`
+Provide a single concise and clearly worded sentence as a description of the activity shown here.`
+
+// narratorMaxTokens is the output cap for summary calls. Kept high so a
+// long-thinking reasoning model isn't truncated before emitting content.
+const narratorMaxTokens = 20000
 
 // NarratorConfig tunes when and how the Narrator fires.
 type NarratorConfig struct {
-	Interval   time.Duration // 0 disables; else min time between fires.
-	Model      string        // summary model ID.
-	Client     agent.ChatClient
-	CallBudget time.Duration // per-summary call timeout; 0 defaults to 15s.
+	Interval time.Duration // 0 disables; else min time between fires.
+	Model    string        // summary model ID.
+	// Pool is the shared ClientPool summary calls route through. Narration
+	// counts against the configured concurrency budget rather than bypassing
+	// it with a dedicated client, so total outstanding requests against the
+	// model service never exceeds --openai-pool-size.
+	Pool       *agent.ClientPool
+	CallBudget time.Duration // per-summary call timeout; 0 defaults to 5m.
+	// Summarizer handles reasoning-format specifics for the summary model
+	// itself (e.g. pulling a think-tail on truncated structured output).
+	// Nil defaults to the inline handler.
+	Summarizer agent.ReasoningHandler
+	// Parent is the context whose cancellation aborts every in-flight
+	// summary HTTP call. When the controller's Run ctx is passed here,
+	// ctrl+c propagates immediately to the narrator — no waiting on
+	// CallBudget. Nil defaults to context.Background() (fires complete
+	// naturally; Close still aborts via its own cancel).
+	Parent context.Context
+}
+
+// NamedAgent pairs an agent with the label used in its emitted narration
+// line (e.g. "worker-3", "verifier", "director").
+type NamedAgent struct {
+	Name  string
+	Agent *agent.OpenAIAgent
 }
 
 // Narrator buffers orchestrator events and periodically asks a summary model
@@ -35,12 +60,30 @@ type Narrator struct {
 	cfg NarratorConfig
 	log *Logger
 
-	mu         sync.Mutex
-	buf        []narratorEvent
-	lastFireAt time.Time
+	mu           sync.Mutex
+	buf          []narratorEvent
+	lastFireAt   time.Time
+	activeAgents []NamedAgent // snapshot published by the controller; read under mu
 
-	fireMu sync.Mutex     // held for the entire async call; serialises firings.
+	// fireMu is held for the whole async firing (buffer snapshot + every
+	// HTTP dispatch inside runSummary). Dispatches happen sequentially in
+	// a for-loop so no intra-firing serialization is needed beyond this lock.
+	fireMu sync.Mutex
 	wg     sync.WaitGroup // so Close can wait on the last in-flight firing.
+
+	// armed gates firing until at least one substantive event has been
+	// observed (worker turn, tool done, finding, decision). Phase
+	// transitions and iteration-start events at run startup buffer normally
+	// but do NOT trigger narration — the first narrator call would block on
+	// a pool slot before any real work has happened, delaying the agent's
+	// first turn. Sticky once set: armed never resets.
+	armed bool
+
+	// shutdownCtx is the parent context for every in-flight summary HTTP
+	// call. Cancelled by Close so ctrl+c aborts summaries immediately
+	// instead of waiting up to CallBudget per queued call.
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 
 	tickerStop chan struct{} // closed by Close to stop the background ticker.
 	closed     bool
@@ -57,16 +100,42 @@ type narratorEvent struct {
 // A background ticker goroutine is started that calls Tick() every Interval
 // so periodic narration fires without requiring external trigger calls.
 func NewNarrator(cfg NarratorConfig, log *Logger) *Narrator {
-	if cfg.Interval <= 0 || cfg.Client == nil || cfg.Model == "" {
+	if cfg.Interval <= 0 || cfg.Pool == nil || cfg.Model == "" {
 		return nil
 	}
 	if cfg.CallBudget <= 0 {
 		cfg.CallBudget = 300 * time.Second
 	}
-	n := &Narrator{cfg: cfg, log: log, tickerStop: make(chan struct{})}
+	if cfg.Summarizer == nil {
+		cfg.Summarizer = agent.NewReasoningHandler(agent.ReasoningFormatInline)
+	}
+	parent := cfg.Parent
+	if parent == nil {
+		parent = context.Background()
+	}
+	shutdownCtx, shutdownCancel := context.WithCancel(parent)
+	n := &Narrator{
+		cfg:            cfg,
+		log:            log,
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
+		tickerStop:     make(chan struct{}),
+	}
 	n.wg.Add(1)
 	go n.runTicker()
 	return n
+}
+
+// runSummaryCall acquires a client from the shared pool and hands it to fn,
+// so narration counts against the configured concurrency budget rather than
+// bypassing it. Serialization is provided by fireMu on the surrounding firing.
+func (n *Narrator) runSummaryCall(ctx context.Context, fn func(agent.ChatClient) error) error {
+	client, err := n.cfg.Pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer n.cfg.Pool.Release(client)
+	return fn(client)
 }
 
 func (n *Narrator) runTicker() {
@@ -83,7 +152,37 @@ func (n *Narrator) runTicker() {
 	}
 }
 
+// SetActiveAgents publishes the agents the next firing should summarize
+// alongside the orchestrator event log. Callers should invoke this from
+// the main controller goroutine whenever the active set changes (phase
+// transitions, worker spawn/stop). The narrator takes its own copy, so
+// the caller's slice may be reused.
+// isUsableNarration filters out summary outputs that aren't a natural-
+// language sentence — single-word replies and XML-ish tags like
+// "<tool_call>" happen with smaller models and add no operator value. The
+// minimum bar is "contains whitespace" so the caller falls through to the
+// truncated-think / empty branch instead of logging a noise line.
+func isUsableNarration(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	return strings.ContainsAny(s, " \t\n")
+}
+
+func (n *Narrator) SetActiveAgents(agents []NamedAgent) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	n.activeAgents = append(n.activeAgents[:0], agents...)
+	n.mu.Unlock()
+}
+
 // Record buffers one event. Lightweight and safe to call from hot paths.
+// Also toggles the armed gate once a substantive event arrives so startup
+// phase-transitions and seeded-worker events don't force a no-context
+// summary before any real work has happened.
 func (n *Narrator) Record(tag, msg string, fields map[string]any) {
 	if n == nil {
 		return
@@ -96,19 +195,41 @@ func (n *Narrator) Record(tag, msg string, fields map[string]any) {
 	n.buf = append(n.buf, narratorEvent{
 		ts: time.Now(), tag: tag, msg: msg, fields: fields,
 	})
+	if !n.armed && isSubstantiveNarrationEvent(tag, msg) {
+		n.armed = true
+	}
 	n.mu.Unlock()
+}
+
+// isSubstantiveNarrationEvent identifies events that indicate real agent
+// activity worth narrating. Anything else — phase transitions, iteration
+// boundaries, initial worker spawning, server lifecycle — may have been
+// buffered already but is not sufficient reason to fire a summary.
+func isSubstantiveNarrationEvent(tag, msg string) bool {
+	switch tag {
+	case "worker":
+		return msg == "turn"
+	case "tool":
+		return msg == toolMsgDone || msg == toolMsgSlow || msg == toolMsgTimeout
+	case "finding":
+		return msg == "written"
+	case "decision":
+		return true
+	}
+	return false
 }
 
 // Tick is called by the main loop to give the narrator a chance to fire
 // based on cadence. Safe to call every iteration — it no-ops if nothing
-// has changed since the last fire.
+// has changed since the last fire or if no substantive event has armed
+// the narrator yet.
 func (n *Narrator) Tick() {
 	if n == nil {
 		return
 	}
 	n.mu.Lock()
 	now := time.Now()
-	shouldFire := len(n.buf) > 0 && now.Sub(n.lastFireAt) >= n.cfg.Interval
+	shouldFire := n.armed && len(n.buf) > 0 && now.Sub(n.lastFireAt) >= n.cfg.Interval
 	n.mu.Unlock()
 	if shouldFire {
 		n.fireAsync()
@@ -117,15 +238,17 @@ func (n *Narrator) Tick() {
 
 // TriggerNow forces a firing regardless of cadence. Use at phase transitions,
 // finding writes, and decision applications so narration stays in sync with
-// human-meaningful events. No-op if the buffer is empty.
+// human-meaningful events. No-op until the narrator has been armed by a
+// substantive event, so startup phase transitions don't force a pre-work
+// summary that would block the first worker turn on a pool slot.
 func (n *Narrator) TriggerNow() {
 	if n == nil {
 		return
 	}
 	n.mu.Lock()
-	empty := len(n.buf) == 0
+	skip := !n.armed || len(n.buf) == 0
 	n.mu.Unlock()
-	if empty {
+	if skip {
 		return
 	}
 	n.fireAsync()
@@ -157,36 +280,140 @@ func (n *Narrator) fireAsync() {
 	}()
 }
 
+// runSummary dispatches one orchestrator-level event summary plus one
+// per-active-agent status summary sequentially, under a single shared
+// timeout. Serial execution pins narration to at most one pool slot at
+// any moment, so the configured concurrency budget stays intact while
+// agents keep using the remaining slots. Every outcome — success, empty
+// response, or error — is logged so silent drops don't happen; previously
+// an empty line from a reasoning model that burned its whole MaxTokens on
+// a <think> block left no trace at all.
 func (n *Narrator) runSummary(events []narratorEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.cfg.CallBudget)
+	// Parent derived from shutdownCtx — Close cancels it so ctrl+c aborts
+	// any in-flight summary HTTP call instead of waiting up to CallBudget.
+	ctx, cancel := context.WithTimeout(n.shutdownCtx, n.cfg.CallBudget)
 	defer cancel()
 
-	body := buildNarratorPrompt(events)
-	resp, err := n.cfg.Client.CreateChatCompletion(ctx, agent.ChatRequest{
-		Model: n.cfg.Model,
-		Messages: []agent.ChatMessage{
-			{Role: "system", Content: narratorSystemPrompt},
-			{Role: "user", Content: body},
-		},
-		MaxTokens: 120,
-	})
-	if err != nil {
-		if n.log != nil {
-			n.log.Log("narrate", "error", map[string]any{"err": err.Error()})
+	// If shutdown has already fired, skip entirely rather than acquiring
+	// a pool slot just to discover the ctx is cancelled inside Acquire.
+	if ctx.Err() != nil {
+		return
+	}
+
+	n.mu.Lock()
+	agents := append([]NamedAgent(nil), n.activeAgents...)
+	n.mu.Unlock()
+
+	n.runOrchestratorSummary(ctx, events)
+	for _, na := range agents {
+		if ctx.Err() != nil {
+			return
 		}
-		return
-	}
-	line := firstLine(agent.StripThinkBlocks(resp.Content))
-	if line == "" {
-		return
-	}
-	if n.log != nil {
-		n.log.Log("narrate", line, map[string]any{"events": len(events)})
+		if na.Agent == nil || na.Name == "" {
+			continue
+		}
+		n.runAgentSummary(ctx, na)
 	}
 }
 
-// Close stops the background ticker, flushes any in-flight narration,
-// prevents further records, and returns once the last firing has emitted.
+func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narratorEvent) {
+	body := buildNarratorPrompt(events)
+	var resp agent.ChatResponse
+	err := n.runSummaryCall(ctx, func(client agent.ChatClient) error {
+		var e error
+		resp, e = client.CreateChatCompletion(ctx, agent.ChatRequest{
+			Model: n.cfg.Model,
+			Messages: []agent.ChatMessage{
+				{Role: "system", Content: narratorSystemPrompt},
+				{Role: "user", Content: body},
+			},
+			MaxTokens:       narratorMaxTokens,
+			ReasoningEffort: agent.SummaryReasoningEffort,
+		})
+		return e
+	})
+	if err != nil {
+		if n.log != nil {
+			n.log.Log("narrate", "orchestrator: error", map[string]any{
+				"err": err.Error(),
+			})
+		}
+		return
+	}
+	// Confident line first: Extract runs the full defensive cascade
+	// (strip think/fences, parse JSON wrappers, salvage Final:/Output:
+	// markers). Fall back to Tail only when no usable line was found.
+	if line := n.cfg.Summarizer.Extract(resp); isUsableNarration(line) {
+		if n.log != nil {
+			n.log.Log("narrate", "orchestrator: "+line, map[string]any{
+				"events": len(events),
+			})
+		}
+		return
+	}
+	if tail := n.cfg.Summarizer.Tail(resp); tail != "" {
+		if n.log != nil {
+			n.log.Log("narrate", "orchestrator: …thinking: "+tail, map[string]any{
+				"events":          len(events),
+				"truncated_think": true,
+			})
+		}
+		return
+	}
+	if n.log != nil {
+		n.log.Log("narrate", "orchestrator: empty", map[string]any{
+			"events":     len(events),
+			"tokens_out": resp.Usage.CompletionTokens,
+		})
+	}
+}
+
+func (n *Narrator) runAgentSummary(ctx context.Context, na NamedAgent) {
+	var line, tail string
+	err := n.runSummaryCall(ctx, func(client agent.ChatClient) error {
+		var e error
+		// Pass the narrator's summary model so per-agent summaries run
+		// through it (and honor its reasoning_effort contract) rather than
+		// the agent's own model — keeps all summary traffic targeting one
+		// model regardless of which worker/verifier/director we're
+		// summarizing.
+		line, tail, e = agent.SummarizeStatusVia(ctx, na.Agent, client, n.cfg.Model, narratorMaxTokens)
+		return e
+	})
+	if err != nil {
+		if n.log != nil {
+			n.log.Log("narrate", "agent ("+na.Name+"): error", map[string]any{
+				"err": err.Error(),
+			})
+		}
+		return
+	}
+	if isUsableNarration(line) {
+		if n.log != nil {
+			n.log.Log("narrate", "agent ("+na.Name+"): "+line, nil)
+		}
+		return
+	}
+	if tail != "" {
+		if n.log != nil {
+			n.log.Log("narrate", "agent ("+na.Name+"): …thinking: "+tail, map[string]any{
+				"truncated_think": true,
+			})
+		}
+		return
+	}
+	if n.log != nil {
+		n.log.Log("narrate", "agent ("+na.Name+"): empty", nil)
+	}
+}
+
+// Close stops the ticker, cancels in-flight summaries, and waits for
+// pending firings to return. Does not flush — shutdown is terminal.
+//
+// Cancel order matters: shutdownCancel must fire BEFORE wg.Wait so
+// in-flight summary HTTP calls see context cancellation and return
+// promptly. Otherwise wg.Wait could block for up to NarrateTimeout
+// (15min default) after run completion.
 func (n *Narrator) Close() {
 	if n == nil {
 		return
@@ -194,15 +421,11 @@ func (n *Narrator) Close() {
 	n.mu.Lock()
 	alreadyClosed := n.closed
 	n.closed = true
-	pending := len(n.buf)
 	n.mu.Unlock()
 	if !alreadyClosed {
 		close(n.tickerStop)
 	}
-	if pending > 0 {
-		// fire the final batch so shutdown doesn't drop it
-		n.fireAsync()
-	}
+	n.shutdownCancel()
 	n.wg.Wait()
 }
 
@@ -225,42 +448,18 @@ func buildNarratorPrompt(events []narratorEvent) string {
 		if v, ok := e.fields["worker_id"]; ok {
 			fmt.Fprintf(&b, " worker_id=%s", formatPrettyValue(v))
 		}
-		for _, k := range sortedKeys(e.fields, "role", "worker_id") {
+		keys := make([]string, 0, len(e.fields))
+		for k := range e.fields {
+			if k == "role" || k == "worker_id" {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
 			fmt.Fprintf(&b, " %s=%s", k, formatPrettyValue(e.fields[k]))
 		}
 		b.WriteByte('\n')
 	}
 	return b.String()
-}
-
-func sortedKeys(m map[string]any, skip ...string) []string {
-	if len(m) == 0 {
-		return nil
-	}
-	skipSet := make(map[string]bool, len(skip))
-	for _, s := range skip {
-		skipSet[s] = true
-	}
-	out := make([]string, 0, len(m))
-	for k := range m {
-		if skipSet[k] {
-			continue
-		}
-		out = append(out, k)
-	}
-	// simple insertion sort — N is tiny.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1] > out[j]; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
-	return out
-}
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return s
 }

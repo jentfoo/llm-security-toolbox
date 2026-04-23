@@ -20,15 +20,14 @@ func TestRepairToolArgs(t *testing.T) {
 		{"fenced", "```json\n{\"a\":1}\n```", `{"a":1}`, false},
 		{"fenced_no_lang", "```\n{\"a\":1}\n```", `{"a":1}`, false},
 		{"double_encoded", `"{\"a\":1}"`, `{"a":1}`, false},
-		{"trailing_brace_missing", `{"a":1`, `{"a":1}`, false},
+		{"missing_brace", `{"a":1`, `{"a":1}`, false},
 		{"garbage", "not json", "", true},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := RepairToolArgs(tc.input)
 			if tc.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)

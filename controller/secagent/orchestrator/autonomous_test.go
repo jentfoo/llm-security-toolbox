@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,21 +8,6 @@ import (
 
 	"github.com/go-appsec/secagent/agent"
 )
-
-// injectingFake wraps FakeAgent to run a callback before each Drain.
-type injectingFake struct {
-	*agent.FakeAgent
-	onDrain map[int]func()
-	turn    int
-}
-
-func (i *injectingFake) Drain(ctx context.Context) (agent.TurnSummary, error) {
-	if f, ok := i.onDrain[i.turn]; ok {
-		f()
-	}
-	i.turn++
-	return i.FakeAgent.Drain(ctx)
-}
 
 func TestRunWorkerUntilEscalation(t *testing.T) {
 	t.Parallel()
@@ -37,7 +21,7 @@ func TestRunWorkerUntilEscalation(t *testing.T) {
 		}
 		w := &WorkerState{ID: 1, Agent: fake, Alive: true, AutonomousBudget: 3}
 		pool := NewCandidatePool()
-		runs, err := RunWorkerUntilEscalation(context.Background(), w, pool, nil)
+		runs, err := RunWorkerUntilEscalation(t.Context(), w, pool, nil)
 		require.NoError(t, err)
 		assert.Len(t, runs, 3)
 		assert.Equal(t, "budget", w.EscalationReason)
@@ -51,7 +35,7 @@ func TestRunWorkerUntilEscalation(t *testing.T) {
 			},
 		}
 		w := &WorkerState{ID: 1, Agent: fake, Alive: true, AutonomousBudget: 5}
-		runs, err := RunWorkerUntilEscalation(context.Background(), w, NewCandidatePool(), nil)
+		runs, err := RunWorkerUntilEscalation(t.Context(), w, NewCandidatePool(), nil)
 		require.NoError(t, err)
 		assert.Len(t, runs, 2)
 		assert.Equal(t, "silent", w.EscalationReason)
@@ -59,19 +43,24 @@ func TestRunWorkerUntilEscalation(t *testing.T) {
 
 	t.Run("candidate", func(t *testing.T) {
 		pool := NewCandidatePool()
-		// FakeAgent can't call handlers; inject the candidate from a wrapper.
-		candidateInjector := func() {
-			pool.Add(AddInput{WorkerID: 1, Title: "x", Severity: "low", FlowIDs: []string{"abc123"}})
-		}
 		fake := &agent.FakeAgent{
 			Turns: []agent.TurnSummary{
 				{ToolCalls: []agent.ToolCallRecord{{Name: "t"}}},
 				{ToolCalls: []agent.ToolCallRecord{{Name: "report_finding_candidate"}}},
 			},
 		}
-		wrapper := &injectingFake{FakeAgent: fake, onDrain: map[int]func(){1: candidateInjector}}
-		w := &WorkerState{ID: 1, Agent: wrapper, Alive: true, AutonomousBudget: 5}
-		runs, err := RunWorkerUntilEscalation(context.Background(), w, pool, nil)
+		// turnIdx tracks len(QueriedInputs)-1: -1 for the first Drain (no
+		// Query emitted yet), then 0 for the second Drain after the worker
+		// injects the continue prompt. Fire on turnIdx=0 so the candidate is
+		// in the pool when the 2nd turn (the report_finding_candidate call) is
+		// classified.
+		fake.OnDrain = func(turnIdx int) {
+			if turnIdx == 0 {
+				pool.Add(AddInput{WorkerID: 1, Title: "x", Severity: "low", FlowIDs: []string{"abc123"}})
+			}
+		}
+		w := &WorkerState{ID: 1, Agent: fake, Alive: true, AutonomousBudget: 5}
+		runs, err := RunWorkerUntilEscalation(t.Context(), w, pool, nil)
 		require.NoError(t, err)
 		assert.Len(t, runs, 2)
 		assert.Equal(t, "candidate", w.EscalationReason)

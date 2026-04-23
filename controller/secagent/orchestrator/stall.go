@@ -4,11 +4,20 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/go-appsec/secagent/agent"
 )
 
 // UpdateStallStreaks walks every worker and adjusts ProgressNoneStreak
-// based on its escalation_reason and whether any flow IDs were touched
-// during the autonomous run.
+// based on the outcome of the last autonomous run. Both "silent"
+// (timeout or model chose not to escalate) and "error" (HTTP error, crashed
+// mid-drain) increment the streak so both failure modes feed the existing
+// StallStopAfter threshold. A worker stuck issuing the same tool error
+// repeatedly (RecentToolErrors) is also treated as silent. "candidate" or
+// any turn that produced flows resets the streak.
+//
+// When the repeated-error path fires for a signature we haven't coached on
+// yet, a one-shot coaching message is queued to the worker via Agent.Query.
 func UpdateStallStreaks(workers []*WorkerState) {
 	for _, w := range workers {
 		if !w.Alive {
@@ -21,14 +30,63 @@ func UpdateStallStreaks(workers []*WorkerState) {
 				break
 			}
 		}
+		repeatedSig, repeated := repeatedErrorSignature(w.RecentToolErrors)
 		switch {
-		case w.EscalationReason == "silent":
+		case w.EscalationReason == "silent" || w.EscalationReason == "error":
+			// Silent/error wins over flows (preserved precedence: a worker
+			// that touched a flow but escalated silent is still stalling).
 			w.ProgressNoneStreak++
 		case w.EscalationReason == "candidate" || producedFlows:
 			w.ProgressNoneStreak = 0
 			w.StallWarned = false
+		case repeated:
+			w.ProgressNoneStreak++
+		}
+		if repeated && w.CoachedErrorSig != repeatedSig && w.Agent != nil {
+			w.Agent.Query(buildRepeatedErrorCoaching(repeatedSig))
+			w.CoachedErrorSig = repeatedSig
 		}
 	}
+}
+
+// repeatedErrorSignature returns (signature, true) when the window contains
+// at least RepeatedErrorThreshold identical entries.
+func repeatedErrorSignature(sigs []string) (string, bool) {
+	if len(sigs) < RepeatedErrorThreshold {
+		return "", false
+	}
+	counts := map[string]int{}
+	for _, s := range sigs {
+		counts[s]++
+		if counts[s] >= RepeatedErrorThreshold {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// buildRepeatedErrorCoaching renders the one-shot nudge queued to workers
+// stuck on the same tool error repeatedly.
+func buildRepeatedErrorCoaching(sig string) string {
+	return fmt.Sprintf(
+		"Your last several tool calls returned the same error: %q. Try a different tool or approach. If you're stuck, report what you've learned via report_finding_candidate and describe the blocker.",
+		sig,
+	)
+}
+
+// hasProductiveTurn returns true when any turn in the slice made real
+// progress — tool calls issued or flow IDs touched. Prompt tokens alone
+// don't count: any successful round-trip (including the model saying "I'll
+// keep looking" with no tool calls) consumes them. Used by applyPlanDiff
+// so the director's retarget cannot reset the stall counter when the
+// worker was dead this iteration.
+func hasProductiveTurn(turns []agent.TurnSummary) bool {
+	for _, t := range turns {
+		if len(t.ToolCalls) > 0 || len(t.FlowIDs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // FormatStallWarnings returns a block for the director prompt, or "" when

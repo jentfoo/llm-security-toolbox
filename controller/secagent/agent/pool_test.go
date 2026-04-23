@@ -23,25 +23,31 @@ func TestClientPool(t *testing.T) {
 		c1 := stubClient{id: 1}
 		c2 := stubClient{id: 2}
 		pool := NewClientPoolWithClients([]ChatClient{c1, c2})
-		ctx := context.Background()
+		ctx := t.Context()
 
 		a1, err := pool.Acquire(ctx)
 		require.NoError(t, err)
 		a2, err := pool.Acquire(ctx)
 		require.NoError(t, err)
 
-		// Third Acquire blocks until Release.
 		var got ChatClient
+		started := make(chan struct{})
 		done := make(chan struct{})
 		go func() {
+			close(started)
 			got, _ = pool.Acquire(ctx)
 			close(done)
 		}()
-		select {
-		case <-done:
-			t.Fatal("expected Acquire to block")
-		case <-time.After(50 * time.Millisecond):
-		}
+		<-started
+		// Once the goroutine is runnable, Acquire must be blocked on the empty pool.
+		require.Never(t, func() bool {
+			select {
+			case <-done:
+				return true
+			default:
+				return false
+			}
+		}, 20*time.Millisecond, time.Millisecond)
 		pool.Release(a1)
 		<-done
 		assert.NotNil(t, got)
@@ -51,10 +57,10 @@ func TestClientPool(t *testing.T) {
 
 	t.Run("context_cancel", func(t *testing.T) {
 		pool := NewClientPool(stubClient{id: 1}, 1)
-		first, err := pool.Acquire(context.Background())
+		first, err := pool.Acquire(t.Context())
 		require.NoError(t, err)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 		defer cancel()
 		_, err = pool.Acquire(ctx)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -67,11 +73,12 @@ func TestClientPool(t *testing.T) {
 		var current int32
 		var wg sync.WaitGroup
 		release := make(chan struct{})
+		ctx := t.Context()
 		for i := 0; i < 10; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				c, err := pool.Acquire(context.Background())
+				c, err := pool.Acquire(ctx)
 				if err != nil {
 					return
 				}

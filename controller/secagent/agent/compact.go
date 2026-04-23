@@ -10,17 +10,26 @@ type CompactionOptions struct {
 	HighWatermark float64 // e.g. 0.80
 	LowWatermark  float64 // e.g. 0.40
 	KeepTurns     int     // e.g. 4
+	// HardTruncateOnOverflow controls whether a last-resort hard-truncate
+	// pass runs when passes 1-4 can't reduce below HighWatermark. When true
+	// (default), the pass shrinks the keep window to 2 turns (4 messages)
+	// and drops additional turns while preserving tool-call/tool-result
+	// pairing. When false, the original overflow error is returned
+	// verbatim — used by tests and by callers that want fail-closed
+	// behavior.
+	HardTruncateOnOverflow bool
 }
 
 // CompactionReport describes what Compact did in one pass.
 type CompactionReport struct {
-	Before         int
-	After          int
-	PassesApplied  []string
-	StubbedResults int
-	DroppedTurns   int
-	Truncated      int
-	ThinkStripped  int
+	Before           int
+	After            int
+	PassesApplied    []string
+	StubbedResults   int
+	DroppedTurns     int
+	Truncated        int
+	ThinkStripped    int
+	RepairsProtected int // tool-result repair errors skipped in pass 2
 }
 
 // Compact shrinks history in place until tokens <= LowWatermark * max.
@@ -73,10 +82,17 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		return report, nil
 	}
 
-	// Pass 2: replace oldest tool results with stubs.
+	// Pass 2: replace oldest tool results with stubs. Skip repair-error
+	// messages — they're small but carry the schema guidance the worker needs
+	// to stop repeating a malformed call.
 	stubbed := 0
+	repairsProtected := 0
 	for i := 0; i < len(msgs)-keep*2; i++ {
 		if msgs[i].Role != roleTool {
+			continue
+		}
+		if msgs[i].IsRepairError {
+			repairsProtected++
 			continue
 		}
 		approxTokens := len(msgs[i].Content) / 4
@@ -98,6 +114,7 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		report.PassesApplied = append(report.PassesApplied, "tool-stub")
 		report.StubbedResults = stubbed
 	}
+	report.RepairsProtected = repairsProtected
 	if h.EstimateTokens() <= target {
 		report.After = h.EstimateTokens()
 		return report, nil
@@ -147,6 +164,28 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		report.DroppedTurns = droppedTurns
 	}
 
+	// Pass 5 (hard truncate): a single worker with one very large tool
+	// result can leave the history over HighWatermark even after pass 4,
+	// because pass 4 preserves keep*2 trailing messages. Shrink the keep
+	// window to the minimum (2 turns) and drop more. Still preserves
+	// tool-call/tool-result pairing via dropOldestTurn.
+	if opt.HardTruncateOnOverflow && h.EstimateTokens() > high {
+		hardDropped := 0
+		for h.EstimateTokens() > high {
+			newMsgs, dropped := dropOldestTurn(msgs, 2)
+			if !dropped {
+				break
+			}
+			msgs = newMsgs
+			hardDropped++
+			h.ReplaceAll(msgs)
+		}
+		if hardDropped > 0 {
+			report.PassesApplied = append(report.PassesApplied, "hard-truncate")
+			report.DroppedTurns += hardDropped
+		}
+	}
+
 	after := h.EstimateTokens()
 	report.After = after
 	if after > high {
@@ -156,6 +195,39 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		)
 	}
 	return report, nil
+}
+
+// ForceHardTruncate unconditionally drops oldest turns from the history,
+// preserving tool-call/tool-result pairing, until the estimated token count
+// is at or below targetTokens OR nothing more can be dropped. It bypasses
+// Compact's watermark checks so callers can recover from cases where the
+// upstream model rejects a request as too large even though our local
+// estimate said it was fine (model's effective context < configured max).
+//
+// keep is the minimum trailing-turn window preserved (min 2). The system
+// prompt is always preserved. Returns a report describing what was done.
+func ForceHardTruncate(h *History, targetTokens, keep int) CompactionReport {
+	if keep < 2 {
+		keep = 2
+	}
+	report := CompactionReport{Before: h.EstimateTokens()}
+	msgs := h.Snapshot()
+	dropped := 0
+	for h.EstimateTokens() > targetTokens {
+		next, ok := dropOldestTurn(msgs, keep)
+		if !ok {
+			break
+		}
+		msgs = next
+		dropped++
+		h.ReplaceAll(msgs)
+	}
+	if dropped > 0 {
+		report.PassesApplied = append(report.PassesApplied, "force-hard-truncate")
+		report.DroppedTurns = dropped
+	}
+	report.After = h.EstimateTokens()
+	return report
 }
 
 // dropOldestTurn drops the oldest (assistant-with-tool-calls,
@@ -183,8 +255,11 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 		for end < len(msgs) && msgs[end].Role == roleTool {
 			end++
 		}
-		// consume a trailing assistant text if it immediately follows
-		if end < len(msgs) && msgs[end].Role == roleAssistant {
+		// consume a trailing assistant TEXT (no tool calls of its own) if it
+		// immediately follows — it's part of this same turn's final reply.
+		// Do NOT swallow the next turn's assistant-with-tool-calls; doing so
+		// would orphan its tool results.
+		if end < len(msgs) && msgs[end].Role == roleAssistant && len(msgs[end].ToolCalls) == 0 {
 			end++
 		}
 		if end > ceil {
