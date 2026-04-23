@@ -544,6 +544,7 @@ class TestPromptFormatting(unittest.TestCase):
             total_cost=1.25, max_cost=None,
             findings_count=1,
             stall_warnings="",
+            follow_up_hints="",
             max_workers=4,
             user_prompt="Explore example.com for auth bugs.",
         )
@@ -571,6 +572,7 @@ class TestPromptFormatting(unittest.TestCase):
             total_cost=0.2, max_cost=None,
             findings_count=0,
             stall_warnings="",
+            follow_up_hints="",
             max_workers=4,
             user_prompt="Broad exploration of target.example.com",
         )
@@ -597,6 +599,7 @@ class TestPromptFormatting(unittest.TestCase):
             total_cost=0.0, max_cost=None,
             findings_count=0,
             stall_warnings="",
+            follow_up_hints="",
             max_workers=4,
             user_prompt="anything",
         )
@@ -910,7 +913,7 @@ class TestDirectionPhase(unittest.TestCase):
             _FakeManaged(client), None, decisions, [w1, w2], worker_runs={},
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
-            findings_count=0, stall_warnings="", verbose=False,
+            findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
             max_workers=4, user_prompt="test",
         ))
         self.assertEqual(len(decisions.worker_decisions), 2)
@@ -942,7 +945,7 @@ class TestDirectionPhase(unittest.TestCase):
             _FakeManaged(client), None, decisions, [w1], worker_runs={},
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
-            findings_count=0, stall_warnings="", verbose=False,
+            findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
             max_workers=4, user_prompt="test",
         ))
         self.assertEqual(decisions.direction_done_summary, "done")
@@ -963,7 +966,7 @@ class TestDirectionPhase(unittest.TestCase):
             _FakeManaged(client), None, decisions, [w1], worker_runs={},
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
-            findings_count=0, stall_warnings="", verbose=False,
+            findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
             max_workers=4, user_prompt="test",
         ))
         self.assertEqual(decisions.done_summary, "finished")
@@ -986,7 +989,7 @@ class TestDirectionPhase(unittest.TestCase):
             _FakeManaged(client), None, decisions, [w1], worker_runs={},
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
-            findings_count=0, stall_warnings="", verbose=False,
+            findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
             max_workers=4, user_prompt="test",
         ))
         self.assertEqual(
