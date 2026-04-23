@@ -33,7 +33,7 @@ func buildFattyHistory(maxCtx int, big string) *History {
 
 func TestCompact(t *testing.T) {
 	t.Parallel()
-	t.Run("think_strip_then_tool_stub", func(t *testing.T) {
+	t.Run("think_strip_tool_stub", func(t *testing.T) {
 		big := strings.Repeat("x", 6_000)
 		h := buildFattyHistory(8192, big)
 		before := h.EstimateTokens()
@@ -47,7 +47,6 @@ func TestCompact(t *testing.T) {
 	})
 
 	t.Run("drop_turn_fallback", func(t *testing.T) {
-		// Big content without sentence terminator forces turn-drop.
 		big := strings.Repeat("y", 20_000)
 		h := NewHistory(2048)
 		h.Append(Message{Role: "system", Content: "sys"})
@@ -69,7 +68,6 @@ func TestCompact(t *testing.T) {
 	})
 
 	t.Run("fail_fast_over_high_watermark", func(t *testing.T) {
-		// Keep every turn so the protected tail alone exceeds the high mark.
 		big := strings.Repeat("z", 8_000)
 		h := NewHistory(1024)
 		h.Append(Message{Role: "system", Content: "sys"})

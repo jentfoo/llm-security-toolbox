@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -11,26 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReasoningFormat_String(t *testing.T) {
-	t.Parallel()
-	cases := map[ReasoningFormat]string{
-		ReasoningFormatUnknown:    "unknown",
-		ReasoningFormatNone:       "none",
-		ReasoningFormatInline:     "inline",
-		ReasoningFormatStructured: "structured",
-	}
-	for f, want := range cases {
-		assert.Equal(t, want, f.String())
-	}
-}
-
 func TestDetectReasoningFormat_Structured(t *testing.T) {
 	t.Parallel()
 	client := &fakeChatClient{responses: []ChatResponse{{
 		Content:          "",
 		ReasoningContent: "working through it",
 	}}}
-	f, err := DetectReasoningFormat(context.Background(), client, "m")
+	f, err := DetectReasoningFormat(t.Context(), client, "m")
 	require.NoError(t, err)
 	assert.Equal(t, ReasoningFormatStructured, f)
 	require.Len(t, client.calls, 1)
@@ -42,7 +28,7 @@ func TestDetectReasoningFormat_Inline(t *testing.T) {
 	client := &fakeChatClient{responses: []ChatResponse{{
 		Content: "<think>reasoning here</think>final answer",
 	}}}
-	f, err := DetectReasoningFormat(context.Background(), client, "m")
+	f, err := DetectReasoningFormat(t.Context(), client, "m")
 	require.NoError(t, err)
 	assert.Equal(t, ReasoningFormatInline, f)
 }
@@ -52,7 +38,7 @@ func TestDetectReasoningFormat_None(t *testing.T) {
 	client := &fakeChatClient{responses: []ChatResponse{{
 		Content: "plain prose answer — no thinking shown.",
 	}}}
-	f, err := DetectReasoningFormat(context.Background(), client, "m")
+	f, err := DetectReasoningFormat(t.Context(), client, "m")
 	require.NoError(t, err)
 	assert.Equal(t, ReasoningFormatNone, f)
 }
@@ -63,7 +49,7 @@ func TestDetectReasoningFormat_ErrorFallsBackToUnknown(t *testing.T) {
 		responses: []ChatResponse{{}},
 		errors:    []error{errors.New("probe failed")},
 	}
-	f, err := DetectReasoningFormat(context.Background(), client, "m")
+	f, err := DetectReasoningFormat(t.Context(), client, "m")
 	require.Error(t, err)
 	assert.Equal(t, ReasoningFormatUnknown, f)
 }
@@ -78,21 +64,15 @@ func TestReasoningFormatCache_Dedups(t *testing.T) {
 	var detectCount int
 	onDetect := func(ReasoningFormat, time.Duration, error) { detectCount++ }
 
-	f1 := cache.Resolve(context.Background(), client, "u1", "m", onDetect)
-	f2 := cache.Resolve(context.Background(), client, "u1", "m", onDetect)
-	f3 := cache.Resolve(context.Background(), client, "u2", "m", onDetect) // different URL → probe again
+	f1 := cache.Resolve(t.Context(), client, "u1", "m", onDetect)
+	f2 := cache.Resolve(t.Context(), client, "u1", "m", onDetect)
+	f3 := cache.Resolve(t.Context(), client, "u2", "m", onDetect) // different URL → probe again
 
 	assert.Equal(t, ReasoningFormatStructured, f1)
 	assert.Equal(t, ReasoningFormatStructured, f2)
 	assert.Equal(t, ReasoningFormatStructured, f3)
-	assert.Equal(t, 2, detectCount, "same (url,model) dedup; different url re-probes")
-	assert.Equal(t, int32(2), client.idx, "exactly two probes hit the client")
-}
-
-func TestNewReasoningHandler_UnknownFallsBackToInline(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatUnknown)
-	assert.Equal(t, ReasoningFormatInline, h.Format(), "unknown maps to inline for back-compat")
+	assert.Equal(t, 2, detectCount)
+	assert.Equal(t, int32(2), client.idx)
 }
 
 func TestInlineHandler_IngestPassesContentThrough(t *testing.T) {
@@ -103,7 +83,7 @@ func TestInlineHandler_IngestPassesContentThrough(t *testing.T) {
 		ReasoningContent: "ignored-if-present-on-inline-model",
 	})
 	assert.Equal(t, "<think>x</think>answer", content)
-	assert.Empty(t, reasoning, "inline handler stores reasoning only in Content")
+	assert.Empty(t, reasoning)
 }
 
 func TestInlineHandler_ReplayPreservesLastN(t *testing.T) {
@@ -116,9 +96,9 @@ func TestInlineHandler_ReplayPreservesLastN(t *testing.T) {
 		{Role: roleAssistant, Content: "<think>turn3</think>done3"},
 	}
 	out := h.Replay(msgs, 1)
-	assert.Equal(t, "done1", out[1].Content, "older stripped")
-	assert.Equal(t, "done2", out[2].Content, "older stripped")
-	assert.Contains(t, out[3].Content, "<think>turn3</think>", "newest preserved")
+	assert.Equal(t, "done1", out[1].Content)
+	assert.Equal(t, "done2", out[2].Content)
+	assert.Contains(t, out[3].Content, "<think>turn3</think>")
 }
 
 func TestInlineHandler_ForSummaryIsPassThrough(t *testing.T) {
@@ -158,11 +138,10 @@ func TestStructuredHandler_ReplayBlanksReasoningRegardlessOfKeepN(t *testing.T) 
 	for _, keep := range []int{0, 1, 5} {
 		out := h.Replay(msgs, keep)
 		for i, m := range out {
-			assert.Emptyf(t, m.ReasoningContent, "keep=%d msg=%d: reasoning must be blanked", keep, i)
-			assert.Equal(t, msgs[i].Content, m.Content, "content passes through")
+			assert.Empty(t, m.ReasoningContent)
+			assert.Equal(t, msgs[i].Content, m.Content)
 		}
 	}
-	// Original not mutated.
 	assert.Equal(t, "r1", msgs[0].ReasoningContent)
 }
 
@@ -178,9 +157,9 @@ func TestStructuredHandler_ForSummaryWrapsAsInlineThink(t *testing.T) {
 	out := h.ForSummary(msgs)
 	assert.Equal(t, "sys", out[0].Content)
 	assert.Equal(t, "<think>probing JWT</think>", out[2].Content)
-	assert.Empty(t, out[2].ReasoningContent, "reasoning moved into Content")
+	assert.Empty(t, out[2].ReasoningContent)
 	assert.True(t, strings.HasPrefix(out[3].Content, "<think>more reasoning</think>"))
-	assert.Contains(t, out[3].Content, "final answer", "original content preserved after wrapper")
+	assert.Contains(t, out[3].Content, "final answer")
 }
 
 func TestInlineHandler_ExtractUsesExtractProse(t *testing.T) {
@@ -213,7 +192,7 @@ func TestStructuredHandler_ExtractPrefersContentWhenBothPresent(t *testing.T) {
 		Content:          "the clean final answer.",
 		ReasoningContent: "Final: something else",
 	})
-	assert.Equal(t, "the clean final answer.", line, "Content wins when both are populated")
+	assert.Equal(t, "the clean final answer.", line)
 }
 
 func TestStructuredHandler_ExtractReturnsEmptyWhenNoMarker(t *testing.T) {

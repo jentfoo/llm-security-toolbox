@@ -25,7 +25,6 @@ func TestStripThinkBlocks(t *testing.T) {
 		{"two_blocks", "a<think>x</think>b<think>y</think>c", "abc"},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, StripThinkBlocks(tc.in))
 		})
@@ -52,7 +51,6 @@ func TestStripCodeFences(t *testing.T) {
 		{"trailing_fence_exact_only", "prose\n```json", "prose\n```json"}, // opener-style trailer not stripped
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, StripCodeFences(tc.in))
 		})
@@ -72,7 +70,7 @@ func TestFilterThinkBlocks(t *testing.T) {
 		}
 	}
 
-	t.Run("keep_all_preserved_when_n_exceeds_count", func(t *testing.T) {
+	t.Run("keep_all_when_n_exceeds", func(t *testing.T) {
 		msgs := FilterThinkBlocks(build(), 10)
 		for _, m := range msgs {
 			if m.Role == roleAssistant {
@@ -83,7 +81,6 @@ func TestFilterThinkBlocks(t *testing.T) {
 
 	t.Run("keep_two_preserves_last_two", func(t *testing.T) {
 		msgs := FilterThinkBlocks(build(), 2)
-		// turn1 stripped, turn2 and turn3 preserved
 		assert.NotContains(t, msgs[2].Content, "<think>", "oldest assistant should be stripped")
 		assert.Equal(t, "done1", msgs[2].Content)
 		assert.Contains(t, msgs[4].Content, "<think>turn2</think>")
@@ -116,7 +113,7 @@ func TestFilterThinkBlocks(t *testing.T) {
 	t.Run("returns_copy_not_mutation", func(t *testing.T) {
 		orig := build()
 		_ = FilterThinkBlocks(orig, 0)
-		assert.Contains(t, orig[2].Content, "<think>turn1</think>", "input must not be mutated")
+		assert.Contains(t, orig[2].Content, "<think>turn1</think>")
 	})
 }
 
@@ -154,7 +151,7 @@ func TestTruncatedThinkTail(t *testing.T) {
 		long := strings.Repeat("word ", 200)
 		got := TruncatedThinkTail("<think>" + long)
 		assert.Truef(t, strings.HasPrefix(got, "…"), "long tail should be prefixed with ellipsis, got %q", got)
-		assert.Less(t, len(got), len(long), "should be shorter than original")
+		assert.Less(t, len(got), len(long))
 	})
 
 	t.Run("collapses_newlines", func(t *testing.T) {
@@ -164,7 +161,7 @@ func TestTruncatedThinkTail(t *testing.T) {
 		assert.Contains(t, got, "line three")
 	})
 
-	t.Run("prefers_later_sentence_start_in_truncated_tail", func(t *testing.T) {
+	t.Run("prefers_later_sentence_start", func(t *testing.T) {
 		// Build a tail where the middle contains a sentence boundary; result
 		// should start on a clean sentence rather than mid-word.
 		prefix := strings.Repeat("a ", 200)

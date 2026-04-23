@@ -7,8 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// withColors toggles useColor for the duration of the test and restores
-// it afterwards so parallel-free color tests do not leak state.
+// withColors sets useColor for the test and restores it on cleanup.
 func withColors(t *testing.T, on bool) {
 	t.Helper()
 	prev := useColor

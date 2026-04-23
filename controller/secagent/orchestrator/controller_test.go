@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -33,89 +32,88 @@ func TestFindWorker(t *testing.T) {
 	assert.Nil(t, findWorker(ws, 99))
 }
 
-func TestApplyDecision_Stop(t *testing.T) {
+func TestApplyDecision(t *testing.T) {
 	t.Parallel()
-	a := &agent.FakeAgent{}
-	w := &WorkerState{ID: 1, Alive: true, Agent: a}
-	applyDecision(WorkerDecision{Kind: "stop", WorkerID: 1, Reason: "done"}, w, nil)
-	assert.False(t, w.Alive)
-	assert.True(t, a.Closed)
+	t.Run("stop", func(t *testing.T) {
+		a := &agent.FakeAgent{}
+		w := &WorkerState{ID: 1, Alive: true, Agent: a}
+		applyDecision(WorkerDecision{Kind: "stop", WorkerID: 1, Reason: "done"}, w, nil)
+		assert.False(t, w.Alive)
+		assert.True(t, a.Closed)
+	})
+
+	t.Run("continue_clamps_budget", func(t *testing.T) {
+		a := &agent.FakeAgent{}
+		w := &WorkerState{ID: 1, Alive: true, Agent: a}
+		applyDecision(WorkerDecision{
+			Kind: "continue", WorkerID: 1, Instruction: "keep going",
+			AutonomousBudget: 999,
+		}, w, nil)
+		assert.Equal(t, 20, w.AutonomousBudget)
+		assert.Equal(t, "keep going", w.LastInstruction)
+		assert.Equal(t, []string{"keep going"}, a.QueriedInputs)
+	})
+
+	t.Run("expand_defaults_budget", func(t *testing.T) {
+		a := &agent.FakeAgent{}
+		w := &WorkerState{ID: 1, Alive: true, Agent: a}
+		applyDecision(WorkerDecision{Kind: "expand", WorkerID: 1, Instruction: "new scope"}, w, nil)
+		assert.Equal(t, defaultAutonomousBudget, w.AutonomousBudget)
+	})
 }
 
-func TestApplyDecision_ContinueClampsBudget(t *testing.T) {
+func TestRunAllWorkersUntilEscalation(t *testing.T) {
 	t.Parallel()
-	a := &agent.FakeAgent{}
-	w := &WorkerState{ID: 1, Alive: true, Agent: a}
-	applyDecision(WorkerDecision{
-		Kind: "continue", WorkerID: 1, Instruction: "keep going",
-		AutonomousBudget: 999, // clamped
-	}, w, nil)
-	assert.Equal(t, 20, w.AutonomousBudget)
-	assert.Equal(t, "keep going", w.LastInstruction)
-	assert.Equal(t, []string{"keep going"}, a.QueriedInputs)
-}
 
-func TestApplyDecision_ContinueDefaultsBudget(t *testing.T) {
-	t.Parallel()
-	a := &agent.FakeAgent{}
-	w := &WorkerState{ID: 1, Alive: true, Agent: a}
-	applyDecision(WorkerDecision{Kind: "expand", WorkerID: 1, Instruction: "new scope"}, w, nil)
-	assert.Equal(t, defaultAutonomousBudget, w.AutonomousBudget)
-}
+	t.Run("concurrent_isolated", func(t *testing.T) {
+		// Two workers; one yields a candidate on turn 1, the other runs silent
+		// and stays. Neither affects the other's escalation reason.
+		a1 := &agent.FakeAgent{Turns: []agent.TurnSummary{
+			{ToolCalls: []agent.ToolCallRecord{{Name: "report_finding_candidate"}}},
+		}}
+		a2 := &agent.FakeAgent{Turns: []agent.TurnSummary{
+			{AssistantText: "nothing to report"},
+		}}
+		candidates := NewCandidatePool()
+		a1.OnDrain = func(_ int) {
+			candidates.Add(AddInput{WorkerID: 1, Title: "x"})
+		}
 
-func TestRunAllWorkersUntilEscalation_ConcurrentIsolated(t *testing.T) {
-	t.Parallel()
-	// Two workers; one yields a candidate on turn 1, the other runs silent
-	// and stays. Neither affects the other's escalation reason.
-	a1 := &agent.FakeAgent{Turns: []agent.TurnSummary{
-		{ToolCalls: []agent.ToolCallRecord{{Name: "report_finding_candidate"}}},
-	}}
-	a2 := &agent.FakeAgent{Turns: []agent.TurnSummary{
-		{AssistantText: "nothing to report"},
-	}}
-	candidates := NewCandidatePool()
-	// Attribute candidate to worker 1 so the classifier fires.
-	a1.OnDrain = func(_ int) {
-		candidates.Add(AddInput{WorkerID: 1, Title: "x"})
-	}
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: a1, AutonomousBudget: 1, LastInstruction: "go"}
+		w2 := &WorkerState{ID: 2, Alive: true, Agent: a2, AutonomousBudget: 1, LastInstruction: "go"}
+		results := RunAllWorkersUntilEscalation(
+			t.Context(),
+			[]*WorkerState{w1, w2}, candidates, nil,
+		)
 
-	w1 := &WorkerState{ID: 1, Alive: true, Agent: a1, AutonomousBudget: 1, LastInstruction: "go"}
-	w2 := &WorkerState{ID: 2, Alive: true, Agent: a2, AutonomousBudget: 1, LastInstruction: "go"}
-	results := RunAllWorkersUntilEscalation(
-		context.Background(),
-		[]*WorkerState{w1, w2}, candidates, nil,
-	)
+		require.Len(t, results, 2)
+		assert.Equal(t, "candidate", w1.EscalationReason)
+		assert.Equal(t, "silent", w2.EscalationReason)
+	})
 
-	require.Len(t, results, 2)
-	assert.Equal(t, "candidate", w1.EscalationReason)
-	assert.Equal(t, "silent", w2.EscalationReason)
+	t.Run("recovery_path", func(t *testing.T) {
+		// First Drain errors out; the controller re-queues LastInstruction and
+		// runs one more Drain which succeeds, landing the recovered turn in results.
+		a := &agent.FakeAgent{
+			Turns: []agent.TurnSummary{
+				{},
+				{AssistantText: "recovered", FlowIDs: []string{"abc12345"}},
+			},
+			Errors: []error{errors.New("transient"), nil},
+		}
+		w := &WorkerState{ID: 1, Alive: true, Agent: a, AutonomousBudget: 1, LastInstruction: "go"}
+		results := RunAllWorkersUntilEscalation(t.Context(), []*WorkerState{w}, NewCandidatePool(), nil)
+		require.Len(t, results[1], 1)
+		assert.Equal(t, []string{"go"}, a.QueriedInputs)
+	})
 }
 
 func TestBuildClientPoolDefaults(t *testing.T) {
 	t.Parallel()
 	pool := buildClientPool("http://localhost:9999/v1", "", 4)
 	assert.Equal(t, 4, pool.Size())
-	// buildClientPool with n<1 clamps to 1.
 	pool2 := buildClientPool("", "", 0)
 	assert.Equal(t, 1, pool2.Size())
-}
-
-func TestRunAllWorkersUntilEscalation_RecoveryPath(t *testing.T) {
-	t.Parallel()
-	// First Drain errors out; the controller re-queues LastInstruction and
-	// runs one more Drain which succeeds, landing the recovered turn in results.
-	a := &agent.FakeAgent{
-		Turns: []agent.TurnSummary{
-			{},
-			{AssistantText: "recovered", FlowIDs: []string{"abc12345"}},
-		},
-		Errors: []error{errors.New("transient"), nil},
-	}
-	candidates := NewCandidatePool()
-	w := &WorkerState{ID: 1, Alive: true, Agent: a, AutonomousBudget: 1, LastInstruction: "go"}
-	results := RunAllWorkersUntilEscalation(context.Background(), []*WorkerState{w}, candidates, nil)
-	require.Len(t, results[1], 1, "recovery added one successful turn")
-	assert.Equal(t, []string{"go"}, a.QueriedInputs, "recovery re-queues LastInstruction")
 }
 
 func TestAutoSummary(t *testing.T) {
@@ -132,28 +130,40 @@ func TestWorkerStateClose(t *testing.T) {
 	w := &WorkerState{ID: 1, Agent: a}
 	w.Close()
 	assert.True(t, a.Closed)
-	// Close is safe on nil WorkerState and nil fields.
-	(*WorkerState)(nil).Close()
-	(&WorkerState{}).Close()
+	assert.NotPanics(t, func() {
+		(*WorkerState)(nil).Close()
+		(&WorkerState{}).Close()
+	})
 }
 
-func TestRunWorkerUntilEscalation_BudgetExhausted(t *testing.T) {
+func TestRunWorkerUntilEscalationBudget(t *testing.T) {
 	t.Parallel()
-	a := &agent.FakeAgent{Turns: []agent.TurnSummary{
-		{ToolCalls: []agent.ToolCallRecord{{Name: "x"}}},
-		{ToolCalls: []agent.ToolCallRecord{{Name: "y"}}},
-	}}
-	w := &WorkerState{ID: 1, Alive: true, Agent: a, AutonomousBudget: 2, LastInstruction: "go"}
-	runs, err := RunWorkerUntilEscalation(context.Background(), w, NewCandidatePool(), nil)
-	require.NoError(t, err)
-	assert.Len(t, runs, 2)
-	assert.Equal(t, "budget", w.EscalationReason)
-	// Second turn (attempt>0) injects the continue prompt.
-	require.Len(t, a.QueriedInputs, 1)
-	assert.Contains(t, a.QueriedInputs[0], "Continue")
+
+	t.Run("exhausted", func(t *testing.T) {
+		a := &agent.FakeAgent{Turns: []agent.TurnSummary{
+			{ToolCalls: []agent.ToolCallRecord{{Name: "x"}}},
+			{ToolCalls: []agent.ToolCallRecord{{Name: "y"}}},
+		}}
+		w := &WorkerState{ID: 1, Alive: true, Agent: a, AutonomousBudget: 2, LastInstruction: "go"}
+		runs, err := RunWorkerUntilEscalation(t.Context(), w, NewCandidatePool(), nil)
+		require.NoError(t, err)
+		assert.Len(t, runs, 2)
+		assert.Equal(t, "budget", w.EscalationReason)
+		// second turn (attempt>0) injects the continue prompt
+		require.Len(t, a.QueriedInputs, 1)
+		assert.Contains(t, a.QueriedInputs[0], "Continue")
+	})
+
+	t.Run("clamps_zero_to_one", func(t *testing.T) {
+		a := &agent.FakeAgent{Turns: []agent.TurnSummary{{ToolCalls: []agent.ToolCallRecord{{Name: "x"}}}}}
+		w := &WorkerState{ID: 1, Alive: true, Agent: a, AutonomousBudget: 0}
+		runs, err := RunWorkerUntilEscalation(t.Context(), w, NewCandidatePool(), nil)
+		require.NoError(t, err)
+		assert.Len(t, runs, 1)
+	})
 }
 
-func TestOpenAIFactory_ConstructsAgentsWithMalformedWired(t *testing.T) {
+func TestOpenAIFactory(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{
 		WorkerModel: "worker-m", OrchestratorModel: "orch-m",
@@ -178,17 +188,6 @@ func TestOpenAIFactory_ConstructsAgentsWithMalformedWired(t *testing.T) {
 
 	require.NoError(t, f.Close())
 
-	// malformedCallback returns nil when no counter is configured.
 	f.Malformed = nil
 	assert.Nil(t, f.malformedCallback("m"))
-}
-
-func TestRunWorkerUntilEscalation_BudgetClamps(t *testing.T) {
-	t.Parallel()
-	a := &agent.FakeAgent{Turns: []agent.TurnSummary{{ToolCalls: []agent.ToolCallRecord{{Name: "x"}}}}}
-	w := &WorkerState{ID: 1, Alive: true, Agent: a, AutonomousBudget: 0}
-	// Budget<1 clamps to 1 so only one turn drains.
-	runs, err := RunWorkerUntilEscalation(context.Background(), w, NewCandidatePool(), nil)
-	require.NoError(t, err)
-	assert.Len(t, runs, 1)
 }

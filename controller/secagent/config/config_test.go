@@ -24,7 +24,6 @@ func TestEffectiveKeepThinkTurns(t *testing.T) {
 		{"negative_treated_as_auto", -1, 32_768, 4},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Config{KeepThinkTurns: tc.configured}
 			assert.Equal(t, tc.want, c.EffectiveKeepThinkTurns(tc.maxContext))

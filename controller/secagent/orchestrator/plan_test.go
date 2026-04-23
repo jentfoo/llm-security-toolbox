@@ -32,7 +32,7 @@ func TestApplyPlanDiff(t *testing.T) {
 			{ID: 1, Agent: &agent.FakeAgent{}, Alive: true},
 		}
 		var built int
-		applyPlanDiff(context.Background(),
+		applyPlanDiff(t.Context(),
 			[]PlanEntry{{WorkerID: 1, Assignment: "new plan"}, {WorkerID: 2, Assignment: "second"}},
 			&workers, stubSpawn(&built), 5, nil,
 		)
@@ -48,7 +48,7 @@ func TestApplyPlanDiff(t *testing.T) {
 			{ID: 2, Agent: &agent.FakeAgent{}, Alive: true},
 		}
 		var built int
-		applyPlanDiff(context.Background(),
+		applyPlanDiff(t.Context(),
 			[]PlanEntry{
 				{WorkerID: 3, Assignment: "x"},
 				{WorkerID: 4, Assignment: "y"},

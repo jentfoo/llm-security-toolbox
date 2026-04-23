@@ -82,7 +82,7 @@ func TestNarrator_DisabledWhenIntervalZero(t *testing.T) {
 		Model:    "m",
 		Pool:     poolOf(&scriptedClient{response: "ok"}),
 	}, nil)
-	assert.Nil(t, n, "zero interval must return nil so callers no-op")
+	assert.Nil(t, n)
 }
 
 func TestNarrator_RecordAndTriggerEmitSummary(t *testing.T) {
@@ -159,15 +159,13 @@ func TestNarrator_FailureDoesNotPanic(t *testing.T) {
 	_ = l.Close()
 
 	logged := mustReadFile(t, path)
-	assert.Contains(t, logged, `"msg":"orchestrator: error"`, "failure logs to file")
+	assert.Contains(t, logged, `"msg":"orchestrator: error"`)
 	assert.Contains(t, logged, "boom")
 }
 
 func TestNarrator_CloseDoesNotFlush(t *testing.T) {
 	t.Parallel()
-	// Close is a shutdown signal — it must NOT fire a final summary. The
-	// operator pressed ctrl+c to quit, not to wait another 10-15s for one
-	// more summary. Buffer contents at Close are dropped.
+	// Close must not fire a final summary; buffer contents at Close are dropped
 	client := &scriptedClient{response: "would-be final narration"}
 	l, _, buf := newCapturedLogger(t)
 	n := NewNarrator(NarratorConfig{
@@ -187,10 +185,8 @@ func TestNarrator_CloseDoesNotFlush(t *testing.T) {
 
 func TestNarrator_ParentCtxCancelAbortsInFlightSummary(t *testing.T) {
 	t.Parallel()
-	// Summary in flight when the parent context cancels (e.g. ctrl+c on
-	// the controller's Run ctx) must receive the cancellation so shutdown
-	// doesn't wait up to CallBudget for the HTTP call to finish naturally.
-	parentCtx, parentCancel := context.WithCancel(context.Background())
+	// in-flight summary receives cancel transitively so shutdown doesn't wait on CallBudget
+	parentCtx, parentCancel := context.WithCancel(t.Context())
 	defer parentCancel()
 	gate := make(chan struct{})
 	client := &scriptedClient{response: "narrated", gate: gate}
@@ -248,11 +244,7 @@ func TestNarrator_TickRespectsInterval(t *testing.T) {
 
 func TestNarrator_SuppressedUntilSubstantiveEvent(t *testing.T) {
 	t.Parallel()
-	// Startup burst — phase transitions, iteration starts, worker seeded —
-	// all buffer normally but the narrator must NOT fire; acquiring a pool
-	// slot before any real work has happened would delay the agent's first
-	// turn. Once a substantive event arrives (worker/turn, tool/done,
-	// finding/written, decision/*) the next trigger is honored.
+	// narrator suppressed until a substantive event (worker/turn, tool/done, finding/written, decision/*) arms it
 	client := &scriptedClient{response: "narration fired"}
 	l, _, buf := newCapturedLogger(t)
 	n := NewNarrator(NarratorConfig{
@@ -266,10 +258,13 @@ func TestNarrator_SuppressedUntilSubstantiveEvent(t *testing.T) {
 	n.Record("controller", "iteration start", map[string]any{"iter": 1})
 	n.Record("worker", "seeded", map[string]any{"id": 1})
 	n.TriggerNow()
-	// Give any (incorrect) async firing a chance to run.
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, int32(0), atomic.LoadInt32(&client.calls),
-		"narrator must not fire until a substantive event has been recorded")
+	// TriggerNow short-circuits synchronously when unarmed — no goroutine
+	// is spawned, so the state check + call counter is race-free.
+	n.mu.Lock()
+	armed := n.armed
+	n.mu.Unlock()
+	assert.False(t, armed)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&client.calls))
 
 	// Now simulate a real worker turn — arms the narrator.
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
@@ -277,16 +272,13 @@ func TestNarrator_SuppressedUntilSubstantiveEvent(t *testing.T) {
 	n.Close()
 	_ = l.Close()
 
-	assert.Equal(t, int32(1), atomic.LoadInt32(&client.calls), "first fire lands after arming")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&client.calls))
 	assert.Contains(t, buf.String(), "narration fired")
 }
 
 func TestNarrator_AgentProviderFiresPerAgent(t *testing.T) {
 	t.Parallel()
-	// One scripted client backs both the orchestrator event-summary and
-	// every per-agent SummarizeStatusVia call. Narrator shares the same
-	// ClientPool as the agents — matching the runtime configuration — so
-	// summary traffic counts against the configured concurrency budget.
+	// narrator shares the agents' ClientPool so summary traffic counts against concurrency budget
 	client := &scriptedClient{response: "current focus"}
 	l, path, buf := newCapturedLogger(t)
 
@@ -325,17 +317,13 @@ func TestNarrator_AgentProviderFiresPerAgent(t *testing.T) {
 	jsonLog := mustReadFile(t, path)
 	assert.Contains(t, jsonLog, `"msg":"agent (worker-1): current focus"`)
 	assert.Contains(t, jsonLog, `"msg":"agent (worker-2): current focus"`)
-	assert.NotContains(t, jsonLog, `"role":`, "role field must not be emitted for narrate events")
-	assert.NotContains(t, jsonLog, `"agent":`, "agent field must not be emitted for narrate events")
+	assert.NotContains(t, jsonLog, `"role":`)
+	assert.NotContains(t, jsonLog, `"agent":`)
 }
 
 func TestNarrator_PerAgentSummaryUsesSummaryModel(t *testing.T) {
 	t.Parallel()
-	// Per-agent status summaries must go through the narrator's configured
-	// summary model, NOT the agent's own model. Otherwise an abliterated
-	// worker model receives reasoning_effort=none and LM Studio logs
-	// warnings; consolidating on the summary model eliminates that and
-	// keeps summary behavior consistent across agents.
+	// per-agent summaries go through the narrator's summary model, not the agent's own model
 	client := &scriptedClient{response: "status"}
 	l, _, _ := newCapturedLogger(t)
 
@@ -364,19 +352,13 @@ func TestNarrator_PerAgentSummaryUsesSummaryModel(t *testing.T) {
 	defer client.mu.Unlock()
 	require.Len(t, client.requests, 2, "orchestrator event summary + 1 per-agent summary")
 	perAgentReq := client.requests[1]
-	assert.Equal(t, "summary-model", perAgentReq.Model,
-		"per-agent summary must target the summary model, not the agent's own model")
-	assert.Equal(t, "none", perAgentReq.ReasoningEffort,
-		"per-agent summary must still carry reasoning_effort=none")
+	assert.Equal(t, "summary-model", perAgentReq.Model)
+	assert.Equal(t, "none", perAgentReq.ReasoningEffort)
 }
 
 func TestNarrator_EmptyResponseLogsEmptyAndSkipsStderr(t *testing.T) {
 	t.Parallel()
-	// Entire response is a closed think block with nothing after; after
-	// stripping, the line is "" and there is no unclosed-think fallback.
-	// The JSON file must capture the "empty" event (so operators can
-	// diagnose a misbehaving summary model) but stderr must stay clean
-	// so these events don't drown out real activity.
+	// empty-after-strip: JSON file captures "empty" for diagnostics; stderr stays clean
 	client := &scriptedClient{response: "<think>plan</think>"}
 	l, path, buf := newCapturedLogger(t)
 	n := NewNarrator(NarratorConfig{
@@ -397,9 +379,7 @@ func TestNarrator_EmptyResponseLogsEmptyAndSkipsStderr(t *testing.T) {
 
 func TestNarrator_StripsCodeFenceFromResponse(t *testing.T) {
 	t.Parallel()
-	// Reasoning model wraps its answer in a fenced code block — naively
-	// surfacing firstLine would emit just "```" as the narrated sentence.
-	// The fence stripper must peel both ends so actual prose reaches stderr.
+	// fence stripper must peel both ends so prose (not "```") reaches stderr
 	client := &scriptedClient{response: "```\nworker is scanning OAuth endpoints\n```"}
 	l, _, buf := newCapturedLogger(t)
 	n := NewNarrator(NarratorConfig{
@@ -414,17 +394,12 @@ func TestNarrator_StripsCodeFenceFromResponse(t *testing.T) {
 
 	out := buf.String()
 	assert.Contains(t, out, "orchestrator: worker is scanning OAuth endpoints")
-	assert.NotContains(t, out, "narrate] ```", "bare fence must not be surfaced as the summary line")
+	assert.NotContains(t, out, "narrate] ```")
 }
 
 func TestNarrator_SummaryCallsDisableReasoning(t *testing.T) {
 	t.Parallel()
-	// Summary traffic (orchestrator event-summary + per-agent via
-	// SummarizeStatusVia) must forward reasoning_effort=none so backends
-	// that honor it (LM Studio-hosted qwen3, o-series) skip reasoning;
-	// backends that don't ignore silently. Worker/verifier/director drains
-	// remain unchanged — covered separately in
-	// TestOpenAIAgent_DrainDoesNotSetReasoningEffortOrTemplateKwargs.
+	// summary traffic forwards reasoning_effort=none for backends that honor it
 	client := &scriptedClient{response: "all good"}
 	l, _, _ := newCapturedLogger(t)
 	n := NewNarrator(NarratorConfig{
@@ -442,88 +417,83 @@ func TestNarrator_SummaryCallsDisableReasoning(t *testing.T) {
 	defer client.mu.Unlock()
 	require.Len(t, client.requests, 1)
 	req := client.requests[0]
-	assert.Equal(t, "none", req.ReasoningEffort, "orchestrator summary must disable reasoning")
+	assert.Equal(t, "none", req.ReasoningEffort)
 }
 
-func TestNarrator_StructuredFinalMarkerSurfacesAsCleanLine(t *testing.T) {
+func TestNarrator_ReasoningExtraction(t *testing.T) {
 	t.Parallel()
-	// Real-world case: summary model emits meta-chatter inside reasoning
-	// and ends with "Final: <actual summary>". Handler.Extract should
-	// salvage the sentence after the marker so the narrator logs a clean
-	// "orchestrator: <sentence>" — NOT the "…thinking:" fallback.
-	structured := &structuredRespClient{reasoning: "Thinking... Matches constraints. Output matches.✅ Final: worker-1 scanned the admin OAuth client registration endpoint."}
-	l, _, buf := newCapturedLogger(t)
-	n := NewNarrator(NarratorConfig{
-		Interval:   time.Millisecond,
-		Model:      "m",
-		Pool:       poolOf(structured),
-		CallBudget: time.Second,
-		Summarizer: agent.NewReasoningHandler(agent.ReasoningFormatStructured),
-	}, l)
-	require.NotNil(t, n)
+	cases := []struct {
+		name           string
+		pool           func() *agent.ClientPool
+		summarizer     agent.ReasoningHandler
+		wantContains   []string
+		wantNoContains []string
+	}{
+		{
+			// "Final: <sentence>" inside reasoning: Extract salvages it, narrator logs cleanly
+			name: "final_marker",
+			pool: func() *agent.ClientPool {
+				return poolOf(&structuredRespClient{reasoning: "Thinking... Matches constraints. Output matches.✅ Final: worker-1 scanned the admin OAuth client registration endpoint."})
+			},
+			summarizer: agent.NewReasoningHandler(agent.ReasoningFormatStructured),
+			wantContains: []string{
+				"orchestrator: worker-1 scanned the admin OAuth client registration endpoint.",
+			},
+			// marker-extracted output must not wear the thinking prefix
+			wantNoContains: []string{"…thinking:"},
+		},
+		{
+			// structured reasoning_content (no <think> tags): Summarizer handler surfaces a tail instead of "empty"
+			name: "reasoning_tail",
+			pool: func() *agent.ClientPool {
+				return poolOf(&structuredRespClient{reasoning: "probing the admin OAuth client registration flow"})
+			},
+			summarizer: agent.NewReasoningHandler(agent.ReasoningFormatStructured),
+			wantContains: []string{
+				"orchestrator: …thinking:",
+				"admin OAuth client registration flow",
+			},
+			wantNoContains: []string{"empty"},
+		},
+		{
+			// truncated mid-think: narrator surfaces the think tail instead of "empty"
+			name: "unclosed_think_tail",
+			pool: func() *agent.ClientPool {
+				return poolOf(&scriptedClient{response: "<think>I am about to test the admin client registration endpoint for mass assignment"})
+			},
+			wantContains: []string{
+				"orchestrator: …thinking:",
+				"admin client registration endpoint for mass assignment",
+			},
+			wantNoContains: []string{"empty"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			l, _, buf := newCapturedLogger(t)
+			n := NewNarrator(NarratorConfig{
+				Interval:   time.Millisecond,
+				Model:      "m",
+				Pool:       c.pool(),
+				CallBudget: time.Second,
+				Summarizer: c.summarizer,
+			}, l)
+			require.NotNil(t, n)
 
-	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
-	n.TriggerNow()
-	n.Close()
-	_ = l.Close()
+			n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+			n.TriggerNow()
+			n.Close()
+			_ = l.Close()
 
-	out := buf.String()
-	assert.Contains(t, out, "orchestrator: worker-1 scanned the admin OAuth client registration endpoint.")
-	assert.NotContains(t, out, "…thinking:", "marker-extracted output must not wear the thinking prefix")
-}
-
-func TestNarrator_StructuredReasoningTailSurfaces(t *testing.T) {
-	t.Parallel()
-	// When the summary model emits reasoning via the structured
-	// reasoning_content field (no <think> tags in content), the narrator
-	// must still surface a thought fragment via the Summarizer handler
-	// rather than logging `empty`.
-	client := &scriptedClient{}
-	client.response = "" // will not be hit on the response path; use onCall below
-	// scriptedClient only populates Content, so stub by swapping for a
-	// client that returns the structured field directly.
-	structured := &structuredRespClient{reasoning: "probing the admin OAuth client registration flow"}
-	l, _, buf := newCapturedLogger(t)
-	n := NewNarrator(NarratorConfig{
-		Interval: time.Millisecond, Model: "m",
-		Pool:       poolOf(structured),
-		CallBudget: time.Second,
-		Summarizer: agent.NewReasoningHandler(agent.ReasoningFormatStructured),
-	}, l)
-	require.NotNil(t, n)
-
-	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
-	n.TriggerNow()
-	n.Close()
-	_ = l.Close()
-
-	out := buf.String()
-	assert.Contains(t, out, "orchestrator: …thinking:")
-	assert.Contains(t, out, "admin OAuth client registration flow")
-	assert.NotContains(t, out, "empty")
-}
-
-func TestNarrator_UnclosedThinkFallsBackToThinkingTail(t *testing.T) {
-	t.Parallel()
-	// Reasoning model was truncated mid-think (no closing tag). Instead of
-	// logging "empty", narrator surfaces the tail of the thought as a
-	// best-effort signal so the operator sees what the model was working on.
-	client := &scriptedClient{response: "<think>I am about to test the admin client registration endpoint for mass assignment"}
-	l, _, buf := newCapturedLogger(t)
-	n := NewNarrator(NarratorConfig{
-		Interval: time.Millisecond, Model: "m", Pool: poolOf(client), CallBudget: time.Second,
-	}, l)
-	require.NotNil(t, n)
-
-	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
-	n.TriggerNow()
-	n.Close()
-	_ = l.Close()
-
-	out := buf.String()
-	assert.Contains(t, out, "orchestrator: …thinking:")
-	assert.Contains(t, out, "admin client registration endpoint for mass assignment")
-	assert.NotContains(t, out, "empty", "fallback path should not log the empty event")
+			out := buf.String()
+			for _, want := range c.wantContains {
+				assert.Contains(t, out, want)
+			}
+			for _, bad := range c.wantNoContains {
+				assert.NotContains(t, out, bad)
+			}
+		})
+	}
 }
 
 func TestNarrator_NoActiveAgentsKeepsOrchestratorOnly(t *testing.T) {
@@ -547,28 +517,27 @@ func TestNarrator_NoActiveAgentsKeepsOrchestratorOnly(t *testing.T) {
 
 func TestShouldNarrate(t *testing.T) {
 	t.Parallel()
-	cases := map[string]bool{
-		"controller|phase":     true,
-		"decision|expand":      true,
-		"finding|written":      true,
-		"tool|start":           true,
-		"tool|done":            true,
-		"tool|other":           false,
-		"agent|response":       true,
-		"agent|request":        false,
-		"agent|malformed-args": false,
-		"worker|turn":          true,
-		"server|models":        false,
+	cases := []struct {
+		name string
+		tag  string
+		msg  string
+		want bool
+	}{
+		{"controller_phase", "controller", "phase", true},
+		{"decision_expand", "decision", "expand", true},
+		{"finding_written", "finding", "written", true},
+		{"tool_start", "tool", "start", true},
+		{"tool_done", "tool", "done", true},
+		{"tool_other", "tool", "other", false},
+		{"agent_response", "agent", "response", true},
+		{"agent_request", "agent", "request", false},
+		{"agent_malformed_args", "agent", "malformed-args", false},
+		{"worker_turn", "worker", "turn", true},
+		{"server_models", "server", "models", false},
 	}
-	for key, want := range cases {
-		t.Run(key, func(t *testing.T) {
-			i := 0
-			for ; i < len(key); i++ {
-				if key[i] == '|' {
-					break
-				}
-			}
-			assert.Equal(t, want, shouldNarrate(key[:i], key[i+1:]))
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, shouldNarrate(c.tag, c.msg))
 		})
 	}
 }

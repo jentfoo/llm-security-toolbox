@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCandidatePool(t *testing.T) {
@@ -18,6 +19,6 @@ func TestCandidatePool(t *testing.T) {
 	assert.Equal(t, []string{"c002"}, p.IDsSinceForWorker(before, 2))
 	p.Mark("c001", "verified")
 	pending := p.Pending()
-	assert.Len(t, pending, 1)
+	require.Len(t, pending, 1)
 	assert.Equal(t, "c002", pending[0].CandidateID)
 }

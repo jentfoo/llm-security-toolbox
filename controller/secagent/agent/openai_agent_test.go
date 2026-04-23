@@ -15,8 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeChatClient returns scripted ChatResponses. It captures every outbound
-// request so tests can assert message ordering and tool dispatch shape.
+// scripted ChatClient; captures outbound requests for assertion.
 type fakeChatClient struct {
 	responses []ChatResponse
 	errors    []error
@@ -53,13 +52,12 @@ func TestOpenAIAgent_QueryAppendsWithoutSending(t *testing.T) {
 	})
 	a.Query("first")
 	a.Query("second")
-	assert.Empty(t, client.calls, "Query must not send")
+	assert.Empty(t, client.calls)
 
 	_, err := a.Drain(t.Context())
 	require.NoError(t, err)
 	require.Len(t, client.calls, 1)
 	msgs := client.calls[0].Messages
-	// Expect: system + user(first) + user(second)
 	require.GreaterOrEqual(t, len(msgs), 3)
 	assert.Equal(t, "system", msgs[0].Role)
 	assert.Equal(t, "user", msgs[1].Role)
@@ -100,8 +98,7 @@ func TestOpenAIAgent_ToolDispatchLoop(t *testing.T) {
 	require.Len(t, sum.ToolCalls, 1)
 	assert.Equal(t, "echo", sum.ToolCalls[0].Name)
 	assert.False(t, sum.ToolCalls[0].IsError)
-	assert.Len(t, client.calls, 2, "second send after tool result")
-	// The second send must include the tool result.
+	assert.Len(t, client.calls, 2)
 	secondMsgs := client.calls[1].Messages
 	var sawTool bool
 	for _, m := range secondMsgs {
@@ -110,14 +107,11 @@ func TestOpenAIAgent_ToolDispatchLoop(t *testing.T) {
 			assert.Contains(t, m.Content, "echoed")
 		}
 	}
-	assert.True(t, sawTool, "tool result must be appended before re-send")
+	assert.True(t, sawTool)
 }
 
 func TestOpenAIAgent_MalformedArgsReportsSchemaAndCapsRepairs(t *testing.T) {
 	t.Parallel()
-	// First assistant response emits 3 bad tool calls; with cap=2, only 2
-	// get a repair "tool" message before the cap exhausts. The second send
-	// responds final.
 	bad := []ToolCall{
 		{ID: "a", Type: "function", Function: ToolFunction{Name: "echo", Arguments: "not json"}},
 		{ID: "b", Type: "function", Function: ToolFunction{Name: "echo", Arguments: "still not"}},
@@ -141,16 +135,13 @@ func TestOpenAIAgent_MalformedArgsReportsSchemaAndCapsRepairs(t *testing.T) {
 	a.Query("trigger")
 	sum, err := a.Drain(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, int32(3), malformed, "each malformed call fires the callback")
+	assert.Equal(t, int32(3), malformed)
 
-	// All three tool calls produced records; every one is marked IsError.
 	require.Len(t, sum.ToolCalls, 3)
 	for _, rec := range sum.ToolCalls {
 		assert.True(t, rec.IsError)
 	}
 
-	// Second send history includes three tool-error messages whose first
-	// two embed the schema JSON.
 	second := client.calls[1].Messages
 	var errMsgs []string
 	for _, m := range second {
@@ -160,7 +151,7 @@ func TestOpenAIAgent_MalformedArgsReportsSchemaAndCapsRepairs(t *testing.T) {
 	}
 	require.Len(t, errMsgs, 3)
 	assert.Contains(t, errMsgs[0], "ERROR: your arguments did not parse")
-	assert.Contains(t, errMsgs[0], `"properties"`, "schema embedded in error")
+	assert.Contains(t, errMsgs[0], `"properties"`)
 }
 
 func TestOpenAIAgent_PerTurnTimeoutSilent(t *testing.T) {
@@ -202,7 +193,7 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 	sum, err := a.Drain(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, sum.EscalationReason)
-	assert.Equal(t, 3, int(flaky.idx), "two retries + final success")
+	assert.Equal(t, 3, int(flaky.idx))
 }
 
 func TestOpenAIAgent_SendWithRetryExhausted(t *testing.T) {
@@ -223,9 +214,8 @@ func TestOpenAIAgent_SendWithRetryExhausted(t *testing.T) {
 
 func TestOpenAIAgent_ParallelToolsPreserveOrder(t *testing.T) {
 	t.Parallel()
-	// Five tool calls whose handlers finish in reverse order. Result history +
-	// summary.ToolCalls MUST be in the original tool_calls order regardless.
-	calls := make([]ToolCall, 5)
+	const n = 5
+	calls := make([]ToolCall, n)
 	for i := range calls {
 		calls[i] = ToolCall{
 			ID:       fmt.Sprintf("c%d", i),
@@ -236,8 +226,16 @@ func TestOpenAIAgent_ParallelToolsPreserveOrder(t *testing.T) {
 	client := &fakeChatClient{
 		responses: []ChatResponse{{ToolCalls: calls}, {Content: "done"}},
 	}
+	// gates[i] releases handler i (closed in reverse); started[i] fires when
+	// handler i begins, so we can wait until all n are in-flight before releasing.
+	gates := make([]chan struct{}, n)
+	started := make([]chan struct{}, n)
+	for i := range gates {
+		gates[i] = make(chan struct{})
+		started[i] = make(chan struct{})
+	}
 	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", Pool: newPoolWith(client), MaxParallelTools: 5,
+		Model: "m", Pool: newPoolWith(client), MaxParallelTools: n,
 	})
 	a.SetTools([]ToolDef{{
 		Name:   "probe",
@@ -247,20 +245,35 @@ func TestOpenAIAgent_ParallelToolsPreserveOrder(t *testing.T) {
 				N int `json:"n"`
 			}
 			_ = json.Unmarshal(args, &p)
-			// later indices finish faster — reverse handler order
-			time.Sleep(time.Duration(5-p.N) * 5 * time.Millisecond)
+			close(started[p.N])
+			<-gates[p.N]
 			return ToolResult{Text: fmt.Sprintf("n=%d", p.N)}
 		},
 	}})
 	a.Query("go")
-	sum, err := a.Drain(t.Context())
-	require.NoError(t, err)
-	require.Len(t, sum.ToolCalls, 5)
-	for i, rec := range sum.ToolCalls {
-		assert.Contains(t, rec.ResultSummary, fmt.Sprintf("n=%d", i),
-			"tool result #%d must be in original tool_calls order", i)
+	done := make(chan struct {
+		sum TurnSummary
+		err error
+	}, 1)
+	go func() {
+		sum, err := a.Drain(t.Context())
+		done <- struct {
+			sum TurnSummary
+			err error
+		}{sum, err}
+	}()
+	for i := range started {
+		<-started[i]
 	}
-	// Second send includes tool messages in the same order.
+	for i := n - 1; i >= 0; i-- {
+		close(gates[i])
+	}
+	result := <-done
+	require.NoError(t, result.err)
+	require.Len(t, result.sum.ToolCalls, n)
+	for i, rec := range result.sum.ToolCalls {
+		assert.Contains(t, rec.ResultSummary, fmt.Sprintf("n=%d", i))
+	}
 	second := client.calls[1].Messages
 	var toolOrder []string
 	for _, m := range second {
@@ -315,7 +328,7 @@ func TestOpenAIAgent_PerToolTimeout(t *testing.T) {
 	assert.True(t, sum.ToolCalls[0].IsError)
 	assert.Contains(t, sum.ToolCalls[0].ResultSummary, "timed out")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&ended))
-	assert.True(t, endTimedOut, "OnToolEnd must flag timedOut=true")
+	assert.True(t, endTimedOut)
 	assert.True(t, endIsErr)
 }
 
@@ -400,7 +413,7 @@ func TestOpenAIAgent_OnToolEndErrTextPopulated(t *testing.T) {
 	require.NoError(t, err)
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, "<clean>", seen["ok"], "non-error results must pass empty errText")
+	assert.Equal(t, "<clean>", seen["ok"])
 	assert.Contains(t, seen["reject"], "Rejected: boom because of a reason")
 }
 
@@ -446,14 +459,12 @@ func TestOpenAIAgent_RequestLifecycleCallbacksOnRetry(t *testing.T) {
 	a.Query("go")
 	_, err := a.Drain(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), atomic.LoadInt32(&starts), "start fires per attempt")
-	assert.Equal(t, int32(2), atomic.LoadInt32(&ends), "end fires per attempt, including failures")
+	assert.Equal(t, int32(2), atomic.LoadInt32(&starts))
+	assert.Equal(t, int32(2), atomic.LoadInt32(&ends))
 }
 
 func TestSynthesizePendingToolStubs(t *testing.T) {
 	t.Parallel()
-	// Build history ending in an assistant.tool_calls with 3 calls but only
-	// 1 paired tool result. synthesizePendingToolStubs must fill the other 2.
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(&fakeChatClient{})})
 	a.history.Append(Message{Role: roleUser, Content: "go"})
 	a.history.Append(Message{
@@ -482,11 +493,6 @@ func TestSynthesizePendingToolStubs(t *testing.T) {
 
 func TestOpenAIAgent_DrainStoresRawThink_SendStripsOlderThanKeepN(t *testing.T) {
 	t.Parallel()
-	// Two assistant responses, both containing think blocks. With
-	// KeepThinkTurns=1, the first send after both responses must have the
-	// older assistant's think stripped while the most recent one retains it.
-	// History itself must store raw content either way so summaries and
-	// inspection can recover the reasoning.
 	client := &fakeChatClient{responses: []ChatResponse{
 		{Content: "<think>plan A</think>result A"},
 		{Content: "<think>plan B</think>result B"},
@@ -505,8 +511,6 @@ func TestOpenAIAgent_DrainStoresRawThink_SendStripsOlderThanKeepN(t *testing.T) 
 	_, err = a.Drain(t.Context())
 	require.NoError(t, err)
 
-	// History snapshot: raw content is retained so downstream consumers
-	// (e.g. the narrator) can pick it up.
 	snap := a.history.Snapshot()
 	var assistants []Message
 	for _, m := range snap {
@@ -515,13 +519,9 @@ func TestOpenAIAgent_DrainStoresRawThink_SendStripsOlderThanKeepN(t *testing.T) 
 		}
 	}
 	require.Len(t, assistants, 3)
-	assert.Contains(t, assistants[0].Content, "<think>plan A</think>",
-		"history must retain raw think for summary use")
+	assert.Contains(t, assistants[0].Content, "<think>plan A</think>")
 	assert.Contains(t, assistants[1].Content, "<think>plan B</think>")
 
-	// The third outbound send (for the "third" user turn) replayed messages
-	// through buildChatMessages, which applies FilterThinkBlocks. With
-	// KeepThinkTurns=1, only the most recent assistant retains think.
 	sent := client.calls[2].Messages
 	var sentAssistants []ChatMessage
 	for _, m := range sent {
@@ -530,22 +530,15 @@ func TestOpenAIAgent_DrainStoresRawThink_SendStripsOlderThanKeepN(t *testing.T) 
 		}
 	}
 	require.GreaterOrEqual(t, len(sentAssistants), 2)
-	// Older ones stripped
 	for i := 0; i < len(sentAssistants)-1; i++ {
-		assert.NotContains(t, sentAssistants[i].Content, "<think>",
-			"older assistant %d should have think stripped on send", i)
+		assert.NotContains(t, sentAssistants[i].Content, "<think>")
 	}
-	// Newest preserved
 	last := sentAssistants[len(sentAssistants)-1]
-	assert.Contains(t, last.Content, "<think>plan B</think>",
-		"most recent assistant must retain think (KeepThinkTurns=1)")
+	assert.Contains(t, last.Content, "<think>plan B</think>")
 }
 
 func TestOpenAIAgent_DrainStoresStructuredReasoning(t *testing.T) {
 	t.Parallel()
-	// Structured-format model puts reasoning in ReasoningContent and leaves
-	// Content empty. Drain must preserve both fields in history via the
-	// structured handler's Ingest.
 	client := &fakeChatClient{responses: []ChatResponse{
 		{Content: "", ReasoningContent: "I was thinking about X"},
 	}}
@@ -571,9 +564,8 @@ func TestOpenAIAgent_DrainStoresStructuredReasoning(t *testing.T) {
 
 func TestOpenAIAgent_StructuredReasoningNotReplayed(t *testing.T) {
 	t.Parallel()
-	// Structured handler: on the next send, assistant.ReasoningContent must
-	// be blanked so the reasoning field never reaches the wire (deepseek
-	// convention — reasoning is output-only).
+	// Structured handler blanks assistant.ReasoningContent on replay so the
+	// reasoning field stays output-only on the wire (deepseek convention).
 	client := &fakeChatClient{responses: []ChatResponse{
 		{Content: "", ReasoningContent: "prior turn reasoning"},
 		{Content: "final answer"},
@@ -590,16 +582,13 @@ func TestOpenAIAgent_StructuredReasoningNotReplayed(t *testing.T) {
 	_, err = a.Drain(t.Context())
 	require.NoError(t, err)
 
-	// Second outbound send replays history; the prior assistant turn must
-	// have ReasoningContent blanked on the wire.
 	sent := client.calls[1].Messages
-	for i, m := range sent {
+	for _, m := range sent {
 		if m.Role == "assistant" {
-			assert.Emptyf(t, m.ReasoningContent,
-				"replayed assistant %d must not carry reasoning_content", i)
+			assert.Empty(t, m.ReasoningContent)
 		}
 	}
-	// History kept the reasoning for summary use.
+	// History retains raw reasoning for summaries.
 	snap := a.history.Snapshot()
 	var found bool
 	for _, m := range snap {
@@ -607,21 +596,19 @@ func TestOpenAIAgent_StructuredReasoningNotReplayed(t *testing.T) {
 			found = true
 		}
 	}
-	assert.True(t, found, "history must retain raw reasoning for summaries")
+	assert.True(t, found)
 }
 
 func TestOpenAIAgent_DrainDoesNotSetReasoningEffort(t *testing.T) {
 	t.Parallel()
-	// Worker / verifier / director drains must keep reasoning enabled — the
-	// summary-only reasoning_effort knob must not leak into the agent's own
-	// Drain path.
+	// summary-only reasoning_effort knob must not leak into agent Drain
 	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
 	a.Query("go")
 	_, err := a.Drain(t.Context())
 	require.NoError(t, err)
 	require.Len(t, client.calls, 1)
-	assert.Empty(t, client.calls[0].ReasoningEffort, "drain must not disable reasoning")
+	assert.Empty(t, client.calls[0].ReasoningEffort)
 }
 
 func TestOpenAIAgent_FlowIDExtraction(t *testing.T) {
@@ -644,4 +631,25 @@ func TestOpenAIAgent_FlowIDExtraction(t *testing.T) {
 	sum, err := a.Drain(t.Context())
 	require.NoError(t, err)
 	assert.Contains(t, sum.FlowIDs, "abc12345")
+}
+
+func TestOpenAIAgent_ContextUsage(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
+	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client), MaxContext: 4096})
+
+	tokens, max := a.ContextUsage()
+	assert.Equal(t, 4096, max)
+	assert.GreaterOrEqual(t, tokens, 0)
+	assert.NotNil(t, a.History())
+	require.NoError(t, a.Close())
+}
+
+func TestOpenAIAgent_InterruptNoop(t *testing.T) {
+	t.Parallel()
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m",
+		Pool:  newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+	})
+	a.Interrupt()
 }

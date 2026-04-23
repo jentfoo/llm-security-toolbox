@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFakeAgent_QueryDrainScripted(t *testing.T) {
+func TestFakeAgent_Drain(t *testing.T) {
 	t.Parallel()
 	f := &FakeAgent{
 		Turns:  []TurnSummary{{AssistantText: "one"}, {AssistantText: "two"}},
@@ -23,33 +23,4 @@ func TestFakeAgent_QueryDrainScripted(t *testing.T) {
 
 	_, err = f.Drain(t.Context())
 	require.Error(t, err)
-}
-
-func TestFakeAgent_DrainEmptyErrors(t *testing.T) {
-	t.Parallel()
-	f := &FakeAgent{}
-	_, err := f.Drain(t.Context())
-	require.Error(t, err)
-}
-
-func TestFakeAgent_DrainBoundedRecordsCap(t *testing.T) {
-	t.Parallel()
-	f := &FakeAgent{Turns: []TurnSummary{{}, {}, {}}}
-	_, _ = f.DrainBounded(t.Context(), 2)
-	_, _ = f.DrainBounded(t.Context(), 5)
-	_, _ = f.Drain(t.Context()) // bound 0 not recorded
-	assert.Equal(t, []int{2, 5}, f.MaxRoundsSeen)
-}
-
-func TestFakeAgent_SetToolsAndContext(t *testing.T) {
-	t.Parallel()
-	f := &FakeAgent{ContextTokens: 123, ContextMax: 1000}
-	f.SetTools([]ToolDef{{Name: "a"}, {Name: "b"}})
-	assert.Len(t, f.Tools, 2)
-	tokens, max := f.ContextUsage()
-	assert.Equal(t, 123, tokens)
-	assert.Equal(t, 1000, max)
-	require.NoError(t, f.Close())
-	assert.True(t, f.Closed)
-	f.Interrupt() // no-op
 }

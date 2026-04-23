@@ -43,15 +43,13 @@ func TestSummarizeStatus_ErrorPropagates(t *testing.T) {
 
 func TestSummarizeStatus_ContextCanceledDuringAcquire(t *testing.T) {
 	t.Parallel()
-	// Drain the pool, then cancel ctx; Acquire must return ctx.Err() rather
-	// than blocking.
 	pool := NewClientPool(&fakeChatClient{}, 1)
-	held, err := pool.Acquire(context.Background())
+	held, err := pool.Acquire(t.Context())
 	require.NoError(t, err)
 	defer pool.Release(held)
 
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: pool})
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	_, err = SummarizeStatus(ctx, a, 0)
 	require.Error(t, err)
@@ -59,10 +57,9 @@ func TestSummarizeStatus_ContextCanceledDuringAcquire(t *testing.T) {
 
 func TestSummarizeStatus_ViaBypassesAgentPool(t *testing.T) {
 	t.Parallel()
-	// Pool is drained → the agent's pool is unusable. SummarizeStatusVia
-	// must route through the override client instead and still succeed.
+	// drained agent pool → SummarizeStatusVia routes through the override client
 	pool := NewClientPool(&fakeChatClient{}, 1)
-	held, err := pool.Acquire(context.Background())
+	held, err := pool.Acquire(t.Context())
 	require.NoError(t, err)
 	defer pool.Release(held)
 
@@ -82,21 +79,17 @@ func TestSummarizeStatus_ViaBypassesAgentPool(t *testing.T) {
 
 func TestSummarizeStatus_ViaModelOverride(t *testing.T) {
 	t.Parallel()
-	// Non-empty model parameter overrides the agent's own model — used by
-	// the narrator so per-agent summaries run through the summary model,
-	// not the potentially-abliterated worker/verifier/director model.
 	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "worker-model-abliterated", Pool: newPoolWith(client)})
 	_, _, err := SummarizeStatusVia(t.Context(), a, client, "summary-model", 0)
 	require.NoError(t, err)
 	require.Len(t, client.calls, 1)
-	assert.Equal(t, "summary-model", client.calls[0].Model, "explicit override must be honored")
+	assert.Equal(t, "summary-model", client.calls[0].Model)
 }
 
 func TestSummarizeStatus_ViaReturnsThinkTailOnTruncatedResponse(t *testing.T) {
 	t.Parallel()
-	// Reasoning model runs out of tokens mid-think: no close tag, no
-	// post-think summary. Line is empty, tail carries the last fragment.
+	// truncation mid-think: no close tag → empty line, tail carries the fragment
 	client := &fakeChatClient{responses: []ChatResponse{{
 		Content: "<think>I was planning to test the OAuth redirect next",
 	}}}
@@ -130,7 +123,6 @@ func TestBuildStatusMessages_DropsToolResultsAndKeepsThink(t *testing.T) {
 		{Role: roleTool, Content: "HTTP/1.1 200 OK\n..." + strings.Repeat("x", 4000), ToolCallID: "c1"},
 		{Role: roleAssistant, Content: "<think>next step</think>checking response"},
 	}
-	// keepThinkTurns=2 preserves think on both recent assistants.
 	msgs := buildStatusMessages(hist, 2000, 2)
 	require.GreaterOrEqual(t, len(msgs), 4, "anchor + filtered tail")
 
@@ -148,19 +140,17 @@ func TestBuildStatusMessages_DropsToolResultsAndKeepsThink(t *testing.T) {
 			sawThink = true
 		}
 	}
-	assert.True(t, sawPlaceholder, "tool message must be kept with placeholder for pairing")
-	assert.False(t, toolResultLeaked, "tool result bytes must not be sent to the summary model")
-	assert.True(t, sawThink, "assistant <think> blocks must be preserved as intent signal")
+	assert.True(t, sawPlaceholder)
+	assert.False(t, toolResultLeaked)
+	assert.True(t, sawThink)
 
-	// Assistant tool_calls must still be present to keep the `what it's
-	// trying` signal.
 	var foundToolCalls bool
 	for _, m := range msgs {
 		if m.Role == roleAssistant && len(m.ToolCalls) > 0 && m.ToolCalls[0].Function.Name == "replay_send" {
 			foundToolCalls = true
 		}
 	}
-	assert.True(t, foundToolCalls, "assistant tool_calls must be preserved")
+	assert.True(t, foundToolCalls)
 }
 
 func TestBuildStatusMessages_TailTruncateRespectsBudget(t *testing.T) {
@@ -181,8 +171,6 @@ func TestBuildStatusMessages_TailTruncateRespectsBudget(t *testing.T) {
 	// truncation actually happened (unbounded would be 6400+).
 	assert.LessOrEqual(t, total, 2500, "should have tail-truncated to roughly 2k tokens")
 
-	// The last message of the input (newest) must be retained — this is the
-	// "most recent" context we care about for a status sentence.
 	last := msgs[len(msgs)-1]
 	assert.Equal(t, roleAssistant, last.Role)
 	assert.Len(t, last.Content, 500)
@@ -190,8 +178,7 @@ func TestBuildStatusMessages_TailTruncateRespectsBudget(t *testing.T) {
 
 func TestBuildStatusMessages_DropsOrphanLeadingTool(t *testing.T) {
 	t.Parallel()
-	// Construct history where truncation would otherwise start on a tool
-	// message whose assistant parent got cut off.
+	// truncation would otherwise start on a tool with its assistant parent cut off
 	hist := []Message{
 		{Role: roleSystem, Content: "sys"},
 		{Role: roleUser, Content: "assignment"},
@@ -200,8 +187,6 @@ func TestBuildStatusMessages_DropsOrphanLeadingTool(t *testing.T) {
 		{Role: roleAssistant, Content: strings.Repeat("y", 4000)},
 	}
 	msgs := buildStatusMessages(hist, 200, 0)
-	// Anchor system+user, plus tail. The tail must not begin with a role=tool
-	// orphaned from its parent.
 	for i, m := range msgs {
 		if i == 0 || (i == 1 && m.Role == "user") {
 			continue
