@@ -46,9 +46,11 @@ from tools import (
     PHASE_VERIFICATION,
     VERIFIER_TOOL_ALLOWED,
     WORKER_TOOL_ALLOWED,
+    CandidateDismissal,
     CandidatePool,
     DecisionQueue,
     FindingCandidate,
+    FindingFiled,
     PlanEntry,
     ToolCallRecord,
     WorkerDecision,
@@ -798,6 +800,31 @@ def _build_verifier_continue_prompt(
     ])
 
 
+def _format_follow_up_hints(
+    findings: list[FindingFiled],
+    dismissals: list[CandidateDismissal],
+) -> str:
+    """Collate optional verifier follow-up hints into a labeled block.
+
+    Returns "" when no hints are present so the caller can suppress the block.
+    """
+    lines: list[str] = []
+    for f in findings:
+        h = f.follow_up_hint.strip()
+        if h:
+            lines.append(f"- (filed: {_short(f.title, 80)}) {h}")
+    for d in dismissals:
+        h = d.follow_up_hint.strip()
+        if h:
+            lines.append(f"- (dismissed: {d.candidate_id}) {h}")
+    if not lines:
+        return ""
+    return (
+        "**Verifier follow-up hints (advisory — you decide whether to act):**\n"
+        + "\n".join(lines)
+    )
+
+
 def _build_director_prompt(
     *,
     workers: list[WorkerState],
@@ -808,6 +835,7 @@ def _build_director_prompt(
     total_cost: float, max_cost: float | None,
     findings_count: int,
     stall_warnings: str,
+    follow_up_hints: str,
     max_workers: int,
     user_prompt: str,
 ) -> str:
@@ -823,6 +851,9 @@ def _build_director_prompt(
     if stall_warnings:
         parts.append("")
         parts.append(stall_warnings)
+    if follow_up_hints:
+        parts.append("")
+        parts.append(follow_up_hints)
     parts.append("")
     parts.append("**Worker autonomous runs this iteration:**")
     parts.append("")
@@ -1076,6 +1107,7 @@ async def run_direction_phase(
     max_cost: float | None,
     findings_count: int,
     stall_warnings: str,
+    follow_up_hints: str,
     verbose: bool,
     max_workers: int,
     user_prompt: str,
@@ -1104,6 +1136,7 @@ async def run_direction_phase(
                 max_cost=max_cost,
                 findings_count=findings_count,
                 stall_warnings=stall_warnings,
+                follow_up_hints=follow_up_hints,
                 max_workers=max_workers,
                 user_prompt=user_prompt,
             )
@@ -1436,11 +1469,14 @@ async def run(config: Config) -> None:
 
                 # 6) Direction phase
                 stall_warnings = _format_stall_warnings(workers)
+                follow_up_hints = _format_follow_up_hints(
+                    decisions.findings, decisions.dismissals,
+                )
                 director_managed, d_cost = await run_direction_phase(
                     director_managed, director_options, decisions, workers, worker_runs,
                     v_summary, finding_writer.summary_for_orchestrator(),
                     iteration, config.max_iterations, total_cost, config.max_cost,
-                    finding_writer.count, stall_warnings, config.verbose,
+                    finding_writer.count, stall_warnings, follow_up_hints, config.verbose,
                     config.max_workers,
                     config.prompt,
                 )

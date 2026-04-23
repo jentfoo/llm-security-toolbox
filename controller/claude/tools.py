@@ -217,12 +217,14 @@ class FindingFiled:
     impact: str
     verification_notes: str
     supersedes_candidate_ids: list[str] = field(default_factory=list)
+    follow_up_hint: str = ""
 
 
 @dataclass
 class CandidateDismissal:
     candidate_id: str
     reason: str
+    follow_up_hint: str = ""
 
 
 PHASE_IDLE = "idle"
@@ -294,9 +296,11 @@ class DecisionQueue:
         with self._lock:
             self.findings.append(f)
 
-    def add_dismissal(self, candidate_id: str, reason: str) -> None:
+    def add_dismissal(self, candidate_id: str, reason: str, follow_up_hint: str = "") -> None:
         with self._lock:
-            self.dismissals.append(CandidateDismissal(candidate_id=candidate_id, reason=reason))
+            self.dismissals.append(CandidateDismissal(
+                candidate_id=candidate_id, reason=reason, follow_up_hint=follow_up_hint,
+            ))
 
     def set_done(self, summary: str) -> None:
         with self._lock:
@@ -733,6 +737,15 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
                         "preferred."
                     ),
                 },
+                "follow_up_hint": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Optional one-line hint for the director: a related "
+                        "angle, variant, or adjacent endpoint worth probing "
+                        "next. Advisory only; omit if nothing stands out."
+                    ),
+                },
             },
             "required": [
                 "title",
@@ -779,6 +792,7 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
             supersedes_candidate_ids=[
                 str(c) for c in (args.get("supersedes_candidate_ids") or [])
             ],
+            follow_up_hint=str(args.get("follow_up_hint", "")).strip(),
         )
         decisions.add_finding(filed)
         return {
@@ -798,6 +812,15 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
             "properties": {
                 "candidate_id": {"type": "string"},
                 "reason": {"type": "string"},
+                "follow_up_hint": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Optional one-line hint for the director: a related "
+                        "angle or real lead this dead-end points toward. "
+                        "Advisory only; omit if nothing stands out."
+                    ),
+                },
             },
             "required": ["candidate_id", "reason"],
         },
@@ -812,7 +835,9 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
                 "content": [{"type": "text", "text": "Rejected: candidate_id and reason required."}],
                 "is_error": True,
             }
-        decisions.add_dismissal(cid, reason)
+        decisions.add_dismissal(
+            cid, reason, follow_up_hint=str(args.get("follow_up_hint", "")).strip(),
+        )
         return {"content": [{"type": "text", "text": f"Candidate {cid} dismissal recorded."}]}
 
     @tool(

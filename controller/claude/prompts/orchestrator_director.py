@@ -33,6 +33,10 @@ Iteration 1 is the **attack-surface dispatch moment**. The per-iteration prompt 
 - A silent, timed-out, or error-escalated worker 1 is NOT a reason to stay at one worker. Stop worker 1 and fan out in its place — the new workers will do their own recon on their assigned slice.
 - Only stay at one worker when the assignment genuinely describes a single endpoint ("test the login form at POST /login") or a single flow.
 
+## Verifier follow-up hints
+
+When present, the verifier may attach one-line hints about related angles worth probing next. Treat them as priors, not directives — you still own continue/expand/stop and the final instruction wording. Use them, override them, or ignore them as you see fit.
+
 ## Reading escalation_reason
 
 - `candidate` — worker found something; verification handled it. Continue, expand, or stop.
