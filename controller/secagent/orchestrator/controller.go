@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-analyze/bulk"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/go-appsec/secagent/agent"
 	"github.com/go-appsec/secagent/config"
@@ -33,6 +34,10 @@ type OpenAIFactory struct {
 	OrchPool   *agent.ClientPool
 	Malformed  *MalformedCounter
 	Log        *Logger
+	// WorkerReasoning / OrchReasoning hold the reasoning handlers detected
+	// at startup for their respective models. Nil falls back to inline.
+	WorkerReasoning agent.ReasoningHandler
+	OrchReasoning   agent.ReasoningHandler
 }
 
 // slowToolThreshold is the elapsed time at which [tool] done is mirrored
@@ -89,42 +94,52 @@ func (f *OpenAIFactory) requestCallbacks(role string) (func(int), func(int, time
 
 // toolCallbacks returns start/end hooks for individual tool dispatches. Only
 // slow/error/timeout outcomes mirror to stderr; the rest stay in the JSON log.
-func (f *OpenAIFactory) toolCallbacks(role string) (func(string, json.RawMessage), func(string, json.RawMessage, time.Duration, bool, bool)) {
+func (f *OpenAIFactory) toolCallbacks(role string) (func(string, json.RawMessage), func(string, json.RawMessage, time.Duration, bool, bool, string)) {
 	if f.Log == nil {
 		return nil, nil
 	}
 	start := func(name string, _ json.RawMessage) {
 		f.Log.Log("tool", "start", map[string]any{"role": role, "name": name})
 	}
-	end := func(name string, _ json.RawMessage, elapsed time.Duration, isErr, timedOut bool) {
+	end := func(name string, _ json.RawMessage, elapsed time.Duration, isErr, timedOut bool, errText string) {
 		fields := map[string]any{
 			"role":    role,
 			"name":    name,
 			"elapsed": elapsed.Round(time.Millisecond).String(),
 			"error":   isErr,
 		}
-		msg := "done"
+		if errText != "" {
+			fields["error_text"] = errText
+		}
+		msg := toolMsgDone
 		switch {
 		case timedOut:
-			msg = "timeout"
+			msg = toolMsgTimeout
 		case elapsed >= slowToolThreshold && !isErr:
-			msg = "slow"
+			msg = toolMsgSlow
 		}
 		f.Log.Log("tool", msg, fields)
 	}
 	return start, end
 }
 
-// NewWorker builds a worker agent with the given role-sizing.
-func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
-	role := fmt.Sprintf("worker-%d", id)
+// buildAgent assembles an OpenAIAgent for a role. Workers and verifiers set
+// a FlowIDExtractor so their turn summaries can link reported flow IDs;
+// directors don't dispatch sectool tools, so their extractor stays nil.
+func (f *OpenAIFactory) buildAgent(
+	role, model, systemPrompt string,
+	pool *agent.ClientPool,
+	maxContext int,
+	reasoning agent.ReasoningHandler,
+	setFlowExtractor bool,
+) agent.Agent {
 	onReqStart, onReqEnd := f.requestCallbacks(role)
 	onToolStart, onToolEnd := f.toolCallbacks(role)
-	return agent.NewOpenAIAgent(agent.OpenAIAgentConfig{
-		Model:        f.Cfg.WorkerModel,
-		SystemPrompt: prompts.BuildWorkerSystemPrompt(id, numWorkers),
-		Pool:         f.WorkerPool,
-		MaxContext:   f.Cfg.WorkerMaxContext,
+	cfg := agent.OpenAIAgentConfig{
+		Model:        model,
+		SystemPrompt: systemPrompt,
+		Pool:         pool,
+		MaxContext:   maxContext,
 		Compaction: agent.CompactionOptions{
 			HighWatermark: f.Cfg.HighWatermark,
 			LowWatermark:  f.Cfg.LowWatermark,
@@ -134,66 +149,57 @@ func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 		PerToolTimeout:   f.Cfg.PerToolTimeout,
 		MaxParallelTools: f.Cfg.MaxParallelTools,
 		MaxTurnsPerAgent: f.Cfg.MaxTurnsPerAgent,
-		FlowIDExtractor:  ExtractFlowIDs,
-		OnMalformedCall:  f.malformedCallback(f.Cfg.WorkerModel),
+		KeepThinkTurns:   f.Cfg.EffectiveKeepThinkTurns(maxContext),
+		Reasoning:        reasoning,
+		OnMalformedCall:  f.malformedCallback(model),
 		OnRequestStart:   onReqStart,
 		OnRequestEnd:     onReqEnd,
 		OnToolStart:      onToolStart,
 		OnToolEnd:        onToolEnd,
-	}), nil
+	}
+	if setFlowExtractor {
+		cfg.FlowIDExtractor = ExtractFlowIDs
+	}
+	return agent.NewOpenAIAgent(cfg)
+}
+
+// NewWorker builds a worker agent with the given role-sizing.
+func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
+	return f.buildAgent(
+		fmt.Sprintf("worker-%d", id),
+		f.Cfg.WorkerModel,
+		prompts.BuildWorkerSystemPrompt(id, numWorkers),
+		f.WorkerPool,
+		f.Cfg.WorkerMaxContext,
+		f.WorkerReasoning,
+		true,
+	), nil
 }
 
 // NewVerifier builds a verifier agent.
 func (f *OpenAIFactory) NewVerifier() (agent.Agent, error) {
-	onReqStart, onReqEnd := f.requestCallbacks("verifier")
-	onToolStart, onToolEnd := f.toolCallbacks("verifier")
-	return agent.NewOpenAIAgent(agent.OpenAIAgentConfig{
-		Model:        f.Cfg.OrchestratorModel,
-		SystemPrompt: prompts.BuildVerifierSystemPrompt(f.Cfg.MaxWorkers),
-		Pool:         f.OrchPool,
-		MaxContext:   f.Cfg.OrchestratorMaxContext,
-		Compaction: agent.CompactionOptions{
-			HighWatermark: f.Cfg.HighWatermark,
-			LowWatermark:  f.Cfg.LowWatermark,
-			KeepTurns:     f.Cfg.KeepTurns,
-		},
-		TurnTimeout:      f.Cfg.TurnTimeout,
-		PerToolTimeout:   f.Cfg.PerToolTimeout,
-		MaxParallelTools: f.Cfg.MaxParallelTools,
-		MaxTurnsPerAgent: f.Cfg.MaxTurnsPerAgent,
-		FlowIDExtractor:  ExtractFlowIDs,
-		OnMalformedCall:  f.malformedCallback(f.Cfg.OrchestratorModel),
-		OnRequestStart:   onReqStart,
-		OnRequestEnd:     onReqEnd,
-		OnToolStart:      onToolStart,
-		OnToolEnd:        onToolEnd,
-	}), nil
+	return f.buildAgent(
+		"verifier",
+		f.Cfg.OrchestratorModel,
+		prompts.BuildVerifierSystemPrompt(f.Cfg.MaxWorkers),
+		f.OrchPool,
+		f.Cfg.OrchestratorMaxContext,
+		f.OrchReasoning,
+		true,
+	), nil
 }
 
 // NewDirector builds a director agent.
 func (f *OpenAIFactory) NewDirector() (agent.Agent, error) {
-	onReqStart, onReqEnd := f.requestCallbacks("director")
-	onToolStart, onToolEnd := f.toolCallbacks("director")
-	return agent.NewOpenAIAgent(agent.OpenAIAgentConfig{
-		Model:        f.Cfg.OrchestratorModel,
-		SystemPrompt: prompts.BuildDirectorSystemPrompt(f.Cfg.MaxWorkers),
-		Pool:         f.OrchPool,
-		MaxContext:   f.Cfg.OrchestratorMaxContext,
-		Compaction: agent.CompactionOptions{
-			HighWatermark: f.Cfg.HighWatermark,
-			LowWatermark:  f.Cfg.LowWatermark,
-			KeepTurns:     f.Cfg.KeepTurns,
-		},
-		TurnTimeout:      f.Cfg.TurnTimeout,
-		PerToolTimeout:   f.Cfg.PerToolTimeout,
-		MaxParallelTools: f.Cfg.MaxParallelTools,
-		MaxTurnsPerAgent: f.Cfg.MaxTurnsPerAgent,
-		OnMalformedCall:  f.malformedCallback(f.Cfg.OrchestratorModel),
-		OnRequestStart:   onReqStart,
-		OnRequestEnd:     onReqEnd,
-		OnToolStart:      onToolStart,
-		OnToolEnd:        onToolEnd,
-	}), nil
+	return f.buildAgent(
+		"director",
+		f.Cfg.OrchestratorModel,
+		prompts.BuildDirectorSystemPrompt(f.Cfg.MaxWorkers),
+		f.OrchPool,
+		f.Cfg.OrchestratorMaxContext,
+		f.OrchReasoning,
+		false,
+	), nil
 }
 
 // Close is a no-op (pools outlive the factory in typical use).
@@ -210,6 +216,46 @@ func buildClientPool(baseURL, apiKey string, n int) *agent.ClientPool {
 		clients = append(clients, agent.NewOpenAIChatClient(baseURL, apiKey))
 	}
 	return agent.NewClientPoolWithClients(clients)
+}
+
+// resolveFormat probes (baseURL, model) via pool-acquired client through the
+// shared cache and emits a [server] reasoning-format log entry on the real
+// detection path (cache hits are silent). Returns the resolved format.
+func resolveFormat(
+	ctx context.Context,
+	cache *agent.ReasoningFormatCache,
+	pool *agent.ClientPool,
+	role, baseURL, model string,
+	log *Logger,
+) agent.ReasoningFormat {
+	client, err := pool.Acquire(ctx)
+	if err != nil {
+		if log != nil {
+			log.Log("server", "reasoning-format probe aborted", map[string]any{
+				"role": role, "model": model, "err": err.Error(),
+			})
+		}
+		return agent.ReasoningFormatUnknown
+	}
+	defer pool.Release(client)
+	return cache.Resolve(ctx, client, baseURL, model,
+		func(f agent.ReasoningFormat, elapsed time.Duration, err error) {
+			if log == nil {
+				return
+			}
+			fields := map[string]any{
+				"role":     role,
+				"model":    model,
+				"base_url": baseURL,
+				"format":   f.String(),
+				"elapsed":  elapsed.Round(time.Millisecond).String(),
+			}
+			if err != nil {
+				fields["err"] = err.Error()
+			}
+			log.Log("server", "reasoning-format", fields)
+		},
+	)
 }
 
 // workerSpawnFunc produces a ready-to-run worker (MCP client connected,
@@ -300,38 +346,53 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		}
 		orchPool = buildClientPool(cfg.EffectiveOrchestratorBaseURL(), cfg.APIKey, sz)
 	}
-
-	// Narrator runs on its own dedicated ChatClient so narration never queues
-	// behind worker/verifier/director HTTP traffic.
-	narrator := NewNarrator(NarratorConfig{
-		Interval:   cfg.NarrateInterval,
-		Model:      cfg.EffectiveSummaryModel(),
-		Client:     agent.NewOpenAIChatClient(cfg.EffectiveSummaryBaseURL(), cfg.APIKey),
-		CallBudget: cfg.NarrateTimeout,
-	}, log)
-	log.AttachNarrator(narrator)
-	defer func() {
-		log.AttachNarrator(nil)
-		narrator.Close()
-	}()
-	if log != nil {
-		fields := map[string]any{}
-		if narrator == nil {
-			fields["enabled"] = false
-			fields["reason"] = "disabled by config"
-		} else {
-			fields["enabled"] = true
-			fields["interval"] = cfg.NarrateInterval.String()
-			fields["timeout"] = cfg.NarrateTimeout.String()
-		}
-		log.Log("server", "narrator", fields)
+	// Build the summary pool alongside worker/orch so all three reasoning-
+	// format probes can run in parallel below, rather than waiting until
+	// narrator construction time to start the third probe.
+	summaryPool := orchPool
+	if cfg.EffectiveSummaryBaseURL() != cfg.EffectiveOrchestratorBaseURL() {
+		summaryPool = buildClientPool(cfg.EffectiveSummaryBaseURL(), cfg.APIKey, 1)
 	}
+
+	// Probe each unique (baseURL, model) in parallel. Reasoning-format
+	// detection on qwen3-class models takes ~30s per probe; sequential
+	// probes add up to ~60-90s of startup latency. errgroup + the shared
+	// cache dedups identical pairs (so if orchestrator model == worker
+	// model, the second probe is a cache hit rather than a duplicate call).
+	formatCache := agent.NewReasoningFormatCache()
+	var (
+		workerFmt  agent.ReasoningFormat
+		orchFmt    agent.ReasoningFormat
+		summaryFmt agent.ReasoningFormat
+	)
+	probeGroup, probeCtx := errgroup.WithContext(ctx)
+	probeGroup.Go(func() error {
+		workerFmt = resolveFormat(probeCtx, formatCache, workerPool, "worker",
+			cfg.EffectiveWorkerBaseURL(), cfg.WorkerModel, log)
+		return nil
+	})
+	probeGroup.Go(func() error {
+		orchFmt = resolveFormat(probeCtx, formatCache, orchPool, "orchestrator",
+			cfg.EffectiveOrchestratorBaseURL(), cfg.OrchestratorModel, log)
+		return nil
+	})
+	probeGroup.Go(func() error {
+		summaryFmt = resolveFormat(probeCtx, formatCache, summaryPool, "summary",
+			cfg.EffectiveSummaryBaseURL(), cfg.EffectiveSummaryModel(), log)
+		return nil
+	})
+	_ = probeGroup.Wait()
+	workerReasoning := agent.NewReasoningHandler(workerFmt)
+	orchReasoning := agent.NewReasoningHandler(orchFmt)
+	summaryReasoning := agent.NewReasoningHandler(summaryFmt)
 
 	malformed := NewMalformedCounter(log)
 	defer malformed.Flush()
 	factory := &OpenAIFactory{
 		Cfg: cfg, WorkerPool: workerPool, OrchPool: orchPool,
 		Malformed: malformed, Log: log,
+		WorkerReasoning: workerReasoning,
+		OrchReasoning:   orchReasoning,
 	}
 
 	candidates := NewCandidatePool()
@@ -363,7 +424,15 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 
 	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions)...)
 	verifier.SetTools(verifierTools)
-	director.SetTools(DirectorToolDefs(decisions))
+
+	// guardIteration is updated by the main loop below; the closure captures
+	// its address so DirectorToolDefs' end_run guard sees live state instead
+	// of a stale snapshot. writer.RunCount is read directly — the FindingWriter
+	// is race-safe (internal mutex).
+	var guardIteration int
+	director.SetTools(DirectorToolDefs(decisions, func() (int, int) {
+		return guardIteration, writer.RunCount
+	}))
 
 	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, cfg.AutonomousBudget)
 
@@ -382,18 +451,95 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		log.Log("worker", "seeded", map[string]any{"id": 1, "assignment": cfg.Prompt})
 	}
 
-	// phaseTransition logs a phase change and force-fires a narrator summary,
-	// so the operator always gets a fresh sentence when the agent switches
-	// between autonomous / verification / direction phases.
+	// currentPhase drives which agents the narrator summarizes per firing.
+	// Mutated only on the main loop goroutine (phaseTransition); snapshots
+	// are pushed to the narrator via SetActiveAgents so the narrator's
+	// goroutine never dereferences controller-owned state directly.
+	currentPhase := "idle"
+
+	// computeActiveAgents returns the agents active for currentPhase. Called
+	// only from the main loop goroutine. Fake agents used in tests are
+	// interface-only and skipped.
+	computeActiveAgents := func() []NamedAgent {
+		switch currentPhase {
+		case "autonomous":
+			var out []NamedAgent
+			for _, w := range workers {
+				if !w.Alive {
+					continue
+				}
+				if oa, ok := w.Agent.(*agent.OpenAIAgent); ok {
+					out = append(out, NamedAgent{
+						Name:  fmt.Sprintf("worker-%d", w.ID),
+						Agent: oa,
+					})
+				}
+			}
+			return out
+		case "verification":
+			if oa, ok := verifier.(*agent.OpenAIAgent); ok {
+				return []NamedAgent{{Name: "verifier", Agent: oa}}
+			}
+		case "direction":
+			if oa, ok := director.(*agent.OpenAIAgent); ok {
+				return []NamedAgent{{Name: "director", Agent: oa}}
+			}
+		}
+		return nil
+	}
+
+	// summaryPool and summaryReasoning were constructed earlier alongside
+	// worker/orch pools so all three reasoning-format probes could run in
+	// parallel at startup. Narration routes through the shared orchestrator
+	// pool when the summary endpoint matches; a distinct summary URL gets
+	// its own size-1 pool so the "one summary in flight" invariant holds by
+	// construction.
+	narrator := NewNarrator(NarratorConfig{
+		Interval:   cfg.NarrateInterval,
+		Model:      cfg.EffectiveSummaryModel(),
+		Pool:       summaryPool,
+		CallBudget: cfg.NarrateTimeout,
+		Summarizer: summaryReasoning,
+		// Parent ctx — ctrl+c propagates to in-flight summary HTTP calls
+		// so shutdown doesn't wait on narration that the operator doesn't
+		// care about anymore.
+		Parent: ctx,
+	}, log)
+	log.AttachNarrator(narrator)
+	defer func() {
+		log.AttachNarrator(nil)
+		narrator.Close()
+	}()
+	if log != nil {
+		fields := map[string]any{}
+		if narrator == nil {
+			fields["enabled"] = false
+			fields["reason"] = "disabled by config"
+		} else {
+			fields["enabled"] = true
+			fields["interval"] = cfg.NarrateInterval.String()
+			fields["timeout"] = cfg.NarrateTimeout.String()
+			fields["pool_size"] = summaryPool.Size()
+			fields["shared_pool"] = summaryPool == orchPool
+		}
+		log.Log("server", "narrator", fields)
+	}
+
+	// phaseTransition logs a phase change, republishes the narrator's
+	// active-agent snapshot for the new phase, and force-fires a summary
+	// so the operator always gets a fresh sentence at phase boundaries.
 	phaseTransition := func(from, to string) {
+		currentPhase = to
+		narrator.SetActiveAgents(computeActiveAgents())
 		if log != nil {
-			log.Log("controller", "phase", map[string]any{"from": from, "to": to})
+			log.Log("controller", "transition phase "+from+" to "+to, nil)
 		}
 		narrator.TriggerNow()
 	}
 
 	var iteration int
 	for iteration = 1; iteration <= cfg.MaxIterations; iteration++ {
+		guardIteration = iteration
 		if err := ctx.Err(); err != nil {
 			if log != nil {
 				log.Log("controller", "cancelled", map[string]any{"iter": iteration, "err": err.Error()})
@@ -444,33 +590,22 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 
 		phaseTransition("verification", "direction")
 		stallWarnings := FormatStallWarnings(workers, cfg.StallWarnAfter)
+		followUpHints := FormatFollowUpHints(decisions.Findings, decisions.Dismissals)
 		RunDirectionPhase(
 			ctx, director, decisions, workers, workerRuns,
-			verificationSummary, writer.SummaryForOrchestrator(), stallWarnings,
-			iteration, cfg.MaxIterations, writer.Count, cfg.MaxWorkers, log,
+			verificationSummary, writer.SummaryForOrchestrator(), stallWarnings, followUpHints,
+			iteration, cfg.MaxIterations, writer.RunCount, cfg.MaxWorkers, log,
 		)
 		LatchStallWarnings(workers, cfg.StallWarnAfter)
 
-		if decisions.HasDone {
-			// Guardrail: local models routinely confuse `done` with `direction_done`
-			// on early iterations. Only accept `done` once the run has made
-			// meaningful progress (filed findings, or exhausted several iterations).
-			if iteration < MinIterationsForDone && writer.Count == 0 {
-				if log != nil {
-					log.Log("controller", "done ignored: premature", map[string]any{
-						"iter":           iteration,
-						"findings_count": writer.Count,
-						"summary":        decisions.DoneSummary,
-					})
-				}
-				decisions.HasDone = false
-				decisions.DoneSummary = ""
-			} else {
-				if log != nil {
-					log.Log("controller", "director done", map[string]any{"summary": decisions.DoneSummary})
-				}
-				break
+		if decisions.HasEndRun {
+			// The end_run tool handler already enforced MinIterationsForDone /
+			// RunCount; by the time HasEndRun is true the director has met the
+			// bar, so the controller just honors it.
+			if log != nil {
+				log.Log("controller", "end_run", map[string]any{"summary": decisions.EndRunSummary})
 			}
+			break
 		}
 
 		if decisions.HasPlan {
@@ -514,7 +649,7 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 	if log != nil {
 		log.Log("summary", "run complete", map[string]any{
 			"iterations":     iteration,
-			"findings_count": writer.Count,
+			"findings_count": writer.RunCount,
 			"workers":        len(workers),
 		})
 		for _, p := range writer.Paths {

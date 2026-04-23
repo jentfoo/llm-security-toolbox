@@ -80,10 +80,13 @@ func TestNewFindingWriter_SeedsCountFromExistingFiles(t *testing.T) {
 	}
 	w := NewFindingWriter(dir)
 	assert.Equal(t, 7, w.Count)
+	assert.Equal(t, 0, w.RunCount, "RunCount must not be seeded from disk")
 
 	path, err := w.Write(FindingFiled{Title: "New Finding", Severity: "low", Endpoint: "GET /"})
 	require.NoError(t, err)
 	assert.Equal(t, "finding-08-new-finding.md", filepath.Base(path))
+	assert.Equal(t, 8, w.Count)
+	assert.Equal(t, 1, w.RunCount, "RunCount increments only on in-process Write")
 }
 
 func TestNewFindingWriter_MissingDirStartsAtZero(t *testing.T) {

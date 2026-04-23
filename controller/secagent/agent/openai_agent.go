@@ -29,13 +29,21 @@ type OpenAIAgentConfig struct {
 	DrainRetryMax     int
 	DrainRetryBackoff time.Duration
 	MaxTurnsPerAgent  int // hard cap on tool-dispatch rounds per Drain
+	// KeepThinkTurns is the count of recent assistant messages that retain
+	// <think> blocks on replay. 0 strips all. Inline handler only.
+	KeepThinkTurns int
+	// Reasoning encapsulates format-specific ingest/replay/summary behaviour.
+	// Nil defaults to the inline handler.
+	Reasoning ReasoningHandler
 	// OnCompact is called with each compaction report (optional).
 	OnCompact func(CompactionReport)
 	// OnToolStart fires before a tool handler runs (optional).
 	OnToolStart func(name string, args json.RawMessage)
 	// OnToolEnd fires after a tool handler returns (optional). timedOut is true
-	// when PerToolTimeout fired.
-	OnToolEnd func(name string, args json.RawMessage, elapsed time.Duration, isError, timedOut bool)
+	// when PerToolTimeout fired. errText is the truncated result text when
+	// isError is true, empty otherwise — so operators can see rejection reasons
+	// without digging through the agent's chat history.
+	OnToolEnd func(name string, args json.RawMessage, elapsed time.Duration, isError, timedOut bool, errText string)
 	// OnMalformedCall is called when tool arg repair fails (optional).
 	OnMalformedCall func(name string, err error)
 	// OnRequestStart fires before each chat-completion HTTP call (optional).
@@ -82,6 +90,9 @@ func NewOpenAIAgent(cfg OpenAIAgentConfig) *OpenAIAgent {
 	}
 	if cfg.MaxParallelTools <= 0 {
 		cfg.MaxParallelTools = 4
+	}
+	if cfg.Reasoning == nil {
+		cfg.Reasoning = NewReasoningHandler(ReasoningFormatInline)
 	}
 	a := &OpenAIAgent{
 		cfg:      cfg,
@@ -201,29 +212,39 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 		}
 		summary.TokensOut += resp.Usage.CompletionTokens
 
+		// Delegate format-specific storage to the reasoning handler: inline
+		// keeps raw <think> in Content; structured splits Content from the
+		// dedicated ReasoningContent field. Observability (AssistantText,
+		// flow IDs) operates on stripped Content — reasoning is for replay
+		// and summary, not for flow extraction.
+		storeContent, storeReasoning := a.cfg.Reasoning.Ingest(resp)
+		stripped := StripThinkBlocks(storeContent)
 		if len(resp.ToolCalls) == 0 {
-			content := StripThinkBlocks(resp.Content)
-			a.history.Append(Message{Role: roleAssistant, Content: content})
-			summary.AssistantText += content
+			a.history.Append(Message{
+				Role:             roleAssistant,
+				Content:          storeContent,
+				ReasoningContent: storeReasoning,
+			})
+			summary.AssistantText += stripped
 			if extractFlow != nil {
-				for _, f := range extractFlow(content) {
+				for _, f := range extractFlow(stripped) {
 					summary.FlowIDs = appendUnique(summary.FlowIDs, f)
 				}
 			}
 			return summary, nil
 		}
 
-		content := StripThinkBlocks(resp.Content)
 		a.history.Append(Message{
-			Role:      roleAssistant,
-			Content:   content,
-			ToolCalls: resp.ToolCalls,
+			Role:             roleAssistant,
+			Content:          storeContent,
+			ReasoningContent: storeReasoning,
+			ToolCalls:        resp.ToolCalls,
 		})
-		if content != "" {
-			summary.AssistantText += content
+		if stripped != "" {
+			summary.AssistantText += stripped
 		}
 		if extractFlow != nil {
-			for _, f := range extractFlow(content) {
+			for _, f := range extractFlow(stripped) {
 				summary.FlowIDs = appendUnique(summary.FlowIDs, f)
 			}
 		}
@@ -378,7 +399,11 @@ func (a *OpenAIAgent) runSingleTool(
 	rec.IsError = result.IsError
 	rec.ResultSummary = truncate(result.Text, 300)
 	if a.cfg.OnToolEnd != nil {
-		a.cfg.OnToolEnd(tc.Function.Name, args, elapsed, result.IsError, timedOut)
+		var errText string
+		if result.IsError {
+			errText = truncate(result.Text, 240)
+		}
+		a.cfg.OnToolEnd(tc.Function.Name, args, elapsed, result.IsError, timedOut, errText)
 	}
 	if extractFlow != nil {
 		flowIDs = append(flowIDs, extractFlow(result.Text)...)
@@ -503,15 +528,21 @@ func (a *OpenAIAgent) dispatchChatRequest(
 }
 
 // buildChatMessages returns history filtered to OpenAI-compatible shape.
+// The reasoning handler decides format-specific replay semantics: inline
+// preserves `<think>` on the last KeepThinkTurns assistant messages;
+// structured blanks ReasoningContent so it's never sent back (deepseek
+// convention); none passes through. History storage remains raw — only
+// the outbound view is filtered.
 func (a *OpenAIAgent) buildChatMessages() []ChatMessage {
-	snap := a.history.Snapshot()
+	snap := a.cfg.Reasoning.Replay(a.history.Snapshot(), a.cfg.KeepThinkTurns)
 	out := make([]ChatMessage, 0, len(snap))
 	for _, m := range snap {
 		out = append(out, ChatMessage{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolCalls:  m.ToolCalls,
-			ToolCallID: m.ToolCallID,
+			Role:             m.Role,
+			Content:          m.Content,
+			ReasoningContent: m.ReasoningContent,
+			ToolCalls:        m.ToolCalls,
+			ToolCallID:       m.ToolCallID,
 		})
 	}
 	return out

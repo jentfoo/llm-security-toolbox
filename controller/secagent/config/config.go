@@ -28,6 +28,7 @@ type Config struct {
 	HighWatermark          float64
 	LowWatermark           float64
 	KeepTurns              int
+	KeepThinkTurns         int
 
 	// Sectool
 	ProxyPort int
@@ -88,6 +89,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.Float64Var(&c.HighWatermark, "compaction-high-watermark", 0.80, "compaction trigger fraction")
 	fs.Float64Var(&c.LowWatermark, "compaction-low-watermark", 0.40, "compaction target fraction")
 	fs.IntVar(&c.KeepTurns, "compaction-keep-turns", 4, "turns never compacted")
+	fs.IntVar(&c.KeepThinkTurns, "keep-think-turns", 0, "assistant messages to preserve <think> blocks on when replaying history (0 = auto: 4 if max-context ≤ 128k, else 8)")
 
 	fs.IntVar(&c.ProxyPort, "proxy-port", 8181, "sectool proxy port")
 	fs.IntVar(&c.MCPPort, "mcp-port", 9119, "sectool MCP port")
@@ -109,7 +111,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.StallStopAfter, "stall-stop-after", 4, "silent runs before force-stop")
 
 	fs.IntVar(&c.ProgressLogInterval, "progress-log-interval", 3, "turns per agent between status summaries (0 disables; deprecated — superseded by narrator)")
-	fs.DurationVar(&c.NarrateInterval, "narrate-interval", 30*time.Second, "min interval between async narrator summaries (0 disables)")
+	fs.DurationVar(&c.NarrateInterval, "narrate-interval", 2*time.Minute, "min interval between async narrator summaries (0 disables)")
 	fs.DurationVar(&c.NarrateTimeout, "narrate-timeout", 300*time.Second, "per-summary narrator call timeout")
 	fs.StringVar(&c.LogFile, "log-file", "secagent.log", "structured log destination")
 
@@ -158,4 +160,19 @@ func (c *Config) EffectiveSummaryModel() string {
 		return c.OrchestratorModel
 	}
 	return c.WorkerModel
+}
+
+// EffectiveKeepThinkTurns returns the number of recent assistant messages
+// that should retain their `<think>` blocks when replaying history to the
+// model. An explicit positive KeepThinkTurns takes precedence; otherwise
+// auto-resolves based on maxContext — small contexts get a tighter window
+// (4) since think blocks can be large, larger contexts keep 8.
+func (c *Config) EffectiveKeepThinkTurns(maxContext int) int {
+	if c.KeepThinkTurns > 0 {
+		return c.KeepThinkTurns
+	}
+	if maxContext <= 128_000 {
+		return 4
+	}
+	return 8
 }

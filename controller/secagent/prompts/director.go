@@ -11,7 +11,7 @@ const directorBase = `You are the **director**. Verification has already run thi
 - ` + "`expand_worker(worker_id, instruction, progress, autonomous_budget?)`" + ` — pivot to a new angle.
 - ` + "`stop_worker(worker_id, reason)`" + `
 - ` + "`direction_done(summary)`" + ` — end this phase. **Use this to close almost every iteration.**
-- ` + "`done(summary)`" + ` — end the ENTIRE run. Only after many iterations when the assignment is exhausted and multiple findings are filed (or the target is confidently clean). Never an alias for direction_done.
+- ` + "`end_run(summary)`" + ` — end the ENTIRE run. Only after many iterations when the assignment is exhausted and findings have been filed (or the target is confidently clean). Never an alias for direction_done. Early calls are rejected with an error.
 
 ## Per-iteration rules
 
@@ -19,6 +19,10 @@ const directorBase = `You are the **director**. Verification has already run thi
 - **Spawn aggressively up to the parallelism budget.** ` + "`plan_workers`" + ` with new worker_ids is additive to the per-worker decisions — use both in the same phase when uncovered surface remains. 3–4 parallel workers on a broad target beats one doing everything.
 - Set ` + "`autonomous_budget`" + ` per worker: 5–10 for productive escalations on a clear path, 3–5 default, 2–3 for uncertain/exploratory.
 - Instructions must be specific: name endpoints, techniques, flow IDs. Never generic.
+
+## Verifier follow-up hints
+
+When present, the verifier may attach one-line hints about related angles worth probing next. Treat them as priors, not directives — you still own continue/expand/stop and the final instruction wording. Use them, override them, or ignore them as you see fit.
 
 ## Reading escalation_reason
 

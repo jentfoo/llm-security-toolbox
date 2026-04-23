@@ -55,13 +55,13 @@ func formatAutonomousRun(workerID int, turns []agent.TurnSummary, escalationReas
 	if len(turns) == 0 {
 		return fmt.Sprintf(
 			"### Worker %d\n(No autonomous turns this iteration. escalation_reason=%s)",
-			workerID, orDef(escalationReason, "unknown"),
+			workerID, orDefault(escalationReason, "unknown"),
 		)
 	}
 	var parts []string
 	parts = append(parts, fmt.Sprintf(
 		"### Worker %d — %d autonomous turn(s), escalated: %s",
-		workerID, len(turns), orDef(escalationReason, "unknown"),
+		workerID, len(turns), orDefault(escalationReason, "unknown"),
 	))
 	for i, s := range turns {
 		var names []string
@@ -96,13 +96,6 @@ func firstNonEmptyLine(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return strings.TrimSpace(s[:i])
-	}
-	return s
-}
-
-func orDef(s, def string) string {
-	if s == "" {
-		return def
 	}
 	return s
 }
@@ -161,11 +154,35 @@ func BuildVerifierContinuePrompt(pending []FindingCandidate, filedThisIter, dism
 	}, "\n")
 }
 
+// FormatFollowUpHints renders optional verifier follow-up hints for the director.
+// Returns "" when no hints are present.
+func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissal) string {
+	var lines []string
+	for _, f := range findings {
+		h := strings.TrimSpace(f.FollowUpHint)
+		if h == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- (filed: %s) %s", short(f.Title, 80), h))
+	}
+	for _, d := range dismissals {
+		h := strings.TrimSpace(d.FollowUpHint)
+		if h == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- (dismissed: %s) %s", d.CandidateID, h))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "**Verifier follow-up hints (advisory — you decide whether to act):**\n" + strings.Join(lines, "\n")
+}
+
 // BuildDirectorPrompt renders the initial director substep.
 func BuildDirectorPrompt(
 	workers []*WorkerState,
 	workerRuns map[int][]agent.TurnSummary,
-	verificationSummary, findingsSummary, stallWarnings string,
+	verificationSummary, findingsSummary, stallWarnings, followUpHints string,
 	iteration, maxIter, findingsCount int,
 	maxWorkers int,
 ) string {
@@ -173,6 +190,9 @@ func BuildDirectorPrompt(
 	parts = append(parts, statusLine(iteration, maxIter, findingsCount), "", findingsSummary, "", "**Verification:** "+verificationSummary)
 	if stallWarnings != "" {
 		parts = append(parts, "", stallWarnings)
+	}
+	if followUpHints != "" {
+		parts = append(parts, "", followUpHints)
 	}
 	parts = append(parts, "", "**Worker autonomous runs this iteration:**", "")
 	aliveCount := 0

@@ -144,6 +144,10 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 						"type":  "array",
 						"items": map[string]any{"type": "string"},
 					},
+					"follow_up_hint": map[string]any{
+						"type":        "string",
+						"description": "Optional one-line hint for the director: a related angle, variant, or adjacent endpoint worth probing next. Advisory only; omit if nothing stands out.",
+					},
 				},
 				"required": []string{
 					"title", "severity", "endpoint", "description",
@@ -164,6 +168,7 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 					Impact                 string   `json:"impact"`
 					VerificationNotes      string   `json:"verification_notes"`
 					SupersedesCandidateIDs []string `json:"supersedes_candidate_ids"`
+					FollowUpHint           string   `json:"follow_up_hint"`
 				}
 				if err := json.Unmarshal(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments: " + err.Error(), IsError: true}
@@ -192,6 +197,7 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 					Impact:                 strings.TrimSpace(in.Impact),
 					VerificationNotes:      notes,
 					SupersedesCandidateIDs: in.SupersedesCandidateIDs,
+					FollowUpHint:           strings.TrimSpace(in.FollowUpHint),
 				}
 				decisions.AddFinding(f)
 				return agent.ToolResult{Text: fmt.Sprintf("Finding '%s' recorded for persistence.", f.Title)}
@@ -205,6 +211,10 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 				"properties": map[string]any{
 					"candidate_id": map[string]any{"type": "string"},
 					"reason":       map[string]any{"type": "string"},
+					"follow_up_hint": map[string]any{
+						"type":        "string",
+						"description": "Optional one-line hint for the director: a related angle or real lead this dead-end points toward. Advisory only; omit if nothing stands out.",
+					},
 				},
 				"required": []string{"candidate_id", "reason"},
 			},
@@ -213,8 +223,9 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 					return reject("dismiss_candidate")
 				}
 				var in struct {
-					CandidateID string `json:"candidate_id"`
-					Reason      string `json:"reason"`
+					CandidateID  string `json:"candidate_id"`
+					Reason       string `json:"reason"`
+					FollowUpHint string `json:"follow_up_hint"`
 				}
 				if err := json.Unmarshal(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
@@ -227,7 +238,11 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 						IsError: true,
 					}
 				}
-				decisions.AddDismissal(cid, reason)
+				decisions.AddDismissal(CandidateDismissal{
+					CandidateID:  cid,
+					Reason:       reason,
+					FollowUpHint: strings.TrimSpace(in.FollowUpHint),
+				})
 				return agent.ToolResult{Text: fmt.Sprintf("Candidate %s dismissal recorded.", cid)}
 			},
 		},
@@ -263,7 +278,15 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 }
 
 // DirectorToolDefs builds the in-process tool set for the director.
-func DirectorToolDefs(decisions *DecisionQueue) []agent.ToolDef {
+//
+// guardState returns (iteration, findingsThisRun). It must be non-nil — the
+// end_run handler consults it to reject premature calls that local models
+// emit when they confuse end_run with direction_done. Pass a closure that
+// captures the controller's loop iteration and writer.RunCount.
+func DirectorToolDefs(
+	decisions *DecisionQueue,
+	guardState func() (iter, runFindings int),
+) []agent.ToolDef {
 	reject := func(name string) agent.ToolResult {
 		cur := decisions.Phase()
 		return agent.ToolResult{
@@ -459,8 +482,10 @@ func DirectorToolDefs(decisions *DecisionQueue) []agent.ToolDef {
 			},
 		},
 		{
-			Name:        "done",
-			Description: `Signal that the exploration run should end.`,
+			Name: "end_run",
+			Description: `End the ENTIRE exploration run. Use only after many iterations when ` +
+				`the assignment is exhausted and findings have been filed (or the target is confidently clean). ` +
+				`Never use this to close a phase — that is direction_done's job.`,
 			Schema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"summary": map[string]any{"type": "string"}},
@@ -468,7 +493,7 @@ func DirectorToolDefs(decisions *DecisionQueue) []agent.ToolDef {
 			},
 			Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
 				if decisions.Phase() != agent.PhaseDirection {
-					return reject("done")
+					return reject("end_run")
 				}
 				var in struct {
 					Summary string `json:"summary"`
@@ -480,7 +505,19 @@ func DirectorToolDefs(decisions *DecisionQueue) []agent.ToolDef {
 				if s == "" {
 					return agent.ToolResult{Text: "Rejected: summary is required.", IsError: true}
 				}
-				decisions.SetDone(s)
+				iter, runFindings := guardState()
+				if iter < MinIterationsForDone && runFindings == 0 {
+					return agent.ToolResult{
+						Text: fmt.Sprintf(
+							"Rejected: `end_run` is premature (iteration %d/%d, %d findings filed this run). "+
+								"Use `direction_done(summary)` to close this phase. `end_run` ends the ENTIRE run "+
+								"and is only for exhausted assignments after findings have been filed.",
+							iter, MinIterationsForDone, runFindings,
+						),
+						IsError: true,
+					}
+				}
+				decisions.SetEndRun(s)
 				return agent.ToolResult{Text: "Run end signaled."}
 			},
 		},

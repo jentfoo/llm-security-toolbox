@@ -10,11 +10,15 @@ import (
 
 // ChatMessage mirrors the subset of OpenAI chat-completion fields we need.
 type ChatMessage struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role    string `json:"role"`
+	Content string `json:"content,omitempty"`
+	// ReasoningContent carries structured reasoning (deepseek / qwen3-style).
+	// Propagated to outbound requests only when a reasoning handler chose to
+	// preserve it; omitempty keeps blank values off the wire.
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall mirrors assistant.tool_calls entries.
@@ -49,14 +53,20 @@ type ChatRequest struct {
 	Messages  []ChatMessage
 	Tools     []ChatTool
 	MaxTokens int
+	// ReasoningEffort, when non-empty, forwards OpenAI's `reasoning_effort`.
+	// Ignored silently by backends that don't support it. Leave blank on
+	// drains where reasoning is desirable; see SummaryReasoningEffort for
+	// the value used on narrator/status calls.
+	ReasoningEffort string
 }
 
 // ChatResponse captures the assistant reply.
 type ChatResponse struct {
-	Content   string
-	ToolCalls []ToolCall
-	Usage     Usage
-	Model     string
+	Content          string
+	ReasoningContent string // populated when the server returns structured reasoning
+	ToolCalls        []ToolCall
+	Usage            Usage
+	Model            string
 }
 
 // Usage reports token counts.
@@ -92,10 +102,11 @@ func (c *OpenAIChatClient) CreateChatCompletion(ctx context.Context, req ChatReq
 	msgs := make([]openai.ChatCompletionMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		om := openai.ChatCompletionMessage{
-			Role:       m.Role,
-			Content:    m.Content,
-			Name:       m.Name,
-			ToolCallID: m.ToolCallID,
+			Role:             m.Role,
+			Content:          m.Content,
+			ReasoningContent: m.ReasoningContent,
+			Name:             m.Name,
+			ToolCallID:       m.ToolCallID,
 		}
 		if len(m.ToolCalls) > 0 {
 			om.ToolCalls = make([]openai.ToolCall, 0, len(m.ToolCalls))
@@ -126,10 +137,11 @@ func (c *OpenAIChatClient) CreateChatCompletion(ctx context.Context, req ChatReq
 	}
 
 	ocr := openai.ChatCompletionRequest{
-		Model:     req.Model,
-		Messages:  msgs,
-		Tools:     tools,
-		MaxTokens: req.MaxTokens,
+		Model:           req.Model,
+		Messages:        msgs,
+		Tools:           tools,
+		MaxTokens:       req.MaxTokens,
+		ReasoningEffort: req.ReasoningEffort,
 	}
 	resp, err := c.client.CreateChatCompletion(ctx, ocr)
 	if err != nil {
@@ -144,7 +156,8 @@ func (c *OpenAIChatClient) CreateChatCompletion(ctx context.Context, req ChatReq
 	}
 	choice := resp.Choices[0]
 	out := ChatResponse{
-		Content: choice.Message.Content,
+		Content:          choice.Message.Content,
+		ReasoningContent: choice.Message.ReasoningContent,
 		Usage: Usage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,

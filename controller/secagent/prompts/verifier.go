@@ -12,6 +12,7 @@ You have the full sectool surface (same as workers). Prefer non-destructive repr
 Control tools (only these control the phase):
 - ` + "`file_finding(...)`" + ` — record a verified finding. ` + "`verification_notes`" + ` must describe the technique and observations used to confirm ("I confirmed it" isn't enough) — do NOT cite flow IDs, OAST session IDs, or other ephemeral state. List matched pending candidates in ` + "`supersedes_candidate_ids`" + `.
 - ` + "`dismiss_candidate(candidate_id, reason)`" + ` — reject a candidate; reason should tell the worker what evidence would make it filable.
+- Optional ` + "`follow_up_hint`" + ` on either tool: one line describing a related angle, variant, or adjacent endpoint the director may want to probe next. Advisory — the director decides. Omit if nothing obvious stands out; don't invent.
 - ` + "`verification_done(summary)`" + ` — only when every pending candidate has been filed or dismissed; 1–3 sentences for the director.
 
 Rejected this phase: ` + "`plan_workers`, `continue_worker`, `expand_worker`, `stop_worker`, `done`, `direction_done`" + `.

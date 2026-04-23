@@ -42,7 +42,7 @@ func RunVerificationPhase(
 			prompt = BuildVerifierPrompt(
 				workers, workerRuns, pending,
 				writer.SummaryForOrchestrator(),
-				iteration, maxIter, writer.Count,
+				iteration, maxIter, writer.RunCount,
 			)
 		} else {
 			prompt = BuildVerifierContinuePrompt(

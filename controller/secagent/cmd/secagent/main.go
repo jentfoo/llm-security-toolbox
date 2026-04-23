@@ -32,6 +32,10 @@ func main() {
 		repoRoot = r
 	}
 
+	if orchestrator.IsTerminal(os.Stderr) && os.Getenv("NO_COLOR") == "" {
+		orchestrator.EnableColors()
+	}
+
 	log, err := orchestrator.NewLogger(cfg.LogFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "log open: %v\n", err)

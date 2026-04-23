@@ -39,7 +39,7 @@ func TestRunVerificationPhase_FilesAndDismissesThenDone(t *testing.T) {
 			VerificationNotes:      "Reproduced via replay_send on flow abc12345",
 			SupersedesCandidateIDs: []string{c1},
 		})
-		decisions.AddDismissal(c2, "insufficient impact")
+		decisions.AddDismissal(CandidateDismissal{CandidateID: c2, Reason: "insufficient impact"})
 		decisions.SetVerificationDone("filed 1, dismissed 1")
 	}
 

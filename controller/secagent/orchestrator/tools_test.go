@@ -101,12 +101,20 @@ func TestVerifierToolDefs(t *testing.T) {
 	})
 }
 
+// guardAccept is a guardState closure that always permits end_run. Used by
+// director-tool tests that aren't exercising the premature-end_run path.
+func guardAccept() (int, int) { return MinIterationsForDone, 0 }
+
+// guardPremature is a guardState closure that always produces a rejection
+// from the end_run handler (iter below threshold, zero findings this run).
+func guardPremature() (int, int) { return 1, 0 }
+
 func TestDirectorToolDefs(t *testing.T) {
 	t.Parallel()
 	t.Run("phase_gated_and_budget_clamp", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		defs := DirectorToolDefs(dq)
+		defs := DirectorToolDefs(dq, guardAccept)
 		cw := findTool(defs, "continue_worker")
 		require.NotNil(t, cw)
 		args, _ := json.Marshal(map[string]any{
@@ -124,7 +132,7 @@ func TestDirectorToolDefs(t *testing.T) {
 	t.Run("continue_rejects_bad_progress", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		cw := findTool(DirectorToolDefs(dq), "continue_worker")
+		cw := findTool(DirectorToolDefs(dq, guardAccept), "continue_worker")
 		args, _ := json.Marshal(map[string]any{
 			"worker_id": 1, "instruction": "go", "progress": "bogus",
 		})
@@ -135,7 +143,7 @@ func TestDirectorToolDefs(t *testing.T) {
 	t.Run("plan_rejects_empty", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		pw := findTool(DirectorToolDefs(dq), "plan_workers")
+		pw := findTool(DirectorToolDefs(dq, guardAccept), "plan_workers")
 		args, _ := json.Marshal(map[string]any{"plans": []any{}})
 		res := pw.Handler(context.Background(), args)
 		assert.True(t, res.IsError)
@@ -144,7 +152,7 @@ func TestDirectorToolDefs(t *testing.T) {
 	t.Run("plan_records_valid_entries", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		pw := findTool(DirectorToolDefs(dq), "plan_workers")
+		pw := findTool(DirectorToolDefs(dq, guardAccept), "plan_workers")
 		args, _ := json.Marshal(map[string]any{
 			"plans": []map[string]any{
 				{"worker_id": 1, "assignment": "scan auth"},
@@ -160,10 +168,10 @@ func TestDirectorToolDefs(t *testing.T) {
 		assert.Equal(t, 3, dq.Plan[1].WorkerID)
 	})
 
-	t.Run("stop_and_done", func(t *testing.T) {
+	t.Run("stop_and_end_run", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		defs := DirectorToolDefs(dq)
+		defs := DirectorToolDefs(dq, guardAccept)
 
 		stop := findTool(defs, "stop_worker")
 		args, _ := json.Marshal(map[string]any{"worker_id": 2, "reason": "dead end"})
@@ -178,22 +186,66 @@ func TestDirectorToolDefs(t *testing.T) {
 		assert.False(t, res.IsError)
 		assert.True(t, dq.HasDirectionDone)
 
-		done := findTool(defs, "done")
+		er := findTool(defs, "end_run")
 		args, _ = json.Marshal(map[string]any{"summary": "run over"})
-		res = done.Handler(context.Background(), args)
+		res = er.Handler(context.Background(), args)
 		assert.False(t, res.IsError)
-		assert.True(t, dq.HasDone)
+		assert.True(t, dq.HasEndRun)
 	})
 
 	t.Run("phase_mismatch_rejects_all", func(t *testing.T) {
 		dq := NewDecisionQueue() // idle
-		defs := DirectorToolDefs(dq)
-		for _, name := range []string{"plan_workers", "continue_worker", "expand_worker", "stop_worker", "direction_done", "done"} {
+		defs := DirectorToolDefs(dq, guardAccept)
+		for _, name := range []string{"plan_workers", "continue_worker", "expand_worker", "stop_worker", "direction_done", "end_run"} {
 			d := findTool(defs, name)
 			require.NotNil(t, d, name)
 			res := d.Handler(context.Background(), []byte(`{}`))
 			assert.True(t, res.IsError, name)
 		}
+	})
+
+	t.Run("end_run_premature_rejected", func(t *testing.T) {
+		// Director is in the right phase but called end_run on iteration 1
+		// with zero findings filed this run — the guard inside the handler
+		// must reject with IsError so the model sees the rejection same-turn
+		// and can course-correct to direction_done.
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		er := findTool(DirectorToolDefs(dq, guardPremature), "end_run")
+		require.NotNil(t, er)
+		args, _ := json.Marshal(map[string]any{"summary": "fabricated dispatch summary"})
+		res := er.Handler(context.Background(), args)
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "premature")
+		assert.Contains(t, res.Text, "direction_done")
+		assert.False(t, dq.HasEndRun, "premature end_run must not flip HasEndRun")
+		assert.Empty(t, dq.EndRunSummary)
+	})
+
+	t.Run("end_run_accepted_after_threshold", func(t *testing.T) {
+		// Reaching MinIterationsForDone without findings is the intended
+		// "nothing found, stop" escape hatch — the guard should accept.
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		er := findTool(DirectorToolDefs(dq, func() (int, int) {
+			return MinIterationsForDone, 0
+		}), "end_run")
+		args, _ := json.Marshal(map[string]any{"summary": "exhausted after 5 iterations"})
+		res := er.Handler(context.Background(), args)
+		assert.False(t, res.IsError, res.Text)
+		assert.True(t, dq.HasEndRun)
+	})
+
+	t.Run("end_run_accepted_with_findings_this_run", func(t *testing.T) {
+		// One filed finding on iteration 2 is also fine — model has made
+		// concrete progress, so it can end the run even before iter 5.
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		er := findTool(DirectorToolDefs(dq, func() (int, int) { return 2, 1 }), "end_run")
+		args, _ := json.Marshal(map[string]any{"summary": "one finding, nothing else to probe"})
+		res := er.Handler(context.Background(), args)
+		assert.False(t, res.IsError, res.Text)
+		assert.True(t, dq.HasEndRun)
 	})
 }
 

@@ -33,12 +33,14 @@ type FindingFiled struct {
 	Impact                 string
 	VerificationNotes      string
 	SupersedesCandidateIDs []string
+	FollowUpHint           string
 }
 
 // CandidateDismissal records a dismissal.
 type CandidateDismissal struct {
-	CandidateID string
-	Reason      string
+	CandidateID  string
+	Reason       string
+	FollowUpHint string
 }
 
 // DecisionQueue holds cross-phase orchestrator tool-call state.
@@ -49,8 +51,8 @@ type DecisionQueue struct {
 	WorkerDecisions         []WorkerDecision
 	Findings                []FindingFiled
 	Dismissals              []CandidateDismissal
-	DoneSummary             string
-	HasDone                 bool
+	EndRunSummary           string
+	HasEndRun               bool
 	VerificationDoneSummary string
 	HasVerificationDone     bool
 	DirectionDoneSummary    string
@@ -71,7 +73,7 @@ func (q *DecisionQueue) Reset() {
 	q.WorkerDecisions = nil
 	q.Findings = nil
 	q.Dismissals = nil
-	q.DoneSummary, q.HasDone = "", false
+	q.EndRunSummary, q.HasEndRun = "", false
 	q.VerificationDoneSummary, q.HasVerificationDone = "", false
 	q.DirectionDoneSummary, q.HasDirectionDone = "", false
 	q.phase = agent.PhaseIdle
@@ -122,18 +124,18 @@ func (q *DecisionQueue) AddFinding(f FindingFiled) {
 }
 
 // AddDismissal records a dismissal.
-func (q *DecisionQueue) AddDismissal(id, reason string) {
+func (q *DecisionQueue) AddDismissal(d CandidateDismissal) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.Dismissals = append(q.Dismissals, CandidateDismissal{CandidateID: id, Reason: reason})
+	q.Dismissals = append(q.Dismissals, d)
 }
 
-// SetDone signals run end.
-func (q *DecisionQueue) SetDone(summary string) {
+// SetEndRun signals run end.
+func (q *DecisionQueue) SetEndRun(summary string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.DoneSummary = summary
-	q.HasDone = true
+	q.EndRunSummary = summary
+	q.HasEndRun = true
 }
 
 // SetVerificationDone marks the verification phase complete.

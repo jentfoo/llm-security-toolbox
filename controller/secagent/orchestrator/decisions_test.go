@@ -20,7 +20,7 @@ func TestDecisionQueue_Lifecycle(t *testing.T) {
 	assert.True(t, q.HasPlan)
 	q.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1})
 	q.AddFinding(FindingFiled{Title: "xss"})
-	q.AddDismissal("c1", "no repro")
+	q.AddDismissal(CandidateDismissal{CandidateID: "c1", Reason: "no repro"})
 	q.SetVerificationDone("all set")
 	assert.True(t, q.HasVerificationDone)
 
@@ -29,8 +29,8 @@ func TestDecisionQueue_Lifecycle(t *testing.T) {
 	q.SetDirectionDone("planned")
 	assert.True(t, q.HasDirectionDone)
 
-	q.SetDone("run over")
-	assert.True(t, q.HasDone)
+	q.SetEndRun("run over")
+	assert.True(t, q.HasEndRun)
 
 	// Reset wipes everything.
 	q.Reset()
@@ -38,7 +38,7 @@ func TestDecisionQueue_Lifecycle(t *testing.T) {
 	assert.Empty(t, q.WorkerDecisions)
 	assert.Empty(t, q.Findings)
 	assert.Empty(t, q.Dismissals)
-	assert.False(t, q.HasDone)
+	assert.False(t, q.HasEndRun)
 	assert.False(t, q.HasVerificationDone)
 	assert.False(t, q.HasDirectionDone)
 	assert.Equal(t, agent.PhaseIdle, q.Phase())

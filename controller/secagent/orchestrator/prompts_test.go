@@ -14,13 +14,13 @@ func TestStatusLine(t *testing.T) {
 	assert.Equal(t, "**Status:** iteration 2/10, findings filed: 3", statusLine(2, 10, 3))
 }
 
-func TestShortAndOrDef(t *testing.T) {
+func TestShortAndOrDefault(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "hi", short("hi", 10))
 	assert.Equal(t, "a…", short("abcdef", 2))
 	assert.Equal(t, "…", short("abcdef", 0))
-	assert.Equal(t, "fallback", orDef("", "fallback"))
-	assert.Equal(t, "actual", orDef("actual", "fallback"))
+	assert.Equal(t, "fallback", orDefault("", "fallback"))
+	assert.Equal(t, "actual", orDefault("actual", "fallback"))
 }
 
 func TestFirstNonEmptyLine(t *testing.T) {

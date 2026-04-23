@@ -21,7 +21,7 @@ func RunDirectionPhase(
 	decisions *DecisionQueue,
 	workers []*WorkerState,
 	workerRuns map[int][]agent.TurnSummary,
-	verificationSummary, findingsSummary, stallWarnings string,
+	verificationSummary, findingsSummary, stallWarnings, followUpHints string,
 	iteration, maxIter, findingsCount, maxWorkers int,
 	log *Logger,
 ) {
@@ -40,7 +40,7 @@ func RunDirectionPhase(
 		var prompt string
 		if substep == 1 {
 			prompt = BuildDirectorPrompt(
-				workers, workerRuns, verificationSummary, findingsSummary, stallWarnings,
+				workers, workerRuns, verificationSummary, findingsSummary, stallWarnings, followUpHints,
 				iteration, maxIter, findingsCount, maxWorkers,
 			)
 		} else {
@@ -54,7 +54,7 @@ func RunDirectionPhase(
 			break
 		}
 		emitStatusIfDue(ctx, director, "direct", substep, log)
-		if decisions.HasDirectionDone || decisions.HasDone {
+		if decisions.HasDirectionDone || decisions.HasEndRun {
 			break
 		}
 		covered = coveredIDs(decisions)

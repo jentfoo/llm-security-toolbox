@@ -7,12 +7,18 @@ import (
 
 // Message is one entry in an agent's history.
 type Message struct {
-	Role       string     // system | user | assistant | tool
-	Content    string     // for assistant+tool_calls this may be empty
-	ToolCalls  []ToolCall // assistant only
-	ToolCallID string     // tool only, pairs with assistant.tool_calls[i].ID
-	ToolName   string     // tool only, populated at append for compaction stubs
-	Summary120 string     // tool only, first 120 chars of raw content at append
+	Role    string // system | user | assistant | tool
+	Content string // for assistant+tool_calls this may be empty
+	// ReasoningContent holds structured reasoning surfaced via the
+	// `reasoning_content` field of the OpenAI-compatible response (deepseek /
+	// qwen3-style). Inline-think models leave this empty and carry thinking
+	// inside Content as <think>...</think>. Stored verbatim as the model
+	// emitted it; replay/summary logic lives in the reasoning handler.
+	ReasoningContent string
+	ToolCalls        []ToolCall // assistant only
+	ToolCallID       string     // tool only, pairs with assistant.tool_calls[i].ID
+	ToolName         string     // tool only, populated at append for compaction stubs
+	Summary120       string     // tool only, first 120 chars of raw content at append
 }
 
 // History is a goroutine-safe message log for one agent.

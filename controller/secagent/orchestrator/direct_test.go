@@ -34,7 +34,7 @@ func TestRunDirectionPhase_FirstSubstepCoversEveryone(t *testing.T) {
 		{ID: 2, Alive: true, Agent: director},
 	}
 	RunDirectionPhase(context.Background(), director, decisions, workers,
-		nil, "verif summary", "no findings", "", 1, 10, 0, 4, nil)
+		nil, "verif summary", "no findings", "", "", 1, 10, 0, 4, nil)
 
 	// Main phase ran once, then self-review ran once.
 	assert.Equal(t, 2, step)
@@ -73,7 +73,7 @@ func TestRunDirectionPhase_SelfReviewAddsMissedDecision(t *testing.T) {
 		{ID: 2, Alive: true, Agent: director},
 	}
 	RunDirectionPhase(context.Background(), director, decisions, workers,
-		nil, "v", "f", "", 1, 10, 0, 4, nil)
+		nil, "v", "f", "", "", 1, 10, 0, 4, nil)
 
 	ids := map[int]string{}
 	for _, d := range decisions.WorkerDecisions {

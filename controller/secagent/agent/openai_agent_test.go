@@ -288,7 +288,7 @@ func TestOpenAIAgent_PerToolTimeout(t *testing.T) {
 	a := NewOpenAIAgent(OpenAIAgentConfig{
 		Model: "m", Pool: newPoolWith(client),
 		PerToolTimeout: 20 * time.Millisecond,
-		OnToolEnd: func(_ string, _ json.RawMessage, _ time.Duration, isErr, timedOut bool) {
+		OnToolEnd: func(_ string, _ json.RawMessage, _ time.Duration, isErr, timedOut bool, _ string) {
 			atomic.AddInt32(&ended, 1)
 			endTimedOut = timedOut
 			endIsErr = isErr
@@ -339,7 +339,7 @@ func TestOpenAIAgent_OnToolStartEndSequencing(t *testing.T) {
 			seq = append(seq, "start:"+name)
 			mu.Unlock()
 		},
-		OnToolEnd: func(name string, _ json.RawMessage, _ time.Duration, _, _ bool) {
+		OnToolEnd: func(name string, _ json.RawMessage, _ time.Duration, _, _ bool, _ string) {
 			mu.Lock()
 			seq = append(seq, "end:"+name)
 			mu.Unlock()
@@ -354,6 +354,54 @@ func TestOpenAIAgent_OnToolStartEndSequencing(t *testing.T) {
 	_, err := a.Drain(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"start:echo", "end:echo"}, seq)
+}
+
+func TestOpenAIAgent_OnToolEndErrTextPopulated(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{
+		responses: []ChatResponse{
+			{ToolCalls: []ToolCall{
+				{ID: "c1", Type: "function", Function: ToolFunction{Name: "ok", Arguments: `{}`}},
+				{ID: "c2", Type: "function", Function: ToolFunction{Name: "reject", Arguments: `{}`}},
+			}},
+			{Content: "done"},
+		},
+	}
+	var mu sync.Mutex
+	seen := map[string]string{}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client),
+		OnToolEnd: func(name string, _ json.RawMessage, _ time.Duration, isErr, _ bool, errText string) {
+			mu.Lock()
+			defer mu.Unlock()
+			if isErr {
+				seen[name] = errText
+			} else {
+				seen[name] = "<clean>"
+			}
+		},
+	})
+	a.SetTools([]ToolDef{
+		{
+			Name:    "ok",
+			Schema:  map[string]any{"type": "object"},
+			Handler: func(_ context.Context, _ json.RawMessage) ToolResult { return ToolResult{Text: "success body"} },
+		},
+		{
+			Name:   "reject",
+			Schema: map[string]any{"type": "object"},
+			Handler: func(_ context.Context, _ json.RawMessage) ToolResult {
+				return ToolResult{Text: "Rejected: boom because of a reason", IsError: true}
+			},
+		},
+	})
+	a.Query("go")
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "<clean>", seen["ok"], "non-error results must pass empty errText")
+	assert.Contains(t, seen["reject"], "Rejected: boom because of a reason")
 }
 
 func TestOpenAIAgent_RequestLifecycleCallbacks(t *testing.T) {
@@ -430,6 +478,150 @@ func TestSynthesizePendingToolStubs(t *testing.T) {
 	assert.Equal(t, "ok", paired["a"])
 	assert.Contains(t, paired["b"], "interrupted before tool could run")
 	assert.Contains(t, paired["c"], "interrupted before tool could run")
+}
+
+func TestOpenAIAgent_DrainStoresRawThink_SendStripsOlderThanKeepN(t *testing.T) {
+	t.Parallel()
+	// Two assistant responses, both containing think blocks. With
+	// KeepThinkTurns=1, the first send after both responses must have the
+	// older assistant's think stripped while the most recent one retains it.
+	// History itself must store raw content either way so summaries and
+	// inspection can recover the reasoning.
+	client := &fakeChatClient{responses: []ChatResponse{
+		{Content: "<think>plan A</think>result A"},
+		{Content: "<think>plan B</think>result B"},
+		{Content: "done"},
+	}}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", Pool: newPoolWith(client), KeepThinkTurns: 1,
+	})
+	a.Query("first")
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	a.Query("second")
+	_, err = a.Drain(t.Context())
+	require.NoError(t, err)
+	a.Query("third")
+	_, err = a.Drain(t.Context())
+	require.NoError(t, err)
+
+	// History snapshot: raw content is retained so downstream consumers
+	// (e.g. the narrator) can pick it up.
+	snap := a.history.Snapshot()
+	var assistants []Message
+	for _, m := range snap {
+		if m.Role == roleAssistant {
+			assistants = append(assistants, m)
+		}
+	}
+	require.Len(t, assistants, 3)
+	assert.Contains(t, assistants[0].Content, "<think>plan A</think>",
+		"history must retain raw think for summary use")
+	assert.Contains(t, assistants[1].Content, "<think>plan B</think>")
+
+	// The third outbound send (for the "third" user turn) replayed messages
+	// through buildChatMessages, which applies FilterThinkBlocks. With
+	// KeepThinkTurns=1, only the most recent assistant retains think.
+	sent := client.calls[2].Messages
+	var sentAssistants []ChatMessage
+	for _, m := range sent {
+		if m.Role == "assistant" {
+			sentAssistants = append(sentAssistants, m)
+		}
+	}
+	require.GreaterOrEqual(t, len(sentAssistants), 2)
+	// Older ones stripped
+	for i := 0; i < len(sentAssistants)-1; i++ {
+		assert.NotContains(t, sentAssistants[i].Content, "<think>",
+			"older assistant %d should have think stripped on send", i)
+	}
+	// Newest preserved
+	last := sentAssistants[len(sentAssistants)-1]
+	assert.Contains(t, last.Content, "<think>plan B</think>",
+		"most recent assistant must retain think (KeepThinkTurns=1)")
+}
+
+func TestOpenAIAgent_DrainStoresStructuredReasoning(t *testing.T) {
+	t.Parallel()
+	// Structured-format model puts reasoning in ReasoningContent and leaves
+	// Content empty. Drain must preserve both fields in history via the
+	// structured handler's Ingest.
+	client := &fakeChatClient{responses: []ChatResponse{
+		{Content: "", ReasoningContent: "I was thinking about X"},
+	}}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model:     "m",
+		Pool:      newPoolWith(client),
+		Reasoning: NewReasoningHandler(ReasoningFormatStructured),
+	})
+	a.Query("prompt")
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+
+	snap := a.history.Snapshot()
+	var asst Message
+	for _, m := range snap {
+		if m.Role == roleAssistant {
+			asst = m
+		}
+	}
+	assert.Empty(t, asst.Content)
+	assert.Equal(t, "I was thinking about X", asst.ReasoningContent)
+}
+
+func TestOpenAIAgent_StructuredReasoningNotReplayed(t *testing.T) {
+	t.Parallel()
+	// Structured handler: on the next send, assistant.ReasoningContent must
+	// be blanked so the reasoning field never reaches the wire (deepseek
+	// convention — reasoning is output-only).
+	client := &fakeChatClient{responses: []ChatResponse{
+		{Content: "", ReasoningContent: "prior turn reasoning"},
+		{Content: "final answer"},
+	}}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model:     "m",
+		Pool:      newPoolWith(client),
+		Reasoning: NewReasoningHandler(ReasoningFormatStructured),
+	})
+	a.Query("first")
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	a.Query("second")
+	_, err = a.Drain(t.Context())
+	require.NoError(t, err)
+
+	// Second outbound send replays history; the prior assistant turn must
+	// have ReasoningContent blanked on the wire.
+	sent := client.calls[1].Messages
+	for i, m := range sent {
+		if m.Role == "assistant" {
+			assert.Emptyf(t, m.ReasoningContent,
+				"replayed assistant %d must not carry reasoning_content", i)
+		}
+	}
+	// History kept the reasoning for summary use.
+	snap := a.history.Snapshot()
+	var found bool
+	for _, m := range snap {
+		if m.Role == roleAssistant && m.ReasoningContent == "prior turn reasoning" {
+			found = true
+		}
+	}
+	assert.True(t, found, "history must retain raw reasoning for summaries")
+}
+
+func TestOpenAIAgent_DrainDoesNotSetReasoningEffort(t *testing.T) {
+	t.Parallel()
+	// Worker / verifier / director drains must keep reasoning enabled — the
+	// summary-only reasoning_effort knob must not leak into the agent's own
+	// Drain path.
+	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
+	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+	a.Query("go")
+	_, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	require.Len(t, client.calls, 1)
+	assert.Empty(t, client.calls[0].ReasoningEffort, "drain must not disable reasoning")
 }
 
 func TestOpenAIAgent_FlowIDExtraction(t *testing.T) {

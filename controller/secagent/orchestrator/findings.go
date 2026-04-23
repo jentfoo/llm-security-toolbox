@@ -138,9 +138,15 @@ const markdownTemplate = `# %s
 type FindingWriter struct {
 	mu          sync.Mutex
 	findingsDir string
-	Count       int
-	Paths       []string
-	index       []findingIndexEntry
+	// Count is the highest finding index on disk (seeded from prior runs) and
+	// drives the finding-NN-*.md filename numbering.
+	Count int
+	// RunCount counts findings filed in this process only; used by the
+	// premature-done guard so stale findings left on disk from earlier runs
+	// can't bypass it.
+	RunCount int
+	Paths    []string
+	index    []findingIndexEntry
 }
 
 type findingIndexEntry struct {
@@ -208,6 +214,7 @@ func (w *FindingWriter) Write(filed FindingFiled) (string, error) {
 		return "", err
 	}
 	w.Count++
+	w.RunCount++
 	slug := Slugify(filed.Title)
 	if slug == "" {
 		slug = "untitled"

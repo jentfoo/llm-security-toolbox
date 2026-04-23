@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,7 +67,7 @@ func TestLogger_StderrAllowlist(t *testing.T) {
 	t.Parallel()
 	l, path, buf := newCapturedLogger(t)
 	// Mirrored: controller phase, finding, narrate, server, worker turn, slow tool.
-	l.Log("controller", "phase", map[string]any{"from": "a", "to": "b"})
+	l.Log("controller", "transition phase a to b", nil)
 	l.Log("finding", "written", map[string]any{"path": "f.md"})
 	l.Log("narrate", "worker scanning", nil)
 	l.Log("server", "models", map[string]any{"worker": "m"})
@@ -82,7 +83,7 @@ func TestLogger_StderrAllowlist(t *testing.T) {
 
 	out := buf.String()
 	// Mirrored:
-	assert.Contains(t, out, "[controller] phase")
+	assert.Contains(t, out, "[controller] transition phase a to b")
 	assert.Contains(t, out, "[finding] written")
 	assert.Contains(t, out, "[narrate] worker scanning")
 	assert.Contains(t, out, "[server] models")
@@ -103,11 +104,58 @@ func TestLogger_StderrAllowlist(t *testing.T) {
 func TestLogger_PrettyDoesNotDuplicateJSON(t *testing.T) {
 	t.Parallel()
 	l, _, buf := newCapturedLogger(t)
-	l.Log("controller", "phase", map[string]any{"from": "idle", "to": "autonomous"})
+	l.Log("controller", "transition phase idle to autonomous", nil)
 	out := buf.String()
 	// Must be the pretty line, not JSON
-	assert.NotContains(t, out, `"msg":"phase"`)
-	assert.Contains(t, out, "[controller] phase from=idle to=autonomous")
+	assert.NotContains(t, out, `"msg":"transition phase idle to autonomous"`)
+	assert.Contains(t, out, "[controller] transition phase idle to autonomous")
+}
+
+func TestLogger_ColoredOutput(t *testing.T) {
+	withColors(t, true)
+	l, _, buf := newCapturedLogger(t)
+	l.Log("worker", "turn", map[string]any{"worker_id": 1})
+	l.Log("narrate", "orchestrator: running scans", nil)
+	l.Log("narrate", "agent (worker-2): probing login", nil)
+	l.Log("narrate", "empty-ish line", nil)
+
+	out := buf.String()
+	// Timestamp colored gray.
+	assert.Contains(t, out, ansiGray+"")
+	// Tag colored blue.
+	assert.Contains(t, out, "["+ansiBlue+"worker"+ansiReset+"]")
+	assert.Contains(t, out, "["+ansiBlue+"narrate"+ansiReset+"]")
+	// Field key=value pairs colored gray.
+	assert.Contains(t, out, " "+ansiGray+"worker_id=1"+ansiReset)
+	// Narrate prefix colored green for both shapes.
+	assert.Contains(t, out, ansiMedGreen+"orchestrator:"+ansiReset+" running scans")
+	assert.Contains(t, out, ansiMedGreen+"agent (worker-2):"+ansiReset+" probing login")
+	// Non-prefix narrate messages are passed through unchanged.
+	assert.Contains(t, out, "] empty-ish line")
+}
+
+func TestWriteNarrateMsg(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		colored bool
+		want    string
+	}{
+		{"orchestrator_plain", "orchestrator: did a thing", false, "orchestrator: did a thing"},
+		{"orchestrator_colored", "orchestrator: did a thing", true, ansiMedGreen + "orchestrator:" + ansiReset + " did a thing"},
+		{"agent_plain", "agent (worker-1): probing", false, "agent (worker-1): probing"},
+		{"agent_colored", "agent (worker-1): probing", true, ansiMedGreen + "agent (worker-1):" + ansiReset + " probing"},
+		{"unmatched_passthrough", "some other narrate", true, "some other narrate"},
+		{"agent_open_no_close", "agent (oops no close", true, "agent (oops no close"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			withColors(t, c.colored)
+			var b strings.Builder
+			writeNarrateMsg(&b, c.in)
+			assert.Equal(t, c.want, b.String())
+		})
+	}
 }
 
 func TestFormatPrettyValue(t *testing.T) {
