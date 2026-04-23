@@ -42,6 +42,48 @@ func TestApplyPlanDiff(t *testing.T) {
 		assert.Equal(t, 1, built)
 	})
 
+	t.Run("retarget_preserves_streak_on_dead_iteration", func(t *testing.T) {
+		// Regression: the director was retargeting dead workers every
+		// iteration, resetting ProgressNoneStreak and preventing the stall
+		// force-stop from ever firing. Retarget must only clear the counter
+		// when the worker actually produced something this iteration.
+		w := &WorkerState{
+			ID:                 1,
+			Agent:              &agent.FakeAgent{},
+			Alive:              true,
+			ProgressNoneStreak: 3,
+			StallWarned:        true,
+			AutonomousTurns:    []agent.TurnSummary{{}, {}}, // all dead
+		}
+		workers := []*WorkerState{w}
+		var built int
+		applyPlanDiff(t.Context(),
+			[]PlanEntry{{WorkerID: 1, Assignment: "try something new"}},
+			&workers, stubSpawn(&built), 5, nil,
+		)
+		assert.Equal(t, 3, w.ProgressNoneStreak, "dead-iteration retarget must not reset streak")
+		assert.True(t, w.StallWarned, "dead-iteration retarget must not clear warn latch")
+	})
+
+	t.Run("retarget_resets_streak_when_productive", func(t *testing.T) {
+		w := &WorkerState{
+			ID:                 1,
+			Agent:              &agent.FakeAgent{},
+			Alive:              true,
+			ProgressNoneStreak: 3,
+			StallWarned:        true,
+			AutonomousTurns:    []agent.TurnSummary{{TokensIn: 200, FlowIDs: []string{"f1"}}},
+		}
+		workers := []*WorkerState{w}
+		var built int
+		applyPlanDiff(t.Context(),
+			[]PlanEntry{{WorkerID: 1, Assignment: "continue"}},
+			&workers, stubSpawn(&built), 5, nil,
+		)
+		assert.Equal(t, 0, w.ProgressNoneStreak)
+		assert.False(t, w.StallWarned)
+	})
+
 	t.Run("max_workers_cap", func(t *testing.T) {
 		workers := []*WorkerState{
 			{ID: 1, Agent: &agent.FakeAgent{}, Alive: true},

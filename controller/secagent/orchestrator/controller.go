@@ -398,6 +398,11 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 	candidates := NewCandidatePool()
 	decisions := NewDecisionQueue()
 	writer := NewFindingWriter(cfg.FindingsDir)
+	dedupReviewer := &OpenAIDedupReviewer{
+		Pool:  orchPool,
+		Model: cfg.OrchestratorModel,
+		Log:   log,
+	}
 
 	verifier, err := factory.NewVerifier()
 	if err != nil {
@@ -563,11 +568,15 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		phaseTransition("idle", "autonomous")
 		narrator.Tick()
 
+		candidatesBefore := candidates.Counter()
 		workerRuns := RunAllWorkersUntilEscalation(ctx, alive, candidates, log)
 		UpdateStallStreaks(alive)
 
 		// stall-force-stop happens before verification so the stalled worker's
-		// run still feeds the verifier (spec §7.3)
+		// run still feeds the verifier (spec §7.3). Both silent and error
+		// escalations count toward ProgressNoneStreak (see UpdateStallStreaks),
+		// so a worker that consistently times out or crashes terminates at
+		// the same threshold as one that goes silent by choice.
 		for _, w := range workers {
 			if w.Alive && w.ProgressNoneStreak >= cfg.StallStopAfter {
 				if log != nil {
@@ -580,11 +589,34 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			}
 		}
 
+		// Dead-iteration short-circuit: if every worker produced zero tool
+		// calls AND no new candidates were filed this iteration, there is
+		// nothing for the verifier to process and nothing new for the
+		// director to plan against. Skip both phases to save orchestrator
+		// LLM budget. The stall mechanism above still retires dead workers
+		// naturally; once all workers stop, the alive-check ends the run.
+		// Each still-alive worker gets a continuePrompt queued so the next
+		// iteration's Drain has a user message to respond to — otherwise
+		// the chat history would end on an assistant role and the next
+		// request would be rejected or degenerate.
+		if isDeadIteration(workerRuns, candidatesBefore, candidates.Counter()) {
+			if log != nil {
+				log.Log("controller", "dead-iteration", map[string]any{"iter": iteration})
+			}
+			for _, w := range workers {
+				if w.Alive {
+					w.Agent.Query(continuePrompt)
+				}
+			}
+			narrator.TriggerNow()
+			continue
+		}
+
 		decisions.Reset()
 
 		phaseTransition("autonomous", "verification")
 		verificationSummary := RunVerificationPhase(
-			ctx, verifier, decisions, candidates, writer,
+			ctx, verifier, decisions, candidates, writer, dedupReviewer,
 			workerRuns, workers, iteration, cfg.MaxIterations, log,
 		)
 
@@ -663,6 +695,24 @@ func aliveWorkers(ws []*WorkerState) []*WorkerState {
 	return bulk.SliceFilter(func(w *WorkerState) bool { return w.Alive }, ws)
 }
 
+// isDeadIteration reports whether the autonomous phase produced nothing
+// actionable — no tool calls across any worker and no new candidates filed.
+// These iterations shouldn't feed verification/direction; doing so lets the
+// director hallucinate plans over workers that silently failed LLM-side.
+func isDeadIteration(workerRuns map[int][]agent.TurnSummary, candidatesBefore, candidatesAfter int) bool {
+	if candidatesAfter != candidatesBefore {
+		return false
+	}
+	for _, runs := range workerRuns {
+		for _, r := range runs {
+			if len(r.ToolCalls) > 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func findWorker(ws []*WorkerState, id int) *WorkerState {
 	idx := slices.IndexFunc(ws, func(w *WorkerState) bool { return w.ID == id })
 	if idx < 0 {
@@ -716,8 +766,14 @@ func applyPlanDiff(
 		if w, ok := byID[p.WorkerID]; ok && w.Alive {
 			w.Assignment = p.Assignment
 			w.LastInstruction = p.Assignment
-			w.ProgressNoneStreak = 0
-			w.StallWarned = false
+			// Only reset the stall counter when the worker actually produced
+			// something this iteration. A fresh assignment doesn't bring a
+			// dead LLM back to life, so the streak must keep climbing until
+			// force-stop fires.
+			if hasProductiveTurn(w.AutonomousTurns) {
+				w.ProgressNoneStreak = 0
+				w.StallWarned = false
+			}
 			w.Agent.Query(p.Assignment)
 			if log != nil {
 				log.Log("plan", "retarget", map[string]any{"worker_id": p.WorkerID})

@@ -18,6 +18,8 @@ func TestSlugify(t *testing.T) {
 	}{
 		{"path_and_spaces", "Reflected XSS in /search", "reflected-xss-in-search"},
 		{"extra_whitespace", "  Hello   World!  ", "hello-world"},
+		{"underscore_equals_hyphen", "plaintext client_secret exposure", "plaintext-client-secret-exposure"},
+		{"hyphen_equivalence", "plaintext client-secret exposure", "plaintext-client-secret-exposure"},
 		{"empty", "", ""},
 	}
 	for _, c := range cases {
@@ -99,6 +101,51 @@ func TestFindingWriter(t *testing.T) {
 		require.NoError(t, err)
 		other := finding
 		other.Title = "Completely Different Thing"
+		assert.False(t, w.IsDuplicate(other))
+	})
+
+	t.Run("underscore_vs_hyphen_client_secret", func(t *testing.T) {
+		// Regression: the secagent run at 2026-04-22 produced finding-02
+		// "Plaintext client_secret Exposure ..." and finding-03 "Plaintext
+		// Client Secret Exposure ..." — same class, different punctuation.
+		first := FindingFiled{
+			Title:    "Plaintext client_secret Exposure in OAuth2 Registration Response",
+			Severity: "high",
+			Endpoint: "POST /oauth2/register",
+		}
+		second := FindingFiled{
+			Title:    "Plaintext Client Secret Exposure in OAuth2 Registration Response",
+			Severity: "high",
+			Endpoint: "POST /oauth2/register",
+		}
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(first)
+		require.NoError(t, err)
+		assert.True(t, w.IsDuplicate(second))
+	})
+
+	t.Run("same_title_missing_endpoint_is_duplicate", func(t *testing.T) {
+		// Same title regardless of endpoint → exact slug match.
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(finding)
+		require.NoError(t, err)
+		other := finding
+		other.Endpoint = ""
+		assert.True(t, w.IsDuplicate(other))
+	})
+
+	t.Run("similar_title_not_exact_slug_not_duplicate", func(t *testing.T) {
+		// Softer match: TitlesSimilar but slug differs — IsDuplicate no
+		// longer returns true. Agent-mediated dedup (FindSimilarEntries +
+		// reviewer) handles these.
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(finding)
+		require.NoError(t, err)
+		other := FindingFiled{
+			Title:    "Reflected XSS in login flow",
+			Severity: "high",
+			Endpoint: "GET /login",
+		}
 		assert.False(t, w.IsDuplicate(other))
 	})
 }

@@ -19,6 +19,12 @@ type Message struct {
 	ToolCallID       string     // tool only, pairs with assistant.tool_calls[i].ID
 	ToolName         string     // tool only, populated at append for compaction stubs
 	Summary120       string     // tool only, first 120 chars of raw content at append
+	// IsRepairError marks a tool-result message carrying the synthetic "your
+	// arguments did not parse" feedback from RepairToolArgs failure. These
+	// messages are small and high-signal (they include schema guidance) so
+	// compaction pass 2 skips them to avoid the model repeating the same
+	// malformed call after the fix was compacted away.
+	IsRepairError bool
 }
 
 // History is a goroutine-safe message log for one agent.

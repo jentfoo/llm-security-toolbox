@@ -4,11 +4,16 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/go-appsec/secagent/agent"
 )
 
 // UpdateStallStreaks walks every worker and adjusts ProgressNoneStreak
-// based on its escalation_reason and whether any flow IDs were touched
-// during the autonomous run.
+// based on the outcome of the last autonomous run. Both "silent"
+// (timeout or model chose not to escalate) and "error" (HTTP error, crashed
+// mid-drain) increment the streak so both failure modes feed the existing
+// StallStopAfter threshold. "candidate" or any turn that produced flows
+// resets the streak.
 func UpdateStallStreaks(workers []*WorkerState) {
 	for _, w := range workers {
 		if !w.Alive {
@@ -22,13 +27,28 @@ func UpdateStallStreaks(workers []*WorkerState) {
 			}
 		}
 		switch {
-		case w.EscalationReason == "silent":
+		case w.EscalationReason == "silent" || w.EscalationReason == "error":
 			w.ProgressNoneStreak++
 		case w.EscalationReason == "candidate" || producedFlows:
 			w.ProgressNoneStreak = 0
 			w.StallWarned = false
 		}
 	}
+}
+
+// hasProductiveTurn returns true when any turn in the slice made real
+// progress — tool calls issued or flow IDs touched. Prompt tokens alone
+// don't count: any successful round-trip (including the model saying "I'll
+// keep looking" with no tool calls) consumes them. Used by applyPlanDiff
+// so the director's retarget cannot reset the stall counter when the
+// worker was dead this iteration.
+func hasProductiveTurn(turns []agent.TurnSummary) bool {
+	for _, t := range turns {
+		if len(t.ToolCalls) > 0 || len(t.FlowIDs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // FormatStallWarnings returns a block for the director prompt, or "" when

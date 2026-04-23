@@ -12,6 +12,51 @@ import (
 	"github.com/go-appsec/secagent/config"
 )
 
+func TestIsDeadIteration(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		runs        map[int][]agent.TurnSummary
+		candsBefore int
+		candsAfter  int
+		wantDead    bool
+	}{
+		{
+			name:        "all_empty_no_new_candidates",
+			runs:        map[int][]agent.TurnSummary{1: {{}, {}}, 2: {{}}},
+			candsBefore: 0,
+			candsAfter:  0,
+			wantDead:    true,
+		},
+		{
+			name:        "any_tool_call_not_dead",
+			runs:        map[int][]agent.TurnSummary{1: {{ToolCalls: []agent.ToolCallRecord{{Name: "x"}}}}},
+			candsBefore: 0,
+			candsAfter:  0,
+			wantDead:    false,
+		},
+		{
+			name:        "new_candidate_not_dead",
+			runs:        map[int][]agent.TurnSummary{1: {{}}},
+			candsBefore: 0,
+			candsAfter:  1,
+			wantDead:    false,
+		},
+		{
+			name:        "empty_runs_map_is_dead",
+			runs:        map[int][]agent.TurnSummary{},
+			candsBefore: 5,
+			candsAfter:  5,
+			wantDead:    true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.wantDead, isDeadIteration(c.runs, c.candsBefore, c.candsAfter))
+		})
+	}
+}
+
 func TestAliveWorkers(t *testing.T) {
 	t.Parallel()
 	ws := []*WorkerState{

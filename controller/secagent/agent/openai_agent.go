@@ -295,11 +295,12 @@ func (a *OpenAIAgent) dispatchToolCalls(
 			outcomes[i] = toolOutcome{
 				rec: rec,
 				histMsg: Message{
-					Role:       roleTool,
-					Content:    errText,
-					ToolCallID: tc.ID,
-					ToolName:   tc.Function.Name,
-					Summary120: Summarize120(errText),
+					Role:          roleTool,
+					Content:       errText,
+					ToolCallID:    tc.ID,
+					ToolName:      tc.Function.Name,
+					Summary120:    Summarize120(errText),
+					IsRepairError: true,
 				},
 			}
 			if *repairsLeft > 0 {

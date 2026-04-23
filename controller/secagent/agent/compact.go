@@ -14,13 +14,14 @@ type CompactionOptions struct {
 
 // CompactionReport describes what Compact did in one pass.
 type CompactionReport struct {
-	Before         int
-	After          int
-	PassesApplied  []string
-	StubbedResults int
-	DroppedTurns   int
-	Truncated      int
-	ThinkStripped  int
+	Before           int
+	After            int
+	PassesApplied    []string
+	StubbedResults   int
+	DroppedTurns     int
+	Truncated        int
+	ThinkStripped    int
+	RepairsProtected int // tool-result repair errors skipped in pass 2
 }
 
 // Compact shrinks history in place until tokens <= LowWatermark * max.
@@ -73,10 +74,17 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		return report, nil
 	}
 
-	// Pass 2: replace oldest tool results with stubs.
+	// Pass 2: replace oldest tool results with stubs. Skip repair-error
+	// messages — they're small but carry the schema guidance the worker needs
+	// to stop repeating a malformed call.
 	stubbed := 0
+	repairsProtected := 0
 	for i := 0; i < len(msgs)-keep*2; i++ {
 		if msgs[i].Role != roleTool {
+			continue
+		}
+		if msgs[i].IsRepairError {
+			repairsProtected++
 			continue
 		}
 		approxTokens := len(msgs[i].Content) / 4
@@ -98,6 +106,7 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		report.PassesApplied = append(report.PassesApplied, "tool-stub")
 		report.StubbedResults = stubbed
 	}
+	report.RepairsProtected = repairsProtected
 	if h.EstimateTokens() <= target {
 		report.After = h.EstimateTokens()
 		return report, nil

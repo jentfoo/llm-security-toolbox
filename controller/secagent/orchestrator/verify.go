@@ -12,12 +12,16 @@ const VerificationMaxSubsteps = 6
 
 // RunVerificationPhase drives the verifier over up to VerificationMaxSubsteps.
 // Returns the summary string for the director prompt.
+//
+// dedupReviewer arbitrates softer title matches that pass TitlesSimilar but
+// not exact-slug equality. Pass nil to disable agent-mediated dedup (tests).
 func RunVerificationPhase(
 	ctx context.Context,
 	verifier agent.Agent,
 	decisions *DecisionQueue,
 	candidates *CandidatePool,
 	writer *FindingWriter,
+	dedupReviewer DedupReviewer,
 	workerRuns map[int][]agent.TurnSummary,
 	workers []*WorkerState,
 	iteration, maxIter int,
@@ -58,21 +62,16 @@ func RunVerificationPhase(
 			break
 		}
 		emitStatusIfDue(ctx, verifier, "verify", substep, log)
-		// Apply new findings.
+		// Apply new findings through the dedup pipeline (exact-slug skip,
+		// agent review for soft matches, fall through to a fresh write).
 		for _, filed := range decisions.Findings[appliedFindings:] {
-			if writer.IsDuplicate(filed) {
+			wrote, path, err := ReviewAndWrite(ctx, dedupReviewer, writer, filed, log)
+			if err != nil {
 				if log != nil {
-					log.Log("finding", "duplicate skipped", map[string]any{"title": filed.Title})
+					log.Log("finding", "write failed", map[string]any{"err": err.Error()})
 				}
-			} else {
-				path, err := writer.Write(filed)
-				if err != nil {
-					if log != nil {
-						log.Log("finding", "write failed", map[string]any{"err": err.Error()})
-					}
-				} else if log != nil {
-					log.Log("finding", "written", map[string]any{"path": path, "title": filed.Title})
-				}
+			} else if wrote && log != nil {
+				log.Log("finding", "written", map[string]any{"path": path, "title": filed.Title})
 			}
 			resolved := append([]string{}, filed.SupersedesCandidateIDs...)
 			if len(resolved) == 0 {

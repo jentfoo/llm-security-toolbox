@@ -45,7 +45,7 @@ func TestRunVerificationPhase(t *testing.T) {
 
 		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
 		summary := RunVerificationPhase(
-			t.Context(), verifier, decisions, candidates, writer,
+			t.Context(), verifier, decisions, candidates, writer, nil,
 			map[int][]agent.TurnSummary{1: nil}, workers, 2, 10, nil,
 		)
 
@@ -66,7 +66,7 @@ func TestRunVerificationPhase(t *testing.T) {
 		decisions := NewDecisionQueue()
 		verifier := &agent.FakeAgent{} // no scripted turns, would error if reached
 		summary := RunVerificationPhase(
-			t.Context(), verifier, decisions, candidates, writer,
+			t.Context(), verifier, decisions, candidates, writer, nil,
 			map[int][]agent.TurnSummary{}, nil, 1, 10, nil,
 		)
 		assert.Contains(t, summary, "No pending candidates")
@@ -94,7 +94,7 @@ func TestRunVerificationPhase(t *testing.T) {
 			decisions.SetVerificationDone("done")
 		}
 		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
-		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer,
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil,
 			nil, workers, 1, 10, nil)
 
 		entries, err := os.ReadDir(dir)
