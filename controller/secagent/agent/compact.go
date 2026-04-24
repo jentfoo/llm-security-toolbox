@@ -47,7 +47,10 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 
 	before := h.EstimateTokens()
 	report := CompactionReport{Before: before}
-	maxCtx := h.MaxContext()
+	// Use EffectiveMaxContext so adaptive shrinkage from a prior
+	// context-rejected error actually tightens the watermarks. When no
+	// rejection has happened yet this equals MaxContext.
+	maxCtx := h.EffectiveMaxContext()
 	target := int(float64(maxCtx) * opt.LowWatermark)
 	high := int(float64(maxCtx) * opt.HighWatermark)
 
