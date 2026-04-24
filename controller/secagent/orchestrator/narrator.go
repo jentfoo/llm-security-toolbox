@@ -157,6 +157,19 @@ func (n *Narrator) runTicker() {
 // the main controller goroutine whenever the active set changes (phase
 // transitions, worker spawn/stop). The narrator takes its own copy, so
 // the caller's slice may be reused.
+// isUsableNarration filters out summary outputs that aren't a natural-
+// language sentence — single-word replies and XML-ish tags like
+// "<tool_call>" happen with smaller models and add no operator value. The
+// minimum bar is "contains whitespace" so the caller falls through to the
+// truncated-think / empty branch instead of logging a noise line.
+func isUsableNarration(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	return strings.ContainsAny(s, " \t\n")
+}
+
 func (n *Narrator) SetActiveAgents(agents []NamedAgent) {
 	if n == nil {
 		return
@@ -330,7 +343,7 @@ func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narrator
 	// Confident line first: Extract runs the full defensive cascade
 	// (strip think/fences, parse JSON wrappers, salvage Final:/Output:
 	// markers). Fall back to Tail only when no usable line was found.
-	if line := n.cfg.Summarizer.Extract(resp); line != "" {
+	if line := n.cfg.Summarizer.Extract(resp); isUsableNarration(line) {
 		if n.log != nil {
 			n.log.Log("narrate", "orchestrator: "+line, map[string]any{
 				"events": len(events),
@@ -375,7 +388,7 @@ func (n *Narrator) runAgentSummary(ctx context.Context, na NamedAgent) {
 		}
 		return
 	}
-	if line != "" {
+	if isUsableNarration(line) {
 		if n.log != nil {
 			n.log.Log("narrate", "agent ("+na.Name+"): "+line, nil)
 		}
@@ -396,6 +409,11 @@ func (n *Narrator) runAgentSummary(ctx context.Context, na NamedAgent) {
 
 // Close stops the ticker, cancels in-flight summaries, and waits for
 // pending firings to return. Does not flush — shutdown is terminal.
+//
+// Cancel order matters: shutdownCancel must fire BEFORE wg.Wait so
+// in-flight summary HTTP calls see context cancellation and return
+// promptly. Otherwise wg.Wait could block for up to NarrateTimeout
+// (15min default) after run completion.
 func (n *Narrator) Close() {
 	if n == nil {
 		return
@@ -407,8 +425,8 @@ func (n *Narrator) Close() {
 	if !alreadyClosed {
 		close(n.tickerStop)
 	}
-	n.wg.Wait()
 	n.shutdownCancel()
+	n.wg.Wait()
 }
 
 // buildNarratorPrompt renders events as a compact plaintext log the summary

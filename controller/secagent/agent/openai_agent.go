@@ -480,6 +480,7 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	a.mu.Unlock()
 
 	msgs := a.buildChatMessages()
+	hardTruncated := false
 
 	var lastErr error
 	for attempt := 0; attempt <= a.cfg.DrainRetryMax; attempt++ {
@@ -498,8 +499,46 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return ChatResponse{}, err
 		}
+		// Recovery path: the upstream model rejected the request as too
+		// large even though our local compaction thought we were fine
+		// (configured max-context > model's effective limit). Force a hard
+		// truncate that bypasses the watermark check, rebuild messages, and
+		// let the next retry attempt pick up the shrunk history. Only fire
+		// once per sendWithRetry so a persistent mismatch still surfaces
+		// instead of silently looping.
+		if !hardTruncated && isContextRejectedError(err) {
+			hardTruncated = true
+			target := a.history.MaxContext() / 2
+			report := ForceHardTruncate(a.history, target, 2)
+			if a.cfg.OnCompact != nil {
+				a.cfg.OnCompact(report)
+			}
+			if report.DroppedTurns > 0 {
+				msgs = a.buildChatMessages()
+				// Do not consume a retry attempt: the truncate is itself
+				// the remediation, and the next loop iteration tries
+				// again with the shrunk history.
+				attempt--
+				continue
+			}
+		}
 	}
 	return ChatResponse{}, lastErr
+}
+
+// isContextRejectedError reports whether the error came from the upstream
+// model rejecting the request as too large. Matches both the OpenAI-style
+// `context_length_exceeded` code and local-model phrasing like "Context
+// size has been exceeded" seen in the live-run 400 bodies.
+func isContextRejectedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "context size has been exceeded") ||
+		strings.Contains(s, "context_length_exceeded") ||
+		strings.Contains(s, "maximum context length") ||
+		strings.Contains(s, "context window")
 }
 
 // dispatchChatRequest acquires a pooled client, runs one request with

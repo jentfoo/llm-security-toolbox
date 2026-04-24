@@ -153,3 +153,49 @@ func (q *DecisionQueue) SetDirectionDone(summary string) {
 	q.DirectionDoneSummary = summary
 	q.HasDirectionDone = true
 }
+
+// coalesceDecisions reduces per-worker duplicates from the director's tool calls.
+//
+// The director often re-invokes continue_worker/expand_worker/stop_worker on
+// the same worker across substeps (and even multiple times within a single
+// turn), which would otherwise queue duplicate instruction messages into the
+// worker's history. Rules:
+//   - Last decision per worker_id wins (pure last-writer-wins). A later
+//     continue after stop resurrects the worker intent; a later stop after
+//     continue kills it.
+//   - A worker already covered by a Plan entry gets its continue/expand
+//     dropped entirely — the plan's spawn/retarget carries the instruction.
+//     A stop still survives (contradictory, but explicit).
+//
+// Order is preserved based on the final position of each worker's surviving
+// decision.
+func coalesceDecisions(decisions []WorkerDecision, plan []PlanEntry) []WorkerDecision {
+	if len(decisions) == 0 {
+		return nil
+	}
+	inPlan := map[int]bool{}
+	for _, p := range plan {
+		inPlan[p.WorkerID] = true
+	}
+	lastIdx := map[int]int{}
+	for i, d := range decisions {
+		if inPlan[d.WorkerID] && d.Kind != "stop" {
+			continue
+		}
+		lastIdx[d.WorkerID] = i
+	}
+	if len(lastIdx) == 0 {
+		return nil
+	}
+	keep := make([]bool, len(decisions))
+	for _, i := range lastIdx {
+		keep[i] = true
+	}
+	out := make([]WorkerDecision, 0, len(lastIdx))
+	for i, d := range decisions {
+		if keep[i] {
+			out = append(out, d)
+		}
+	}
+	return out
+}

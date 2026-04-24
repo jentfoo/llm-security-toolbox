@@ -196,6 +196,115 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 	assert.Equal(t, 3, int(flaky.idx))
 }
 
+func TestIsContextRejectedError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"unrelated_net_err", errors.New("connection refused"), false},
+		{"local_model_phrasing", errors.New(`error, status code: 400, status: 400 Bad Request, message: , body: {"error":"Context size has been exceeded."}`), true},
+		{"openai_code", errors.New("context_length_exceeded"), true},
+		{"maximum_context_length", errors.New("This model's maximum context length is 8192 tokens"), true},
+		{"context_window_phrasing", errors.New("request exceeds context window"), true},
+		{"case_insensitive", errors.New("CONTEXT_LENGTH_EXCEEDED"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, isContextRejectedError(c.err))
+		})
+	}
+}
+
+func TestOpenAIAgent_SendWithRetry_ContextRejectedRecovery(t *testing.T) {
+	t.Parallel()
+	// First call returns a context-exceeded 400; second call succeeds.
+	// The recovery path should force-hard-truncate the history and retry
+	// WITHOUT consuming a retry attempt.
+	client := &fakeChatClient{
+		responses: []ChatResponse{{}, {Content: "ok after truncate"}},
+		errors: []error{
+			errors.New(`error, status code: 400, status: 400 Bad Request, message: , body: {"error":"Context size has been exceeded."}`),
+			nil,
+		},
+	}
+
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model:         "m",
+		Pool:          newPoolWith(client),
+		MaxContext:    4096,
+		DrainRetryMax: 1, // one retry allowed — recovery must not consume it
+		// sub-millisecond backoff keeps the test fast.
+		DrainRetryBackoff: time.Microsecond,
+	})
+	// Seed history with droppable turns so the force-truncate has something
+	// to remove.
+	big := strings.Repeat("y", 1_500)
+	for i := 0; i < 6; i++ {
+		a.history.Append(Message{
+			Role:      roleAssistant,
+			Content:   big,
+			ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+		})
+		a.history.Append(Message{
+			Role: roleTool, ToolCallID: "t", ToolName: "t",
+			Content: big, Summary120: "summary",
+		})
+	}
+	beforeTokens := a.history.EstimateTokens()
+
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, sum.EscalationReason)
+	assert.Equal(t, 2, int(client.idx), "exactly two send attempts: the rejected one and the post-truncate retry")
+	assert.Less(t, a.history.EstimateTokens(), beforeTokens)
+}
+
+func TestOpenAIAgent_SendWithRetry_ContextRejectedFiresOncePerSend(t *testing.T) {
+	t.Parallel()
+	// Model keeps rejecting even after truncate — recovery must not loop
+	// forever. Expected: one rejection → force-truncate → one retry with
+	// same error → propagate. Total attempts = DrainRetryMax + 1 + 1
+	// (the rejection, the truncate-retry; DrainRetryMax normal retries).
+	rejectErr := errors.New(`error, status code: 400, body: {"error":"Context size has been exceeded."}`)
+	client := &fakeChatClient{
+		responses: []ChatResponse{{}, {}, {}, {}},
+		errors:    []error{rejectErr, rejectErr, rejectErr, rejectErr},
+	}
+
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model:             "m",
+		Pool:              newPoolWith(client),
+		MaxContext:        4096,
+		DrainRetryMax:     1,
+		DrainRetryBackoff: time.Microsecond,
+	})
+	// Seed just enough history that ForceHardTruncate can drop something.
+	big := strings.Repeat("z", 1_500)
+	for i := 0; i < 4; i++ {
+		a.history.Append(Message{
+			Role:      roleAssistant,
+			Content:   big,
+			ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+		})
+		a.history.Append(Message{
+			Role: roleTool, ToolCallID: "t", ToolName: "t",
+			Content: big, Summary120: "summary",
+		})
+	}
+
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.Error(t, err)
+	assert.Equal(t, escalationError, sum.EscalationReason)
+	// Attempts: initial rejection (1) + free retry after truncate (2) +
+	// DrainRetryMax follow-up retries (1) = 3. Must not loop forever.
+	assert.LessOrEqual(t, int(client.idx), 4)
+}
+
 func TestOpenAIAgent_SendWithRetryExhausted(t *testing.T) {
 	t.Parallel()
 	flaky := &fakeChatClient{

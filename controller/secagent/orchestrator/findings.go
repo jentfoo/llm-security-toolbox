@@ -91,23 +91,94 @@ func TitlesSimilar(a, b string) bool {
 	return float64(overlap)/float64(denom) > 0.8
 }
 
-// MatchPendingCandidates returns pending candidate IDs whose title+endpoint match filed.
+// MatchTier reports which rule matched a pending candidate to a filed finding.
+type MatchTier int
+
+const (
+	MatchNone MatchTier = iota
+	// MatchTitleAndEndpoint: title similar AND endpoint canonical-equal.
+	MatchTitleAndEndpoint
+	// MatchEndpointOnly: same canonical endpoint, titles diverge.
+	MatchEndpointOnly
+	// MatchTitleOnly: similar title, endpoints diverge or one is missing.
+	MatchTitleOnly
+)
+
+// String returns a short label for logging.
+func (t MatchTier) String() string {
+	switch t {
+	case MatchTitleAndEndpoint:
+		return "title+endpoint"
+	case MatchEndpointOnly:
+		return "endpoint-only"
+	case MatchTitleOnly:
+		return "title-only"
+	}
+	return "none"
+}
+
+// MatchPendingCandidates returns pending candidate IDs whose title+endpoint
+// match filed. Kept for compatibility; prefer MatchPendingCandidatesTiered.
 func MatchPendingCandidates(filed FindingFiled, pending []FindingCandidate) []string {
+	ids, _ := MatchPendingCandidatesTiered(filed, pending)
+	return ids
+}
+
+// MatchPendingCandidatesTiered resolves pending candidates against a filed
+// finding using progressively looser rules, returning the first non-empty
+// match along with the tier that matched. Order:
+//  1. title similar AND endpoint equal (strictest — no change in semantics
+//     for findings that cite both).
+//  2. endpoint equal only (the filed title rephrased the candidate's title,
+//     e.g. "Admin API Requires JWT Bearer Auth" vs "Standard User Cookie
+//     Reuse on Admin API" — same behavior, different wording).
+//  3. title similar only (the endpoint was omitted or reworded but the
+//     claim is recognizable).
+//
+// Returns (nil, MatchNone) when no pending candidate matches any tier.
+func MatchPendingCandidatesTiered(filed FindingFiled, pending []FindingCandidate) ([]string, MatchTier) {
+	if filed.Title == "" && filed.Endpoint == "" {
+		return nil, MatchNone
+	}
 	filedEP := CanonicalEndpoint(filed.Endpoint)
-	if filedEP == "" || filed.Title == "" {
-		return nil
-	}
-	var out []string
-	for _, c := range pending {
-		if CanonicalEndpoint(c.Endpoint) != filedEP {
-			continue
+
+	if filedEP != "" && filed.Title != "" {
+		var out []string
+		for _, c := range pending {
+			if CanonicalEndpoint(c.Endpoint) == filedEP && TitlesSimilar(c.Title, filed.Title) {
+				out = append(out, c.CandidateID)
+			}
 		}
-		if !TitlesSimilar(c.Title, filed.Title) {
-			continue
+		if len(out) > 0 {
+			return out, MatchTitleAndEndpoint
 		}
-		out = append(out, c.CandidateID)
 	}
-	return out
+
+	if filedEP != "" {
+		var out []string
+		for _, c := range pending {
+			if CanonicalEndpoint(c.Endpoint) == filedEP {
+				out = append(out, c.CandidateID)
+			}
+		}
+		if len(out) > 0 {
+			return out, MatchEndpointOnly
+		}
+	}
+
+	if filed.Title != "" {
+		var out []string
+		for _, c := range pending {
+			if TitlesSimilar(c.Title, filed.Title) {
+				out = append(out, c.CandidateID)
+			}
+		}
+		if len(out) > 0 {
+			return out, MatchTitleOnly
+		}
+	}
+
+	return nil, MatchNone
 }
 
 const markdownTemplate = `# %s
@@ -361,6 +432,24 @@ func (w *FindingWriter) SummaryForOrchestrator() string {
 	for i, e := range w.index {
 		fmt.Fprintf(&sb, "%d. [%s] %s — %s\n",
 			i+1, orDefault(e.filed.Severity, "unknown"), e.filed.Title, orDefault(e.endpoint, "N/A"))
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// SummaryForWorker renders a compact title + endpoint listing for workers so
+// they can skip re-investigating already-filed vulnerabilities. Deliberately
+// omits severity and verifier reasoning (workers shouldn't argue with the
+// verifier, only avoid duplicate work).
+func (w *FindingWriter) SummaryForWorker() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.index) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("**Findings filed so far — do not re-file:**\n")
+	for _, e := range w.index {
+		fmt.Fprintf(&sb, "- %s — %s\n", e.filed.Title, orDefault(e.filed.Endpoint, "N/A"))
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }

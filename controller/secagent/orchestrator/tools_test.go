@@ -196,6 +196,36 @@ func TestDirectorToolDefs(t *testing.T) {
 		require.Len(t, dq.Plan, 2)
 		assert.Equal(t, 1, dq.Plan[0].WorkerID)
 		assert.Equal(t, 3, dq.Plan[1].WorkerID)
+		// Skipped entries are surfaced in the response so the director can fix them.
+		assert.Contains(t, res.Text, "plans[1]")
+		assert.Contains(t, res.Text, "plans[2]")
+	})
+
+	t.Run("plan_parse_error_returns_detail", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		pw := findTool(DirectorToolDefs(dq, guardAccept), "plan_workers")
+		res := pw.Handler(t.Context(), json.RawMessage(`{"plans": "not an array"}`))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "cannot parse arguments")
+		assert.Contains(t, res.Text, `{"plans"`)
+	})
+
+	t.Run("plan_all_invalid_returns_per_entry_reasons", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		pw := findTool(DirectorToolDefs(dq, guardAccept), "plan_workers")
+		res := pw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"plans": []map[string]any{
+				{"worker_id": 0, "assignment": "oops"},
+				{"worker_id": 2, "assignment": "   "},
+			},
+		}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "plans[0]")
+		assert.Contains(t, res.Text, "worker_id must be >= 1")
+		assert.Contains(t, res.Text, "plans[1]")
+		assert.Contains(t, res.Text, "assignment is empty")
 	})
 
 	t.Run("stop_worker", func(t *testing.T) {

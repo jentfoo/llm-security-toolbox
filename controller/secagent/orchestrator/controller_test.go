@@ -57,26 +57,6 @@ func TestIsDeadIteration(t *testing.T) {
 	}
 }
 
-func TestAliveWorkers(t *testing.T) {
-	t.Parallel()
-	ws := []*WorkerState{
-		{ID: 1, Alive: true},
-		{ID: 2, Alive: false},
-		{ID: 3, Alive: true},
-	}
-	out := aliveWorkers(ws)
-	require.Len(t, out, 2)
-	assert.Equal(t, 1, out[0].ID)
-	assert.Equal(t, 3, out[1].ID)
-}
-
-func TestFindWorker(t *testing.T) {
-	t.Parallel()
-	ws := []*WorkerState{{ID: 1}, {ID: 7}}
-	assert.Equal(t, 7, findWorker(ws, 7).ID)
-	assert.Nil(t, findWorker(ws, 99))
-}
-
 func TestApplyDecision(t *testing.T) {
 	t.Parallel()
 	t.Run("stop", func(t *testing.T) {

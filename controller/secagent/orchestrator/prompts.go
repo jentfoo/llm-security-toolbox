@@ -145,13 +145,34 @@ func BuildVerifierPrompt(
 	return strings.Join(parts, "\n")
 }
 
-// BuildVerifierContinuePrompt renders substeps 2..N.
-func BuildVerifierContinuePrompt(pending []FindingCandidate, filedThisIter, dismissedThisIter, substep, maxSubsteps int) string {
-	return strings.Join([]string{
-		fmt.Sprintf("**Verification substep %d/%d.** Filed %d, dismissed %d so far.", substep, maxSubsteps, filedThisIter, dismissedThisIter),
-		"",
-		formatPendingCandidates(pending),
-	}, "\n")
+// BuildVerifierContinuePrompt renders substeps 2..N. The filed/dismissed
+// slices are what the verifier has processed in this phase so far; their
+// titles are surfaced so the verifier stops re-announcing the same
+// candidates each substep.
+func BuildVerifierContinuePrompt(
+	pending []FindingCandidate,
+	filedThisPhase []FindingFiled,
+	dismissedThisPhase []CandidateDismissal,
+	substep, maxSubsteps int,
+) string {
+	parts := []string{
+		fmt.Sprintf("**Verification substep %d/%d.** Filed %d, dismissed %d so far this phase.",
+			substep, maxSubsteps, len(filedThisPhase), len(dismissedThisPhase)),
+	}
+	if len(filedThisPhase) > 0 {
+		parts = append(parts, "", "**Already filed this phase (do not re-file):**")
+		for _, f := range filedThisPhase {
+			parts = append(parts, "- "+f.Title)
+		}
+	}
+	if len(dismissedThisPhase) > 0 {
+		parts = append(parts, "", "**Already dismissed this phase:**")
+		for _, d := range dismissedThisPhase {
+			parts = append(parts, "- "+d.CandidateID)
+		}
+	}
+	parts = append(parts, "", formatPendingCandidates(pending))
+	return strings.Join(parts, "\n")
 }
 
 // FormatFollowUpHints renders optional verifier follow-up hints for the director.
@@ -178,6 +199,36 @@ func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissa
 	return "**Verifier follow-up hints (advisory — you decide whether to act):**\n" + strings.Join(lines, "\n")
 }
 
+// WorkerContinueContext is optional state to include in a worker's continue
+// prompt. All fields are optional; when empty the builder returns the bare
+// resumption directive.
+type WorkerContinueContext struct {
+	// FindingsSummary is a short listing of titles + endpoints (typically
+	// FindingWriter.SummaryForWorker()) so the worker avoids re-filing
+	// already-filed vulnerabilities.
+	FindingsSummary string
+	// Note is an optional per-worker annotation, e.g. *"Your candidate c012
+	// was filed as finding-09."* Use for one-shot recognition that the
+	// verifier closed out a candidate this worker reported.
+	Note string
+}
+
+// BuildWorkerContinuePrompt renders the resumption prompt the orchestrator
+// queues between worker turns and iterations. Workers' system prompts
+// describe the base directive; optional context is prepended so workers
+// don't re-investigate already-filed vulns.
+func BuildWorkerContinuePrompt(workerID int, ctx WorkerContinueContext) string {
+	var parts []string
+	if ctx.FindingsSummary != "" {
+		parts = append(parts, ctx.FindingsSummary)
+	}
+	if ctx.Note != "" {
+		parts = append(parts, ctx.Note)
+	}
+	parts = append(parts, "Continue your current testing plan. Take the next concrete step.")
+	return strings.Join(parts, "\n\n")
+}
+
 // BuildDirectorPrompt renders the initial director substep.
 func BuildDirectorPrompt(
 	workers []*WorkerState,
@@ -197,8 +248,10 @@ func BuildDirectorPrompt(
 	parts = append(parts, "", "**Worker autonomous runs this iteration:**", "")
 	aliveCount := 0
 	aliveIDs := make([]string, 0, len(workers))
+	stoppedIDs := make([]int, 0, len(workers))
 	for _, w := range workers {
 		if !w.Alive {
+			stoppedIDs = append(stoppedIDs, w.ID)
 			continue
 		}
 		aliveCount++
@@ -210,6 +263,14 @@ func BuildDirectorPrompt(
 		aliveStr = strings.Join(aliveIDs, ", ")
 	}
 	parts = append(parts, fmt.Sprintf("**Alive:** [%s]  **Parallelism:** %d/%d.", aliveStr, aliveCount, maxWorkers))
+	if len(stoppedIDs) > 0 {
+		sort.Ints(stoppedIDs)
+		ss := make([]string, len(stoppedIDs))
+		for i, id := range stoppedIDs {
+			ss[i] = strconv.Itoa(id)
+		}
+		parts = append(parts, fmt.Sprintf("**Stopped this run:** [%s] (do not re-plan around these; pick fresh worker_ids for new workers).", strings.Join(ss, ", ")))
+	}
 
 	// Iteration 1: worker 1 has just done recon; prompt the director to
 	// dispatch specialised parallel workers rather than pile more onto one.

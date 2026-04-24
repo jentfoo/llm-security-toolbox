@@ -18,7 +18,25 @@ type WorkerState struct {
 	AutonomousBudget   int
 	EscalationReason   string
 	AutonomousTurns    []agent.TurnSummary
+	// RecentToolErrors is a rolling window of recent tool-error signatures
+	// (first 80 chars of error_text). Used to detect workers stuck on the
+	// same error across multiple turns.
+	RecentToolErrors []string
+	// CoachedErrorSig tracks the last signature for which a coaching
+	// message was injected, preventing the same nudge from firing every
+	// iteration while the error persists.
+	CoachedErrorSig string
 }
+
+// MaxRecentToolErrors caps the rolling error signature window on WorkerState.
+const MaxRecentToolErrors = 5
+
+// RepeatedErrorThreshold is how many identical signatures in RecentToolErrors
+// trigger the silent-stall + coaching path.
+const RepeatedErrorThreshold = 3
+
+// ErrorSignatureMaxLen caps the prefix of error_text recorded on WorkerState.
+const ErrorSignatureMaxLen = 80
 
 // Close releases agent and MCP resources held by the worker.
 func (w *WorkerState) Close() {

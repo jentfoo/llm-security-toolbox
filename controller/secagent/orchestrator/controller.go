@@ -141,9 +141,10 @@ func (f *OpenAIFactory) buildAgent(
 		Pool:         pool,
 		MaxContext:   maxContext,
 		Compaction: agent.CompactionOptions{
-			HighWatermark: f.Cfg.HighWatermark,
-			LowWatermark:  f.Cfg.LowWatermark,
-			KeepTurns:     f.Cfg.KeepTurns,
+			HighWatermark:          f.Cfg.HighWatermark,
+			LowWatermark:           f.Cfg.LowWatermark,
+			KeepTurns:              f.Cfg.KeepTurns,
+			HardTruncateOnOverflow: true,
 		},
 		TurnTimeout:      f.Cfg.TurnTimeout,
 		PerToolTimeout:   f.Cfg.PerToolTimeout,
@@ -603,9 +604,12 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			if log != nil {
 				log.Log("controller", "dead-iteration", map[string]any{"iter": iteration})
 			}
+			findingsBrief := writer.SummaryForWorker()
 			for _, w := range workers {
 				if w.Alive {
-					w.Agent.Query(continuePrompt)
+					w.Agent.Query(BuildWorkerContinuePrompt(w.ID, WorkerContinueContext{
+						FindingsSummary: findingsBrief,
+					}))
 				}
 			}
 			narrator.TriggerNow()
@@ -644,9 +648,16 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			applyPlanDiff(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, log)
 		}
 
-		// apply per-worker decisions
+		// apply per-worker decisions, after coalescing director duplicates
+		effective := coalesceDecisions(decisions.WorkerDecisions, decisions.Plan)
+		if log != nil && len(effective) != len(decisions.WorkerDecisions) {
+			log.Log("decision", "coalesced", map[string]any{
+				"original":  len(decisions.WorkerDecisions),
+				"effective": len(effective),
+			})
+		}
 		decidedWIDs := map[int]bool{}
-		for _, d := range decisions.WorkerDecisions {
+		for _, d := range effective {
 			w := findWorker(workers, d.WorkerID)
 			if w == nil || !w.Alive {
 				if log != nil {
@@ -659,6 +670,7 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		}
 
 		// implicit continue for undirected alive workers
+		findingsBrief := writer.SummaryForWorker()
 		for _, w := range workers {
 			if !w.Alive || decidedWIDs[w.ID] {
 				continue
@@ -670,7 +682,9 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			if log != nil {
 				log.Log("controller", "implicit continue", map[string]any{"worker_id": w.ID})
 			}
-			w.Agent.Query(continuePrompt)
+			w.Agent.Query(BuildWorkerContinuePrompt(w.ID, WorkerContinueContext{
+				FindingsSummary: findingsBrief,
+			}))
 		}
 
 		// End-of-iteration: coalesce any events since the last phase transition

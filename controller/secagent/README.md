@@ -169,8 +169,11 @@ bin/secagent \
 
    **Phase 1: Autonomous worker run.** Each alive worker runs concurrently
    for up to its `autonomous_budget` turns (default 8). Between turns the
-   controller sends a generic `"Continue your current testing plan."`
-   prompt - no orchestrator intervention. A worker **escalates back** early
+   controller sends a terse resumption prompt via
+   `BuildWorkerContinuePrompt` - no orchestrator intervention. At iteration
+   boundaries (implicit-continue, dead-iteration recovery) the prompt is
+   prefixed with a short "findings filed so far" recap so workers avoid
+   re-investigating already-filed vulnerabilities. A worker **escalates back** early
    if it reports a finding candidate, produces a silent turn (no tool
    calls, no new flow IDs), or hits an error. Each turn's summary (tool
    calls, flow IDs touched, candidates raised) is recorded on the worker.

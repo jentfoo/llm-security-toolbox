@@ -10,8 +10,6 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-const continuePrompt = "Continue your current testing plan."
-
 // StatusSummaryInterval controls how often the orchestrator should ask
 // each agent for a one-sentence summary of its current focus. 0 disables.
 // This is a package-level variable so tests can tweak it; production reads
@@ -66,6 +64,7 @@ func drainOne(
 		summary.EscalationReason = agent.ClassifyEscalation(summary, false)
 	}
 	w.AutonomousTurns = append(w.AutonomousTurns, summary)
+	updateToolErrorSignatures(w, summary)
 	if log != nil {
 		log.Log("worker", "turn", map[string]any{
 			"worker_id":        w.ID,
@@ -79,6 +78,34 @@ func drainOne(
 	}
 	emitStatusIfDue(ctx, w.Agent, "worker."+strconv.Itoa(w.ID), len(w.AutonomousTurns), log)
 	return summary, nil
+}
+
+// updateToolErrorSignatures records each error-producing tool call from a
+// turn as a rolling signature on WorkerState. A single successful tool call
+// in the same turn clears CoachedErrorSig so the next distinct failure can
+// be coached again.
+func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
+	sawSuccess := false
+	for _, tc := range summary.ToolCalls {
+		if !tc.IsError {
+			sawSuccess = true
+			continue
+		}
+		sig := tc.ResultSummary
+		if len(sig) > ErrorSignatureMaxLen {
+			sig = sig[:ErrorSignatureMaxLen]
+		}
+		if sig == "" {
+			continue
+		}
+		w.RecentToolErrors = append(w.RecentToolErrors, sig)
+		if len(w.RecentToolErrors) > MaxRecentToolErrors {
+			w.RecentToolErrors = w.RecentToolErrors[len(w.RecentToolErrors)-MaxRecentToolErrors:]
+		}
+	}
+	if sawSuccess {
+		w.CoachedErrorSig = ""
+	}
 }
 
 // RunWorkerUntilEscalation drains up to w.AutonomousBudget turns or until
@@ -96,7 +123,10 @@ func RunWorkerUntilEscalation(
 	var runs []agent.TurnSummary
 	for attempt := 0; attempt < budget; attempt++ {
 		if attempt > 0 {
-			w.Agent.Query(continuePrompt)
+			// Intra-iteration turns get the bare resumption directive; the
+			// full findings preamble is reserved for iteration boundaries
+			// (controller.go) so we don't burn tokens every turn.
+			w.Agent.Query(BuildWorkerContinuePrompt(w.ID, WorkerContinueContext{}))
 		}
 		summary, err := drainOne(ctx, w, candidates, log)
 		if err != nil {

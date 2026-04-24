@@ -12,8 +12,12 @@ import (
 // based on the outcome of the last autonomous run. Both "silent"
 // (timeout or model chose not to escalate) and "error" (HTTP error, crashed
 // mid-drain) increment the streak so both failure modes feed the existing
-// StallStopAfter threshold. "candidate" or any turn that produced flows
-// resets the streak.
+// StallStopAfter threshold. A worker stuck issuing the same tool error
+// repeatedly (RecentToolErrors) is also treated as silent. "candidate" or
+// any turn that produced flows resets the streak.
+//
+// When the repeated-error path fires for a signature we haven't coached on
+// yet, a one-shot coaching message is queued to the worker via Agent.Query.
 func UpdateStallStreaks(workers []*WorkerState) {
 	for _, w := range workers {
 		if !w.Alive {
@@ -26,14 +30,48 @@ func UpdateStallStreaks(workers []*WorkerState) {
 				break
 			}
 		}
+		repeatedSig, repeated := repeatedErrorSignature(w.RecentToolErrors)
 		switch {
 		case w.EscalationReason == "silent" || w.EscalationReason == "error":
+			// Silent/error wins over flows (preserved precedence: a worker
+			// that touched a flow but escalated silent is still stalling).
 			w.ProgressNoneStreak++
 		case w.EscalationReason == "candidate" || producedFlows:
 			w.ProgressNoneStreak = 0
 			w.StallWarned = false
+		case repeated:
+			w.ProgressNoneStreak++
+		}
+		if repeated && w.CoachedErrorSig != repeatedSig && w.Agent != nil {
+			w.Agent.Query(buildRepeatedErrorCoaching(repeatedSig))
+			w.CoachedErrorSig = repeatedSig
 		}
 	}
+}
+
+// repeatedErrorSignature returns (signature, true) when the window contains
+// at least RepeatedErrorThreshold identical entries.
+func repeatedErrorSignature(sigs []string) (string, bool) {
+	if len(sigs) < RepeatedErrorThreshold {
+		return "", false
+	}
+	counts := map[string]int{}
+	for _, s := range sigs {
+		counts[s]++
+		if counts[s] >= RepeatedErrorThreshold {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// buildRepeatedErrorCoaching renders the one-shot nudge queued to workers
+// stuck on the same tool error repeatedly.
+func buildRepeatedErrorCoaching(sig string) string {
+	return fmt.Sprintf(
+		"Your last several tool calls returned the same error: %q. Try a different tool or approach. If you're stuck, report what you've learned via report_finding_candidate and describe the blocker.",
+		sig,
+	)
 }
 
 // hasProductiveTurn returns true when any turn in the slice made real

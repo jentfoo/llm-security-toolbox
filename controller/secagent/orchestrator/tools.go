@@ -386,23 +386,47 @@ func DirectorToolDefs(
 					} `json:"plans"`
 				}
 				if err := json.Unmarshal(args, &in); err != nil {
-					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
+					return agent.ToolResult{
+						Text: fmt.Sprintf(
+							"Rejected: cannot parse arguments (%s). Expected JSON shape {\"plans\":[{\"worker_id\":N,\"assignment\":\"...\"}]}.",
+							err.Error(),
+						),
+						IsError: true,
+					}
+				}
+				if len(in.Plans) == 0 {
+					return agent.ToolResult{
+						Text:    "Rejected: 'plans' array is empty. Provide at least one {worker_id, assignment} object.",
+						IsError: true,
+					}
 				}
 				var entries []PlanEntry
-				for _, p := range in.Plans {
+				var reasons []string
+				for i, p := range in.Plans {
 					asg := strings.TrimSpace(p.Assignment)
-					if p.WorkerID < 1 || asg == "" {
+					if p.WorkerID < 1 {
+						reasons = append(reasons, fmt.Sprintf("plans[%d]: worker_id must be >= 1 (got %d)", i, p.WorkerID))
+						continue
+					}
+					if asg == "" {
+						reasons = append(reasons, fmt.Sprintf("plans[%d] (worker_id=%d): assignment is empty", i, p.WorkerID))
 						continue
 					}
 					entries = append(entries, PlanEntry{WorkerID: p.WorkerID, Assignment: asg})
 				}
 				if len(entries) == 0 {
-					return agent.ToolResult{Text: "Rejected: no valid plan entries.", IsError: true}
+					msg := "Rejected: no valid plan entries."
+					if len(reasons) > 0 {
+						msg += " " + strings.Join(reasons, "; ")
+					}
+					return agent.ToolResult{Text: msg, IsError: true}
 				}
 				decisions.SetPlan(entries)
-				return agent.ToolResult{
-					Text: fmt.Sprintf("Plan recorded: %d worker assignment(s).", len(entries)),
+				text := fmt.Sprintf("Plan recorded: %d worker assignment(s).", len(entries))
+				if len(reasons) > 0 {
+					text += " Skipped: " + strings.Join(reasons, "; ")
 				}
+				return agent.ToolResult{Text: text}
 			},
 		},
 		{

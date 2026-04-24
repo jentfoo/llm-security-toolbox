@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,9 +9,102 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-func TestStatusLine(t *testing.T) {
+func TestBuildWorkerContinuePrompt(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "**Status:** iteration 2/10, findings filed: 3", statusLine(2, 10, 3))
+
+	t.Run("empty_context_returns_bare_directive", func(t *testing.T) {
+		out := BuildWorkerContinuePrompt(3, WorkerContinueContext{})
+		assert.Equal(t, "Continue your current testing plan. Take the next concrete step.", out)
+	})
+
+	t.Run("findings_summary_prepended", func(t *testing.T) {
+		out := BuildWorkerContinuePrompt(3, WorkerContinueContext{
+			FindingsSummary: "**Findings filed so far — do not re-file:**\n- X — GET /x",
+		})
+		assert.True(t, strings.HasPrefix(out, "**Findings filed so far"))
+		assert.Contains(t, out, "Continue your current testing plan. Take the next concrete step.")
+	})
+
+	t.Run("note_included_between_summary_and_directive", func(t *testing.T) {
+		out := BuildWorkerContinuePrompt(3, WorkerContinueContext{
+			FindingsSummary: "**Findings filed:** X",
+			Note:            "Your candidate c012 was filed as finding-09.",
+		})
+		findingsIdx := strings.Index(out, "Findings filed")
+		noteIdx := strings.Index(out, "Your candidate c012")
+		dirIdx := strings.Index(out, "Continue your current testing plan")
+		assert.Less(t, findingsIdx, noteIdx)
+		assert.Less(t, noteIdx, dirIdx)
+	})
+}
+
+func TestBuildVerifierContinuePrompt_PhaseProgress(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no_progress_yet_keeps_pending_only", func(t *testing.T) {
+		out := BuildVerifierContinuePrompt(
+			[]FindingCandidate{{CandidateID: "c001", Title: "Pending X"}},
+			nil, nil, 2, 6,
+		)
+		assert.Contains(t, out, "Filed 0, dismissed 0 so far this phase.")
+		assert.NotContains(t, out, "Already filed this phase")
+		assert.NotContains(t, out, "Already dismissed this phase")
+		assert.Contains(t, out, "c001")
+	})
+
+	t.Run("lists_filed_and_dismissed_titles", func(t *testing.T) {
+		filed := []FindingFiled{
+			{Title: "Admin PUT JSON Injection"},
+			{Title: "Federation Role Manipulation"},
+		}
+		dismissed := []CandidateDismissal{
+			{CandidateID: "c004"},
+		}
+		out := BuildVerifierContinuePrompt(
+			[]FindingCandidate{{CandidateID: "c005", Title: "Still pending"}},
+			filed, dismissed, 3, 6,
+		)
+		assert.Contains(t, out, "Filed 2, dismissed 1 so far this phase.")
+		assert.Contains(t, out, "Admin PUT JSON Injection")
+		assert.Contains(t, out, "Federation Role Manipulation")
+		assert.Contains(t, out, "c004")
+		assert.Contains(t, out, "c005")
+	})
+}
+
+func TestBuildDirectorPrompt_RosterSections(t *testing.T) {
+	t.Parallel()
+
+	t.Run("stopped_roster_listed_when_present", func(t *testing.T) {
+		workers := []*WorkerState{
+			{ID: 1, Alive: false},
+			{ID: 4, Alive: true},
+			{ID: 7, Alive: false},
+			{ID: 8, Alive: true},
+		}
+		out := BuildDirectorPrompt(
+			workers, map[int][]agent.TurnSummary{},
+			"vs", "fs", "", "",
+			3, 10, 2, 5,
+		)
+		assert.Contains(t, out, "**Alive:** [4, 8]")
+		assert.Contains(t, out, "**Stopped this run:** [1, 7]")
+		assert.Contains(t, out, "do not re-plan around these")
+	})
+
+	t.Run("stopped_roster_omitted_when_none", func(t *testing.T) {
+		workers := []*WorkerState{
+			{ID: 1, Alive: true},
+			{ID: 2, Alive: true},
+		}
+		out := BuildDirectorPrompt(
+			workers, map[int][]agent.TurnSummary{},
+			"vs", "fs", "", "",
+			1, 10, 0, 5,
+		)
+		assert.Contains(t, out, "**Alive:** [1, 2]")
+		assert.NotContains(t, out, "**Stopped this run:**")
+	})
 }
 
 func TestShort(t *testing.T) {
@@ -30,12 +124,6 @@ func TestShort(t *testing.T) {
 			assert.Equal(t, c.expected, short(c.in, c.max))
 		})
 	}
-}
-
-func TestOrDefault(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, "fallback", orDefault("", "fallback"))
-	assert.Equal(t, "actual", orDefault("actual", "fallback"))
 }
 
 func TestFirstNonEmptyLine(t *testing.T) {
@@ -107,15 +195,6 @@ func TestFormatAutonomousRun(t *testing.T) {
 		assert.Contains(t, out, "abc12345")
 		assert.Contains(t, out, "looking into it")
 	})
-}
-
-func TestBuildVerifierContinuePrompt(t *testing.T) {
-	t.Parallel()
-	pending := []FindingCandidate{{CandidateID: "c1", Title: "xss", Severity: "high", Endpoint: "/x"}}
-	out := BuildVerifierContinuePrompt(pending, 1, 0, 3, 6)
-	assert.Contains(t, out, "substep 3/6")
-	assert.Contains(t, out, "Filed 1")
-	assert.Contains(t, out, "c1")
 }
 
 func TestBuildDirectorContinuePrompt(t *testing.T) {

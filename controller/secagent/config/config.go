@@ -101,8 +101,13 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.MaxIterations, "max-iterations", 30, "hard iteration cap")
 	fs.IntVar(&c.MaxWorkers, "max-workers", 4, "max parallel workers")
 	fs.IntVar(&c.AutonomousBudget, "autonomous-budget", DefaultAutoBudget, "turns per worker per iteration")
-	fs.DurationVar(&c.TurnTimeout, "turn-timeout", 300*time.Second, "per-turn ctx timeout")
-	fs.DurationVar(&c.PerToolTimeout, "per-tool-timeout", 120*time.Second, "per-tool-call ctx timeout")
+	// Defaults sized for slow local models: a turn that chains many tool
+	// calls against a heavy backend easily exceeds 5 minutes, and a 5-min
+	// turn timeout produced repeated forced escalations in past runs before
+	// the agent could emit its final response. 15 min per turn / 5 min per
+	// tool gives breathing room without hiding genuinely stuck operations.
+	fs.DurationVar(&c.TurnTimeout, "turn-timeout", 15*time.Minute, "per-turn ctx timeout")
+	fs.DurationVar(&c.PerToolTimeout, "per-tool-timeout", 5*time.Minute, "per-tool-call ctx timeout")
 	fs.IntVar(&c.MaxParallelTools, "max-parallel-tools", 4, "max concurrent in-flight tool calls per assistant response")
 	fs.IntVar(&c.MaxTurnsPerAgent, "max-turns-per-agent", 100, "hard cap per Drain chain")
 	fs.StringVar(&c.FindingsDir, "findings-dir", "./findings", "finding report directory")
@@ -112,7 +117,10 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 
 	fs.IntVar(&c.ProgressLogInterval, "progress-log-interval", 3, "turns per agent between status summaries (0 disables; deprecated — superseded by narrator)")
 	fs.DurationVar(&c.NarrateInterval, "narrate-interval", 2*time.Minute, "min interval between async narrator summaries (0 disables)")
-	fs.DurationVar(&c.NarrateTimeout, "narrate-timeout", 300*time.Second, "per-summary narrator call timeout")
+	// Narrator shares the pool with workers/orchestrator; a too-tight cap
+	// here just abandons in-flight summaries without freeing the slot
+	// sooner. Align with TurnTimeout.
+	fs.DurationVar(&c.NarrateTimeout, "narrate-timeout", 15*time.Minute, "per-summary narrator call timeout")
 	fs.StringVar(&c.LogFile, "log-file", "secagent.log", "structured log destination")
 
 	if err := fs.Parse(args); err != nil {

@@ -69,20 +69,71 @@ func poolOf(c agent.ChatClient) *agent.ClientPool {
 // model that burned its budget on the dedicated reasoning field.
 type structuredRespClient struct {
 	reasoning string
+	calls     int32
 }
 
 func (c *structuredRespClient) CreateChatCompletion(context.Context, agent.ChatRequest) (agent.ChatResponse, error) {
+	atomic.AddInt32(&c.calls, 1)
 	return agent.ChatResponse{Content: "", ReasoningContent: c.reasoning}, nil
 }
 
-func TestNarrator_DisabledWhenIntervalZero(t *testing.T) {
+// waitForCalls polls until the call counter reaches at least want, then
+// returns. Use this after TriggerNow/Tick and BEFORE Close so the in-flight
+// summary goroutine completes its HTTP call before Close's shutdownCancel
+// aborts it. Without this wait the buf/calls assertions race with the
+// shutdown path and flake (or fail outright when the goroutine consistently
+// loses the race).
+//
+// Accepts both scriptedClient and structuredRespClient via the *int32 the
+// test owns. Tests that don't need to assert call count can still call this
+// purely to gate Close on the firing completing.
+func waitForCalls(t *testing.T, calls *int32, want int32) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(calls) >= want
+	}, 2*time.Second, time.Millisecond)
+}
+
+func TestIsUsableNarration(t *testing.T) {
 	t.Parallel()
-	n := NewNarrator(NarratorConfig{
-		Interval: 0,
-		Model:    "m",
-		Pool:     poolOf(&scriptedClient{response: "ok"}),
-	}, nil)
-	assert.Nil(t, n)
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"whitespace_only", "   \t\n", false},
+		{"single_word", "ok", false},
+		{"xml_tag", "<tool_call>", false},
+		{"natural_sentence", "worker 4 is probing the admin API", true},
+		{"two_words", "in progress", true},
+		{"leading_trailing_space_preserved", "  ok fine  ", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, isUsableNarration(c.in))
+		})
+	}
+}
+
+func TestNewNarrator_DisabledReturnsNil(t *testing.T) {
+	t.Parallel()
+	validPool := poolOf(&scriptedClient{response: "ok"})
+	cases := []struct {
+		name string
+		cfg  NarratorConfig
+	}{
+		{"zero_interval", NarratorConfig{Interval: 0, Model: "m", Pool: validPool}},
+		{"negative_interval", NarratorConfig{Interval: -time.Second, Model: "m", Pool: validPool}},
+		{"nil_pool", NarratorConfig{Interval: time.Millisecond, Model: "m", Pool: nil}},
+		{"empty_model", NarratorConfig{Interval: time.Millisecond, Model: "", Pool: validPool}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Nil(t, NewNarrator(c.cfg, nil))
+		})
+	}
 }
 
 func TestNarrator_RecordAndTriggerEmitSummary(t *testing.T) {
@@ -99,6 +150,7 @@ func TestNarrator_RecordAndTriggerEmitSummary(t *testing.T) {
 
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 1)
 	n.Close()
 	_ = l.Close()
 
@@ -132,6 +184,9 @@ func TestNarrator_CoalescesConcurrentFires(t *testing.T) {
 
 	// Release firing #1.
 	close(gate)
+	// Wait for the coalesced tail firing to complete before Close cancels
+	// any in-flight goroutine.
+	waitForCalls(t, &client.calls, 2)
 	n.Close()
 	_ = l.Close()
 
@@ -141,7 +196,7 @@ func TestNarrator_CoalescesConcurrentFires(t *testing.T) {
 	// model calls total (1 blocked + 1 draining the coalesced tail).
 	calls := atomic.LoadInt32(&client.calls)
 	assert.GreaterOrEqual(t, calls, int32(2))
-	assert.LessOrEqual(t, calls, int32(3), "concurrent triggers must coalesce")
+	assert.LessOrEqual(t, calls, int32(3))
 }
 
 func TestNarrator_FailureDoesNotPanic(t *testing.T) {
@@ -155,6 +210,7 @@ func TestNarrator_FailureDoesNotPanic(t *testing.T) {
 
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 1)
 	n.Close()
 	_ = l.Close()
 
@@ -237,6 +293,7 @@ func TestNarrator_TickRespectsInterval(t *testing.T) {
 	n.lastFireAt = time.Now().Add(-time.Second)
 	n.mu.Unlock()
 	n.Tick()
+	waitForCalls(t, &client.calls, 1)
 	n.Close()
 	_ = l.Close()
 	assert.Equal(t, int32(1), atomic.LoadInt32(&client.calls))
@@ -269,6 +326,7 @@ func TestNarrator_SuppressedUntilSubstantiveEvent(t *testing.T) {
 	// Now simulate a real worker turn — arms the narrator.
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 1)
 	n.Close()
 	_ = l.Close()
 
@@ -302,6 +360,7 @@ func TestNarrator_AgentProviderFiresPerAgent(t *testing.T) {
 
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 3)
 	n.Close()
 	_ = l.Close()
 
@@ -345,6 +404,7 @@ func TestNarrator_PerAgentSummaryUsesSummaryModel(t *testing.T) {
 
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 2)
 	n.Close()
 	_ = l.Close()
 
@@ -368,6 +428,7 @@ func TestNarrator_EmptyResponseLogsEmptyAndSkipsStderr(t *testing.T) {
 
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 1)
 	n.Close()
 	_ = l.Close()
 
@@ -389,6 +450,7 @@ func TestNarrator_StripsCodeFenceFromResponse(t *testing.T) {
 
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 1)
 	n.Close()
 	_ = l.Close()
 
@@ -410,6 +472,7 @@ func TestNarrator_SummaryCallsDisableReasoning(t *testing.T) {
 
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 1)
 	n.Close()
 	_ = l.Close()
 
@@ -422,9 +485,12 @@ func TestNarrator_SummaryCallsDisableReasoning(t *testing.T) {
 
 func TestNarrator_ReasoningExtraction(t *testing.T) {
 	t.Parallel()
+	// build returns the pool plus a *int32 the test can pass to waitForCalls
+	// — both client types track call counts but live behind agent.ChatClient
+	// so we expose the counter directly.
 	cases := []struct {
 		name           string
-		pool           func() *agent.ClientPool
+		build          func() (*agent.ClientPool, *int32)
 		summarizer     agent.ReasoningHandler
 		wantContains   []string
 		wantNoContains []string
@@ -432,8 +498,9 @@ func TestNarrator_ReasoningExtraction(t *testing.T) {
 		{
 			// "Final: <sentence>" inside reasoning: Extract salvages it, narrator logs cleanly
 			name: "final_marker",
-			pool: func() *agent.ClientPool {
-				return poolOf(&structuredRespClient{reasoning: "Thinking... Matches constraints. Output matches.✅ Final: worker-1 scanned the admin OAuth client registration endpoint."})
+			build: func() (*agent.ClientPool, *int32) {
+				c := &structuredRespClient{reasoning: "Thinking... Matches constraints. Output matches.✅ Final: worker-1 scanned the admin OAuth client registration endpoint."}
+				return poolOf(c), &c.calls
 			},
 			summarizer: agent.NewReasoningHandler(agent.ReasoningFormatStructured),
 			wantContains: []string{
@@ -445,8 +512,9 @@ func TestNarrator_ReasoningExtraction(t *testing.T) {
 		{
 			// structured reasoning_content (no <think> tags): Summarizer handler surfaces a tail instead of "empty"
 			name: "reasoning_tail",
-			pool: func() *agent.ClientPool {
-				return poolOf(&structuredRespClient{reasoning: "probing the admin OAuth client registration flow"})
+			build: func() (*agent.ClientPool, *int32) {
+				c := &structuredRespClient{reasoning: "probing the admin OAuth client registration flow"}
+				return poolOf(c), &c.calls
 			},
 			summarizer: agent.NewReasoningHandler(agent.ReasoningFormatStructured),
 			wantContains: []string{
@@ -458,8 +526,9 @@ func TestNarrator_ReasoningExtraction(t *testing.T) {
 		{
 			// truncated mid-think: narrator surfaces the think tail instead of "empty"
 			name: "unclosed_think_tail",
-			pool: func() *agent.ClientPool {
-				return poolOf(&scriptedClient{response: "<think>I am about to test the admin client registration endpoint for mass assignment"})
+			build: func() (*agent.ClientPool, *int32) {
+				c := &scriptedClient{response: "<think>I am about to test the admin client registration endpoint for mass assignment"}
+				return poolOf(c), &c.calls
 			},
 			wantContains: []string{
 				"orchestrator: …thinking:",
@@ -471,10 +540,11 @@ func TestNarrator_ReasoningExtraction(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			l, _, buf := newCapturedLogger(t)
+			pool, calls := c.build()
 			n := NewNarrator(NarratorConfig{
 				Interval:   time.Millisecond,
 				Model:      "m",
-				Pool:       c.pool(),
+				Pool:       pool,
 				CallBudget: time.Second,
 				Summarizer: c.summarizer,
 			}, l)
@@ -482,6 +552,7 @@ func TestNarrator_ReasoningExtraction(t *testing.T) {
 
 			n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 			n.TriggerNow()
+			waitForCalls(t, calls, 1)
 			n.Close()
 			_ = l.Close()
 
@@ -508,6 +579,7 @@ func TestNarrator_NoActiveAgentsKeepsOrchestratorOnly(t *testing.T) {
 
 	n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
 	n.TriggerNow()
+	waitForCalls(t, &client.calls, 1)
 	n.Close()
 	_ = l.Close()
 
