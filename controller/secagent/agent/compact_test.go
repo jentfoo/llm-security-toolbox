@@ -152,6 +152,45 @@ func TestCompact(t *testing.T) {
 	})
 }
 
+func TestCompact_UsesEffectiveMaxContext(t *testing.T) {
+	t.Parallel()
+	// After a context-rejection shrinks the effective ceiling, Compact's
+	// watermark math must follow so the next maybeCompact fires at the
+	// tighter threshold instead of against the original (too-large) max.
+	big := strings.Repeat("y", 3_000)
+	h := NewHistory(200_000)
+	h.Append(Message{Role: "system", Content: "sys"})
+	for i := 0; i < 6; i++ {
+		h.Append(Message{
+			Role:      "assistant",
+			Content:   big,
+			ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+		})
+		h.Append(Message{
+			Role: "tool", ToolCallID: "t", ToolName: "t",
+			Content: big, Summary120: "summary",
+		})
+	}
+
+	// Against MaxContext=200k and HighWatermark=0.80 the ~18k estimate is
+	// well under the trigger, so Compact should early-return.
+	report, err := Compact(h, CompactionOptions{
+		HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, report.PassesApplied, "no compaction needed at configured ceiling")
+
+	// Shrink effective max down to 20k; now the same history's ~18k is
+	// above LowWatermark × 20k = 8k, so Compact should engage.
+	h.ShrinkEffectiveMaxOnRejection(25_000) // × 0.80 = 20k
+	report, err = Compact(h, CompactionOptions{
+		HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
+		HardTruncateOnOverflow: true,
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, report.PassesApplied, "Compact must react to shrunk effective max")
+}
+
 func TestForceHardTruncate(t *testing.T) {
 	t.Parallel()
 

@@ -232,9 +232,11 @@ func TestOpenAIAgent_SendWithRetry_ContextRejectedRecovery(t *testing.T) {
 	}
 
 	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model:         "m",
-		Pool:          newPoolWith(client),
-		MaxContext:    4096,
+		Model: "m",
+		Pool:  newPoolWith(client),
+		// MaxContext well above seeded history so ShrinkEffectiveMaxOnRejection
+		// can land below MaxContext (it's rejected when the candidate >= max).
+		MaxContext:    64_000,
 		DrainRetryMax: 1, // one retry allowed — recovery must not consume it
 		// sub-millisecond backoff keeps the test fast.
 		DrainRetryBackoff: time.Microsecond,
@@ -261,6 +263,10 @@ func TestOpenAIAgent_SendWithRetry_ContextRejectedRecovery(t *testing.T) {
 	assert.Empty(t, sum.EscalationReason)
 	assert.Equal(t, 2, int(client.idx), "exactly two send attempts: the rejected one and the post-truncate retry")
 	assert.Less(t, a.history.EstimateTokens(), beforeTokens)
+	// Adaptive effective-max must have shrunk below the configured ceiling
+	// so the next turn's compaction triggers at the tighter watermark
+	// instead of re-hitting the same rejection.
+	assert.Less(t, a.history.EffectiveMaxContext(), a.history.MaxContext())
 }
 
 func TestOpenAIAgent_SendWithRetry_ContextRejectedFiresOncePerSend(t *testing.T) {

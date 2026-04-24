@@ -460,9 +460,12 @@ func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string
 }
 
 func (a *OpenAIAgent) maybeCompact() error {
-	high := int(float64(a.history.MaxContext()) * a.cfg.Compaction.HighWatermark)
+	// EffectiveMaxContext tracks adaptive shrinkage from past rejections;
+	// when none has happened it equals the configured MaxContext.
+	maxCtx := a.history.EffectiveMaxContext()
+	high := int(float64(maxCtx) * a.cfg.Compaction.HighWatermark)
 	if high <= 0 {
-		high = int(float64(a.history.MaxContext()) * 0.80)
+		high = int(float64(maxCtx) * 0.80)
 	}
 	if a.history.EstimateTokens() < high {
 		return nil
@@ -500,15 +503,21 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 			return ChatResponse{}, err
 		}
 		// Recovery path: the upstream model rejected the request as too
-		// large even though our local compaction thought we were fine
-		// (configured max-context > model's effective limit). Force a hard
-		// truncate that bypasses the watermark check, rebuild messages, and
-		// let the next retry attempt pick up the shrunk history. Only fire
-		// once per sendWithRetry so a persistent mismatch still surfaces
+		// large even though our local compaction thought we were fine.
+		// Two coordinated actions:
+		//  1. Shrink EffectiveMaxContext to 80% of what we just sent. That
+		//     value was clearly over the model's real ceiling, so future
+		//     compactions trigger at a lower watermark instead of re-hitting
+		//     the same rejection next turn. Sticky — only shrinks.
+		//  2. Force-truncate the current history against the new effective
+		//     ceiling so the immediate retry fits.
+		// Fire once per sendWithRetry so a persistent mismatch still surfaces
 		// instead of silently looping.
 		if !hardTruncated && isContextRejectedError(err) {
 			hardTruncated = true
-			target := a.history.MaxContext() / 2
+			estAtRejection := a.history.EstimateTokens()
+			a.history.ShrinkEffectiveMaxOnRejection(estAtRejection)
+			target := a.history.EffectiveMaxContext() / 2
 			report := ForceHardTruncate(a.history, target, 2)
 			if a.cfg.OnCompact != nil {
 				a.cfg.OnCompact(report)
