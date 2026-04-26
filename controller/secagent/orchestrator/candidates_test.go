@@ -9,24 +9,25 @@ import (
 
 func TestCandidatePool(t *testing.T) {
 	t.Parallel()
-	p := NewCandidatePool()
-	before := p.Counter()
-	c1 := p.Add(AddInput{WorkerID: 1, Title: "x", Severity: "low", FlowIDs: []string{"abc123"}})
-	c2 := p.Add(AddInput{WorkerID: 2, Title: "y", Severity: "low", FlowIDs: []string{"def456"}})
-	assert.Equal(t, "c001", c1)
-	assert.Equal(t, "c002", c2)
-	assert.Equal(t, []string{"c001"}, p.IDsSinceForWorker(before, 1))
-	assert.Equal(t, []string{"c002"}, p.IDsSinceForWorker(before, 2))
-	p.Mark("c001", "verified")
-	pending := p.Pending()
-	require.Len(t, pending, 1)
-	assert.Equal(t, "c002", pending[0].CandidateID)
-}
 
-func TestCandidatePool_ByID(t *testing.T) {
-	t.Parallel()
+	t.Run("add_and_pending", func(t *testing.T) {
+		t.Parallel()
+		p := NewCandidatePool()
+		before := p.Counter()
+		c1 := p.Add(AddInput{WorkerID: 1, Title: "x", Severity: "low", FlowIDs: []string{"abc123"}})
+		c2 := p.Add(AddInput{WorkerID: 2, Title: "y", Severity: "low", FlowIDs: []string{"def456"}})
+		assert.Equal(t, "c001", c1)
+		assert.Equal(t, "c002", c2)
+		assert.Equal(t, []string{"c001"}, p.IDsSinceForWorker(before, 1))
+		assert.Equal(t, []string{"c002"}, p.IDsSinceForWorker(before, 2))
+		p.Mark("c001", "verified")
+		pending := p.Pending()
+		require.Len(t, pending, 1)
+		assert.Equal(t, "c002", pending[0].CandidateID)
+	})
 
-	t.Run("returns_copy", func(t *testing.T) {
+	t.Run("by_id_returns_copy", func(t *testing.T) {
+		t.Parallel()
 		p := NewCandidatePool()
 		id := p.Add(AddInput{WorkerID: 1, Title: "x", FlowIDs: []string{"f1"}})
 		got := p.ByID(id)
@@ -39,16 +40,14 @@ func TestCandidatePool_ByID(t *testing.T) {
 		assert.Equal(t, "f1", again.FlowIDs[0])
 	})
 
-	t.Run("nil_for_unknown", func(t *testing.T) {
+	t.Run("by_id_nil_for_unknown", func(t *testing.T) {
+		t.Parallel()
 		p := NewCandidatePool()
 		assert.Nil(t, p.ByID("nope"))
 	})
-}
 
-func TestCandidatePool_MarkRejectsBackwardsTransition(t *testing.T) {
-	t.Parallel()
-
-	t.Run("verified_cannot_become_dismissed", func(t *testing.T) {
+	t.Run("mark_verified_sticks", func(t *testing.T) {
+		t.Parallel()
 		p := NewCandidatePool()
 		id := p.Add(AddInput{WorkerID: 1, Title: "x"})
 		p.Mark(id, "verified")
@@ -56,7 +55,8 @@ func TestCandidatePool_MarkRejectsBackwardsTransition(t *testing.T) {
 		assert.Equal(t, "verified", p.ByID(id).Status)
 	})
 
-	t.Run("dismissed_cannot_become_verified", func(t *testing.T) {
+	t.Run("mark_dismissed_sticks", func(t *testing.T) {
+		t.Parallel()
 		p := NewCandidatePool()
 		id := p.Add(AddInput{WorkerID: 1, Title: "x"})
 		p.Mark(id, "dismissed")
@@ -64,14 +64,16 @@ func TestCandidatePool_MarkRejectsBackwardsTransition(t *testing.T) {
 		assert.Equal(t, "dismissed", p.ByID(id).Status)
 	})
 
-	t.Run("invalid_status_rejected", func(t *testing.T) {
+	t.Run("mark_invalid_status", func(t *testing.T) {
+		t.Parallel()
 		p := NewCandidatePool()
 		id := p.Add(AddInput{WorkerID: 1, Title: "x"})
 		p.Mark(id, "nonsense")
 		assert.Equal(t, "pending", p.ByID(id).Status)
 	})
 
-	t.Run("unknown_id_noop", func(t *testing.T) {
+	t.Run("mark_unknown_id_noop", func(t *testing.T) {
+		t.Parallel()
 		p := NewCandidatePool()
 		p.Mark("c999", "verified") // must not panic
 	})

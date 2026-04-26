@@ -7,23 +7,10 @@ import (
 	"strings"
 )
 
-// unmarshalToolArgs parses tool arguments into dest, with recovery for
-// common LLM JSON misformulations seen in practice:
-//
-//   - An array field encoded as a JSON string: `"plans": "[{...},{...}]"`.
-//     Recovered by string-decoding then re-injecting the inner array.
-//   - An object field encoded as a JSON string: `"plan": "{...}"`.
-//     Recovered the same way.
-//   - A single object where the schema expects an array: `"plans": {...}`.
-//     Recovered by wrapping into a one-element array.
-//   - A single-element array where the schema expects an object:
-//     `"plan": [{...}]`. Recovered by unwrapping.
-//
-// dest must be a pointer to a struct. Recovery is best-effort and
-// per-field: a successful patch on field A still leaves field B alone if
-// it's already valid. If no recovery applies or the patched parse still
-// fails, the original error from the first attempt is returned so the
-// tool's reject message stays accurate.
+// unmarshalToolArgs parses tool arguments into dest with best-effort, per-field
+// recovery for common LLM misformulations (string-quoted arrays/objects,
+// wrapped/unwrapped collections). dest must be a pointer to a struct. Returns
+// the original parse error if no recovery applies.
 func unmarshalToolArgs(args json.RawMessage, dest any) error {
 	origErr := json.Unmarshal(args, dest)
 	if origErr == nil {

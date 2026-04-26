@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 )
@@ -43,28 +44,19 @@ type ReasoningHandler interface {
 	// Format returns the detected format.
 	Format() ReasoningFormat
 
-	// Ingest normalizes a response for storage. Returns Content and
-	// ReasoningContent as they should be appended to history.
+	// Ingest normalizes response fields for history storage.
 	Ingest(resp ChatResponse) (content, reasoning string)
 
-	// Replay prepares history for the agent's own next send, applying a
-	// format-appropriate KeepThinkTurns window. Returns a new slice.
+	// Replay prepares history for the next send, filtering by format and keepLastN.
 	Replay(msgs []Message, keepLastN int) []Message
 
-	// ForSummary unifies history to inline shape for a one-shot summary /
-	// narrator prompt so the summary model sees one input shape regardless
-	// of the agent's native format.
+	// ForSummary converts history to inline-think shape for summary prompts.
 	ForSummary(msgs []Message) []Message
 
-	// Extract returns a confident single-line prose summary from resp,
-	// sourced from whichever field(s) carry the real answer for this
-	// format. Returns "" when no confident summary can be produced —
-	// callers should fall back to Tail for a best-effort fragment.
+	// Extract returns a confident single-line summary from resp, or "" to fall back to Tail.
 	Extract(resp ChatResponse) string
 
-	// Tail returns a best-effort reasoning fragment for narrator fallback
-	// when Extract produced nothing. Displayed with a "…thinking:" prefix
-	// so the operator knows it's a partial thought rather than a summary.
+	// Tail returns a best-effort reasoning fragment when Extract produced nothing.
 	Tail(resp ChatResponse) string
 }
 
@@ -122,8 +114,7 @@ func (structuredHandler) Replay(msgs []Message, _ int) []Message {
 	// convention: servers don't accept it on input. Blank it on every
 	// replayed message so it never reaches the wire (omitempty handles it).
 	// KeepThinkTurns has no meaning here; replay is strictly zero-turn.
-	out := make([]Message, len(msgs))
-	copy(out, msgs)
+	out := slices.Clone(msgs)
 	for i := range out {
 		if out[i].Role == roleAssistant {
 			out[i].ReasoningContent = ""
@@ -137,8 +128,7 @@ func (structuredHandler) ForSummary(msgs []Message) []Message {
 	// prepend to Content so the summary prompt looks the same regardless of
 	// source. Safe for one-shot summary calls; the summary model's output
 	// is processed via StripThinkBlocks after.
-	out := make([]Message, len(msgs))
-	copy(out, msgs)
+	out := slices.Clone(msgs)
 	for i := range out {
 		m := out[i]
 		if m.Role != roleAssistant || m.ReasoningContent == "" {

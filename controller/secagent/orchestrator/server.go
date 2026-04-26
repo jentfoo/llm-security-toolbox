@@ -11,33 +11,42 @@ import (
 	"time"
 )
 
-// SectoolServer manages a child sectool MCP server process.
+// SectoolServer represents the sectool MCP endpoint secagent talks to.
+// When secagent attached to an already-running server, Cmd is nil and
+// Terminate is a no-op.
 type SectoolServer struct {
 	Cmd     *exec.Cmd
 	LogFile *os.File
 	URL     string
 }
 
-// StartSectool runs `make build-sectool` (unless skipBuild) then
-// `bin/sectool mcp ...` and waits for HTTP readiness.
-func StartSectool(
-	repoRoot string, proxyPort, mcpPort int, workflow string,
-	skipBuild bool, log *Logger,
-) (*SectoolServer, error) {
-	if !skipBuild {
+// readinessProbeTimeout caps each MCP readiness probe so a hung
+// connection can't stall startup.
+const readinessProbeTimeout = 500 * time.Millisecond
+
+// StartSectool returns a SectoolServer for the configured MCP port. If a
+// server is already responding on that port it attaches without starting
+// a child process; otherwise it launches `sectool mcp` from $PATH and
+// waits for HTTP readiness.
+func StartSectool(proxyPort, mcpPort int, workflow string, log *Logger) (*SectoolServer, error) {
+	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort)
+
+	if mcpReachable(url) {
 		if log != nil {
-			log.Log("server", "building sectool", nil)
+			log.Log("server", "attaching to running sectool", map[string]any{
+				"mcp_port": mcpPort, "url": url,
+			})
 		}
-		build := exec.Command("make", "build-sectool")
-		build.Dir = repoRoot
-		if out, err := build.CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("make build-sectool failed: %w\n%s", err, string(out))
-		}
+		return &SectoolServer{URL: url}, nil
 	}
 
-	binary := filepath.Join(repoRoot, "bin", "sectool")
-	cwd, err := os.Getwd()
-	if err != nil || cwd == "" {
+	binary, err := exec.LookPath("sectool")
+	if err != nil {
+		return nil, fmt.Errorf("sectool not found in $PATH: %w", err)
+	}
+
+	cwd, _ := os.Getwd()
+	if cwd == "" {
 		cwd = "."
 	}
 	logPath := filepath.Join(cwd, "sectool-mcp.log")
@@ -57,13 +66,14 @@ func StartSectool(
 		return nil, fmt.Errorf("start sectool: %w", err)
 	}
 	if log != nil {
-		log.Log("server", "started sectool", map[string]any{"mcp_port": mcpPort, "proxy_port": proxyPort, "log": logPath})
+		log.Log("server", "started sectool", map[string]any{
+			"mcp_port": mcpPort, "proxy_port": proxyPort,
+			"log": logPath, "binary": binary,
+		})
 	}
 
-	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		// Early death check.
 		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
 			_ = f.Close()
 			return nil, fmt.Errorf("sectool exited early (code %d)", cmd.ProcessState.ExitCode())
@@ -74,9 +84,7 @@ func StartSectool(
 				return nil, fmt.Errorf("sectool died during startup: %w", err)
 			}
 		}
-		resp, err := http.Get(url)
-		if err == nil {
-			_ = resp.Body.Close()
+		if mcpReachable(url) {
 			if log != nil {
 				log.Log("server", "ready", map[string]any{"url": url})
 			}
@@ -89,7 +97,20 @@ func StartSectool(
 	return nil, errors.New("sectool MCP server did not become ready within 10s")
 }
 
-// Terminate tears down the child server.
+// mcpReachable reports whether the MCP endpoint accepts an HTTP request
+// within readinessProbeTimeout.
+func mcpReachable(url string) bool {
+	client := &http.Client{Timeout: readinessProbeTimeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return true
+}
+
+// Terminate tears down the child server. No-op when attached to a server
+// secagent didn't start.
 func (s *SectoolServer) Terminate() {
 	if s == nil || s.Cmd == nil || s.Cmd.Process == nil {
 		return

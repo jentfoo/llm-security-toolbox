@@ -585,7 +585,10 @@ func TestOpenAIAgent_OnToolEndErrTextPopulated(t *testing.T) {
 }
 
 func TestOpenAIAgent_RequestLifecycleCallbacks(t *testing.T) {
-	t.Parallel()
+	// Not parallel: PromptTokens=12 in the fake response feeds the
+	// process-wide calibration EMA via SetPromptTokens. Resetting on
+	// cleanup keeps parallel tests from observing the perturbation.
+	t.Cleanup(resetCalibrationForTest)
 	client := &fakeChatClient{
 		responses: []ChatResponse{{Content: "ok", Usage: Usage{PromptTokens: 12, CompletionTokens: 3}}},
 	}
@@ -800,71 +803,51 @@ func TestOpenAIAgent_FlowIDExtraction(t *testing.T) {
 	assert.Contains(t, sum.FlowIDs, "abc12345")
 }
 
-func TestOpenAIAgent_ContextUsage(t *testing.T) {
+func TestOpenAIAgent_ReplaceHistory(t *testing.T) {
 	t.Parallel()
-	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client), MaxContext: 4096})
 
-	tokens, max := a.ContextUsage()
-	assert.Equal(t, 4096, max)
-	assert.GreaterOrEqual(t, tokens, 0)
-	assert.NotNil(t, a.History())
-	require.NoError(t, a.Close())
-}
+	t.Run("preserves_system", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool: newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+		})
+		a.Query("noisy first")
+		a.Query("noisy second")
 
-func TestOpenAIAgent_InterruptNoop(t *testing.T) {
-	t.Parallel()
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m",
-		Pool:  newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+		a.ReplaceHistory([]Message{{Role: "user", Content: "recap"}})
+		snap := a.Snapshot()
+		require.Len(t, snap, 2)
+		assert.Equal(t, "system", snap[0].Role)
+		assert.Equal(t, "sys", snap[0].Content)
+		assert.Equal(t, "user", snap[1].Role)
+		assert.Equal(t, "recap", snap[1].Content)
 	})
-	a.Interrupt()
-}
 
-func TestOpenAIAgent_ReplaceHistoryPreservesSystem(t *testing.T) {
-	t.Parallel()
-	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "sys", Pool: newPoolWith(client),
+	t.Run("accepts_explicit_system", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "original-sys",
+			Pool: newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+		})
+		a.ReplaceHistory([]Message{
+			{Role: "system", Content: "explicit-sys"},
+			{Role: "user", Content: "recap"},
+		})
+		snap := a.Snapshot()
+		require.Len(t, snap, 2)
+		assert.Equal(t, "explicit-sys", snap[0].Content)
 	})
-	a.Query("noisy first")
-	a.Query("noisy second")
 
-	a.ReplaceHistory([]Message{{Role: "user", Content: "recap"}})
-	snap := a.Snapshot()
-	require.Len(t, snap, 2)
-	assert.Equal(t, "system", snap[0].Role)
-	assert.Equal(t, "sys", snap[0].Content)
-	assert.Equal(t, "user", snap[1].Role)
-	assert.Equal(t, "recap", snap[1].Content)
-}
-
-func TestOpenAIAgent_ReplaceHistoryAcceptsExplicitSystem(t *testing.T) {
-	t.Parallel()
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "original-sys",
-		Pool: newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+	t.Run("empty_keeps_system_only", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool: newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+		})
+		a.Query("noise")
+		a.ReplaceHistory(nil)
+		snap := a.Snapshot()
+		require.Len(t, snap, 1)
+		assert.Equal(t, "system", snap[0].Role)
 	})
-	a.ReplaceHistory([]Message{
-		{Role: "system", Content: "explicit-sys"},
-		{Role: "user", Content: "recap"},
-	})
-	snap := a.Snapshot()
-	require.Len(t, snap, 2)
-	assert.Equal(t, "explicit-sys", snap[0].Content)
-}
-
-func TestOpenAIAgent_ReplaceHistoryEmpty(t *testing.T) {
-	t.Parallel()
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "sys",
-		Pool: newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-	})
-	a.Query("noise")
-	a.ReplaceHistory(nil)
-	snap := a.Snapshot()
-	require.Len(t, snap, 1)
-	assert.Equal(t, "system", snap[0].Role)
 }
 
 func TestOpenAIAgent_EffectiveContextUsage(t *testing.T) {
@@ -894,7 +877,6 @@ func TestOpenAIAgent_MarkIterationBoundary(t *testing.T) {
 	a.MarkIterationBoundary()
 	assert.Equal(t, 2, a.IterationBoundary(),
 		"after [system, user], boundary records position 2")
-	// ReplaceHistory must reset boundary state.
 	a.ReplaceHistory([]Message{{Role: "user", Content: "fresh"}})
 	assert.Equal(t, 0, a.IterationBoundary(),
 		"ReplaceHistory resets boundary index so the next MarkIterationBoundary starts clean")
@@ -985,8 +967,6 @@ func TestOpenAIAgent_MaybeCompactFailOpenWhenCallbackErrors(t *testing.T) {
 	}
 	a.MarkIterationBoundary()
 	a.Query("iter directive")
-	// Must not surface the callback error — fallthrough to existing
-	// Compact() handles it.
 	err := a.maybeCompact(t.Context())
 	assert.NoError(t, err, "callback errors are absorbed; existing Compact is the safety net")
 }

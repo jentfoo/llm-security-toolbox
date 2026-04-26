@@ -40,39 +40,34 @@ type WorkerState struct {
 	MCP                *mcp.Client
 	LastInstruction    string
 	Alive              bool
-	Assignment         string
 	ProgressNoneStreak int
 	StallWarned        bool
 	AutonomousBudget   int
 	EscalationReason   string
 	AutonomousTurns    []agent.TurnSummary
 	// Chronicle is the canonical investigative record for this worker —
-	// raw messages (directive, assistant turns, tool calls, tool results)
-	// accumulated across every iteration. Lives at the controller and is
-	// NEVER loaded directly into the worker agent's chat history.
+	// the raw chat messages (directive, assistant turns with thinking,
+	// tool calls, tool results) accumulated across every iteration. The
+	// controller installs the chronicle on the worker agent at iter start
+	// (no LLM call) and at iter end appends the iter's new content via
+	// extractAndAppend.
 	//
-	// At iter start the chronicle is summarized fresh by the Summarizer
-	// (one-shot from this raw record, never from a prior summary) and the
-	// resulting summary is installed as the worker's pre-iter context.
-	// Computing every install from canonical raw bytes avoids the
-	// summary-of-summary dilution that would otherwise pull workers back
-	// to their original angle each iteration.
+	// To bound growth, compactChronicle runs at iter end after extract: it
+	// applies StripAssistantThink + StubToolResult in place to messages
+	// older than the keep-recent window (parallel ChronicleIter tracks
+	// per-message iter so the window is iteration-based). Recent iters
+	// stay raw so the worker keeps short-term context intact; older iters
+	// remain present (preserving structural memory + flow IDs in tool-call
+	// args) but stripped of bulk so token growth stays sublinear.
 	//
-	// At iter end, extractAndAppend reads everything from the iteration
-	// boundary through the end of the agent's history and appends it
-	// here, preserving full byte-level texture for the next install.
+	// We never summarize a live worker's chronicle — only at retire time
+	// (SummarizeCompletedWorker) does it collapse into a single CompletedWorker.Summary entry that lives in the director chat.
 	Chronicle []agent.Message
-	// SummaryCache holds the last successfully-produced chronicle summary
-	// for this worker. installChronicle reuses it when the directive AND
-	// chronicle length both match what was current when the summary was
-	// generated — avoiding redundant LLM calls on no-op iters (e.g. dead
-	// iters) while preserving the "always derived from raw chronicle"
-	// invariant: every cached summary IS a fresh-from-raw output, just one
-	// we already paid for. Also serves as the fallback when a fresh
-	// summarize call fails.
-	SummaryCache          string
-	SummaryCacheChronLen  int
-	SummaryCacheDirective string
+	// ChronicleIter is parallel to Chronicle: ChronicleIter[i] is the
+	// iteration number under which Chronicle[i] was appended. Used by
+	// compactChronicle to decide which messages are "old" enough to
+	// think-strip + tool-stub vs which are recent enough to keep raw.
+	ChronicleIter []int
 	// RecentToolErrors is a rolling window of recent tool-error signatures
 	// (first 80 chars of error_text). Used to detect workers stuck on the
 	// same error across multiple turns.

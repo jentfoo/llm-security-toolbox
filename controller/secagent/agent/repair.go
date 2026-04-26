@@ -35,8 +35,17 @@ func RepairToolArgs(raw string) (json.RawMessage, error) {
 	}
 
 	// Balance trailing braces.
-	balanced := balanceBraces(raw)
-	if balanced != raw {
+	open, close := 0, 0
+	for _, r := range raw {
+		switch r {
+		case '{':
+			open++
+		case '}':
+			close++
+		}
+	}
+	if close < open {
+		balanced := raw + strings.Repeat("}", open-close)
 		if json.Valid([]byte(balanced)) {
 			return json.RawMessage(balanced), nil
 		}
@@ -60,22 +69,6 @@ type RepairError struct{ Raw string }
 
 func (e *RepairError) Error() string {
 	return "unable to parse tool arguments as JSON: " + truncate(e.Raw, 200)
-}
-
-func balanceBraces(s string) string {
-	open, close := 0, 0
-	for _, r := range s {
-		switch r {
-		case '{':
-			open++
-		case '}':
-			close++
-		}
-	}
-	if close < open {
-		return s + strings.Repeat("}", open-close)
-	}
-	return s
 }
 
 func truncate(s string, n int) string {

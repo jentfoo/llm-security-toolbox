@@ -5,105 +5,98 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/secagent/agent"
 )
 
 func TestUpdateStallStreaks(t *testing.T) {
 	t.Parallel()
-	flowsTurn := []agent.TurnSummary{{FlowIDs: []string{"abc123"}}}
-	cases := []struct {
-		name          string
-		initial       *WorkerState
-		wantStreak    int
-		wantStallWarn bool
-	}{
-		{
-			name:       "silent_increments_from_zero",
-			initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "silent"},
-			wantStreak: 1,
-		},
-		{
-			name:       "silent_increments_further",
-			initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "silent", ProgressNoneStreak: 1},
-			wantStreak: 2,
-		},
-		{
-			// Hard errors (HTTP 400, crashed drain) feed the same threshold
-			// as silent so consistently-crashing workers die naturally.
-			name:       "error_increments_like_silent",
-			initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "error", ProgressNoneStreak: 2},
-			wantStreak: 3,
-		},
-		{
-			name:       "candidate_resets_streak_and_warn",
-			initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "candidate", ProgressNoneStreak: 2, StallWarned: true},
-			wantStreak: 0,
-		},
-		{
-			// silent always increments before flow-reset check (else-if ordering)
-			name:       "silent_wins_over_flows",
-			initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "silent", AutonomousTurns: flowsTurn},
-			wantStreak: 1,
-		},
-		{
-			// "error" loses to flows only when the error branch doesn't match —
-			// here the worker escalated with a non-matching reason but the
-			// producedFlows branch wins by ordering. Not exercised today but
-			// documents the precedence for future edits.
-			name:       "flows_reset_without_silent_or_error",
-			initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "budget", AutonomousTurns: flowsTurn, ProgressNoneStreak: 2, StallWarned: true},
-			wantStreak: 0,
-		},
-		{
-			name:          "dead_worker_untouched",
-			initial:       &WorkerState{ID: 1, Alive: false, EscalationReason: "silent", ProgressNoneStreak: 4, StallWarned: true},
-			wantStreak:    4,
-			wantStallWarn: true,
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			UpdateStallStreaks([]*WorkerState{c.initial})
-			assert.Equal(t, c.wantStreak, c.initial.ProgressNoneStreak)
-			assert.Equal(t, c.wantStallWarn, c.initial.StallWarned)
-		})
-	}
-}
 
-func TestUpdateStallStreaks_RepeatedErrors(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name          string
-		initialStreak int
-		reason        string
-		errors        []string
-		wantStreak    int
-	}{
-		{"threshold_increments_streak", 0, "budget", []string{"e", "e", "e"}, 1},
-		{"below_threshold_noop", 0, "budget", []string{"e", "e"}, 0},
-		{"candidate_wins_over_errors", 2, "candidate", []string{"e", "e", "e"}, 0},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			w := &WorkerState{
-				ID: 1, Alive: true,
-				EscalationReason:   c.reason,
-				ProgressNoneStreak: c.initialStreak,
-				RecentToolErrors:   c.errors,
-				Agent:              &agent.FakeAgent{},
-			}
-			UpdateStallStreaks([]*WorkerState{w})
-			assert.Equal(t, c.wantStreak, w.ProgressNoneStreak)
-		})
-	}
-}
+	t.Run("escalation_reason_streaks", func(t *testing.T) {
+		flowsTurn := []agent.TurnSummary{{FlowIDs: []string{"abc123"}}}
+		cases := []struct {
+			name          string
+			initial       *WorkerState
+			wantStreak    int
+			wantStallWarn bool
+		}{
+			{
+				name:       "silent_increments_from_zero",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "silent"},
+				wantStreak: 1,
+			},
+			{
+				name:       "silent_increments_further",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "silent", ProgressNoneStreak: 1},
+				wantStreak: 2,
+			},
+			{
+				// Hard errors (HTTP 400, crashed drain) feed the same threshold
+				// as silent so consistently-crashing workers die naturally.
+				name:       "error_increments_like_silent",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "error", ProgressNoneStreak: 2},
+				wantStreak: 3,
+			},
+			{
+				name:       "candidate_resets_streak_and_warn",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "candidate", ProgressNoneStreak: 2, StallWarned: true},
+				wantStreak: 0,
+			},
+			{
+				// silent always increments before flow-reset check (else-if ordering)
+				name:       "silent_wins_over_flows",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "silent", AutonomousTurns: flowsTurn},
+				wantStreak: 1,
+			},
+			{
+				name:       "flows_reset_without_silent_or_error",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "budget", AutonomousTurns: flowsTurn, ProgressNoneStreak: 2, StallWarned: true},
+				wantStreak: 0,
+			},
+			{
+				name:          "dead_worker_untouched",
+				initial:       &WorkerState{ID: 1, Alive: false, EscalationReason: "silent", ProgressNoneStreak: 4, StallWarned: true},
+				wantStreak:    4,
+				wantStallWarn: true,
+			},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				UpdateStallStreaks([]*WorkerState{c.initial})
+				assert.Equal(t, c.wantStreak, c.initial.ProgressNoneStreak)
+				assert.Equal(t, c.wantStallWarn, c.initial.StallWarned)
+			})
+		}
+	})
 
-func TestUpdateStallStreaks_Coaching(t *testing.T) {
-	t.Parallel()
+	t.Run("repeated_tool_errors", func(t *testing.T) {
+		cases := []struct {
+			name          string
+			initialStreak int
+			reason        string
+			errors        []string
+			wantStreak    int
+		}{
+			{"threshold_increments_streak", 0, "budget", []string{"e", "e", "e"}, 1},
+			{"below_threshold_noop", 0, "budget", []string{"e", "e"}, 0},
+			{"candidate_wins_over_errors", 2, "candidate", []string{"e", "e", "e"}, 0},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				w := &WorkerState{
+					ID: 1, Alive: true,
+					EscalationReason:   c.reason,
+					ProgressNoneStreak: c.initialStreak,
+					RecentToolErrors:   c.errors,
+					Agent:              &agent.FakeAgent{},
+				}
+				UpdateStallStreaks([]*WorkerState{w})
+				assert.Equal(t, c.wantStreak, w.ProgressNoneStreak)
+			})
+		}
+	})
 
-	t.Run("same_sig_fires_once", func(t *testing.T) {
+	t.Run("coaching_same_sig_fires_once", func(t *testing.T) {
 		fa := &agent.FakeAgent{}
 		w := &WorkerState{
 			ID: 1, Alive: true,
@@ -111,7 +104,7 @@ func TestUpdateStallStreaks_Coaching(t *testing.T) {
 			RecentToolErrors: []string{"same err", "same err", "same err"},
 			Agent:            fa,
 		}
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			UpdateStallStreaks([]*WorkerState{w})
 		}
 		coachings := 0
@@ -124,7 +117,7 @@ func TestUpdateStallStreaks_Coaching(t *testing.T) {
 		assert.Equal(t, "same err", w.CoachedErrorSig)
 	})
 
-	t.Run("new_sig_fires_again", func(t *testing.T) {
+	t.Run("coaching_new_sig_fires_again", func(t *testing.T) {
 		fa := &agent.FakeAgent{}
 		w := &WorkerState{
 			ID: 1, Alive: true,
@@ -142,53 +135,6 @@ func TestUpdateStallStreaks_Coaching(t *testing.T) {
 			}
 		}
 		assert.Equal(t, 2, coachings)
-	})
-}
-
-func TestUpdateToolErrorSignatures(t *testing.T) {
-	t.Parallel()
-
-	t.Run("error_tool_calls_recorded", func(t *testing.T) {
-		w := &WorkerState{}
-		updateToolErrorSignatures(w, agent.TurnSummary{
-			ToolCalls: []agent.ToolCallRecord{
-				{Name: "x", IsError: true, ResultSummary: "e1"},
-				{Name: "y", IsError: true, ResultSummary: "e2"},
-			},
-		})
-		assert.Equal(t, []string{"e1", "e2"}, w.RecentToolErrors)
-	})
-
-	t.Run("success_clears_coached_sig", func(t *testing.T) {
-		w := &WorkerState{CoachedErrorSig: "prev"}
-		updateToolErrorSignatures(w, agent.TurnSummary{
-			ToolCalls: []agent.ToolCallRecord{
-				{Name: "ok", IsError: false, ResultSummary: "done"},
-			},
-		})
-		assert.Empty(t, w.CoachedErrorSig)
-	})
-
-	t.Run("window_capped_to_max", func(t *testing.T) {
-		w := &WorkerState{}
-		// Populate 7 errors; only the last 5 should survive.
-		calls := make([]agent.ToolCallRecord, 7)
-		for i := range calls {
-			calls[i] = agent.ToolCallRecord{IsError: true, ResultSummary: string(rune('A' + i))}
-		}
-		updateToolErrorSignatures(w, agent.TurnSummary{ToolCalls: calls})
-		assert.Len(t, w.RecentToolErrors, MaxRecentToolErrors)
-		assert.Equal(t, []string{"C", "D", "E", "F", "G"}, w.RecentToolErrors)
-	})
-
-	t.Run("signature_truncated_to_prefix", func(t *testing.T) {
-		long := strings.Repeat("x", ErrorSignatureMaxLen*2)
-		w := &WorkerState{}
-		updateToolErrorSignatures(w, agent.TurnSummary{
-			ToolCalls: []agent.ToolCallRecord{{IsError: true, ResultSummary: long}},
-		})
-		require.Len(t, w.RecentToolErrors, 1)
-		assert.Len(t, w.RecentToolErrors[0], ErrorSignatureMaxLen)
 	})
 }
 

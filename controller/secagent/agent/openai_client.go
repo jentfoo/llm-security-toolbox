@@ -86,15 +86,9 @@ type OpenAIChatClient struct {
 	client *openai.Client
 }
 
-// NewOpenAIChatClient builds a client pointed at baseURL with the given apiKey.
-// Pass an empty apiKey for most local endpoints.
-//
-// Per-request deadlines come from the caller's context (TurnTimeout via
-// DrainBounded). A separate http.Client.Timeout used to live here, hardcoded
-// to 25m — but TurnTimeout is typically 15m, so the HTTP deadline was the
-// looser of the two and added nothing useful. For an outer safety net
-// covering wedged keep-alives with no cancellation, use
-// NewOpenAIChatClientWithTimeout.
+// NewOpenAIChatClient builds a client for baseURL with the given apiKey.
+// Pass empty apiKey for local endpoints. Use NewOpenAIChatClientWithTimeout
+// for an HTTP-level timeout safety net.
 func NewOpenAIChatClient(baseURL, apiKey string) *OpenAIChatClient {
 	return NewOpenAIChatClientWithTimeout(baseURL, apiKey, 0)
 }
@@ -112,13 +106,20 @@ func NewOpenAIChatClientWithTimeout(baseURL, apiKey string, timeout time.Duratio
 	return &OpenAIChatClient{client: openai.NewClientWithConfig(cfg)}
 }
 
-// CreateChatCompletion sends one chat-completion request.
+// CreateChatCompletion sends one chat-completion request. Empty Content on
+// user/system/tool roles is forced to a space so it survives `content,omitempty`
+// (some endpoints reject missing content). Assistant messages with only
+// tool_calls keep empty content.
 func (c *OpenAIChatClient) CreateChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
 	msgs := make([]openai.ChatCompletionMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {
+		content := m.Content
+		if content == "" && m.Role != "assistant" {
+			content = " "
+		}
 		om := openai.ChatCompletionMessage{
 			Role:             m.Role,
-			Content:          m.Content,
+			Content:          content,
 			ReasoningContent: m.ReasoningContent,
 			Name:             m.Name,
 			ToolCallID:       m.ToolCallID,

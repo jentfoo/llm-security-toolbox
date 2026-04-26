@@ -102,14 +102,9 @@ func summarizeStatusVia(ctx context.Context, a *OpenAIAgent, client ChatClient, 
 	return line, thinkTail, nil
 }
 
-// buildStatusMessages filters and tail-truncates the agent's history for a
-// status-summary prompt. The leading system message (if present) and the
-// first non-system turn (typically the assignment) are preserved as anchor
-// regardless of budget; the remaining window is trimmed from the tail.
-// Tool-result bytes are replaced with a placeholder so pairing stays valid
-// without sending the payload. `<think>` blocks are preserved on the last
-// keepThinkTurns assistant messages so the summary model can see recent
-// reasoning intent; older thinks are stripped to keep the prompt lean.
+// buildStatusMessages prepares history for a status-summary prompt. Preserves
+// the system message and first non-system turn as anchors, stubs tool-result
+// content, and keeps think blocks on the last keepThinkTurns assistant messages.
 func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessage {
 	if len(hist) == 0 {
 		return nil
@@ -137,7 +132,7 @@ func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessa
 
 	anchorCost := 0
 	for _, m := range anchor {
-		anchorCost += estimateMessageTokens(m)
+		anchorCost += EstimateMessageTokens(m)
 	}
 	remaining := budget - anchorCost
 	if remaining < 0 {
@@ -169,7 +164,7 @@ func pickTail(msgs []Message, budget int) []Message {
 	cost := 0
 	start := len(msgs)
 	for i := len(msgs) - 1; i >= 0; i-- {
-		c := estimateMessageTokens(msgs[i])
+		c := EstimateMessageTokens(msgs[i])
 		if cost+c > budget && start < len(msgs) {
 			break
 		}
@@ -180,15 +175,4 @@ func pickTail(msgs []Message, budget int) []Message {
 		start++
 	}
 	return msgs[start:]
-}
-
-// estimateMessageTokens mirrors History.estimateRangeLocked's char/4
-// heuristic so summary budgeting stays consistent with compaction.
-func estimateMessageTokens(m Message) int {
-	total := len(m.Content) / 4
-	for _, tc := range m.ToolCalls {
-		total += (len(tc.Function.Name) + len(tc.Function.Arguments)) / 4
-	}
-	total += 4
-	return total
 }

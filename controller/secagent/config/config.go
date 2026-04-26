@@ -29,8 +29,6 @@ type Config struct {
 	ProxyPort int
 	MCPPort   int
 	Workflow  string
-	External  bool
-	SkipBuild bool
 
 	// Loop
 	Prompt           string
@@ -42,6 +40,7 @@ type Config struct {
 	MaxParallelTools int
 	MaxTurnsPerAgent int
 	FindingsDir      string
+	SkipRecon        bool // when true, iter 1 spawns a normal testing worker instead of the recon worker
 
 	// Stall
 	StallWarnAfter int
@@ -84,32 +83,25 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.ProxyPort, "proxy-port", 8181, "sectool proxy port")
 	fs.IntVar(&c.MCPPort, "mcp-port", 9119, "sectool MCP port")
 	fs.StringVar(&c.Workflow, "workflow", "explore", "sectool workflow mode")
-	fs.BoolVar(&c.External, "external", false, "attach to running MCP; skip build+start")
-	fs.BoolVar(&c.SkipBuild, "skip-build", false, "skip make build")
 
 	fs.StringVar(&c.Prompt, "prompt", "", "initial task prompt (required)")
 	fs.IntVar(&c.MaxIterations, "max-iterations", 30, "hard iteration cap")
 	fs.IntVar(&c.MaxWorkers, "max-workers", 4, "max parallel workers")
 	fs.IntVar(&c.AutonomousBudget, "autonomous-budget", DefaultAutoBudget, "turns per worker per iteration")
-	// Defaults sized for slow local models: a turn that chains many tool
-	// calls against a heavy backend easily exceeds 5 minutes, and a 5-min
-	// turn timeout produced repeated forced escalations in past runs before
-	// the agent could emit its final response. 15 min per turn / 5 min per
-	// tool gives breathing room without hiding genuinely stuck operations.
+	// Defaults sized generously for slow local models with long tool chains.
 	fs.DurationVar(&c.TurnTimeout, "turn-timeout", 15*time.Minute, "per-turn ctx timeout")
 	fs.DurationVar(&c.PerToolTimeout, "per-tool-timeout", 5*time.Minute, "per-tool-call ctx timeout")
 	fs.IntVar(&c.MaxParallelTools, "max-parallel-tools", 4, "max concurrent in-flight tool calls per assistant response")
 	fs.IntVar(&c.MaxTurnsPerAgent, "max-turns-per-agent", 100, "hard cap per Drain chain")
 	fs.StringVar(&c.FindingsDir, "findings-dir", "./findings", "finding report directory")
+	fs.BoolVar(&c.SkipRecon, "skip-recon", false, "skip the iter-1 recon pass; iter 1 runs a normal testing worker against cfg.Prompt")
 
 	fs.IntVar(&c.StallWarnAfter, "stall-warn-after", 3, "silent runs before director warning")
 	fs.IntVar(&c.StallStopAfter, "stall-stop-after", 4, "silent runs before force-stop")
 
 	fs.IntVar(&c.ProgressLogInterval, "progress-log-interval", 3, "turns per agent between status summaries (0 disables; deprecated — superseded by narrator)")
 	fs.DurationVar(&c.NarrateInterval, "narrate-interval", 2*time.Minute, "min interval between async narrator summaries (0 disables)")
-	// Narrator shares the pool with workers/orchestrator; a too-tight cap
-	// here just abandons in-flight summaries without freeing the slot
-	// sooner. Align with TurnTimeout.
+	// Narrator shares the worker/orchestrator pool; align with TurnTimeout.
 	fs.DurationVar(&c.NarrateTimeout, "narrate-timeout", 15*time.Minute, "per-summary narrator call timeout")
 	fs.StringVar(&c.LogFile, "log-file", "secagent.log", "structured log destination")
 

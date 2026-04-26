@@ -53,13 +53,13 @@ func TestUnmarshalToolArgs(t *testing.T) {
 		assert.Equal(t, 2, got.Plans[1].WorkerID)
 	})
 
-	t.Run("recovers_string_encoded_object_into_array_field", func(t *testing.T) {
+	t.Run("recovers_object_into_array_field", func(t *testing.T) {
 		var got planArgs
 		err := unmarshalToolArgs(json.RawMessage(
 			`{"plans":"{\"worker_id\":7,\"assignment\":\"solo\"}"}`,
 		), &got)
 		require.NoError(t, err)
-		require.Len(t, got.Plans, 1, "string-encoded single object wrapped into one-element array")
+		require.Len(t, got.Plans, 1)
 		assert.Equal(t, 7, got.Plans[0].WorkerID)
 		assert.Equal(t, "solo", got.Plans[0].Assignment)
 	})
@@ -74,7 +74,7 @@ func TestUnmarshalToolArgs(t *testing.T) {
 		assert.Equal(t, 4, got.Plans[0].WorkerID)
 	})
 
-	t.Run("recovers_string_encoded_object_into_struct_field", func(t *testing.T) {
+	t.Run("recovers_into_struct_field", func(t *testing.T) {
 		var got singleArgs
 		err := unmarshalToolArgs(json.RawMessage(
 			`{"plan":"{\"worker_id\":9,\"assignment\":\"deep dive\"}"}`,
@@ -84,7 +84,7 @@ func TestUnmarshalToolArgs(t *testing.T) {
 		assert.Equal(t, "deep dive", got.Plan.Assignment)
 	})
 
-	t.Run("unwraps_single_element_array_into_struct_field", func(t *testing.T) {
+	t.Run("unwraps_array_into_struct", func(t *testing.T) {
 		var got singleArgs
 		err := unmarshalToolArgs(json.RawMessage(
 			`{"plan":[{"worker_id":11,"assignment":"unwrap me"}]}`,
@@ -96,10 +96,10 @@ func TestUnmarshalToolArgs(t *testing.T) {
 	t.Run("returns_original_error_on_garbage", func(t *testing.T) {
 		var got planArgs
 		err := unmarshalToolArgs(json.RawMessage(`{"plans":"not parseable"}`), &got)
-		require.Error(t, err, "string that decodes to a non-JSON value can't be recovered")
+		require.Error(t, err)
 	})
 
-	t.Run("returns_original_error_on_completely_wrong_shape", func(t *testing.T) {
+	t.Run("errors_on_wrong_shape", func(t *testing.T) {
 		var got planArgs
 		err := unmarshalToolArgs(json.RawMessage(`"just a string"`), &got)
 		require.Error(t, err)

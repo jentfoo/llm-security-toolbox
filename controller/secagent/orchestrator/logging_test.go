@@ -31,116 +31,115 @@ func newCapturedLogger(t *testing.T) (*Logger, string, *bytes.Buffer) {
 	return l, path, buf
 }
 
-func TestLogger_WritesJSONRecord(t *testing.T) {
-	t.Parallel()
-	l, path := newTestLogger(t)
-	l.Log("controller", "hello", map[string]any{"iter": 2})
-	l.Logf("worker", "n=%d", 3)
-	require.NoError(t, l.Close())
+// TestLogger covers Logger.Log/Logf behavior. Parent does not call t.Parallel
+// because colored_output mutates the global useColor.
+func TestLogger(t *testing.T) {
+	t.Run("writes_json_record", func(t *testing.T) {
+		t.Parallel()
+		l, path := newTestLogger(t)
+		l.Log("controller", "hello", map[string]any{"iter": 2})
+		l.Logf("worker", "n=%d", 3)
+		require.NoError(t, l.Close())
 
-	content := mustReadFile(t, path)
-	assert.Contains(t, content, `"tag":"controller"`)
-	assert.Contains(t, content, `"msg":"hello"`)
-	assert.Contains(t, content, `"iter":2`)
-	assert.Contains(t, content, "n=3")
-}
+		content := mustReadFile(t, path)
+		assert.Contains(t, content, `"tag":"controller"`)
+		assert.Contains(t, content, `"msg":"hello"`)
+		assert.Contains(t, content, `"iter":2`)
+		assert.Contains(t, content, "n=3")
+	})
 
-func TestLogger_PrettyOutput(t *testing.T) {
-	t.Parallel()
-	l, _, buf := newCapturedLogger(t)
-	l.Log("worker", "seeded", map[string]any{"id": 1, "assignment": "hunt bugs"})
-	l.Log("controller", "iteration start", nil)
-	l.Log("worker", "error", map[string]any{"err": "context canceled"})
+	t.Run("pretty_output", func(t *testing.T) {
+		t.Parallel()
+		l, _, buf := newCapturedLogger(t)
+		l.Log("worker", "seeded", map[string]any{"id": 1, "assignment": "hunt bugs"})
+		l.Log("controller", "iteration start", nil)
+		l.Log("worker", "error", map[string]any{"err": "context canceled"})
 
-	out := buf.String()
-	// timestamp format HH:MM:SS.mmm
-	assert.Regexp(t, `^\d{2}:\d{2}:\d{2}\.\d{3} \[worker\] seeded`, out)
-	// fields sorted alphabetically: assignment before id
-	assert.Contains(t, out, `[worker] seeded assignment="hunt bugs" id=1`)
-	// no trailing key-separator when fields empty
-	assert.Contains(t, out, "[controller] iteration start\n")
-	// value quoted when contains whitespace
-	assert.Contains(t, out, `err="context canceled"`)
-}
+		out := buf.String()
+		// timestamp format HH:MM:SS.mmm
+		assert.Regexp(t, `^\d{2}:\d{2}:\d{2}\.\d{3} \[worker\] seeded`, out)
+		// fields sorted alphabetically: assignment before id
+		assert.Contains(t, out, `[worker] seeded assignment="hunt bugs" id=1`)
+		// no trailing key-separator when fields empty
+		assert.Contains(t, out, "[controller] iteration start\n")
+		// value quoted when contains whitespace
+		assert.Contains(t, out, `err="context canceled"`)
+	})
 
-func TestLogger_StderrAllowlist(t *testing.T) {
-	t.Parallel()
-	// mirrorMarker is a substring unique to this case's pretty line, used to
-	// distinguish cases that share the same [tag] msg prefix (e.g. tool done
-	// with error=true vs error=false).
-	cases := []struct {
-		name         string
-		tag          string
-		msg          string
-		fields       map[string]any
-		mirrorMarker string
-		wantMirrored bool
-	}{
-		{"controller_phase", "controller", "transition phase a to b", nil, "[controller] transition phase a to b", true},
-		{"finding_written", "finding", "written", map[string]any{"path": "f.md"}, "[finding] written", true},
-		{"narrate", "narrate", "worker scanning", nil, "[narrate] worker scanning", true},
-		{"server_models", "server", "models", map[string]any{"worker": "m"}, "[server] models", true},
-		{"worker_turn", "worker", "turn", map[string]any{"worker_id": 1}, "[worker] turn", true},
-		{"tool_slow", "tool", "slow", map[string]any{"name": "crawl_poll", "elapsed": "7s"}, "[tool] slow", true},
-		{"tool_done_error", "tool", "done", map[string]any{"name": "quick", "elapsed": "1s", "error": true}, "name=quick", true},
-		{"agent_request", "agent", "request", map[string]any{"role": "worker-1"}, "[agent] request", false},
-		{"agent_response", "agent", "response", map[string]any{"role": "worker-1", "tokens_in": 7}, "[agent] response", false},
-		{"tool_start", "tool", "start", map[string]any{"name": "proxy_poll"}, "[tool] start", false},
-		{"tool_done_success", "tool", "done", map[string]any{"name": "proxy_poll", "elapsed": "1s", "error": false}, "name=proxy_poll", false},
-	}
+	t.Run("pretty_no_json_dup", func(t *testing.T) {
+		t.Parallel()
+		l, _, buf := newCapturedLogger(t)
+		l.Log("controller", "transition phase idle to autonomous", nil)
+		out := buf.String()
+		assert.NotContains(t, out, `"msg":"transition phase idle to autonomous"`)
+		assert.Contains(t, out, "[controller] transition phase idle to autonomous")
+	})
 
-	l, path, buf := newCapturedLogger(t)
-	for _, c := range cases {
-		l.Log(c.tag, c.msg, c.fields)
-	}
-	require.NoError(t, l.Close())
+	t.Run("stderr_allowlist", func(t *testing.T) {
+		t.Parallel()
+		// mirrorMarker is a substring unique to this case's pretty line, used to
+		// distinguish cases that share the same [tag] msg prefix (e.g. tool done
+		// with error=true vs error=false).
+		cases := []struct {
+			name         string
+			tag          string
+			msg          string
+			fields       map[string]any
+			mirrorMarker string
+			wantMirrored bool
+		}{
+			{"controller_phase", "controller", "transition phase a to b", nil, "[controller] transition phase a to b", true},
+			{"finding_written", "finding", "written", map[string]any{"path": "f.md"}, "[finding] written", true},
+			{"narrate", "narrate", "worker scanning", nil, "[narrate] worker scanning", true},
+			{"server_models", "server", "models", map[string]any{"worker": "m"}, "[server] models", true},
+			{"worker_turn", "worker", "turn", map[string]any{"worker_id": 1}, "[worker] turn", true},
+			{"tool_slow", "tool", "slow", map[string]any{"name": "crawl_poll", "elapsed": "7s"}, "[tool] slow", true},
+			{"tool_done_error", "tool", "done", map[string]any{"name": "quick", "elapsed": "1s", "error": true}, "name=quick", true},
+			{"agent_request", "agent", "request", map[string]any{"role": "worker-1"}, "[agent] request", false},
+			{"agent_response", "agent", "response", map[string]any{"role": "worker-1", "tokens_in": 7}, "[agent] response", false},
+			{"tool_start", "tool", "start", map[string]any{"name": "proxy_poll"}, "[tool] start", false},
+			{"tool_done_success", "tool", "done", map[string]any{"name": "proxy_poll", "elapsed": "1s", "error": false}, "name=proxy_poll", false},
+		}
 
-	out := buf.String()
-	file := mustReadFile(t, path)
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if c.wantMirrored {
-				assert.Contains(t, out, c.mirrorMarker)
-			} else {
-				assert.NotContains(t, out, c.mirrorMarker)
-			}
-			// File always gets every record regardless of mirror policy.
-			assert.Contains(t, file, `"msg":"`+c.msg+`"`)
-		})
-	}
-}
+		l, path, buf := newCapturedLogger(t)
+		for _, c := range cases {
+			l.Log(c.tag, c.msg, c.fields)
+		}
+		require.NoError(t, l.Close())
 
-func TestLogger_PrettyDoesNotDuplicateJSON(t *testing.T) {
-	t.Parallel()
-	l, _, buf := newCapturedLogger(t)
-	l.Log("controller", "transition phase idle to autonomous", nil)
-	out := buf.String()
-	// Must be the pretty line, not JSON
-	assert.NotContains(t, out, `"msg":"transition phase idle to autonomous"`)
-	assert.Contains(t, out, "[controller] transition phase idle to autonomous")
-}
+		out := buf.String()
+		file := mustReadFile(t, path)
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				if c.wantMirrored {
+					assert.Contains(t, out, c.mirrorMarker)
+				} else {
+					assert.NotContains(t, out, c.mirrorMarker)
+				}
+				// File always gets every record regardless of mirror policy.
+				assert.Contains(t, file, `"msg":"`+c.msg+`"`)
+			})
+		}
+	})
 
-func TestLogger_ColoredOutput(t *testing.T) {
-	withColors(t, true)
-	l, _, buf := newCapturedLogger(t)
-	l.Log("worker", "turn", map[string]any{"worker_id": 1})
-	l.Log("narrate", "orchestrator: running scans", nil)
-	l.Log("narrate", "agent (worker-2): probing login", nil)
-	l.Log("narrate", "empty-ish line", nil)
+	t.Run("colored_output", func(t *testing.T) {
+		// mutates global useColor; no t.Parallel.
+		withColors(t, true)
+		l, _, buf := newCapturedLogger(t)
+		l.Log("worker", "turn", map[string]any{"worker_id": 1})
+		l.Log("narrate", "orchestrator: running scans", nil)
+		l.Log("narrate", "agent (worker-2): probing login", nil)
+		l.Log("narrate", "empty-ish line", nil)
 
-	out := buf.String()
-	// gray timestamp
-	assert.Contains(t, out, ansiGray)
-	// blue tag
-	assert.Contains(t, out, "["+ansiBlue+"worker"+ansiReset+"]")
-	assert.Contains(t, out, "["+ansiBlue+"narrate"+ansiReset+"]")
-	// gray field key=value
-	assert.Contains(t, out, " "+ansiGray+"worker_id=1"+ansiReset)
-	// green narrate prefix
-	assert.Contains(t, out, ansiMedGreen+"orchestrator:"+ansiReset+" running scans")
-	assert.Contains(t, out, ansiMedGreen+"agent (worker-2):"+ansiReset+" probing login")
-	// passthrough non-prefix messages
-	assert.Contains(t, out, "] empty-ish line")
+		out := buf.String()
+		assert.Contains(t, out, ansiGray)
+		assert.Contains(t, out, "["+ansiBlue+"worker"+ansiReset+"]")
+		assert.Contains(t, out, "["+ansiBlue+"narrate"+ansiReset+"]")
+		assert.Contains(t, out, " "+ansiGray+"worker_id=1"+ansiReset)
+		assert.Contains(t, out, ansiMedGreen+"orchestrator:"+ansiReset+" running scans")
+		assert.Contains(t, out, ansiMedGreen+"agent (worker-2):"+ansiReset+" probing login")
+		assert.Contains(t, out, "] empty-ish line")
+	})
 }
 
 func TestWriteNarrateMsg(t *testing.T) {
@@ -191,31 +190,35 @@ func TestFormatPrettyValue(t *testing.T) {
 	}
 }
 
-func TestMalformedCounter_ObserveAndFlush(t *testing.T) {
+func TestMalformedCounterObserveAndFlush(t *testing.T) {
 	t.Parallel()
-	l, path := newTestLogger(t)
-	c := NewMalformedCounter(l)
-	c.Observe("m1", "tool_a", errors.New("bad"))
-	c.Observe("m1", "tool_b", errors.New("bad2"))
-	c.Observe("m2", "tool_a", errors.New("bad3"))
-	c.Flush()
-	require.NoError(t, l.Close())
 
-	content := mustReadFile(t, path)
-	assert.Contains(t, content, `"msg":"malformed-args"`)
-	assert.Contains(t, content, `"model":"m1"`)
-	assert.Contains(t, content, `"msg":"malformed-summary"`)
-	assert.Contains(t, content, `"m1":2`)
-}
+	t.Run("observe_and_flush", func(t *testing.T) {
+		t.Parallel()
+		l, path := newTestLogger(t)
+		c := NewMalformedCounter(l)
+		c.Observe("m1", "tool_a", errors.New("bad"))
+		c.Observe("m1", "tool_b", errors.New("bad2"))
+		c.Observe("m2", "tool_a", errors.New("bad3"))
+		c.Flush()
+		require.NoError(t, l.Close())
 
-func TestMalformedCounter_FlushNoopWhenEmpty(t *testing.T) {
-	t.Parallel()
-	l, path := newTestLogger(t)
-	c := NewMalformedCounter(l)
-	c.Flush()
-	require.NoError(t, l.Close())
-	content := mustReadFile(t, path)
-	assert.NotContains(t, content, "malformed-summary")
+		content := mustReadFile(t, path)
+		assert.Contains(t, content, `"msg":"malformed-args"`)
+		assert.Contains(t, content, `"model":"m1"`)
+		assert.Contains(t, content, `"msg":"malformed-summary"`)
+		assert.Contains(t, content, `"m1":2`)
+	})
+
+	t.Run("flush_noop_when_empty", func(t *testing.T) {
+		t.Parallel()
+		l, path := newTestLogger(t)
+		c := NewMalformedCounter(l)
+		c.Flush()
+		require.NoError(t, l.Close())
+		content := mustReadFile(t, path)
+		assert.NotContains(t, content, "malformed-summary")
+	})
 }
 
 func mustReadFile(t *testing.T, path string) string {

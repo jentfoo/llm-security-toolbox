@@ -19,113 +19,148 @@ func seedCandidate(pool *CandidatePool, workerID int, title, endpoint string) st
 	})
 }
 
-func TestDeriveIterationOutcome_Stopped(t *testing.T) {
+func TestDeriveIterationOutcome(t *testing.T) {
 	t.Parallel()
-	w := &WorkerState{ID: 1, Alive: false, EscalationReason: "silent"}
-	out := DeriveIterationOutcome(w, nil, NewDecisionQueue(), NewCandidatePool(), nil)
-	assert.Equal(t, OutcomeStopped, out)
-}
 
-func TestDeriveIterationOutcome_Finding_ViaSupersedes(t *testing.T) {
-	t.Parallel()
-	pool := NewCandidatePool()
-	cid := seedCandidate(pool, 1, "XSS", "GET /x")
-	dq := NewDecisionQueue()
-	dq.AddFinding(FindingFiled{
-		Title:                  "XSS",
-		Endpoint:               "GET /x",
-		SupersedesCandidateIDs: []string{cid},
-	})
-	w := &WorkerState{ID: 1, Alive: true}
-	out := DeriveIterationOutcome(w, nil, dq, pool, []string{cid})
-	assert.Equal(t, OutcomeFinding, out)
-}
+	type setup struct {
+		worker       *WorkerState
+		populate     func(pool *CandidatePool, dq *DecisionQueue) []string
+		expectedKind IterationOutcome
+	}
 
-func TestDeriveIterationOutcome_PossibleFinding_ViaTieredMatch(t *testing.T) {
-	t.Parallel()
-	// Verifier filed a finding that supersedes nobody explicitly but matches
-	// the worker's candidate by title + endpoint. Tier matches are hints, not
-	// confirmations — they surface as possible-finding so the director can
-	// follow up rather than assume coverage.
-	pool := NewCandidatePool()
-	cid := seedCandidate(pool, 1, "Reflected XSS in search", "GET /search")
-	dq := NewDecisionQueue()
-	dq.AddFinding(FindingFiled{
-		Title:    "Reflected XSS in search",
-		Endpoint: "GET /search",
-	})
-	w := &WorkerState{ID: 1, Alive: true}
-	out := DeriveIterationOutcome(w, nil, dq, pool, []string{cid})
-	assert.Equal(t, OutcomePossibleFinding, out)
-}
+	tests := []struct {
+		name string
+		setup
+	}{
+		{
+			name: "stopped_worker_dead",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: false, EscalationReason: "silent"},
+				populate: func(_ *CandidatePool, _ *DecisionQueue) []string {
+					return nil
+				},
+				expectedKind: OutcomeStopped,
+			},
+		},
+		{
+			name: "finding_via_supersedes",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: true},
+				populate: func(pool *CandidatePool, dq *DecisionQueue) []string {
+					cid := seedCandidate(pool, 1, "XSS", "GET /x")
+					dq.AddFinding(FindingFiled{
+						Title:                  "XSS",
+						Endpoint:               "GET /x",
+						SupersedesCandidateIDs: []string{cid},
+					})
+					return []string{cid}
+				},
+				expectedKind: OutcomeFinding,
+			},
+		},
+		{
+			name: "possible_finding_via_tiered_match",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: true},
+				populate: func(pool *CandidatePool, dq *DecisionQueue) []string {
+					cid := seedCandidate(pool, 1, "Reflected XSS in search", "GET /search")
+					dq.AddFinding(FindingFiled{
+						Title:    "Reflected XSS in search",
+						Endpoint: "GET /search",
+					})
+					return []string{cid}
+				},
+				expectedKind: OutcomePossibleFinding,
+			},
+		},
+		{
+			name: "explicit_finding_beats_tier_match",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: true},
+				populate: func(pool *CandidatePool, dq *DecisionQueue) []string {
+					explicit := seedCandidate(pool, 1, "Auth bypass on /admin", "GET /admin")
+					tierOnly := seedCandidate(pool, 1, "Reflected XSS in search", "GET /search")
+					dq.AddFinding(FindingFiled{
+						Title:                  "Auth bypass on /admin",
+						Endpoint:               "GET /admin",
+						SupersedesCandidateIDs: []string{explicit},
+					})
+					dq.AddFinding(FindingFiled{
+						Title:    "Reflected XSS in search",
+						Endpoint: "GET /search",
+					})
+					return []string{explicit, tierOnly}
+				},
+				expectedKind: OutcomeFinding,
+			},
+		},
+		{
+			name: "candidate_dismissed",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: true},
+				populate: func(pool *CandidatePool, dq *DecisionQueue) []string {
+					cid := seedCandidate(pool, 1, "x", "GET /x")
+					dq.AddDismissal(CandidateDismissal{CandidateID: cid, Reason: "noise"})
+					return []string{cid}
+				},
+				expectedKind: OutcomeDismissed,
+			},
+		},
+		{
+			name: "candidate_still_pending",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: true},
+				populate: func(pool *CandidatePool, _ *DecisionQueue) []string {
+					cid := seedCandidate(pool, 1, "x", "GET /x")
+					c := pool.ByID(cid)
+					require.NotNil(t, c)
+					require.Equal(t, "pending", c.Status)
+					return []string{cid}
+				},
+				expectedKind: OutcomeCandidate,
+			},
+		},
+		{
+			name: "silent_escalation",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: true, EscalationReason: "silent"},
+				populate: func(_ *CandidatePool, _ *DecisionQueue) []string {
+					return nil
+				},
+				expectedKind: OutcomeSilent,
+			},
+		},
+		{
+			name: "error_escalation",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: true, EscalationReason: "error"},
+				populate: func(_ *CandidatePool, _ *DecisionQueue) []string {
+					return nil
+				},
+				expectedKind: OutcomeError,
+			},
+		},
+		{
+			name: "budget_escalation",
+			setup: setup{
+				worker: &WorkerState{ID: 1, Alive: true, EscalationReason: "budget"},
+				populate: func(_ *CandidatePool, _ *DecisionQueue) []string {
+					return nil
+				},
+				expectedKind: OutcomeBudget,
+			},
+		},
+	}
 
-func TestDeriveIterationOutcome_ExplicitFindingBeatsTierMatch(t *testing.T) {
-	t.Parallel()
-	// Two candidates from the same worker: one explicitly superseded by a
-	// finding, another only tier-matched by a different finding. Explicit
-	// link must win — the worker's iteration outcome is "finding", not
-	// "possible-finding".
-	pool := NewCandidatePool()
-	explicit := seedCandidate(pool, 1, "Auth bypass on /admin", "GET /admin")
-	tierOnly := seedCandidate(pool, 1, "Reflected XSS in search", "GET /search")
-	dq := NewDecisionQueue()
-	dq.AddFinding(FindingFiled{
-		Title:                  "Auth bypass on /admin",
-		Endpoint:               "GET /admin",
-		SupersedesCandidateIDs: []string{explicit},
-	})
-	dq.AddFinding(FindingFiled{
-		Title:    "Reflected XSS in search",
-		Endpoint: "GET /search",
-	})
-	w := &WorkerState{ID: 1, Alive: true}
-	out := DeriveIterationOutcome(w, nil, dq, pool, []string{explicit, tierOnly})
-	assert.Equal(t, OutcomeFinding, out)
-}
-
-func TestDeriveIterationOutcome_Dismissed(t *testing.T) {
-	t.Parallel()
-	pool := NewCandidatePool()
-	cid := seedCandidate(pool, 1, "x", "GET /x")
-	dq := NewDecisionQueue()
-	dq.AddDismissal(CandidateDismissal{CandidateID: cid, Reason: "noise"})
-	w := &WorkerState{ID: 1, Alive: true}
-	out := DeriveIterationOutcome(w, nil, dq, pool, []string{cid})
-	assert.Equal(t, OutcomeDismissed, out)
-}
-
-func TestDeriveIterationOutcome_Candidate_StillPending(t *testing.T) {
-	t.Parallel()
-	pool := NewCandidatePool()
-	cid := seedCandidate(pool, 1, "x", "GET /x")
-	// Status remains "pending" — no file_finding or dismiss_candidate.
-	c := pool.ByID(cid)
-	require.NotNil(t, c)
-	require.Equal(t, "pending", c.Status)
-	w := &WorkerState{ID: 1, Alive: true}
-	out := DeriveIterationOutcome(w, nil, NewDecisionQueue(), pool, []string{cid})
-	assert.Equal(t, OutcomeCandidate, out)
-}
-
-func TestDeriveIterationOutcome_Silent(t *testing.T) {
-	t.Parallel()
-	w := &WorkerState{ID: 1, Alive: true, EscalationReason: "silent"}
-	out := DeriveIterationOutcome(w, nil, NewDecisionQueue(), NewCandidatePool(), nil)
-	assert.Equal(t, OutcomeSilent, out)
-}
-
-func TestDeriveIterationOutcome_Error(t *testing.T) {
-	t.Parallel()
-	w := &WorkerState{ID: 1, Alive: true, EscalationReason: "error"}
-	out := DeriveIterationOutcome(w, nil, NewDecisionQueue(), NewCandidatePool(), nil)
-	assert.Equal(t, OutcomeError, out)
-}
-
-func TestDeriveIterationOutcome_Budget(t *testing.T) {
-	t.Parallel()
-	w := &WorkerState{ID: 1, Alive: true, EscalationReason: "budget"}
-	out := DeriveIterationOutcome(w, nil, NewDecisionQueue(), NewCandidatePool(), nil)
-	assert.Equal(t, OutcomeBudget, out)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := NewCandidatePool()
+			dq := NewDecisionQueue()
+			cids := tc.populate(pool, dq)
+			out := DeriveIterationOutcome(tc.worker, nil, dq, pool, cids)
+			assert.Equal(t, tc.expectedKind, out)
+		})
+	}
 }
 
 func TestCountToolCallsAndFlows(t *testing.T) {
@@ -141,13 +176,47 @@ func TestCountToolCallsAndFlows(t *testing.T) {
 
 func TestTruncateAngle(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "short", truncateAngle("short"))
-	assert.Equal(t, "compressed whitespace", truncateAngle("  compressed\t  whitespace\n"))
+
 	long := make([]byte, angleMaxLen+50)
 	for i := range long {
 		long[i] = 'a'
 	}
-	got := truncateAngle(string(long))
-	assert.Len(t, got, angleMaxLen)
-	assert.Equal(t, "…", got[len(got)-len("…"):])
+
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, got string)
+	}{
+		{
+			name:  "short_passthrough",
+			input: "short",
+			check: func(t *testing.T, got string) {
+				t.Helper()
+				assert.Equal(t, "short", got)
+			},
+		},
+		{
+			name:  "whitespace_compressed",
+			input: "  compressed\t  whitespace\n",
+			check: func(t *testing.T, got string) {
+				t.Helper()
+				assert.Equal(t, "compressed whitespace", got)
+			},
+		},
+		{
+			name:  "long_input_truncated",
+			input: string(long),
+			check: func(t *testing.T, got string) {
+				t.Helper()
+				assert.Len(t, got, angleMaxLen)
+				assert.Equal(t, "…", got[len(got)-len("…"):])
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.check(t, truncateAngle(tc.input))
+		})
+	}
 }

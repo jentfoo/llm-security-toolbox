@@ -488,8 +488,7 @@ func (w *FindingWriter) Digests() []FindingDigest {
 	return out
 }
 
-// firstNLines returns the first n lines of s. Short helper kept private
-// because the only caller is Digests().
+// firstNLines returns the first n lines of s.
 func firstNLines(s string, n int) string {
 	if s == "" || n <= 0 {
 		return ""

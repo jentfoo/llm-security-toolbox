@@ -1,7 +1,9 @@
 package orchestrator
 
 import (
-	"errors"
+	"context"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,183 +12,285 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-func TestRunDirectionPhase(t *testing.T) {
+// scriptedFireFn returns a Fire callback that records invocations and
+// returns a join that yields the given turns. Lets tests assert which
+// workers had their iter+1 runs fired.
+func scriptedFireFn(t *testing.T, turns map[int][]agent.TurnSummary) (FireWorkerFunc, func() []int) {
+	t.Helper()
+	var mu sync.Mutex
+	fired := []int{}
+	return func(_ context.Context, w *WorkerState) func() []agent.TurnSummary {
+			mu.Lock()
+			fired = append(fired, w.ID)
+			mu.Unlock()
+			result := turns[w.ID]
+			return func() []agent.TurnSummary { return result }
+		}, func() []int {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(fired)
+		}
+}
+
+func TestRunDecisionPhase(t *testing.T) {
 	t.Parallel()
 
-	t.Run("first_substep_covers_everyone", func(t *testing.T) {
+	t.Run("one_call_per_worker", func(t *testing.T) {
 		decisions := NewDecisionQueue()
-
-		// Scripted: one substep that emits decisions for both workers + self-review.
 		director := &agent.FakeAgent{Turns: []agent.TurnSummary{
-			{AssistantText: "substep 1"},
-			{AssistantText: "self-review — nothing to add"},
+			{AssistantText: "decide w1"},
+			{AssistantText: "decide w2"},
 		}}
-		step := 0
+		turn := 0
 		director.OnDrain = func(_ int) {
-			step++
-			if step == 1 {
-				decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1, Instruction: "keep going"})
-				decisions.AddDecision(WorkerDecision{Kind: "expand", WorkerID: 2, Instruction: "new scope"})
-				decisions.SetDirectionDone("both covered")
-			}
-		}
-
-		workers := []*WorkerState{
-			{ID: 1, Alive: true, Agent: director},
-			{ID: 2, Alive: true, Agent: director},
-		}
-		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
-
-		assert.Equal(t, 2, step)
-		require.NotEmpty(t, director.MaxRoundsSeen)
-		assert.Equal(t, DirectionSelfReviewMaxRounds, director.MaxRoundsSeen[0])
-	})
-
-	t.Run("self_review_adds_missed_decision", func(t *testing.T) {
-		decisions := NewDecisionQueue()
-
-		director := &agent.FakeAgent{Turns: []agent.TurnSummary{
-			{AssistantText: "substep 1"},
-			{AssistantText: "substep 2"},
-			{AssistantText: "substep 3"},
-			{AssistantText: "self-review catch"},
-		}}
-		phaseTurn := 0
-		director.OnDrain = func(_ int) {
-			phaseTurn++
-			switch phaseTurn {
+			turn++
+			switch turn {
 			case 1:
-				decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1})
-			case 4:
-				// D1 breaks the main loop after 2 & 3 no-progress, so phaseTurn 4
-				// is the self-review substep, not the fourth main substep.
-				decisions.AddDecision(WorkerDecision{Kind: "stop", WorkerID: 2, Reason: "dead end"})
-				decisions.SetDirectionDone("late save")
+				decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1, Instruction: "next w1"})
+			case 2:
+				decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 2, Instruction: "next w2"})
 			}
 		}
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: "old1"}
+		w2 := &WorkerState{ID: 2, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: "old2"}
+		dirChat := NewDirectorChat()
+		fire, fired := scriptedFireFn(t, map[int][]agent.TurnSummary{
+			1: {{AssistantText: "w1 iter+1 turn"}},
+			2: {{AssistantText: "w2 iter+1 turn"}},
+		})
+		res := RunDecisionPhase(t.Context(), DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: []*WorkerState{w1, w2},
+			Fire:    fire,
+		}, nil)
 
-		workers := []*WorkerState{
-			{ID: 1, Alive: true, Agent: director},
-			{ID: 2, Alive: true, Agent: director},
-		}
-		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
-
-		ids := map[int]string{}
-		for _, d := range decisions.WorkerDecisions {
-			ids[d.WorkerID] = d.Kind
-		}
-		assert.Equal(t, "continue", ids[1])
-		assert.Equal(t, "stop", ids[2])
-		assert.Equal(t, 4, phaseTurn)
+		assert.Equal(t, 2, turn)
+		assert.Equal(t, []int{1, 2}, fired())
+		require.Len(t, decisions.WorkerDecisions, 2)
+		assert.Equal(t, "next w1", w1.LastInstruction)
+		assert.Equal(t, "next w2", w2.LastInstruction)
+		assert.Len(t, res.Wait(), 2)
 	})
 
-	t.Run("skip_self_review_no_decisions", func(t *testing.T) {
+	t.Run("defaults_to_continue", func(t *testing.T) {
 		decisions := NewDecisionQueue()
-		director := &agent.FakeAgent{Turns: []agent.TurnSummary{
-			{AssistantText: "substep 1 idle"},
-			{AssistantText: "substep 2 idle"},
-			{AssistantText: "substep 3 idle"},
-		}}
-		phaseTurn := 0
-		director.OnDrain = func(_ int) { phaseTurn++ }
-
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: director}}
-		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
-
-		assert.Empty(t, decisions.WorkerDecisions)
-		assert.Empty(t, decisions.Plan)
-		assert.Empty(t, director.MaxRoundsSeen)
-		assert.LessOrEqual(t, phaseTurn, DirectionMaxSubsteps)
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "I forgot to call the tool"}}}
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: "stale"}
+		dirChat := NewDirectorChat()
+		fire, _ := scriptedFireFn(t, nil)
+		RunDecisionPhase(t.Context(), DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: []*WorkerState{w1}, Fire: fire,
+		}, nil)
+		require.Len(t, decisions.WorkerDecisions, 1)
+		assert.Equal(t, "continue", decisions.WorkerDecisions[0].Kind)
+		assert.Equal(t, "stale", w1.LastInstruction)
 	})
 
-	t.Run("early_exit_on_no_progress", func(t *testing.T) {
+	t.Run("stop_invokes_retire", func(t *testing.T) {
 		decisions := NewDecisionQueue()
-		director := &agent.FakeAgent{Turns: []agent.TurnSummary{
-			{AssistantText: "substep 1"},
-			{AssistantText: "substep 2 idle"},
-			{AssistantText: "substep 3 idle"},
-			{AssistantText: "self-review"},
-		}}
-		phaseTurn := 0
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "decide"}}}
 		director.OnDrain = func(_ int) {
-			phaseTurn++
-			if phaseTurn == 1 {
-				decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1})
-			}
+			decisions.AddDecision(WorkerDecision{Kind: "stop", WorkerID: 1, Reason: "exhausted"})
 		}
-
-		workers := []*WorkerState{
-			{ID: 1, Alive: true, Agent: director},
-			{ID: 2, Alive: true, Agent: director},
-		}
-		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
-
-		assert.Equal(t, 4, phaseTurn)
-		require.NotEmpty(t, director.MaxRoundsSeen)
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}}
+		dirChat := NewDirectorChat()
+		var retired []*WorkerState
+		var retiredReason string
+		fire, _ := scriptedFireFn(t, nil)
+		RunDecisionPhase(t.Context(), DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: []*WorkerState{w1}, Fire: fire,
+			Retire: func(w *WorkerState, reason string, _ int) {
+				retired = append(retired, w)
+				retiredReason = reason
+			},
+		}, nil)
+		require.Len(t, retired, 1)
+		assert.Equal(t, w1, retired[0])
+		assert.Equal(t, "exhausted", retiredReason)
 	})
 
-	t.Run("drain_error_retries_then_auto_direction_done", func(t *testing.T) {
-		// Director's first substep fails; phase retry exhausts; OnExhausted
-		// sets direction_done with an auto summary so the iteration loop
-		// advances instead of blocking on a wedged director.
+	t.Run("fork_spawns_and_fires", func(t *testing.T) {
 		decisions := NewDecisionQueue()
-		boom := errors.New("simulated director error")
-		director := &agent.FakeAgent{
-			Turns:  []agent.TurnSummary{{}, {}},
-			Errors: []error{boom, boom},
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "decide+fork"}}}
+		director.OnDrain = func(_ int) {
+			decisions.AddDecision(WorkerDecision{
+				Kind: "expand", WorkerID: 1, Instruction: "pivot parent",
+				Fork: &ForkSubAction{NewWorkerID: 9, Instruction: "child probes /admin"},
+			})
 		}
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: director}}
-		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{},
+			Chronicle:     []agent.Message{{Role: "assistant", Content: "parent prior turn"}},
+			ChronicleIter: []int{1},
+		}
+		dirChat := NewDirectorChat()
+		fire, fired := scriptedFireFn(t, map[int][]agent.TurnSummary{
+			1: {{AssistantText: "w1 iter+1"}},
+			9: {{AssistantText: "child iter 1"}},
+		})
+		var spawnedID int
+		var spawnedInstruction string
+		spawn := func(_ context.Context, id int, instruction string) (*WorkerState, error) {
+			spawnedID = id
+			spawnedInstruction = instruction
+			return &WorkerState{ID: id, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: instruction}, nil
+		}
+		RunDecisionPhase(t.Context(), DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: []*WorkerState{w1}, Fire: fire,
+			SpawnChild: spawn,
+			Iter:       3,
+		}, nil)
+		assert.Equal(t, 9, spawnedID)
+		assert.Equal(t, "child probes /admin", spawnedInstruction)
+		assert.ElementsMatch(t, []int{1, 9}, fired())
+	})
 
-		assert.True(t, decisions.HasDirectionDone)
-		assert.Contains(t, decisions.DirectionDoneSummary, "auto: director unavailable after retry")
-		// Initial + retry consumed both scripted turns.
-		assert.Empty(t, director.Turns)
+	t.Run("appends_activity_and_decision", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "decide"}}}
+		director.OnDrain = func(_ int) {
+			decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1, Instruction: "next"})
+		}
+		workerAgent := &agent.FakeAgent{
+			LastBoundaryIdx: 0,
+			SnapshotMessages: []agent.Message{
+				{Role: "assistant", Content: "worker activity"},
+				{Role: "tool", ToolName: "proxy_poll", Content: "tool result"},
+			},
+		}
+		w := &WorkerState{ID: 1, Alive: true, Agent: workerAgent}
+		dirChat := NewDirectorChat()
+		fire, _ := scriptedFireFn(t, nil)
+		RunDecisionPhase(t.Context(), DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: []*WorkerState{w}, Fire: fire, Iter: 2,
+		}, nil)
+		assert.Len(t, dirChat.Messages, 3)
+		assert.Equal(t, 1, dirChat.Meta[0].WorkerID)
+		last := dirChat.Messages[len(dirChat.Messages)-1]
+		assert.Contains(t, last.Content, "director decision recorded for worker 1")
+		assert.Contains(t, last.Content, "continue")
 	})
 }
 
-func TestDiffSet(t *testing.T) {
+func TestRunSynthesisPhase(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		a    map[int]bool
-		b    map[int]bool
-		want map[int]bool
-	}{
-		{
-			"subset_removed",
-			map[int]bool{1: true, 2: true, 3: true},
-			map[int]bool{2: true},
-			map[int]bool{1: true, 3: true},
-		},
-		{
-			"empty_a",
-			map[int]bool{},
-			map[int]bool{1: true},
-			map[int]bool{},
-		},
-		{
-			"empty_b_returns_a",
-			map[int]bool{1: true, 2: true},
-			map[int]bool{},
-			map[int]bool{1: true, 2: true},
-		},
-		{
-			"identical",
-			map[int]bool{1: true, 2: true},
-			map[int]bool{1: true, 2: true},
-			map[int]bool{},
-		},
-		{
-			"disjoint",
-			map[int]bool{1: true},
-			map[int]bool{2: true},
-			map[int]bool{1: true},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			assert.Equal(t, c.want, diffSet(c.a, c.b))
-		})
-	}
+
+	t.Run("closes_iteration", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "synth"}}}
+		director.OnDrain = func(_ int) {
+			decisions.SetDirectionDone("ok")
+		}
+		dirChat := NewDirectorChat()
+		closed := RunSynthesisPhase(t.Context(), SynthesisPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			MaxWorkers: 4,
+		}, nil)
+		assert.True(t, closed)
+		assert.True(t, decisions.HasDirectionDone)
+		assert.Equal(t, "ok", decisions.DirectionDoneSummary)
+	})
+
+	t.Run("auto_closes_on_no_tool", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "no tool call"}}}
+		dirChat := NewDirectorChat()
+		RunSynthesisPhase(t.Context(), SynthesisPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			MaxWorkers: 4,
+		}, nil)
+		assert.True(t, decisions.HasDirectionDone)
+		assert.Contains(t, decisions.DirectionDoneSummary, "auto: synthesis did not call direction_done")
+	})
+}
+
+func TestRunIter1ReconReviewCall(t *testing.T) {
+	t.Parallel()
+
+	t.Run("appends_response_to_dirchat", func(t *testing.T) {
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{
+			AssistantText: "Worker 2: probe /admin. Worker 3: probe /api.",
+		}}}
+		dirChat := NewDirectorChat()
+		dirChat.Append(agent.Message{Role: "user", Content: "recon summary..."}, 0, 1)
+		RunIter1ReconReviewCall(t.Context(), director, dirChat, "iter status", 1, 5, nil)
+		require.Len(t, dirChat.Messages, 2)
+		assert.Equal(t, "assistant", dirChat.Messages[1].Role)
+		assert.Contains(t, dirChat.Messages[1].Content, "Worker 2: probe /admin")
+		assert.Equal(t, 0, dirChat.Meta[1].WorkerID)
+	})
+
+	t.Run("empty_response_dropped", func(t *testing.T) {
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "   "}}}
+		dirChat := NewDirectorChat()
+		RunIter1ReconReviewCall(t.Context(), director, dirChat, "iter status", 1, 5, nil)
+		assert.Empty(t, dirChat.Messages)
+	})
+}
+
+func TestRunIter1ReconPlanCall(t *testing.T) {
+	t.Parallel()
+
+	t.Run("plan_lands_no_retry", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "planning"}}}
+		director.OnDrain = func(_ int) {
+			decisions.SetPlan([]PlanEntry{{WorkerID: 2, Assignment: "probe /admin"}})
+			decisions.SetDirectionDone("planned for iter 2")
+		}
+		dirChat := NewDirectorChat()
+		RunIter1ReconPlanCall(t.Context(), director, dirChat, decisions, "iter status", 1, 5, nil)
+		assert.True(t, decisions.HasPlan)
+		assert.True(t, decisions.HasDirectionDone)
+		require.Len(t, decisions.Plan, 1)
+		assert.Equal(t, 2, decisions.Plan[0].WorkerID)
+		assert.Empty(t, director.Turns)
+	})
+
+	t.Run("retry_lands_plan", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{
+			{AssistantText: "first response (no plan)"},
+			{AssistantText: "retry response (with plan)"},
+		}}
+		turn := 0
+		director.OnDrain = func(_ int) {
+			turn++
+			if turn == 1 {
+				decisions.SetDirectionDone("done without plan")
+			}
+			if turn == 2 {
+				decisions.SetPlan([]PlanEntry{{WorkerID: 2, Assignment: "probe /admin"}})
+			}
+		}
+		dirChat := NewDirectorChat()
+		RunIter1ReconPlanCall(t.Context(), director, dirChat, decisions, "iter status", 1, 5, nil)
+		assert.Equal(t, 2, turn)
+		assert.True(t, decisions.HasPlan)
+		require.Len(t, decisions.Plan, 1)
+		assert.Equal(t, 2, decisions.Plan[0].WorkerID)
+	})
+
+	t.Run("retry_still_no_plan", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{
+			{AssistantText: "first"},
+			{AssistantText: "retry still no plan"},
+		}}
+		turn := 0
+		director.OnDrain = func(_ int) {
+			turn++
+			if turn == 1 {
+				decisions.SetDirectionDone("done early")
+			}
+		}
+		dirChat := NewDirectorChat()
+		RunIter1ReconPlanCall(t.Context(), director, dirChat, decisions, "iter status", 1, 5, nil)
+		assert.Equal(t, 2, turn)
+		assert.False(t, decisions.HasPlan)
+		assert.True(t, decisions.HasDirectionDone)
+	})
 }

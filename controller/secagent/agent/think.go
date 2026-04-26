@@ -2,6 +2,7 @@ package agent
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -50,8 +51,7 @@ func FilterThinkBlocks(msgs []Message, keepLastN int) []Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
-	out := make([]Message, len(msgs))
-	copy(out, msgs)
+	out := slices.Clone(msgs)
 	remaining := keepLastN
 	for i := len(out) - 1; i >= 0; i-- {
 		if out[i].Role != roleAssistant {

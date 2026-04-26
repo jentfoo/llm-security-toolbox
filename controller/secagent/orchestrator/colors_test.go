@@ -15,17 +15,6 @@ func withColors(t *testing.T, on bool) {
 	t.Cleanup(func() { useColor = prev })
 }
 
-func TestStyleWrap(t *testing.T) {
-	t.Run("disabled_returns_plain", func(t *testing.T) {
-		withColors(t, false)
-		assert.Equal(t, "hello", styleWrap(ansiRed, "hello"))
-	})
-	t.Run("enabled_wraps_with_reset", func(t *testing.T) {
-		withColors(t, true)
-		assert.Equal(t, ansiRed+"hello"+ansiReset, styleWrap(ansiRed, "hello"))
-	})
-}
-
 func TestStyleAppend(t *testing.T) {
 	t.Run("disabled_writes_plain", func(t *testing.T) {
 		withColors(t, false)

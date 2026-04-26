@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-analyze/bulk"
 )
 
 // Tool-lifecycle event messages. Shared by the factory that emits them
@@ -85,9 +87,7 @@ func (l *Logger) Log(tag, msg string, fields map[string]any) {
 	}
 }
 
-// shouldNarrate is a stricter allowlist than shouldMirror: these are the
-// events that should flow into the narrator's prompt buffer. We exclude
-// purely diagnostic messages to keep the summary focused.
+// shouldNarrate reports whether an event is signal-grade for the narrator.
 func shouldNarrate(tag, msg string) bool {
 	switch tag {
 	case "controller", "decision", "finding", "plan", "verify", "worker":
@@ -168,10 +168,7 @@ func buildPrettyLine(now time.Time, tag, msg string, fields map[string]any) []by
 		b.WriteString(msg)
 	}
 	if len(fields) > 0 {
-		keys := make([]string, 0, len(fields))
-		for k := range fields {
-			keys = append(keys, k)
-		}
+		keys := bulk.MapKeysSlice(fields)
 		sort.Strings(keys)
 		for _, k := range keys {
 			b.WriteByte(' ')
@@ -182,10 +179,7 @@ func buildPrettyLine(now time.Time, tag, msg string, fields map[string]any) []by
 	return []byte(b.String())
 }
 
-// writeNarrateMsg colors the "orchestrator:" / "agent (name):" prefix
-// used by the narrator's orchestrator- and per-agent summary lines. The
-// remainder of the message is written plain so only the role label stands
-// out.
+// writeNarrateMsg colors the "orchestrator:" / "agent (name):" prefix in narrator output.
 func writeNarrateMsg(b *strings.Builder, msg string) {
 	const orchPrefix = "orchestrator:"
 	if strings.HasPrefix(msg, orchPrefix) {

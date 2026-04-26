@@ -385,18 +385,10 @@ func extractJSONObject(raw string) string {
 	return s[start : end+1]
 }
 
-// ReviewAndWrite runs the full dedup pipeline for one filed finding:
-//  1. IsDuplicate (exact-slug) — skip.
-//  2. FindSimilarEntries — if empty or reviewer is nil, write as-is.
-//  3. Classify each similar entry; first non-"unique" verdict wins and is
-//     applied via ApplyDedupVerdict. Classifier errors fail open (skip that
-//     entry and continue).
-//  4. If all similar entries classify "unique", write incoming as a new file.
-//
-// Returns (wrote, path, err). "wrote" is true when a new finding was
-// persisted (either a fresh file or an overwrite that introduced new
-// content). "path" is the resulting file path, or "" when incoming was
-// dropped as an exact duplicate.
+// ReviewAndWrite persists a filed finding after dedup: exact-duplicate check,
+// similarity review, and optional merge. Returns (wrote, path, err) where
+// wrote is true when a new file was persisted; path is "" only when incoming
+// was an exact duplicate.
 func ReviewAndWrite(
 	ctx context.Context,
 	reviewer DedupReviewer,

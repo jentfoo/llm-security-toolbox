@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-analyze/bulk"
@@ -22,8 +21,15 @@ import (
 
 // AgentFactory builds a new Agent for a given role. It's parameterized so
 // tests can inject FakeAgent.
+//
+// NewReconWorker is the iter-1 recon variant: it anchors only the
+// recon-mission summary (NOT cfg.Prompt) into the worker's system
+// prompt so the recon worker has no motivation to test. The
+// recon-only spawn path also omits report_finding_candidate from the
+// registered tool set so the worker physically cannot file findings.
 type AgentFactory interface {
 	NewWorker(id, numWorkers int) (agent.Agent, error)
+	NewReconWorker(reconMission string) (agent.Agent, error)
 	NewVerifier(onContextOverflow func()) (agent.Agent, error)
 	NewDirector() (agent.Agent, error)
 	Close() error
@@ -38,6 +44,13 @@ type OpenAIFactory struct {
 	// Reasoning is the reasoning handler detected at startup for cfg.Model.
 	// Nil falls back to inline.
 	Reasoning agent.ReasoningHandler
+	// ReconSummary, when non-empty, is woven into every worker's system
+	// prompt as the canonical scope-mapping context produced by the
+	// iter-1 recon worker. Set by the controller after iter 1 completes
+	// and worker 1 retires; read on every NewWorker call afterwards.
+	// Mutated only on the main controller goroutine before sequential
+	// spawn calls — no race in practice.
+	ReconSummary string
 }
 
 // slowToolThreshold is the elapsed time at which [tool] done is mirrored
@@ -187,17 +200,31 @@ func (f *OpenAIFactory) buildAgent(
 	return agent.NewOpenAIAgent(cfg)
 }
 
-// withMission appends the run's mission (cfg.Prompt) to a role's system
-// prompt as a non-negotiable anchor. The system prompt is preserved across
-// every ReplaceHistory and every compaction pass, so anchoring the mission
-// here means it survives every context-management operation. Empty mission
-// renders nothing — keeps tests and bare-bones invocations clean.
+// withMission anchors the mission and recon summary into a role's system
+// prompt so they survive every ReplaceHistory and compaction pass.
 func (f *OpenAIFactory) withMission(systemPrompt string) string {
 	mission := strings.TrimSpace(f.Cfg.Prompt)
-	if mission == "" {
-		return systemPrompt
+	out := systemPrompt
+	if mission != "" {
+		out += "\n\n## Mission (original assignment for this run — do not lose sight of this)\n\n" + mission
 	}
-	return systemPrompt + "\n\n## Mission (original assignment for this run — do not lose sight of this)\n\n" + mission
+	recon := strings.TrimSpace(f.ReconSummary)
+	if recon != "" {
+		out += "\n\n## Recon (iter-1 scope mapping by retired worker 1 — anchored context for every subsequent worker)\n\n" + recon
+	}
+	return out
+}
+
+// withRecon anchors only the recon-mission summary on a system prompt.
+// Used exclusively for the iter-1 recon worker — cfg.Prompt is NOT
+// surfaced so the worker has no testing motivation. Empty reconMission
+// renders nothing.
+func (f *OpenAIFactory) withRecon(systemPrompt, reconMission string) string {
+	out := systemPrompt
+	if recon := strings.TrimSpace(reconMission); recon != "" {
+		out += "\n\n## Recon goal (this run's surface-mapping objective — observation only)\n\n" + recon
+	}
+	return out
 }
 
 // NewWorker builds a worker agent with the given role-sizing.
@@ -206,6 +233,23 @@ func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 		fmt.Sprintf("worker-%d", id),
 		f.Cfg.Model,
 		f.withMission(prompts.BuildWorkerSystemPrompt(id, numWorkers)),
+		f.Pool,
+		f.Cfg.MaxContext,
+		f.Reasoning,
+		true,
+		nil,
+	), nil
+}
+
+// NewReconWorker builds the iter-1 recon worker agent. Its system
+// prompt anchors the recon-mission summary (NOT cfg.Prompt) so the
+// worker has no testing motivation. The recon role-sizing is hardcoded
+// to (id=1, numWorkers=1) — recon is always solo and always worker 1.
+func (f *OpenAIFactory) NewReconWorker(reconMission string) (agent.Agent, error) {
+	return f.buildAgent(
+		"worker-1-recon",
+		f.Cfg.Model,
+		f.withRecon(prompts.BuildReconWorkerSystemPrompt(), reconMission),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -305,8 +349,9 @@ func resolveFormat(
 }
 
 // workerSpawnFunc produces a ready-to-run worker (MCP client connected,
-// tools registered, assignment queued). Injected into applyPlanDiff so
-// tests can stub provisioning without touching the real MCP server.
+// tools registered, assignment recorded as LastInstruction). Injected
+// into applyPlanAndFire and the per-worker fork path so tests can stub
+// provisioning without touching the real MCP server.
 type workerSpawnFunc func(ctx context.Context, id, numWorkers int, assignment string) (*WorkerState, error)
 
 // newWorkerSpawner returns a workerSpawnFunc that provisions workers
@@ -350,7 +395,6 @@ func newWorkerSpawner(
 			Agent:            a,
 			MCP:              m,
 			Alive:            true,
-			Assignment:       assignment,
 			LastInstruction:  assignment,
 			AutonomousBudget: autonomousBudget,
 		}
@@ -358,22 +402,54 @@ func newWorkerSpawner(
 	}
 }
 
-// Run is the main entrypoint. Starts sectool, connects agents, and runs
-// the main iteration loop until max-iterations or a director `done`.
-func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) error {
-	var srv *SectoolServer
-	if !cfg.External {
-		var err error
-		srv, err = StartSectool(repoRoot, cfg.ProxyPort, cfg.MCPPort, cfg.Workflow, cfg.SkipBuild, log)
-		if err != nil {
-			return fmt.Errorf("sectool start: %w", err)
-		}
-		defer srv.Terminate()
-	} else if log != nil {
-		log.Log("server", "external mode: attaching to running sectool", map[string]any{"mcp_port": cfg.MCPPort})
+// spawnReconWorker provisions the iter-1 recon worker against a live
+// MCP endpoint. The recon worker is always solo and always worker 1;
+// only sectool tools are registered (no in-process WorkerToolDefs) so
+// the worker has no way to file finding candidates — the only
+// structural restriction we enforce on the recon role.
+func spawnReconWorker(
+	ctx context.Context,
+	mcpURL string,
+	toolResultMaxBytes int,
+	factory AgentFactory,
+	reconMission, assignment string,
+	autonomousBudget int,
+) (*WorkerState, error) {
+	m, err := mcp.Connect(ctx, mcpURL)
+	if err != nil {
+		return nil, fmt.Errorf("mcp connect (recon worker): %w", err)
 	}
+	defs, err := m.BuildToolDefs(ctx, "mcp__sectool__", toolResultMaxBytes)
+	if err != nil {
+		_ = m.Close()
+		return nil, fmt.Errorf("list sectool tools (recon worker): %w", err)
+	}
+	a, err := factory.NewReconWorker(reconMission)
+	if err != nil {
+		_ = m.Close()
+		return nil, fmt.Errorf("new recon worker: %w", err)
+	}
+	a.SetTools(defs)
+	return &WorkerState{
+		ID:               1,
+		Agent:            a,
+		MCP:              m,
+		Alive:            true,
+		LastInstruction:  assignment,
+		AutonomousBudget: autonomousBudget,
+	}, nil
+}
 
-	mcpURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.MCPPort)
+// Run starts sectool, connects agents, and runs the iteration loop until
+// max-iterations or a director `done`.
+func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
+	srv, err := StartSectool(cfg.ProxyPort, cfg.MCPPort, cfg.Workflow, log)
+	if err != nil {
+		return fmt.Errorf("sectool start: %w", err)
+	}
+	defer srv.Terminate()
+
+	mcpURL := srv.URL
 
 	// ProgressLogInterval is the deprecated per-turn status summary; when the
 	// narrator is active it subsumes that channel, so force-disable it.
@@ -440,39 +516,16 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 	asyncMerger := newAsyncMerger(ctx, candidateDedup, writer, log, 4)
 	defer asyncMerger.Wait()
 
-	// completed accumulates retired workers as the run progresses. The
-	// director sees these in BuildDirectorPrompt as historical reference
-	// (IDs are gone, not eligible for planning/forking/narration). retire
-	// is invoked from applyDecision (kind=stop) and enforceStallStops; it
-	// generates the canonical summary synchronously from the worker's
-	// chronicle (the canonical raw record) so the summary is one-shot from
-	// the source — never from a prior summary — preserving fidelity.
+	// completed is the controller-side registry of retired workers — used
+	// for plan_workers ID-collision validation and synthesis-prompt
+	// rendering. Mutated on the main goroutine when DrainCompleted picks
+	// up async retire summaries; read by closures handed to the tools
+	// layer.
 	var completed []CompletedWorker
-	retire := func(rctx context.Context, w *WorkerState, reason string, iter int) {
-		entry := CompletedWorker{ID: w.ID, StoppedAt: iter, Reason: reason}
-		if len(w.Chronicle) > 0 {
-			summary, sErr := summarizer.SummarizeCompletedWorker(rctx, w.Chronicle, cfg.Prompt, reason, w.ID)
-			if sErr != nil {
-				if log != nil {
-					log.Log("summarize", "completed-worker fallback", map[string]any{
-						"worker_id": w.ID, "err": sErr.Error(),
-					})
-				}
-				entry.Summary = ""
-			} else {
-				entry.Summary = summary
-			}
-		}
-		completed = append(completed, entry)
-		w.Alive = false
-		_ = w.Agent.Close()
-		if log != nil {
-			log.Log("controller", "worker retired", map[string]any{
-				"worker_id": w.ID, "reason": reason, "iter": iter,
-				"summary_chars": len(entry.Summary),
-			})
-		}
-	}
+	// retireQueue summarizes retired workers in the background so the
+	// controller's main loop never blocks on the LLM call.
+	retireQueue := newRetireQueue(ctx, summarizer, cfg.Prompt, log, 4)
+	defer retireQueue.Wait()
 
 	// verifierOverflowed is set true by the OpenAIAgent OnContextOverflow
 	// callback when a chat-completion request was rejected as over-context.
@@ -494,20 +547,6 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		return fmt.Errorf("new director: %w", err)
 	}
 	defer func() { _ = director.Close() }()
-	// Wire director's boundary-summarize callback. The director's history
-	// is long-lived; when watermark fires, this collapses the oldest
-	// contiguous block of director messages into one concise recap and
-	// returns it as the replacement slice. Different prompt variant from
-	// worker (no goal/directive bias).
-	if oa, ok := director.(*agent.OpenAIAgent); ok {
-		oa.SetOnSummarizeBoundary(func(cctx context.Context, snapshot []agent.Message) ([]agent.Message, error) {
-			out, sErr := summarizer.SummarizeDirectorOldest(cctx, snapshot)
-			if sErr != nil {
-				return nil, sErr
-			}
-			return []agent.Message{{Role: "user", Content: out}}, nil
-		})
-	}
 
 	// per spec §6 each agent gets its own MCP client; workers get theirs in spawnWorker
 	verifierMCP, err := mcp.Connect(ctx, mcpURL)
@@ -524,15 +563,6 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions)...)
 	verifier.SetTools(verifierTools)
 
-	// guardIteration is updated by the main loop below; the closure captures
-	// its address so DirectorToolDefs' end_run guard sees live state instead
-	// of a stale snapshot. writer.RunCount is read directly — the FindingWriter
-	// is race-safe (internal mutex).
-	var guardIteration int
-	director.SetTools(DirectorToolDefs(decisions, func() (int, int) {
-		return guardIteration, writer.RunCount
-	}))
-
 	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, candidateDedup, asyncMerger, cfg.AutonomousBudget)
 
 	workers := make([]*WorkerState, 0, cfg.MaxWorkers)
@@ -541,13 +571,95 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			w.Close()
 		}
 	}()
-	w1, err := spawn(ctx, 1, 1, cfg.Prompt)
-	if err != nil {
-		return err
+	// Iter 1 spawn: either the recon worker (default) or a normal
+	// testing worker (--skip-recon). The recon worker is anchored to a
+	// recon-mission summary, not cfg.Prompt, and has no
+	// report_finding_candidate registered; its retirement summary
+	// becomes the anchored context for every subsequent worker
+	// (factory.ReconSummary). With --skip-recon the iter-1 worker is a
+	// regular testing worker against cfg.Prompt — useful for A/B
+	// comparing the value of the recon iter on a given target.
+	var w1 *WorkerState
+	if cfg.SkipRecon {
+		if log != nil {
+			log.Log("server", "recon", map[string]any{"enabled": false, "reason": "--skip-recon"})
+		}
+		w1, err = spawn(ctx, 1, 1, cfg.Prompt)
+		if err != nil {
+			return err
+		}
+		if log != nil {
+			log.Log("worker", "seeded testing worker (skip-recon)", map[string]any{"id": 1})
+		}
+	} else {
+		reconMission, rerr := summarizer.SummarizeReconMission(ctx, cfg.Prompt)
+		if rerr != nil || reconMission == "" {
+			// Fail-soft: if the recon-mission summary fails (model
+			// error, empty output), use cfg.Prompt verbatim. The recon
+			// worker is still tool-restricted so the worst case is it
+			// reads the full mission and tries to test — better than
+			// blocking the entire run on a one-shot summarize call.
+			if log != nil {
+				fields := map[string]any{"fallback": "cfg.Prompt verbatim"}
+				if rerr != nil {
+					fields["err"] = rerr.Error()
+				}
+				log.Log("recon", "mission-summary failed", fields)
+			}
+			reconMission = cfg.Prompt
+		}
+		if log != nil {
+			log.Log("recon", "start", map[string]any{
+				"mission_chars":   len(reconMission),
+				"mission_preview": short(reconMission, 240),
+			})
+		}
+		w1, err = spawnReconWorker(ctx, mcpURL, cfg.ToolResultMaxBytes, factory, reconMission, ReconDirective, cfg.AutonomousBudget)
+		if err != nil {
+			return err
+		}
+		if log != nil {
+			log.Log("worker", "seeded recon", map[string]any{"id": 1})
+		}
 	}
 	workers = append(workers, w1)
-	if log != nil {
-		log.Log("worker", "seeded", map[string]any{"id": 1, "assignment": cfg.Prompt})
+
+	// Canonical director chat — the long-lived record of every worker's
+	// activity, every per-worker decision, the recon summary, retired-
+	// worker summaries, verifier reports. The director agent is stateless
+	// per call; each per-worker decision call and each synthesis call
+	// installs a selectively-compacted view via ReplaceHistory.
+	dirChat := NewDirectorChat()
+
+	// guardIteration is updated by the main loop below; the closure captures
+	// its address so end_run / takenIDs see live state instead of a stale
+	// snapshot. writer.RunCount is read directly — the FindingWriter is
+	// race-safe (internal mutex).
+	var guardIteration int
+	guardStateFn := func() (int, int) { return guardIteration, writer.RunCount }
+	takenIDsFn := func() map[int]bool {
+		out := map[int]bool{}
+		for _, w := range workers {
+			out[w.ID] = true // alive AND dead — both are taken
+		}
+		for _, c := range completed {
+			out[c.ID] = true
+		}
+		return out
+	}
+	completedIDsFn := func() map[int]bool {
+		out := map[int]bool{}
+		for _, c := range completed {
+			out[c.ID] = true
+		}
+		// Also include retired workers still in the workers slice (Alive=false)
+		// — they may not yet be in `completed` (summary still in flight).
+		for _, w := range workers {
+			if !w.Alive {
+				out[w.ID] = true
+			}
+		}
+		return out
 	}
 
 	// currentPhase drives which agents the narrator summarizes per firing.
@@ -632,6 +744,70 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		narrator.TriggerNow()
 	}
 
+	// Closure: fire one worker's iter run as a goroutine, returning a
+	// blocking join function. Used both to start iter-1 (worker 1) and to
+	// fire each worker's iter+1 run from RunDecisionPhase / applyPlanAndFire
+	// the moment its decision lands.
+	fire := func(fctx context.Context, w *WorkerState) func() []agent.TurnSummary {
+		resultCh := make(chan []agent.TurnSummary, 1)
+		go func() {
+			resultCh <- runOneWorker(fctx, w, candidates, log)
+		}()
+		return func() []agent.TurnSummary { return <-resultCh }
+	}
+
+	// Closure: spawn a forked child worker (used by RunDecisionPhase when
+	// a decide_worker call carries a fork sub-action). The child gets its
+	// inherited chronicle copied in by direct.go; we just provision the
+	// agent + MCP client here. Always treats numWorkers as len(alive)+1
+	// for the multi-worker addendum.
+	spawnChild := func(sctx context.Context, id int, instruction string) (*WorkerState, error) {
+		alive := 0
+		for _, w := range workers {
+			if w.Alive {
+				alive++
+			}
+		}
+		nw, err := spawn(sctx, id, alive+1, instruction)
+		if err != nil {
+			return nil, err
+		}
+		workers = append(workers, nw)
+		return nw, nil
+	}
+
+	// Closure: enqueue a worker for async retire. Workers go Alive=false
+	// immediately; the LLM summarize call runs in the background and the
+	// summary lands on retireQueue's results channel for the main loop
+	// to drain at iter boundaries.
+	retire := func(w *WorkerState, reason string, iter int) {
+		retireQueue.Submit(w, reason, iter)
+	}
+
+	// applyRetiredSummaries drains every completed retire result from the
+	// queue, replaces the worker's messages in dirChat with the summary,
+	// and appends to the controller-side completed registry. Idempotent /
+	// safe to call repeatedly.
+	applyRetiredSummaries := func() {
+		for _, r := range retireQueue.DrainCompleted() {
+			dirChat.ReplaceWorkerWithSummary(r.WorkerID, r.Summary, r.Iter)
+			completed = append(completed, CompletedWorker{
+				ID: r.WorkerID, StoppedAt: r.Iter, Reason: r.Reason, Summary: r.Summary,
+			})
+			if log != nil {
+				log.Log("retire", "summary-applied", map[string]any{
+					"worker_id": r.WorkerID, "iter": r.Iter, "summary_chars": len(r.Summary),
+				})
+			}
+		}
+	}
+
+	// Iter-1 fire: kick off worker 1's recon run before the loop so the
+	// loop's wait-for-in-flight pattern works uniformly from iter 1.
+	installChronicle(w1, w1.LastInstruction)
+	inflight := map[int]func() []agent.TurnSummary{}
+	inflight[1] = fire(ctx, w1)
+
 	var iteration int
 	for iteration = 1; iteration <= cfg.MaxIterations; iteration++ {
 		guardIteration = iteration
@@ -641,6 +817,15 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			}
 			break
 		}
+
+		// Wait for in-flight worker iter runs (fired at end of iter-1 seed
+		// or end of prior iter's decision/synthesis phase). workerRuns is
+		// the iter's autonomous-phase output map.
+		phaseTransition("idle", "autonomous")
+		narrator.Tick()
+		workerRuns := harvestInflight(inflight)
+		inflight = map[int]func() []agent.TurnSummary{}
+
 		alive := aliveWorkers(workers)
 		if len(alive) == 0 {
 			if log != nil {
@@ -656,140 +841,212 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			})
 		}
 
-		// Phase entry: summarize each alive worker's chronicle fresh and
-		// install the result as the worker's pre-iter context. Always
-		// summarized from canonical raw bytes — never from a prior
-		// summary — so worker focus doesn't drift across iterations.
-		installWorkerChroniclesAtIterStart(ctx, alive, summarizer.SummarizeWorkerFromChronicle, cfg.Prompt, iteration, log)
-
-		phaseTransition("idle", "autonomous")
-		narrator.Tick()
-
 		candidatesBefore := candidates.Counter()
-		// Snapshot angles BEFORE applyDecision mutates LastInstruction at the
-		// end of the iteration so history reflects what the worker actually
-		// worked on.
 		angleAt, aliveAtStart := snapshotIterationStart(alive)
-		workerRuns := RunAllWorkersUntilEscalation(ctx, alive, candidates, log)
-		UpdateStallStreaks(alive)
 
-		// Extract this iter's new content into each worker's chronicle so the
-		// next iter's install sees verbatim turns.
+		UpdateStallStreaks(alive)
+		// Extract iter's content into each alive worker's chronicle (and
+		// run in-place compaction so older iters' bulk folds into stubs).
 		extractWorkerChroniclesAtIterEnd(alive, iteration, log)
 
-		// stall-force-stop happens before verification so the stalled worker's
-		// run still feeds the verifier (spec §7.3). Both silent and error
-		// escalations count toward ProgressNoneStreak (see UpdateStallStreaks),
-		// so a worker that consistently times out or crashes terminates at
-		// the same threshold as one that goes silent by choice.
-		enforceStallStops(ctx, workers, cfg.StallStopAfter, retire, iteration, log)
+		// stall-force-stop: workers that have hit the silent-streak
+		// threshold get retired. The retire enqueues async summarization;
+		// the worker is Alive=false immediately so subsequent phases skip it.
+		enforceStallStopsAsync(workers, cfg.StallStopAfter, retire, iteration, log)
 
-		// Dead-iteration short-circuit: if every worker produced zero tool
-		// calls AND no new candidates were filed this iteration, there is
-		// nothing for the verifier to process and nothing new for the
-		// director to plan against. Skip both phases to save orchestrator
-		// LLM budget. With v3, no follow-up Query is needed — the next
-		// iteration's compose layer rebuilds each worker's history from
-		// scratch.
+		// Dead-iteration short-circuit: nothing happened, no candidates
+		// filed. Skip verification/direction; record history; continue.
 		if isDeadIteration(workerRuns, candidatesBefore, candidates.Counter()) {
 			if log != nil {
 				log.Log("controller", "dead-iteration", map[string]any{"iter": iteration})
 			}
-			// Record a history entry even on dead iterations so the director
-			// still sees the streak next time around.
 			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
+			// Re-fire still-alive workers' next-iter runs with their existing
+			// LastInstruction so the loop doesn't wedge on no-in-flight.
+			refireAlive(ctx, workers, fire, inflight, log)
 			narrator.TriggerNow()
 			continue
 		}
 
 		decisions.Reset()
 
-		// Verification phase entry: install fresh history with the iter's
-		// directive. Reset overflow watchdog for the phase. Mission lives
-		// in the verifier's system prompt and is re-prepended automatically
-		// by ReplaceHistory.
+		// Verification phase: fresh compose with the iter's directive.
+		// Reset overflow watchdog. Mission and recon summary live in the
+		// verifier's system prompt anchor; the per-iter directive includes
+		// the recon summary as a header from iter 2+ (BuildVerifierPrompt).
 		verifierOverflowed = false
 		verifierDirective := BuildVerifierPrompt(
 			workers, workerRuns, candidates.Pending(),
-			writer.SummaryForOrchestrator(),
+			writer.SummaryForOrchestrator(), factory.ReconSummary,
 			iteration, cfg.MaxIterations, writer.RunCount,
 		)
 		verifier.ReplaceHistory(ComposeVerifier(verifierDirective))
 		if log != nil {
 			log.Log("compose", "installed", map[string]any{"role": "verifier", "iter": iteration})
 		}
-
 		phaseTransition("autonomous", "verification")
 		verificationSummary := RunVerificationPhase(
 			ctx, verifier, decisions, candidates, writer, dedupReviewer, log,
 		)
-		// If the verifier overflowed even after a fresh compose, the model
-		// can't reproduce its candidates under the current budget. Drop
-		// them so the next iteration doesn't re-burn the same tokens.
 		if verifierOverflowed && !decisions.HasVerificationDone && len(candidates.Pending()) > 0 {
 			AutoDismissOnContextOverflow(candidates, decisions, log)
 		}
 
-		// Direction phase entry: director uses a long-lived chat history
-		// that grows naturally across iterations. Mark the iteration
-		// boundary BEFORE the directive Query so the boundary-summarize
-		// callback (configured at director-construction time) can collapse
-		// older director iterations into a single concise recap when
-		// context pressure trips the watermark, leaving this iter's work
-		// verbatim.
-		stallWarnings := FormatStallWarnings(workers, cfg.StallWarnAfter)
-		followUpHints := FormatFollowUpHints(decisions.Findings, decisions.Dismissals)
-		directorDirective := BuildDirectorPrompt(
-			workers, workerRuns, verificationSummary, writer.SummaryForOrchestrator(),
-			stallWarnings, followUpHints, completed,
-			iteration, cfg.MaxIterations, writer.RunCount, cfg.MaxWorkers,
-		)
-		director.MarkIterationBoundary()
-		director.Query(directorDirective)
+		// Drain any retire summaries that have completed since last drain
+		// (e.g. workers retired at iter N-1 that finished summarizing).
+		applyRetiredSummaries()
 
 		phaseTransition("verification", "direction")
-		RunDirectionPhase(ctx, director, decisions, workers, log)
+		stallWarnings := FormatStallWarnings(workers, cfg.StallWarnAfter)
+		followUpHints := FormatFollowUpHints(decisions.Findings, decisions.Dismissals)
+		iterStatus := statusLine(iteration, cfg.MaxIterations, writer.RunCount)
+
+		if iteration == 1 && !cfg.SkipRecon {
+			// Iter-1 recon flow:
+			//   1. Append worker 1's iter activity to dirChat.
+			//   2. Retire worker 1, block on summary. ReplaceWorkerWithSummary
+			//      ONLY when the summary is non-empty — an empty summary
+			//      (summarize timeout / model error) would otherwise
+			//      collapse the worker's evidence into nothing, leaving
+			//      the director with no recon context.
+			//   3. Review call: SetTools(nil); director reads the recon
+			//      and produces free-form text proposing iter-2 worker
+			//      assignments. Response is appended to dirChat.
+			//   4. Plan call: SetTools(synthesis); director formalizes
+			//      via plan_workers + direction_done, with one mandatory
+			//      retry if plan_workers wasn't called.
+			//   5. Fallback plan: if plan_workers still missing after
+			//      retry, inject a single-worker plan with the original
+			//      cfg.Prompt as the directive so iter 2 runs. Without
+			//      this fallback the run terminates at iter 2's alive-
+			//      check whenever the director can't commit to a plan.
+			dirChat.AppendWorkerActivity(w1.ID, iteration, snapshotWorkerIterActivity(w1))
+			retire(w1, "recon complete", iteration)
+			if r, ok := retireQueue.WaitOne(ctx); ok {
+				if r.Summary != "" {
+					dirChat.ReplaceWorkerWithSummary(r.WorkerID, r.Summary, r.Iter)
+					factory.ReconSummary = r.Summary
+				} else if log != nil {
+					log.Log("recon", "empty summary — keeping raw worker activity in dirChat", map[string]any{
+						"worker_id": r.WorkerID,
+					})
+				}
+				completed = append(completed, CompletedWorker{
+					ID: r.WorkerID, StoppedAt: r.Iter, Reason: r.Reason, Summary: r.Summary,
+				})
+				if log != nil {
+					// summary_tokens_est: calibrated estimate of the recon
+					// summary anchored into every subsequent worker/director
+					// system prompt — so this is the recurring per-call cost
+					// the summary imposes on the rest of the run.
+					log.Log("recon", "end", map[string]any{
+						"worker_id":          r.WorkerID,
+						"summary_chars":      len(r.Summary),
+						"summary_tokens_est": agent.EstimateStringTokens(r.Summary),
+					})
+				}
+				// Discard the recon worker's chronicle now that we have
+				// the canonical summary in factory.ReconSummary. The
+				// worker agent is already closed by retire; nilling
+				// these slices releases the message backing storage so
+				// it doesn't sit around for the rest of the run.
+				w1.Chronicle = nil
+				w1.ChronicleIter = nil
+			}
+			LatchStallWarnings(workers, cfg.StallWarnAfter)
+
+			director.SetTools(nil)
+			RunIter1ReconReviewCall(ctx, director, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
+
+			director.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
+			RunIter1ReconPlanCall(ctx, director, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
+
+			if decisions.HasEndRun {
+				if log != nil {
+					log.Log("controller", "end_run", map[string]any{"summary": decisions.EndRunSummary})
+				}
+				appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
+				break
+			}
+			if !decisions.HasPlan {
+				// Fallback: synthesis failed to commit to a plan even
+				// after the retry. Inject a default single-worker plan
+				// using the original mission so iter 2 still has work to
+				// do. Surfacing the failure prominently so the operator
+				// can tune the prompts; the run continues regardless.
+				fallback := []PlanEntry{{WorkerID: 2, Assignment: cfg.Prompt}}
+				decisions.SetPlan(fallback)
+				if log != nil {
+					log.Log("recon", "synthesis produced no plan — injecting fallback worker 2", map[string]any{
+						"hint":            "director did not call plan_workers after retry; iter 2 spawns one worker with the original mission",
+						"fallback_worker": 2,
+						"fallback_assign": short(cfg.Prompt, 200),
+						"recon_summary":   short(factory.ReconSummary, 200),
+					})
+				}
+			}
+			applyPlanAndFire(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
+			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
+			narrator.TriggerNow()
+			continue
+		}
+
+		// Iter 2+: per-worker decision loop, then synthesis.
+		director.SetTools(DecisionToolDefs(decisions, takenIDsFn))
+		decRes := RunDecisionPhase(ctx, DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: workers, WorkerRuns: workerRuns,
+			IterationStatus: iterStatus, Iter: iteration, MaxWorkers: cfg.MaxWorkers,
+			TakenIDs:   takenIDsFn,
+			Fire:       fire,
+			SpawnChild: spawnChild,
+			Retire:     retire,
+		}, log)
 		LatchStallWarnings(workers, cfg.StallWarnAfter)
+		// Drain retires that completed during the decision loop (stops).
+		applyRetiredSummaries()
+
+		// Synthesis call.
+		director.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
+		RunSynthesisPhase(ctx, SynthesisPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: workers, Completed: completed,
+			VerifierSummary: verificationSummary, FindingsSummary: writer.SummaryForOrchestrator(),
+			StallWarnings: stallWarnings, FollowUpHints: followUpHints,
+			IterationStatus: iterStatus, MaxWorkers: cfg.MaxWorkers,
+		}, log)
 
 		if decisions.HasEndRun {
-			// The end_run tool handler already enforced MinIterationsForDone /
-			// RunCount; by the time HasEndRun is true the director has met the
-			// bar, so the controller just honors it. Skip summarization —
-			// the next iteration won't run.
 			if log != nil {
 				log.Log("controller", "end_run", map[string]any{"summary": decisions.EndRunSummary})
 			}
+			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
 			break
 		}
 
+		// Apply plan_workers (spawn fresh / retarget alive) and fire
+		// iter+1 runs for the affected workers. Merge their joins into
+		// inflight alongside the per-worker decision-fired runs.
 		if decisions.HasPlan {
-			applyPlanDiff(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, log)
+			applyPlanAndFire(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
+		}
+		// Merge per-worker decision-fired runs into inflight.
+		for id, j := range decRes.joins {
+			inflight[id] = j
 		}
 
-		if decisions.HasForks {
-			applyForkDiff(ctx, decisions.Forks, &workers, spawn, cfg.MaxWorkers, iteration, log)
-		}
-
-		// apply per-worker decisions, after coalescing director duplicates
-		effective := coalesceDecisions(decisions.WorkerDecisions, decisions.Plan)
-		if log != nil && len(effective) != len(decisions.WorkerDecisions) {
-			log.Log("decision", "coalesced", map[string]any{
-				"original":  len(decisions.WorkerDecisions),
-				"effective": len(effective),
-			})
-		}
-		applyEffectiveDecisions(ctx, effective, workers, retire, iteration, log)
-
-		// Record per-worker history for this iteration now that autonomous,
-		// verification, and direction have all landed. Outcome derivation
-		// uses decisions + candidates, so it must run after decisions are
-		// applied.
 		appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
-
-		// End-of-iteration: coalesce any events since the last phase transition
-		// into a summary firing so the operator sees a sentence per iteration.
 		narrator.TriggerNow()
 	}
+
+	// Wait for any in-flight runs the loop may have fired but never
+	// harvested (e.g. end_run break path).
+	for _, j := range inflight {
+		_ = j()
+	}
+	// Drain any retire summaries still pending so logs are complete.
+	retireQueue.Wait()
+	applyRetiredSummaries()
 
 	if log != nil {
 		log.Log("summary", "run complete", map[string]any{
@@ -826,153 +1083,22 @@ func isDeadIteration(workerRuns map[int][]agent.TurnSummary, candidatesBefore, c
 	return true
 }
 
-func findWorker(ws []*WorkerState, id int) *WorkerState {
-	idx := slices.IndexFunc(ws, func(w *WorkerState) bool { return w.ID == id })
-	if idx < 0 {
-		return nil
-	}
-	return ws[idx]
-}
-
-// retireFunc summarizes a worker's full investigation and retires it.
-// Implementations append a CompletedWorker entry to the run's registry,
-// then close the worker's agent. The iter parameter is the iteration in
-// which the retirement decision was taken — recorded as StoppedAt on the
-// CompletedWorker so the director prompt can show "stopped iter N".
-// Synchronous so the next director prompt renders the new entry. Pass
-// nil from test contexts where summarization is undesirable; the caller
-// then becomes responsible for closing the agent.
-type retireFunc func(ctx context.Context, w *WorkerState, reason string, iter int)
-
-func applyDecision(ctx context.Context, d WorkerDecision, w *WorkerState, retire retireFunc, iter int, log *Logger) {
-	if d.Kind == "stop" {
-		if log != nil {
-			log.Log("decision", "stop", map[string]any{"worker_id": w.ID, "reason": d.Reason})
-		}
-		if retire != nil {
-			retire(ctx, w, d.Reason, iter)
-		} else {
-			w.Alive = false
-			_ = w.Agent.Close()
-		}
-		return
-	}
-	budget := d.AutonomousBudget
-	if budget <= 0 {
-		budget = defaultAutonomousBudget
-	}
-	budget = min(budget, 20)
-	w.AutonomousBudget = budget
-	w.LastInstruction = d.Instruction
-	// v4: no Query here — the next iteration's installChronicle will
-	// re-install the chronicle (wiping any pending Query) and Query
-	// w.LastInstruction itself. Pre-Query'ing would be a no-op at best
-	// and could create transient two-user-message states at worst.
-	if log != nil {
-		log.Log("decision", d.Kind, map[string]any{
-			"worker_id":         w.ID,
-			"autonomous_budget": budget,
-		})
-	}
-}
-
-// applyForkDiff spawns a new worker per ForkEntry, copying the parent's
-// chronicle so the child reads parent's prior investigation on first
-// install. Validation that already happened in the tool handler:
-// parent_worker_id != new_worker_id, instruction non-empty, both >=1. We
-// re-verify at apply time because director state may have shifted between
-// tool call and apply (e.g. parent stopped in the same direction phase).
+// applyPlanAndFire applies a plan_workers list (spawn fresh / retarget
+// alive) AND fires each affected worker's iter+1 run as a goroutine,
+// recording the join in inflight. The fire callback is the controller's
+// shared fire(ctx, w) closure.
 //
-// Rules:
-//   - Parent must be alive at apply time. If retired since the tool call,
-//     log and skip — the inheritance contract is no longer meaningful.
-//   - new_worker_id must not collide with an alive worker.
-//   - Hitting maxWorkers cap skips the fork (logged).
-//
-// Inheritance framing: the child's chronicle is prepended with a synthetic
-// inheritance header so the next install's summarizer reads the parent's
-// turns under the correct frame ("you are now worker N picking up the
-// thread") rather than mistakenly treating them as the child's own work.
-func applyForkDiff(
-	ctx context.Context,
-	forks []ForkEntry,
-	workers *[]*WorkerState,
-	spawn workerSpawnFunc,
-	maxWorkers int,
-	iter int,
-	log *Logger,
-) {
-	byID := map[int]*WorkerState{}
-	existing := 0
-	for _, w := range *workers {
-		byID[w.ID] = w
-		if w.Alive {
-			existing++
-		}
-	}
-	for _, f := range forks {
-		parent, ok := byID[f.ParentWorkerID]
-		if !ok || !parent.Alive {
-			if log != nil {
-				log.Log("fork", "skipped: parent unavailable", map[string]any{
-					"parent": f.ParentWorkerID, "new": f.NewWorkerID,
-				})
-			}
-			continue
-		}
-		if w, exists := byID[f.NewWorkerID]; exists && w.Alive {
-			if log != nil {
-				log.Log("fork", "skipped: new id collides with alive worker", map[string]any{
-					"parent": f.ParentWorkerID, "new": f.NewWorkerID,
-				})
-			}
-			continue
-		}
-		if existing >= maxWorkers {
-			if log != nil {
-				log.Log("fork", "skipped: max_workers", map[string]any{
-					"parent": f.ParentWorkerID, "new": f.NewWorkerID,
-				})
-			}
-			continue
-		}
-		nw, err := spawn(ctx, f.NewWorkerID, existing+1, f.Instruction)
-		if err != nil {
-			if log != nil {
-				log.Log("fork", "spawn failed", map[string]any{
-					"parent": f.ParentWorkerID, "new": f.NewWorkerID, "err": err.Error(),
-				})
-			}
-			continue
-		}
-		header := agent.Message{
-			Role: "user",
-			Content: fmt.Sprintf(
-				"[Inherited investigative history from worker %d at iter %d. The remainder of this chronicle records that worker's prior turns; you are now worker %d, picking up the thread under a new directive.]",
-				parent.ID, iter, nw.ID,
-			),
-		}
-		nw.Chronicle = make([]agent.Message, 0, 1+len(parent.Chronicle))
-		nw.Chronicle = append(nw.Chronicle, header)
-		nw.Chronicle = append(nw.Chronicle, parent.Chronicle...)
-		*workers = append(*workers, nw)
-		byID[nw.ID] = nw
-		existing++
-		if log != nil {
-			log.Log("fork", "spawn", map[string]any{
-				"parent": f.ParentWorkerID, "new": f.NewWorkerID,
-				"inherited_msgs": len(nw.Chronicle),
-			})
-		}
-	}
-}
-
-func applyPlanDiff(
+// Retargeting an alive worker resets its stall counters when productive
+// (matches the prior plan-apply behavior). Spawn collisions / max-worker
+// cap are skipped with explicit log entries.
+func applyPlanAndFire(
 	ctx context.Context,
 	plan []PlanEntry,
 	workers *[]*WorkerState,
 	spawn workerSpawnFunc,
 	maxWorkers int,
+	fire func(context.Context, *WorkerState) func() []agent.TurnSummary,
+	inflight map[int]func() []agent.TurnSummary,
 	log *Logger,
 ) {
 	byID := map[int]*WorkerState{}
@@ -985,20 +1111,27 @@ func applyPlanDiff(
 	}
 	for _, p := range plan {
 		if w, ok := byID[p.WorkerID]; ok && w.Alive {
-			w.Assignment = p.Assignment
 			w.LastInstruction = p.Assignment
-			// Only reset the stall counter when the worker actually produced
-			// something this iteration. A fresh assignment doesn't bring a
-			// dead LLM back to life, so the streak must keep climbing until
-			// force-stop fires.
 			if hasProductiveTurn(w.AutonomousTurns) {
 				w.ProgressNoneStreak = 0
 				w.StallWarned = false
 			}
-			// v4: no Query here — the next iter's installChronicle re-installs
-			// the chronicle and Queries w.LastInstruction (= the new assignment).
 			if log != nil {
 				log.Log("plan", "retarget", map[string]any{"worker_id": p.WorkerID})
+			}
+			installChronicle(w, w.LastInstruction)
+			inflight[w.ID] = fire(ctx, w)
+			continue
+		}
+		// Defense-in-depth: an ID present in workers (Alive=false) belongs
+		// to a retired worker. The plan_workers handler already rejects
+		// these, but reorderings (e.g. iter-1 path retires worker 1
+		// between handler-time and apply-time) could in principle let one
+		// slip through. Skip explicitly so we never spawn a duplicate ID
+		// that would shadow the dead entry in findWorker-style lookups.
+		if w, ok := byID[p.WorkerID]; ok && !w.Alive {
+			if log != nil {
+				log.Log("plan", "spawn skipped: id taken by retired worker", map[string]any{"worker_id": p.WorkerID})
 			}
 			continue
 		}
@@ -1017,10 +1150,47 @@ func applyPlanDiff(
 		}
 		*workers = append(*workers, nw)
 		existing++
+		installChronicle(nw, nw.LastInstruction)
+		inflight[nw.ID] = fire(ctx, nw)
 		if log != nil {
 			log.Log("plan", "spawn", map[string]any{"worker_id": p.WorkerID})
 		}
 	}
+}
+
+// refireAlive starts an iter+1 run for every still-alive worker that
+// doesn't already have a fired run in inflight. Used on dead-iteration
+// short-circuit so the loop has something to wait on next iter.
+func refireAlive(
+	ctx context.Context,
+	workers []*WorkerState,
+	fire func(context.Context, *WorkerState) func() []agent.TurnSummary,
+	inflight map[int]func() []agent.TurnSummary,
+	log *Logger,
+) {
+	for _, w := range workers {
+		if !w.Alive {
+			continue
+		}
+		if _, exists := inflight[w.ID]; exists {
+			continue
+		}
+		installChronicle(w, w.LastInstruction)
+		inflight[w.ID] = fire(ctx, w)
+		if log != nil {
+			log.Log("refire", "alive worker", map[string]any{"worker_id": w.ID})
+		}
+	}
+}
+
+// harvestInflight blocks on every join function in inflight and returns
+// the per-worker turn-summary map. Idempotent / safe for empty inflight.
+func harvestInflight(inflight map[int]func() []agent.TurnSummary) map[int][]agent.TurnSummary {
+	out := map[int][]agent.TurnSummary{}
+	for id, j := range inflight {
+		out[id] = j()
+	}
+	return out
 }
 
 // probeReasoningHandlers detects reasoning-format support for the main and
@@ -1050,39 +1220,6 @@ func probeReasoningHandlers(
 	return agent.NewReasoningHandler(mainFmt), agent.NewReasoningHandler(logFmt)
 }
 
-// installWorkerChroniclesAtIterStart summarizes each alive worker's
-// chronicle fresh and installs the result as that worker's pre-iter
-// context. Workers run concurrently (bounded by the shared LLM pool) so
-// per-iter latency is dominated by the slowest summary, not the sum.
-func installWorkerChroniclesAtIterStart(
-	ctx context.Context,
-	alive []*WorkerState,
-	summarize chronicleSummarizeFn,
-	mission string,
-	iteration int,
-	log *Logger,
-) {
-	if len(alive) == 0 {
-		return
-	}
-	var wg sync.WaitGroup
-	for _, w := range alive {
-		wg.Add(1)
-		go func(w *WorkerState) {
-			defer wg.Done()
-			installChronicle(ctx, w, w.LastInstruction, summarize, mission, log)
-			if log != nil {
-				log.Log("chronicle", "install", map[string]any{
-					"worker_id":      w.ID,
-					"iter":           iteration,
-					"chronicle_msgs": len(w.Chronicle),
-				})
-			}
-		}(w)
-	}
-	wg.Wait()
-}
-
 // snapshotIterationStart records each worker's current angle before the
 // autonomous phase mutates LastInstruction. Returns the angle map and an
 // alive-set used by appendIterationHistory.
@@ -1097,26 +1234,33 @@ func snapshotIterationStart(alive []*WorkerState) (angleAt map[int]string, alive
 }
 
 // extractWorkerChroniclesAtIterEnd reads each alive worker's iteration
-// boundary onward off its agent and appends it to the worker's chronicle.
+// boundary onward off its agent, appends to the worker's chronicle
+// (tagged with the iteration number), and runs in-place compaction so
+// older iters' think blocks and tool results fold into compact stubs.
 // Called after the autonomous phase so the next iter's installChronicle
-// sees the iter's verbatim turns.
+// sees a bounded, mostly-compacted chronicle with this iter's turns raw.
 func extractWorkerChroniclesAtIterEnd(alive []*WorkerState, iteration int, log *Logger) {
 	for _, w := range alive {
-		extractAndAppend(w)
+		extractAndAppend(w, iteration)
+		stripped, stubbed := compactChronicle(w, iteration, ChronicleKeepRecentIters)
 		if log != nil {
 			log.Log("chronicle", "extract", map[string]any{
 				"worker_id":      w.ID,
 				"iter":           iteration,
 				"chronicle_msgs": len(w.Chronicle),
+				"think_stripped": stripped,
+				"tool_stubbed":   stubbed,
 			})
 		}
 	}
 }
 
-// enforceStallStops retires every still-alive worker whose
-// ProgressNoneStreak has reached stopAfter. Runs before verification so the
-// stalled worker's run still feeds the verifier (spec §7.3).
-func enforceStallStops(ctx context.Context, workers []*WorkerState, stopAfter int, retire retireFunc, iter int, log *Logger) {
+// enforceStallStopsAsync retires every still-alive worker whose
+// ProgressNoneStreak has reached stopAfter. Runs before verification so
+// the stalled worker's run still feeds the verifier (spec §7.3). The
+// retire callback enqueues async summarization via RetireQueue; the
+// worker is Alive=false immediately so subsequent phases skip it.
+func enforceStallStopsAsync(workers []*WorkerState, stopAfter int, retire func(*WorkerState, string, int), iter int, log *Logger) {
 	for _, w := range workers {
 		if w.Alive && w.ProgressNoneStreak >= stopAfter {
 			if log != nil {
@@ -1124,28 +1268,7 @@ func enforceStallStops(ctx context.Context, workers []*WorkerState, stopAfter in
 					"worker_id": w.ID, "streak": w.ProgressNoneStreak,
 				})
 			}
-			if retire != nil {
-				retire(ctx, w, "stall-force-stop", iter)
-			} else {
-				w.Alive = false
-				w.Close()
-			}
+			retire(w, "stall-force-stop", iter)
 		}
-	}
-}
-
-// applyEffectiveDecisions applies each coalesced WorkerDecision onto its
-// target worker. Decisions referencing dead or unknown workers are
-// dropped (and logged when a logger is attached).
-func applyEffectiveDecisions(ctx context.Context, effective []WorkerDecision, workers []*WorkerState, retire retireFunc, iter int, log *Logger) {
-	for _, d := range effective {
-		w := findWorker(workers, d.WorkerID)
-		if w == nil || !w.Alive {
-			if log != nil {
-				log.Log("controller", "decision for unknown/dead worker", map[string]any{"worker_id": d.WorkerID})
-			}
-			continue
-		}
-		applyDecision(ctx, d, w, retire, iter, log)
 	}
 }

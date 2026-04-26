@@ -45,17 +45,10 @@ type OpenAIAgentConfig struct {
 	// overflows, in-flight candidates can't be reproduced under the current
 	// budget and are dismissed rather than carried forward.
 	OnContextOverflow func()
-	// OnSummarizeBoundary, when non-nil, is invoked by maybeCompact AFTER
-	// existing Compact() runs but BEFORE giving up — when the watermark is
-	// still tripped, the iteration boundary has been marked, and no boundary
-	// summary has yet been produced this iteration. The callback receives a
-	// snapshot of the messages eligible for summarization (everything between
-	// the system prompt and the iteration boundary, exclusive of the system
-	// message itself). It returns the replacement slice (typically a single
-	// user-role recap message) or an error to fail open. On success the agent
-	// replaces messages[1:iterationStartIdx] with the returned slice and
-	// updates iterationStartIdx to point past the new replacement so the
-	// iter's in-flight content stays delimited correctly.
+	// OnSummarizeBoundary, when non-nil, is called by maybeCompact when normal
+	// compaction can't free enough space. It receives messages eligible for
+	// summarization and returns a replacement slice or error. On success the
+	// agent replaces messages[1:iterationStartIdx] with the result.
 	OnSummarizeBoundary func(ctx context.Context, snapshot []Message) ([]Message, error)
 	// OnSummarizeError fires when OnSummarizeBoundary returned an error.
 	// The agent fails open (proceeds to the next compaction pass) regardless;
@@ -64,9 +57,8 @@ type OpenAIAgentConfig struct {
 	// OnToolStart fires before a tool handler runs (optional).
 	OnToolStart func(name string, args json.RawMessage)
 	// OnToolEnd fires after a tool handler returns (optional). timedOut is true
-	// when PerToolTimeout fired. errText is the truncated result text when
-	// isError is true, empty otherwise — so operators can see rejection reasons
-	// without digging through the agent's chat history.
+	// when PerToolTimeout fired. errText is truncated result text when isError
+	// is true, else empty.
 	OnToolEnd func(name string, args json.RawMessage, elapsed time.Duration, isError, timedOut bool, errText string)
 	// OnMalformedCall is called when tool arg repair fails (optional).
 	OnMalformedCall func(name string, err error)
@@ -90,14 +82,10 @@ type OpenAIAgent struct {
 	handlers  map[string]ToolHandler
 	mu        sync.Mutex
 	cancelCtx func()
-	// iterationStartIdx records where the current iteration's content begins
-	// in history.messages. Set by MarkIterationBoundary, reset to 0 by
-	// ReplaceHistory. The boundary-summarize path in maybeCompact uses it to
-	// scope summarization to messages BEFORE this iteration's work.
+	// iterationStartIdx marks where the current iteration's content begins.
 	iterationStartIdx int
-	// iterationSummarized prevents the boundary-summarize callback from
-	// firing twice in the same iteration. Cleared by MarkIterationBoundary
-	// and ReplaceHistory.
+	// iterationSummarized prevents the boundary-summarize callback from firing
+	// twice in the same iteration.
 	iterationSummarized bool
 }
 
@@ -518,24 +506,21 @@ func (a *OpenAIAgent) runSingleTool(
 	if extractFlow != nil {
 		flowIDs = append(flowIDs, extractFlow(result.Text)...)
 	}
+	content := result.Text
+	if result.IsError && !strings.HasPrefix(result.Text, "ERROR:") {
+		content = "ERROR: " + result.Text
+	}
 	return toolOutcome{
 		rec: rec,
 		histMsg: Message{
 			Role:       roleTool,
-			Content:    toolResultBody(result),
+			Content:    content,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Function.Name,
 			Summary120: Summarize120(result.Text),
 		},
 		flowIDs: flowIDs,
 	}
-}
-
-func toolResultBody(r ToolResult) string {
-	if r.IsError && !strings.HasPrefix(r.Text, "ERROR:") {
-		return "ERROR: " + r.Text
-	}
-	return r.Text
 }
 
 // formatRepairError renders the error the model sees when its tool_call
