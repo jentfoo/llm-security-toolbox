@@ -8,6 +8,15 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
+// Worker escalation reasons. A worker's autonomous run ends by setting
+// EscalationReason to one of these values.
+const (
+	EscalationSilent    = "silent"
+	EscalationError     = "error"
+	EscalationBudget    = "budget"
+	EscalationCandidate = "candidate"
+)
+
 // UpdateStallStreaks walks every worker and adjusts ProgressNoneStreak
 // based on the outcome of the last autonomous run. Both "silent"
 // (timeout or model chose not to escalate) and "error" (HTTP error, crashed
@@ -32,11 +41,11 @@ func UpdateStallStreaks(workers []*WorkerState) {
 		}
 		repeatedSig, repeated := repeatedErrorSignature(w.RecentToolErrors)
 		switch {
-		case w.EscalationReason == "silent" || w.EscalationReason == "error":
+		case w.EscalationReason == EscalationSilent || w.EscalationReason == EscalationError:
 			// Silent/error wins over flows (preserved precedence: a worker
 			// that touched a flow but escalated silent is still stalling).
 			w.ProgressNoneStreak++
-		case w.EscalationReason == "candidate" || producedFlows:
+		case w.EscalationReason == EscalationCandidate || producedFlows:
 			w.ProgressNoneStreak = 0
 			w.StallWarned = false
 		case repeated:

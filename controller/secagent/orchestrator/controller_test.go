@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -59,10 +60,28 @@ func TestIsDeadIteration(t *testing.T) {
 
 func TestApplyDecision(t *testing.T) {
 	t.Parallel()
-	t.Run("stop", func(t *testing.T) {
+	t.Run("stop_without_retire_closes_directly", func(t *testing.T) {
 		a := &agent.FakeAgent{}
 		w := &WorkerState{ID: 1, Alive: true, Agent: a}
-		applyDecision(WorkerDecision{Kind: "stop", WorkerID: 1, Reason: "done"}, w, nil)
+		applyDecision(t.Context(), WorkerDecision{Kind: "stop", WorkerID: 1, Reason: "done"}, w, nil, 5, nil)
+		assert.False(t, w.Alive)
+		assert.True(t, a.Closed)
+	})
+
+	t.Run("stop_invokes_retire_with_iter", func(t *testing.T) {
+		a := &agent.FakeAgent{}
+		w := &WorkerState{ID: 1, Alive: true, Agent: a}
+		var capturedReason string
+		var capturedIter int
+		retire := func(_ context.Context, ww *WorkerState, reason string, iter int) {
+			capturedReason = reason
+			capturedIter = iter
+			ww.Alive = false
+			_ = ww.Agent.Close()
+		}
+		applyDecision(t.Context(), WorkerDecision{Kind: "stop", WorkerID: 1, Reason: "exhausted"}, w, retire, 7, nil)
+		assert.Equal(t, "exhausted", capturedReason)
+		assert.Equal(t, 7, capturedIter, "iter parameter is threaded into retire")
 		assert.False(t, w.Alive)
 		assert.True(t, a.Closed)
 	})
@@ -70,19 +89,23 @@ func TestApplyDecision(t *testing.T) {
 	t.Run("continue_clamps_budget", func(t *testing.T) {
 		a := &agent.FakeAgent{}
 		w := &WorkerState{ID: 1, Alive: true, Agent: a}
-		applyDecision(WorkerDecision{
+		applyDecision(t.Context(), WorkerDecision{
 			Kind: "continue", WorkerID: 1, Instruction: "keep going",
 			AutonomousBudget: 999,
-		}, w, nil)
+		}, w, nil, 1, nil)
 		assert.Equal(t, 20, w.AutonomousBudget)
 		assert.Equal(t, "keep going", w.LastInstruction)
-		assert.Equal(t, []string{"keep going"}, a.QueriedInputs)
+		// v4: applyDecision does NOT call Query — the next iter's
+		// installChronicle re-installs the chronicle and Queries
+		// w.LastInstruction itself.
+		assert.Empty(t, a.QueriedInputs,
+			"applyDecision must not pre-Query; chronicle install does it")
 	})
 
 	t.Run("expand_defaults_budget", func(t *testing.T) {
 		a := &agent.FakeAgent{}
 		w := &WorkerState{ID: 1, Alive: true, Agent: a}
-		applyDecision(WorkerDecision{Kind: "expand", WorkerID: 1, Instruction: "new scope"}, w, nil)
+		applyDecision(t.Context(), WorkerDecision{Kind: "expand", WorkerID: 1, Instruction: "new scope"}, w, nil, 1, nil)
 		assert.Equal(t, defaultAutonomousBudget, w.AutonomousBudget)
 	})
 }
@@ -135,9 +158,9 @@ func TestRunAllWorkersUntilEscalation(t *testing.T) {
 
 func TestBuildClientPoolDefaults(t *testing.T) {
 	t.Parallel()
-	pool := buildClientPool("http://localhost:9999/v1", "", 4)
+	pool := buildClientPool("http://localhost:9999/v1", "", 4, 0)
 	assert.Equal(t, 4, pool.Size())
-	pool2 := buildClientPool("", "", 0)
+	pool2 := buildClientPool("", "", 0, 0)
 	assert.Equal(t, 1, pool2.Size())
 }
 
@@ -191,19 +214,19 @@ func TestRunWorkerUntilEscalationBudget(t *testing.T) {
 func TestOpenAIFactory(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{
-		WorkerModel: "worker-m", OrchestratorModel: "orch-m",
-		MaxWorkers: 2, WorkerMaxContext: 4096, OrchestratorMaxContext: 4096,
+		Model:      "main-m",
+		MaxWorkers: 2, MaxContext: 4096,
 		TurnTimeout: time.Second, MaxTurnsPerAgent: 10,
 	}
-	pool := buildClientPool("", "", 1)
+	pool := buildClientPool("", "", 1, 0)
 	counter := NewMalformedCounter(nil)
-	f := &OpenAIFactory{Cfg: cfg, WorkerPool: pool, OrchPool: pool, Malformed: counter}
+	f := &OpenAIFactory{Cfg: cfg, Pool: pool, Malformed: counter}
 
 	w, err := f.NewWorker(1, 1)
 	require.NoError(t, err)
 	assert.NotNil(t, w)
 
-	v, err := f.NewVerifier()
+	v, err := f.NewVerifier(nil)
 	require.NoError(t, err)
 	assert.NotNil(t, v)
 
@@ -216,3 +239,9 @@ func TestOpenAIFactory(t *testing.T) {
 	f.Malformed = nil
 	assert.Nil(t, f.malformedCallback("m"))
 }
+
+// v4 controller-side chronicle install/extract is exercised by
+// chronicle_test.go via installChronicle and extractAndAppend. The
+// per-iter loop's chronicle wiring (loop body) is exercised by integration
+// scenarios that drive RunAllWorkersUntilEscalation against FakeAgent
+// chains; covered in autonomous_test.go.

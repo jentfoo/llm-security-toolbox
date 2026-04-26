@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
@@ -24,8 +25,32 @@ var progressTags = map[string]bool{
 	"new":         true,
 }
 
+// MergeSubmitter schedules an asynchronous merge of a worker-reported
+// candidate into an already-filed finding. The implementation owns goroutine
+// lifetime and bounded concurrency; the worker tool just calls Submit and
+// continues. Pass nil to disable async merge (the dedup verdict "merge"
+// degrades to "duplicate" in that case).
+type MergeSubmitter interface {
+	Submit(matchedFilename string, incoming AddInput)
+}
+
 // WorkerToolDefs builds the per-worker tool set: report_finding_candidate.
-func WorkerToolDefs(candidates *CandidatePool, workerID int) []agent.ToolDef {
+//
+// dedupReviewer (optional) classifies each incoming candidate against
+// already-filed findings via the summary model. When nil, the deterministic
+// writer.MatchesFiled fallback runs instead.
+//
+// merger (optional) is invoked when the dedup verdict is "merge" — the
+// candidate is acknowledged synchronously and the merge proceeds in a
+// background goroutine owned by the submitter. When nil, "merge" verdicts
+// degrade to "duplicate" rejections.
+func WorkerToolDefs(
+	candidates *CandidatePool,
+	writer *FindingWriter,
+	workerID int,
+	dedupReviewer CandidateDedupReviewer,
+	merger MergeSubmitter,
+) []agent.ToolDef {
 	return []agent.ToolDef{
 		{
 			Name: "report_finding_candidate",
@@ -63,7 +88,7 @@ Returns a candidate_id confirmation.`,
 					EvidenceNotes    string   `json:"evidence_notes"`
 					ReproductionHint string   `json:"reproduction_hint"`
 				}
-				if err := json.Unmarshal(args, &in); err != nil {
+				if err := unmarshalToolArgs(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments: " + err.Error(), IsError: true}
 				}
 				sev := strings.ToLower(in.Severity)
@@ -79,7 +104,7 @@ Returns a candidate_id confirmation.`,
 						IsError: true,
 					}
 				}
-				cid := candidates.Add(AddInput{
+				addIn := AddInput{
 					WorkerID:         workerID,
 					Title:            orDefault(strings.TrimSpace(in.Title), "untitled"),
 					Severity:         sev,
@@ -88,7 +113,13 @@ Returns a candidate_id confirmation.`,
 					Summary:          strings.TrimSpace(in.Summary),
 					EvidenceNotes:    strings.TrimSpace(in.EvidenceNotes),
 					ReproductionHint: strings.TrimSpace(in.ReproductionHint),
-				})
+				}
+				if writer != nil {
+					if rej, ok := dedupRejectOrMerge(ctx, dedupReviewer, merger, writer, addIn); ok {
+						return rej
+					}
+				}
+				cid := candidates.Add(addIn)
 				return agent.ToolResult{
 					Text: fmt.Sprintf(
 						"Candidate %s recorded. The orchestrator will verify and, if confirmed, file the formal finding. Continue your testing.",
@@ -98,6 +129,74 @@ Returns a candidate_id confirmation.`,
 			},
 		},
 	}
+}
+
+// dedupRejectOrMerge consults the dedup pipeline and returns (result, true)
+// when the candidate should NOT be added to the pool — either because it
+// duplicates an existing finding or because it was queued for async merge.
+// Returns (_, false) when the candidate is unique and should proceed to
+// CandidatePool.Add.
+//
+// When dedupReviewer is nil, falls back to writer.MatchesFiled (deterministic
+// slug + endpoint match), preserving the prior behaviour.
+func dedupRejectOrMerge(
+	ctx context.Context,
+	dedupReviewer CandidateDedupReviewer,
+	merger MergeSubmitter,
+	writer *FindingWriter,
+	in AddInput,
+) (agent.ToolResult, bool) {
+	if dedupReviewer == nil {
+		if matched, path, ok := writer.MatchesFiled(in.Title, in.Endpoint); ok {
+			return agent.ToolResult{
+				Text: fmt.Sprintf(
+					"Rejected: matches already-filed finding %q (%s). Pick a different angle — do not re-report this issue.",
+					matched, filepath.Base(path),
+				),
+				IsError: true,
+			}, true
+		}
+		return agent.ToolResult{}, false
+	}
+	digests := writer.Digests()
+	if len(digests) == 0 {
+		return agent.ToolResult{}, false
+	}
+	verdict, err := dedupReviewer.ClassifyCandidate(ctx, in, digests)
+	if err != nil {
+		// Fail-open on classifier errors: let the candidate enter the pool
+		// and rely on the verifier-side dedup pipeline as the safety net.
+		return agent.ToolResult{}, false
+	}
+	switch verdict.Action {
+	case dedupActionDuplicate:
+		return agent.ToolResult{
+			Text: fmt.Sprintf(
+				"Rejected: matches already-filed finding %s. Pick a different angle — your candidate is fully covered there.",
+				verdict.MatchedFilename,
+			),
+			IsError: true,
+		}, true
+	case dedupActionMerge:
+		if merger == nil {
+			// No async merge available — degrade to a duplicate-style reject.
+			return agent.ToolResult{
+				Text: fmt.Sprintf(
+					"Rejected: matches already-filed finding %s. Pick a different angle — your candidate is fully covered there.",
+					verdict.MatchedFilename,
+				),
+				IsError: true,
+			}, true
+		}
+		merger.Submit(verdict.MatchedFilename, in)
+		return agent.ToolResult{
+			Text: fmt.Sprintf(
+				"Match detected with finding %s. Your evidence will be merged into that finding in the background — pick a different angle next.",
+				verdict.MatchedFilename,
+			),
+		}, true
+	}
+	return agent.ToolResult{}, false
 }
 
 // VerifierToolDefs builds the in-process tool set for the verifier.
@@ -170,7 +269,7 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 					SupersedesCandidateIDs []string `json:"supersedes_candidate_ids"`
 					FollowUpHint           string   `json:"follow_up_hint"`
 				}
-				if err := json.Unmarshal(args, &in); err != nil {
+				if err := unmarshalToolArgs(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments: " + err.Error(), IsError: true}
 				}
 				sev := strings.ToLower(in.Severity)
@@ -227,7 +326,7 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 					Reason       string `json:"reason"`
 					FollowUpHint string `json:"follow_up_hint"`
 				}
-				if err := json.Unmarshal(args, &in); err != nil {
+				if err := unmarshalToolArgs(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
 				}
 				cid := strings.TrimSpace(in.CandidateID)
@@ -263,7 +362,7 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 				var in struct {
 					Summary string `json:"summary"`
 				}
-				if err := json.Unmarshal(args, &in); err != nil {
+				if err := unmarshalToolArgs(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
 				}
 				s := strings.TrimSpace(in.Summary)
@@ -319,7 +418,7 @@ func DirectorToolDefs(
 			Progress         string `json:"progress"`
 			AutonomousBudget int    `json:"autonomous_budget"`
 		}
-		if err := json.Unmarshal(args, &in); err != nil {
+		if err := unmarshalToolArgs(args, &in); err != nil {
 			return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
 		}
 		if in.WorkerID < 1 {
@@ -385,7 +484,7 @@ func DirectorToolDefs(
 						Assignment string `json:"assignment"`
 					} `json:"plans"`
 				}
-				if err := json.Unmarshal(args, &in); err != nil {
+				if err := unmarshalToolArgs(args, &in); err != nil {
 					return agent.ToolResult{
 						Text: fmt.Sprintf(
 							"Rejected: cannot parse arguments (%s). Expected JSON shape {\"plans\":[{\"worker_id\":N,\"assignment\":\"...\"}]}.",
@@ -446,6 +545,53 @@ func DirectorToolDefs(
 			},
 		},
 		{
+			Name: "fork_worker",
+			Description: `Spawn a new worker that inherits the parent's investigative summary plus a steering instruction. ` +
+				`Use when an in-progress worker has uncovered a permutation worth a parallel deep-dive while the parent continues its current line. ` +
+				`Distinct from plan_workers (fresh, no inherited memory) and expand_worker (retargets the same worker in place). ` +
+				`Example: {"parent_worker_id":3,"new_worker_id":9,"instruction":"Pursue the JWT alg=none variant on /oauth2/userinfo that worker 3 just discovered."}`,
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"parent_worker_id": map[string]any{"type": "integer", "minimum": 1},
+					"new_worker_id":    map[string]any{"type": "integer", "minimum": 1},
+					"instruction":      map[string]any{"type": "string"},
+				},
+				"required": []string{"parent_worker_id", "new_worker_id", "instruction"},
+			},
+			Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
+				if decisions.Phase() != agent.PhaseDirection {
+					return reject("fork_worker")
+				}
+				var in struct {
+					ParentWorkerID int    `json:"parent_worker_id"`
+					NewWorkerID    int    `json:"new_worker_id"`
+					Instruction    string `json:"instruction"`
+				}
+				if err := unmarshalToolArgs(args, &in); err != nil {
+					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
+				}
+				if in.ParentWorkerID < 1 || in.NewWorkerID < 1 {
+					return agent.ToolResult{Text: "Rejected: parent_worker_id and new_worker_id must both be >= 1.", IsError: true}
+				}
+				if in.ParentWorkerID == in.NewWorkerID {
+					return agent.ToolResult{Text: "Rejected: parent_worker_id and new_worker_id must differ.", IsError: true}
+				}
+				if strings.TrimSpace(in.Instruction) == "" {
+					return agent.ToolResult{Text: "Rejected: instruction is required.", IsError: true}
+				}
+				decisions.AddFork(ForkEntry{
+					ParentWorkerID: in.ParentWorkerID,
+					NewWorkerID:    in.NewWorkerID,
+					Instruction:    in.Instruction,
+				})
+				return agent.ToolResult{Text: fmt.Sprintf(
+					"fork recorded: worker %d will inherit worker %d's investigation.",
+					in.NewWorkerID, in.ParentWorkerID,
+				)}
+			},
+		},
+		{
 			Name:        "stop_worker",
 			Description: `Stop worker N.`,
 			Schema: map[string]any{
@@ -464,7 +610,7 @@ func DirectorToolDefs(
 					WorkerID int    `json:"worker_id"`
 					Reason   string `json:"reason"`
 				}
-				if err := json.Unmarshal(args, &in); err != nil {
+				if err := unmarshalToolArgs(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
 				}
 				if in.WorkerID < 1 {
@@ -494,7 +640,7 @@ func DirectorToolDefs(
 				var in struct {
 					Summary string `json:"summary"`
 				}
-				if err := json.Unmarshal(args, &in); err != nil {
+				if err := unmarshalToolArgs(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
 				}
 				s := strings.TrimSpace(in.Summary)
@@ -522,7 +668,7 @@ func DirectorToolDefs(
 				var in struct {
 					Summary string `json:"summary"`
 				}
-				if err := json.Unmarshal(args, &in); err != nil {
+				if err := unmarshalToolArgs(args, &in); err != nil {
 					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
 				}
 				s := strings.TrimSpace(in.Summary)

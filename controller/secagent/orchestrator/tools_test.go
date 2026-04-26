@@ -1,8 +1,11 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,7 +46,7 @@ func TestWorkerToolDefs(t *testing.T) {
 
 	t.Run("report_candidate", func(t *testing.T) {
 		pool := NewCandidatePool()
-		defs := WorkerToolDefs(pool, 7)
+		defs := WorkerToolDefs(pool, nil, 7, nil, nil)
 		require.Len(t, defs, 1)
 		rc := findTool(defs, "report_finding_candidate")
 		require.NotNil(t, rc)
@@ -58,7 +61,7 @@ func TestWorkerToolDefs(t *testing.T) {
 
 	t.Run("rejects_bad_severity", func(t *testing.T) {
 		pool := NewCandidatePool()
-		rc := findTool(WorkerToolDefs(pool, 1), "report_finding_candidate")
+		rc := findTool(WorkerToolDefs(pool, nil, 1, nil, nil), "report_finding_candidate")
 		require.NotNil(t, rc)
 		args := baseArgs()
 		args["severity"] = "nope"
@@ -69,12 +72,222 @@ func TestWorkerToolDefs(t *testing.T) {
 
 	t.Run("rejects_empty_flow_ids", func(t *testing.T) {
 		pool := NewCandidatePool()
-		rc := findTool(WorkerToolDefs(pool, 1), "report_finding_candidate")
+		rc := findTool(WorkerToolDefs(pool, nil, 1, nil, nil), "report_finding_candidate")
 		require.NotNil(t, rc)
 		args := baseArgs()
 		args["flow_ids"] = []string{}
 		res := rc.Handler(t.Context(), mustMarshal(t, args))
 		assert.True(t, res.IsError)
+	})
+
+	t.Run("rejects_filed_duplicate_exact_slug", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := NewFindingWriter(t.TempDir())
+		_, err := writer.Write(FindingFiled{
+			Title:    "XSS",
+			Severity: "high",
+			Endpoint: "GET /",
+		})
+		require.NoError(t, err)
+		rc := findTool(WorkerToolDefs(pool, writer, 1, nil, nil), "report_finding_candidate")
+		require.NotNil(t, rc)
+
+		res := rc.Handler(t.Context(), mustMarshal(t, baseArgs()))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "already-filed")
+		assert.Contains(t, res.Text, "XSS")
+		assert.Empty(t, pool.Pending(), "candidate must not be added to pool")
+	})
+
+	t.Run("rejects_filed_duplicate_endpoint_plus_similar_title", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := NewFindingWriter(t.TempDir())
+		_, err := writer.Write(FindingFiled{
+			Title:    "Reflected XSS in search",
+			Severity: "high",
+			Endpoint: "GET /search",
+		})
+		require.NoError(t, err)
+		rc := findTool(WorkerToolDefs(pool, writer, 1, nil, nil), "report_finding_candidate")
+		require.NotNil(t, rc)
+
+		args := baseArgs()
+		args["title"] = "Reflected XSS in search endpoint"
+		args["endpoint"] = "GET /search"
+		res := rc.Handler(t.Context(), mustMarshal(t, args))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "already-filed")
+		assert.Empty(t, pool.Pending())
+	})
+
+	t.Run("admits_distinct_title_and_endpoint", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := NewFindingWriter(t.TempDir())
+		_, err := writer.Write(FindingFiled{
+			Title:    "XSS",
+			Severity: "high",
+			Endpoint: "GET /",
+		})
+		require.NoError(t, err)
+		rc := findTool(WorkerToolDefs(pool, writer, 1, nil, nil), "report_finding_candidate")
+		require.NotNil(t, rc)
+
+		args := baseArgs()
+		args["title"] = "SQL Injection in login"
+		args["endpoint"] = "POST /login"
+		res := rc.Handler(t.Context(), mustMarshal(t, args))
+		assert.False(t, res.IsError, res.Text)
+		assert.Len(t, pool.Pending(), 1)
+	})
+}
+
+// fakeCandidateDedup is a scripted CandidateDedupReviewer for tool tests.
+type fakeCandidateDedup struct {
+	verdict CandidateDedupVerdict
+	err     error
+	calls   int
+}
+
+func (f *fakeCandidateDedup) ClassifyCandidate(_ context.Context, _ AddInput, _ []FindingDigest) (CandidateDedupVerdict, error) {
+	f.calls++
+	return f.verdict, f.err
+}
+
+// fakeMerger collects async merge submissions for assertion.
+type fakeMerger struct {
+	mu          sync.Mutex
+	submissions []fakeMergerSubmission
+}
+
+type fakeMergerSubmission struct {
+	matched  string
+	incoming AddInput
+}
+
+func (f *fakeMerger) Submit(matched string, in AddInput) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.submissions = append(f.submissions, fakeMergerSubmission{matched, in})
+}
+
+func TestWorkerToolDefsLLMDedup(t *testing.T) {
+	t.Parallel()
+	baseArgs := func() map[string]any {
+		return map[string]any{
+			"title":             "Reflected XSS in search",
+			"severity":          "high",
+			"endpoint":          "GET /search",
+			"flow_ids":          []string{"abc123"},
+			"summary":           "user input reflected",
+			"evidence_notes":    "saw <script> echoed",
+			"reproduction_hint": "send q=<script>alert(1)</script>",
+		}
+	}
+	primeWriter := func(t *testing.T) *FindingWriter {
+		t.Helper()
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(FindingFiled{
+			Title: "Open redirect on /go", Severity: "medium", Endpoint: "GET /go",
+			Description: "Existing description.",
+		})
+		require.NoError(t, err)
+		return w
+	}
+
+	t.Run("unique_admits_to_pool", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := primeWriter(t)
+		dedup := &fakeCandidateDedup{verdict: CandidateDedupVerdict{Action: "unique"}}
+		rc := findTool(WorkerToolDefs(pool, writer, 1, dedup, &fakeMerger{}), "report_finding_candidate")
+
+		res := rc.Handler(t.Context(), mustMarshal(t, baseArgs()))
+		assert.False(t, res.IsError, res.Text)
+		assert.Equal(t, 1, dedup.calls)
+		assert.Len(t, pool.Pending(), 1)
+	})
+
+	t.Run("duplicate_rejects_with_cite", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := primeWriter(t)
+		// matched filename will be the only finding's filename
+		var matchedName string
+		for _, d := range writer.Digests() {
+			matchedName = d.Filename
+		}
+		require.NotEmpty(t, matchedName)
+		dedup := &fakeCandidateDedup{verdict: CandidateDedupVerdict{
+			Action: "duplicate", MatchedFilename: matchedName,
+		}}
+		rc := findTool(WorkerToolDefs(pool, writer, 1, dedup, &fakeMerger{}), "report_finding_candidate")
+
+		res := rc.Handler(t.Context(), mustMarshal(t, baseArgs()))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, matchedName)
+		assert.Empty(t, pool.Pending())
+	})
+
+	t.Run("merge_acks_and_submits_async", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := primeWriter(t)
+		var matchedName string
+		for _, d := range writer.Digests() {
+			matchedName = d.Filename
+		}
+		merger := &fakeMerger{}
+		dedup := &fakeCandidateDedup{verdict: CandidateDedupVerdict{
+			Action: "merge", MatchedFilename: matchedName,
+		}}
+		rc := findTool(WorkerToolDefs(pool, writer, 1, dedup, merger), "report_finding_candidate")
+
+		res := rc.Handler(t.Context(), mustMarshal(t, baseArgs()))
+		assert.False(t, res.IsError, "merge ack must not be marked error so the worker treats it as success")
+		assert.Contains(t, res.Text, matchedName)
+		assert.Contains(t, res.Text, "merged")
+		assert.Empty(t, pool.Pending(), "merge candidates do not enter the pool")
+		merger.mu.Lock()
+		require.Len(t, merger.submissions, 1)
+		assert.Equal(t, matchedName, merger.submissions[0].matched)
+		merger.mu.Unlock()
+	})
+
+	t.Run("merge_without_merger_falls_back_to_reject", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := primeWriter(t)
+		var matchedName string
+		for _, d := range writer.Digests() {
+			matchedName = d.Filename
+		}
+		dedup := &fakeCandidateDedup{verdict: CandidateDedupVerdict{
+			Action: "merge", MatchedFilename: matchedName,
+		}}
+		rc := findTool(WorkerToolDefs(pool, writer, 1, dedup, nil), "report_finding_candidate")
+
+		res := rc.Handler(t.Context(), mustMarshal(t, baseArgs()))
+		assert.True(t, res.IsError)
+		assert.Empty(t, pool.Pending())
+	})
+
+	t.Run("classifier_error_fails_open", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := primeWriter(t)
+		dedup := &fakeCandidateDedup{err: errors.New("boom")}
+		rc := findTool(WorkerToolDefs(pool, writer, 1, dedup, &fakeMerger{}), "report_finding_candidate")
+
+		res := rc.Handler(t.Context(), mustMarshal(t, baseArgs()))
+		assert.False(t, res.IsError, "classifier error should fall open and admit the candidate")
+		assert.Len(t, pool.Pending(), 1, "candidate must enter pool when classifier errors")
+	})
+
+	t.Run("empty_index_skips_dedup", func(t *testing.T) {
+		pool := NewCandidatePool()
+		writer := NewFindingWriter(t.TempDir()) // no findings written
+		dedup := &fakeCandidateDedup{}          // would error if called (but we won't increment if not invoked)
+		rc := findTool(WorkerToolDefs(pool, writer, 1, dedup, &fakeMerger{}), "report_finding_candidate")
+
+		res := rc.Handler(t.Context(), mustMarshal(t, baseArgs()))
+		assert.False(t, res.IsError, res.Text)
+		assert.Equal(t, 0, dedup.calls, "no findings means no LLM call")
+		assert.Len(t, pool.Pending(), 1)
 	})
 }
 
@@ -211,6 +424,23 @@ func TestDirectorToolDefs(t *testing.T) {
 		assert.Contains(t, res.Text, `{"plans"`)
 	})
 
+	t.Run("plan_recovers_string_encoded_array", func(t *testing.T) {
+		// Models sometimes emit `plans` as a JSON-encoded string instead of
+		// an array. Recover that one shape rather than burning a retry.
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		pw := findTool(DirectorToolDefs(dq, guardAccept), "plan_workers")
+		res := pw.Handler(t.Context(), json.RawMessage(
+			`{"plans": "[{\"worker_id\":1,\"assignment\":\"scan auth\"},{\"worker_id\":2,\"assignment\":\"scan admin\"}]"}`,
+		))
+		assert.False(t, res.IsError)
+		require.Len(t, dq.Plan, 2)
+		assert.Equal(t, 1, dq.Plan[0].WorkerID)
+		assert.Equal(t, "scan auth", dq.Plan[0].Assignment)
+		assert.Equal(t, 2, dq.Plan[1].WorkerID)
+		assert.Equal(t, "scan admin", dq.Plan[1].Assignment)
+	})
+
 	t.Run("plan_all_invalid_returns_per_entry_reasons", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
@@ -239,6 +469,45 @@ func TestDirectorToolDefs(t *testing.T) {
 		assert.Equal(t, "stop", dq.WorkerDecisions[0].Kind)
 	})
 
+	t.Run("fork_worker_records", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		fw := findTool(DirectorToolDefs(dq, guardAccept), "fork_worker")
+		require.NotNil(t, fw)
+		res := fw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"parent_worker_id": 3,
+			"new_worker_id":    9,
+			"instruction":      "Pursue the JWT alg=none variant on /oauth2/userinfo",
+		}))
+		assert.False(t, res.IsError)
+		require.Len(t, dq.Forks, 1)
+		assert.Equal(t, 3, dq.Forks[0].ParentWorkerID)
+		assert.Equal(t, 9, dq.Forks[0].NewWorkerID)
+		assert.Contains(t, dq.Forks[0].Instruction, "alg=none")
+	})
+
+	t.Run("fork_worker_rejects_same_id", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		fw := findTool(DirectorToolDefs(dq, guardAccept), "fork_worker")
+		res := fw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"parent_worker_id": 3, "new_worker_id": 3, "instruction": "x",
+		}))
+		assert.True(t, res.IsError)
+		assert.Empty(t, dq.Forks)
+	})
+
+	t.Run("fork_worker_rejects_empty_instruction", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		fw := findTool(DirectorToolDefs(dq, guardAccept), "fork_worker")
+		res := fw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"parent_worker_id": 3, "new_worker_id": 4, "instruction": "   ",
+		}))
+		assert.True(t, res.IsError)
+		assert.Empty(t, dq.Forks)
+	})
+
 	t.Run("direction_done", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
@@ -252,7 +521,7 @@ func TestDirectorToolDefs(t *testing.T) {
 	t.Run("phase_mismatch_rejects_all", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		defs := DirectorToolDefs(dq, guardAccept)
-		for _, name := range []string{"plan_workers", "continue_worker", "expand_worker", "stop_worker", "direction_done", "end_run"} {
+		for _, name := range []string{"plan_workers", "fork_worker", "continue_worker", "expand_worker", "stop_worker", "direction_done", "end_run"} {
 			d := findTool(defs, name)
 			require.NotNil(t, d, name)
 			res := d.Handler(t.Context(), []byte(`{}`))

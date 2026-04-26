@@ -150,6 +150,52 @@ func TestFindingWriter(t *testing.T) {
 	})
 }
 
+func TestFindingWriter_MatchesFiled(t *testing.T) {
+	t.Parallel()
+	seed := FindingFiled{
+		Title:    "Reflected XSS in search",
+		Severity: "high",
+		Endpoint: "GET /search",
+	}
+
+	t.Run("exact_slug_match", func(t *testing.T) {
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(seed)
+		require.NoError(t, err)
+		title, path, ok := w.MatchesFiled("Reflected XSS in search", "GET /search")
+		assert.True(t, ok)
+		assert.Equal(t, seed.Title, title)
+		assert.NotEmpty(t, path)
+	})
+
+	t.Run("endpoint_plus_similar_title", func(t *testing.T) {
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(seed)
+		require.NoError(t, err)
+		// Slightly reworded title, same canonical endpoint — should match.
+		title, _, ok := w.MatchesFiled("Reflected XSS in search endpoint", "GET /search")
+		assert.True(t, ok)
+		assert.Equal(t, seed.Title, title)
+	})
+
+	t.Run("distinct_title_and_endpoint_miss", func(t *testing.T) {
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(seed)
+		require.NoError(t, err)
+		_, _, ok := w.MatchesFiled("SQL Injection in login", "POST /login")
+		assert.False(t, ok)
+	})
+
+	t.Run("endpoint_equal_but_unrelated_title_miss", func(t *testing.T) {
+		// Same endpoint, entirely different vuln class → not a match.
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(seed)
+		require.NoError(t, err)
+		_, _, ok := w.MatchesFiled("Open Redirect via return_to", "GET /search")
+		assert.False(t, ok)
+	})
+}
+
 func TestFindingWriter_SummaryForWorker(t *testing.T) {
 	t.Parallel()
 

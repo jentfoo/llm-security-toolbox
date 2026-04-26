@@ -22,6 +22,29 @@ type PlanEntry struct {
 	Assignment string
 }
 
+// ForkEntry is one fork_worker call: spawn a new worker that inherits the
+// parent's investigative summary, plus a steering instruction. Parent
+// continues unchanged unless the director also issues a separate decision
+// for it in the same direction phase.
+type ForkEntry struct {
+	ParentWorkerID int
+	NewWorkerID    int
+	Instruction    string
+}
+
+// CompletedWorker is the durable record of a worker retired during the run.
+// The director reads these from BuildDirectorPrompt as historical reference
+// — the IDs are gone and not eligible for planning, forking, or narration.
+// Summary is generated synchronously at retire time via
+// Summarizer.SummarizeCompletedWorker (one-shot from the worker's
+// canonical raw chronicle, never from a prior summary).
+type CompletedWorker struct {
+	ID        int
+	StoppedAt int    // iteration when the worker was retired
+	Reason    string // explicit director reason, "stall-force-stop", or empty
+	Summary   string // detailed third-person recap of the worker's full investigation
+}
+
 // FindingFiled is a verifier-filed finding.
 type FindingFiled struct {
 	Title                  string
@@ -48,6 +71,8 @@ type DecisionQueue struct {
 	mu                      sync.Mutex
 	Plan                    []PlanEntry
 	HasPlan                 bool
+	Forks                   []ForkEntry
+	HasForks                bool
 	WorkerDecisions         []WorkerDecision
 	Findings                []FindingFiled
 	Dismissals              []CandidateDismissal
@@ -70,6 +95,7 @@ func (q *DecisionQueue) Reset() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.Plan, q.HasPlan = nil, false
+	q.Forks, q.HasForks = nil, false
 	q.WorkerDecisions = nil
 	q.Findings = nil
 	q.Dismissals = nil
@@ -107,6 +133,14 @@ func (q *DecisionQueue) SetPlan(entries []PlanEntry) {
 	defer q.mu.Unlock()
 	q.Plan = append(q.Plan[:0], entries...)
 	q.HasPlan = true
+}
+
+// AddFork appends a fork entry to the queue.
+func (q *DecisionQueue) AddFork(f ForkEntry) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.Forks = append(q.Forks, f)
+	q.HasForks = true
 }
 
 // AddDecision records a per-worker decision.

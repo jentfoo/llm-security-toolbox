@@ -210,6 +210,14 @@ const reasoningProbeMaxTokens = 20000
 // supporting backends; unsupported backends ignore it.
 const SummaryReasoningEffort = "none"
 
+// CompressionReasoningEffort is forwarded as `reasoning_effort` on
+// iteration-boundary history compression. "low" lets the summary model
+// reason briefly about which evidence to preserve without burning the
+// budget that "medium"/"high" would on qwen3-class models. The asymmetry
+// with SummaryReasoningEffort is deliberate: narration is best-effort
+// status text; compression is the agent's only memory of prior work.
+const CompressionReasoningEffort = "low"
+
 // reasoningProbeTimeout bounds probe latency.
 const reasoningProbeTimeout = 60 * time.Second
 

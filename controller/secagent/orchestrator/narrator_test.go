@@ -370,19 +370,41 @@ func TestNarrator_AgentProviderFiresPerAgent(t *testing.T) {
 
 	content := buf.String()
 	assert.Contains(t, content, "orchestrator: current focus")
-	assert.Contains(t, content, "agent (worker-1): current focus")
-	assert.Contains(t, content, "agent (worker-2): current focus")
+	assert.Contains(t, content, "agent (worker-1):")
+	assert.Contains(t, content, "agent (worker-2):")
 
 	jsonLog := mustReadFile(t, path)
-	assert.Contains(t, jsonLog, `"msg":"agent (worker-1): current focus"`)
-	assert.Contains(t, jsonLog, `"msg":"agent (worker-2): current focus"`)
+	assert.Contains(t, jsonLog, `"msg":"agent (worker-1):`)
+	assert.Contains(t, jsonLog, `"msg":"agent (worker-2):`)
+	assert.Contains(t, jsonLog, `"context_usage":`)
 	assert.NotContains(t, jsonLog, `"role":`)
 	assert.NotContains(t, jsonLog, `"agent":`)
 }
 
-func TestNarrator_PerAgentSummaryUsesSummaryModel(t *testing.T) {
+func TestFormatContextPercent(t *testing.T) {
 	t.Parallel()
-	// per-agent summaries go through the narrator's summary model, not the agent's own model
+	cases := []struct {
+		tokens, max int
+		want        string
+	}{
+		{0, 1000, "0%"},
+		{500, 1000, "50%"},
+		{999, 1000, "99%"},
+		{1000, 1000, "99%"}, // clamp at 99%
+		{1500, 1000, "99%"},
+		{0, 0, "?"},
+		{100, 0, "?"},
+		{-5, 1000, "0%"},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, formatContextPercent(c.tokens, c.max),
+			"tokens=%d max=%d", c.tokens, c.max)
+	}
+}
+
+func TestNarrator_PerAgentSummaryUsesLogModel(t *testing.T) {
+	t.Parallel()
+	// per-agent summaries go through the narrator's log model, not the agent's own model
 	client := &scriptedClient{response: "status"}
 	l, _, _ := newCapturedLogger(t)
 
@@ -395,7 +417,7 @@ func TestNarrator_PerAgentSummaryUsesSummaryModel(t *testing.T) {
 
 	n := NewNarrator(NarratorConfig{
 		Interval:   time.Millisecond,
-		Model:      "summary-model",
+		Model:      "log-model",
 		Pool:       agentPool,
 		CallBudget: time.Second,
 	}, l)
@@ -412,7 +434,7 @@ func TestNarrator_PerAgentSummaryUsesSummaryModel(t *testing.T) {
 	defer client.mu.Unlock()
 	require.Len(t, client.requests, 2, "orchestrator event summary + 1 per-agent summary")
 	perAgentReq := client.requests[1]
-	assert.Equal(t, "summary-model", perAgentReq.Model)
+	assert.Equal(t, "log-model", perAgentReq.Model)
 	assert.Equal(t, "none", perAgentReq.ReasoningEffort)
 }
 

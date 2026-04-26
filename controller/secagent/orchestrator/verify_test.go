@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,10 +44,8 @@ func TestRunVerificationPhase(t *testing.T) {
 			decisions.SetVerificationDone("filed 1, dismissed 1")
 		}
 
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
 		summary := RunVerificationPhase(
-			t.Context(), verifier, decisions, candidates, writer, nil,
-			map[int][]agent.TurnSummary{1: nil}, workers, 2, 10, nil,
+			t.Context(), verifier, decisions, candidates, writer, nil, nil,
 		)
 
 		assert.Equal(t, "filed 1, dismissed 1", summary)
@@ -66,8 +65,7 @@ func TestRunVerificationPhase(t *testing.T) {
 		decisions := NewDecisionQueue()
 		verifier := &agent.FakeAgent{} // no scripted turns, would error if reached
 		summary := RunVerificationPhase(
-			t.Context(), verifier, decisions, candidates, writer, nil,
-			map[int][]agent.TurnSummary{}, nil, 1, 10, nil,
+			t.Context(), verifier, decisions, candidates, writer, nil, nil,
 		)
 		assert.Contains(t, summary, "No pending candidates")
 	})
@@ -94,9 +92,7 @@ func TestRunVerificationPhase(t *testing.T) {
 		}
 
 		log, path, _ := newCapturedLogger(t)
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
-		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil,
-			nil, workers, 1, 10, log)
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
 		require.NoError(t, log.Close())
 
 		content := mustReadFile(t, path)
@@ -127,9 +123,7 @@ func TestRunVerificationPhase(t *testing.T) {
 			decisions.SetVerificationDone("done")
 		}
 
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
-		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil,
-			nil, workers, 1, 10, nil)
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, nil)
 		assert.Equal(t, "verified", candidates.ByID(c1).Status)
 	})
 
@@ -154,9 +148,7 @@ func TestRunVerificationPhase(t *testing.T) {
 			})
 			decisions.SetVerificationDone("done")
 		}
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
-		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil,
-			nil, workers, 1, 10, nil)
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, nil)
 
 		entries, err := os.ReadDir(dir)
 		require.NoError(t, err)
@@ -188,9 +180,7 @@ func TestRunVerificationPhase(t *testing.T) {
 		}
 
 		log, path, _ := newCapturedLogger(t)
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
-		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil,
-			nil, workers, 1, 10, log)
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
 		require.NoError(t, log.Close())
 
 		assert.Equal(t, "verified", candidates.ByID(c1).Status)
@@ -220,9 +210,7 @@ func TestRunVerificationPhase(t *testing.T) {
 		}
 
 		log, path, _ := newCapturedLogger(t)
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
-		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil,
-			nil, workers, 1, 10, log)
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
 		require.NoError(t, log.Close())
 
 		assert.Equal(t, "pending", candidates.ByID(orphan).Status)
@@ -257,13 +245,57 @@ func TestRunVerificationPhase(t *testing.T) {
 			decisions.SetVerificationDone("done")
 		}
 		log, path, _ := newCapturedLogger(t)
-		workers := []*WorkerState{{ID: 1, Alive: true, Agent: verifier}}
-		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil,
-			nil, workers, 1, 10, log)
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
 		require.NoError(t, log.Close())
 
 		content := mustReadFile(t, path)
 		count := strings.Count(content, `"msg":"duplicate skipped"`)
 		assert.Equal(t, 1, count)
 	})
+
+	t.Run("llm_wedge_leaves_candidate_pending", func(t *testing.T) {
+		// Pure LLM-side wedge (drain errors twice). With v3 the verifier
+		// no longer auto-dismisses on this path — the next iteration's
+		// fresh-compose gives it a clean shot. AutoDismissOnContextOverflow
+		// (tested separately) is the only path that drops pending
+		// candidates without a verifier file/dismiss.
+		writer := NewFindingWriter(t.TempDir())
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Stuck finding",
+			Severity: "high", Endpoint: "GET /stuck",
+		})
+		decisions := NewDecisionQueue()
+		boom := errors.New("simulated drain error")
+		verifier := &agent.FakeAgent{
+			Turns:  []agent.TurnSummary{{}, {}},
+			Errors: []error{boom, boom},
+		}
+		RunVerificationPhase(
+			t.Context(), verifier, decisions, candidates, writer, nil, nil,
+		)
+
+		c := candidates.ByID(c1)
+		require.NotNil(t, c)
+		assert.Equal(t, "pending", c.Status, "LLM wedge must leave candidate pending")
+		assert.Empty(t, decisions.Dismissals, "no auto-dismiss without context-overflow signal")
+	})
+}
+
+func TestAutoDismissOnContextOverflow(t *testing.T) {
+	t.Parallel()
+	candidates := NewCandidatePool()
+	c1 := candidates.Add(AddInput{WorkerID: 1, Title: "Pending A"})
+	c2 := candidates.Add(AddInput{WorkerID: 1, Title: "Pending B"})
+	decisions := NewDecisionQueue()
+
+	log, path, _ := newCapturedLogger(t)
+	AutoDismissOnContextOverflow(candidates, decisions, log)
+	require.NoError(t, log.Close())
+
+	assert.Equal(t, "dismissed", candidates.ByID(c1).Status)
+	assert.Equal(t, "dismissed", candidates.ByID(c2).Status)
+	require.Len(t, decisions.Dismissals, 2)
+	assert.Contains(t, decisions.Dismissals[0].Reason, "context budget exhausted")
+	assert.Contains(t, mustReadFile(t, path), `"msg":"auto-dismiss on context-budget overflow"`)
 }

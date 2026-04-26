@@ -6,6 +6,13 @@ import (
 	"sync"
 )
 
+// Candidate lifecycle statuses.
+const (
+	CandidateStatusPending   = "pending"
+	CandidateStatusVerified  = "verified"
+	CandidateStatusDismissed = "dismissed"
+)
+
 // FindingCandidate is a worker-reported, unverified issue.
 type FindingCandidate struct {
 	CandidateID      string
@@ -61,7 +68,7 @@ func (p *CandidatePool) Add(in AddInput) string {
 		Summary:          in.Summary,
 		EvidenceNotes:    in.EvidenceNotes,
 		ReproductionHint: in.ReproductionHint,
-		Status:           "pending",
+		Status:           CandidateStatusPending,
 	}
 	p.order = append(p.order, cid)
 	return cid
@@ -77,10 +84,10 @@ func (p *CandidatePool) Mark(id, status string) {
 	if c == nil {
 		return
 	}
-	if c.Status != "pending" {
+	if c.Status != CandidateStatusPending {
 		return
 	}
-	if status != "verified" && status != "dismissed" {
+	if status != CandidateStatusVerified && status != CandidateStatusDismissed {
 		return
 	}
 	c.Status = status
@@ -105,7 +112,7 @@ func (p *CandidatePool) Pending() []FindingCandidate {
 	defer p.mu.Unlock()
 	var out []FindingCandidate
 	for _, id := range p.order {
-		if c := p.byID[id]; c != nil && c.Status == "pending" {
+		if c := p.byID[id]; c != nil && c.Status == CandidateStatusPending {
 			out = append(out, *c)
 		}
 	}

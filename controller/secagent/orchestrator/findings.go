@@ -289,6 +289,26 @@ func (w *FindingWriter) IsDuplicate(filed FindingFiled) bool {
 	return false
 }
 
+// MatchesFiled reports whether (title, endpoint) matches an already-filed
+// finding deterministically: exact title slug, or canonical endpoint equal
+// AND TitlesSimilar. Returns the matched finding's title and path so the
+// caller can cite it. Intended for the worker hot path — no LLM review.
+func (w *FindingWriter) MatchesFiled(title, endpoint string) (matchedTitle, path string, ok bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	titleSlug := Slugify(title)
+	canonEP := CanonicalEndpoint(endpoint)
+	for _, e := range w.index {
+		if titleSlug != "" && titleSlug == e.titleSlug {
+			return e.filed.Title, e.path, true
+		}
+		if canonEP != "" && canonEP == e.endpoint && TitlesSimilar(title, e.filed.Title) {
+			return e.filed.Title, e.path, true
+		}
+	}
+	return "", "", false
+}
+
 // FindSimilarEntries returns previously written findings whose titles pass
 // TitlesSimilar against filed AND whose endpoints are not explicitly
 // different (either side missing, or equal after canonicalization). Exact
@@ -403,11 +423,11 @@ func renderFinding(filed FindingFiled) string {
 		filed.Title,
 		filed.Severity,
 		endpoint,
-		orDefault(filed.Description, "(none)"),
-		orDefault(filed.ReproductionSteps, "(none)"),
-		orDefault(filed.Evidence, "(none)"),
-		orDefault(filed.Impact, "(none)"),
-		orDefault(filed.VerificationNotes, "(none)"),
+		orDefault(filed.Description, noneSentinel),
+		orDefault(filed.ReproductionSteps, noneSentinel),
+		orDefault(filed.Evidence, noneSentinel),
+		orDefault(filed.Impact, noneSentinel),
+		orDefault(filed.VerificationNotes, noneSentinel),
 	)
 }
 
@@ -418,6 +438,67 @@ func indexEntry(filed FindingFiled, path string) findingIndexEntry {
 		endpoint:  CanonicalEndpoint(filed.Endpoint),
 		path:      path,
 	}
+}
+
+// LookupByFilename returns the in-memory FindingFiled snapshot and full
+// path for the finding whose file basename matches name, or ("",false) if
+// nothing matches. Used by the async merge path to fetch the existing
+// finding before reviewer.Merge.
+func (w *FindingWriter) LookupByFilename(name string) (FindingFiled, string, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, e := range w.index {
+		if filepath.Base(e.path) == name {
+			return e.filed, e.path, true
+		}
+	}
+	return FindingFiled{}, "", false
+}
+
+// FindingDigest is a compact, LLM-classifier-friendly summary of an
+// already-filed finding: filename + a few load-bearing fields. Built from
+// the in-memory FindingWriter index — no disk reads.
+type FindingDigest struct {
+	Filename   string
+	Title      string
+	Severity   string
+	Endpoint   string
+	FirstLines string // a few lines of description for context
+}
+
+// findingDigestDescriptionLines caps the description excerpt embedded in
+// each digest. Keeps the classifier prompt bounded as the index grows.
+const findingDigestDescriptionLines = 6
+
+// Digests returns one FindingDigest per finding in the in-memory index.
+// Safe to call concurrently with Write/Replace.
+func (w *FindingWriter) Digests() []FindingDigest {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]FindingDigest, 0, len(w.index))
+	for _, e := range w.index {
+		out = append(out, FindingDigest{
+			Filename:   filepath.Base(e.path),
+			Title:      e.filed.Title,
+			Severity:   e.filed.Severity,
+			Endpoint:   orDefault(e.filed.Endpoint, "N/A"),
+			FirstLines: firstNLines(e.filed.Description, findingDigestDescriptionLines),
+		})
+	}
+	return out
+}
+
+// firstNLines returns the first n lines of s. Short helper kept private
+// because the only caller is Digests().
+func firstNLines(s string, n int) string {
+	if s == "" || n <= 0 {
+		return ""
+	}
+	lines := strings.SplitN(s, "\n", n+1)
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // SummaryForOrchestrator renders a short listing of all filed findings.

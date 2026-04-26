@@ -15,6 +15,8 @@ When you find something suspicious, call ` + "`report_finding_candidate`" + ` im
 
 The orchestrator independently reproduces and files the formal finding; your job is clear, verifiable candidates.
 
+**After you've established a bug**: file the candidate, then **stop investigating that angle**. Do not pivot to a new vector and do not keep gathering evidence on the same one. If you spot adjacent angles or follow-up vectors worth probing, mention them concisely in ` + "`evidence_notes`" + ` so the orchestrator can dispatch them to other workers. The verifier will reproduce; you've done your job — wait for the next directive.
+
 ## Loop semantics
 
 - You often get a short resumption prompt (e.g. *"Continue your current testing plan. Take the next concrete step."*) with no new instruction. Sometimes it is prefixed with a short recap of findings filed this run so you can skip work that's already done — don't re-file those vulnerabilities.

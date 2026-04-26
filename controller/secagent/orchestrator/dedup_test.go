@@ -11,6 +11,67 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestParseCandidateVerdict(t *testing.T) {
+	t.Parallel()
+	digests := []FindingDigest{
+		{Filename: "finding-01-x.md"},
+		{Filename: "finding-02-y.md"},
+	}
+	cases := []struct {
+		name    string
+		raw     string
+		want    CandidateDedupVerdict
+		wantErr bool
+	}{
+		{"unique", `{"action":"unique"}`, CandidateDedupVerdict{Action: "unique"}, false},
+		{
+			"duplicate_with_match",
+			`{"action":"duplicate","matched_filename":"finding-02-y.md","reason":"same vuln"}`,
+			CandidateDedupVerdict{Action: "duplicate", MatchedFilename: "finding-02-y.md", Reason: "same vuln"},
+			false,
+		},
+		{
+			"merge_with_match",
+			`{"action":"merge","matched_filename":"finding-01-x.md","reason":"adds detail"}`,
+			CandidateDedupVerdict{Action: "merge", MatchedFilename: "finding-01-x.md", Reason: "adds detail"},
+			false,
+		},
+		{"duplicate_missing_match", `{"action":"duplicate"}`, CandidateDedupVerdict{}, true},
+		{"unknown_filename", `{"action":"merge","matched_filename":"finding-99-z.md"}`, CandidateDedupVerdict{}, true},
+		{"unknown_action", `{"action":"absorb"}`, CandidateDedupVerdict{}, true},
+		{"malformed_json", `not json`, CandidateDedupVerdict{}, true},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseCandidateVerdict(c.raw, digests)
+			if c.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, c.want, got)
+		})
+	}
+}
+
+func TestCandidateClassifyPromptIncludesDigests(t *testing.T) {
+	t.Parallel()
+	digests := []FindingDigest{
+		{Filename: "finding-01-foo.md", Title: "Foo", Severity: "high", Endpoint: "GET /foo", FirstLines: "First line\nSecond line"},
+		{Filename: "finding-02-bar.md", Title: "Bar", Severity: "low", Endpoint: "POST /bar"},
+	}
+	in := AddInput{Title: "New thing", Severity: "medium", Endpoint: "GET /new", Summary: "summary"}
+	prompt := candidateClassifyPrompt(in, digests)
+	assert.Contains(t, prompt, "finding-01-foo.md")
+	assert.Contains(t, prompt, "Title: New thing")
+	assert.Contains(t, prompt, "First line")
+	assert.Contains(t, prompt, "Second line")
+	assert.Contains(t, prompt, `"action": "unique"`)
+	assert.Contains(t, prompt, `"action": "duplicate"`)
+	assert.Contains(t, prompt, `"action": "merge"`)
+}
+
 // fakeDedupReviewer scripts Classify and Merge for tests.
 type fakeDedupReviewer struct {
 	classifyFn func(existing, incoming FindingFiled) (DedupVerdict, error)
