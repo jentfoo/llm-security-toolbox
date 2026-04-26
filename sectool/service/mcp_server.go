@@ -36,6 +36,7 @@ type mcpServer struct {
 	// workflowMode controls workflow behavior:
 	// ""            - workflow tool required before other tools work
 	// "none"        - no workflow, all tools available immediately
+	// "multi"       - shared-server instructions, all tools available
 	// "explore"     - explore instructions in server description, all tools
 	// "test-report" - test-report instructions, no crawl tools
 	workflowMode        string
@@ -52,10 +53,12 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 	// Add instructions based on workflow mode
 	var instructions string
 	switch workflowMode {
-	case WorkflowModeExplore:
+	case protocol.WorkflowModeExplore:
 		instructions = workflowExploreContent
-	case WorkflowModeTestReport:
+	case protocol.WorkflowModeTestReport:
 		instructions = workflowTestReportContent
+	case protocol.WorkflowModeMulti:
+		instructions = workflowMultiContent
 	}
 	if instructions != "" {
 		if _, ok := svc.httpBackend.(ResponderBackend); ok {
@@ -162,7 +165,7 @@ func (m *mcpServer) Close() error {
 // registerTools registers MCP tools based on workflow mode.
 func (m *mcpServer) registerTools() {
 	switch m.workflowMode {
-	case WorkflowModeNone, WorkflowModeExplore, WorkflowModeCLI: // workflow requirements disabled or pre-set, all tools available
+	case protocol.WorkflowModeNone, protocol.WorkflowModeMulti, protocol.WorkflowModeExplore, protocol.WorkflowModeCLI: // workflow requirements disabled or pre-set, all tools available
 		m.addProxyTools()
 		m.addReplayTools()
 		m.addOastTools()
@@ -172,7 +175,7 @@ func (m *mcpServer) registerTools() {
 		m.addCrawlTools()
 		m.addDiffTools()
 		m.addReflectionTools()
-	case WorkflowModeTestReport:
+	case protocol.WorkflowModeTestReport:
 		m.addProxyTools()
 		m.addReplayTools()
 		m.addOastTools()
@@ -278,15 +281,15 @@ Returns necessary instructions on tool use and user interaction  strategies.`),
 }
 
 func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	task := req.GetString("task", WorkflowModeExplore)
+	task := req.GetString("task", protocol.WorkflowModeExplore)
 
 	var content string
 	switch task {
-	case WorkflowModeExplore:
+	case protocol.WorkflowModeExplore:
 		content = workflowExploreContent
-	case WorkflowModeTestReport:
+	case protocol.WorkflowModeTestReport:
 		content = workflowTestReportContent
-	case WorkflowModeCLI:
+	case protocol.WorkflowModeCLI:
 		m.workflowInitialized.Store(true)
 		return mcp.NewToolResultText("Tools enabled for CLI usage"), nil
 	default:
@@ -328,6 +331,13 @@ const workflowNotesSection = `
 ## Notes
 
 Save notes for interesting discoveries, findings, or results using notes_save. Link notes to the relevant flow IDs for context.`
+
+var workflowMultiContent = `# Shared sectool Server
+
+This MCP server is shared with other agents and users. Expect concurrent requests and interactions outside of your own testing.
+
+Create your own OAST sessions and other state when needed. Avoid deleting or modifying state created by others (proxy rules, responders, sessions, notes) unless explicitly asked.
+`
 
 var workflowExploreContent = `# Security Testing Workflow
 

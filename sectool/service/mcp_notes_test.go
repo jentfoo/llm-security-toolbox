@@ -27,7 +27,7 @@ func setupNotesEnabledServer(t *testing.T) (*Server, *mcpclient.Client, *mockHtt
 
 	srv, err := NewServer(MCPServerFlags{
 		MCPPort:      0,
-		WorkflowMode: WorkflowModeNone,
+		WorkflowMode: protocol.WorkflowModeNone,
 		ConfigPath:   configPath,
 		Notes:        true,
 	}, mockHTTP, mockOast, mockCrawler)

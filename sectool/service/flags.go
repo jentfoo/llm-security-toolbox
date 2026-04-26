@@ -11,14 +11,6 @@ import (
 
 const DefaultMCPPort = 9119
 
-// Workflow mode constants
-const (
-	WorkflowModeNone       = protocol.WorkflowModeNone
-	WorkflowModeExplore    = protocol.WorkflowModeExplore
-	WorkflowModeTestReport = protocol.WorkflowModeTestReport
-	WorkflowModeCLI        = protocol.WorkflowModeCLI // undocumented, for CLI client use only
-)
-
 // MCPServerFlags holds flags for MCP server mode.
 type MCPServerFlags struct {
 	ConfigPath   string
@@ -26,7 +18,7 @@ type MCPServerFlags struct {
 	MCPPort      int
 	ProxyPort    int    // 0 = not set via CLI
 	RequireBurp  bool   // --burp flag: require Burp, error if unavailable
-	WorkflowMode string // "", "none", "explore", "test-report"
+	WorkflowMode string // "", "none", "multi", "explore", "test-report"
 	Notes        bool   // enable notes/findings tools (experimental)
 }
 
@@ -43,7 +35,7 @@ func ParseMCPServerFlags(args []string) (MCPServerFlags, error) {
 	fs.IntVar(&flags.MCPPort, "port", 0, "MCP server port (default: from config or 9119)")
 	fs.IntVar(&flags.ProxyPort, "proxy-port", 0, "built-in proxy port (skips Burp, default: from config or 8080)")
 	fs.BoolVar(&flags.RequireBurp, "burp", false, "require Burp MCP (error if unavailable)")
-	fs.StringVar(&flags.WorkflowMode, "workflow", "", "MCP workflow mode: none, explore, test-report")
+	fs.StringVar(&flags.WorkflowMode, "workflow", "", "MCP workflow mode: none, multi, explore, test-report")
 	fs.BoolVar(&flags.Notes, "notes", false, "enable notes/findings tools (experimental)")
 
 	if err := fs.Parse(args); err != nil {
@@ -52,10 +44,10 @@ func ParseMCPServerFlags(args []string) (MCPServerFlags, error) {
 
 	// Validate workflow mode value
 	switch flags.WorkflowMode {
-	case "", WorkflowModeNone, WorkflowModeExplore, WorkflowModeTestReport:
+	case "", protocol.WorkflowModeNone, protocol.WorkflowModeMulti, protocol.WorkflowModeExplore, protocol.WorkflowModeTestReport:
 		// Valid
 	default:
-		return flags, fmt.Errorf("invalid --workflow value %q: must be none, explore, or test-report", flags.WorkflowMode)
+		return flags, fmt.Errorf("invalid --workflow value %q: must be none, multi, explore, or test-report", flags.WorkflowMode)
 	}
 
 	return flags, nil

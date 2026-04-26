@@ -39,6 +39,12 @@ Set redirect_target to make OAST domain return a redirect with the location head
 }
 
 func (m *mcpServer) oastPollTool() mcp.Tool {
+	incrementalBullet := `- Incremental: use since parameter, accepts event_id or "last"`
+	sinceDesc := "event_id or 'last' (per-session cursor)"
+	if m.workflowMode == protocol.WorkflowModeMulti {
+		incrementalBullet = `- Incremental: pass a previous event_id as since to receive only newer events`
+		sinceDesc = "event_id"
+	}
 	return mcp.NewTool("oast_poll",
 		mcp.WithDescription(`Poll for OAST interaction events: summary (default) or events mode.
 
@@ -50,13 +56,13 @@ Options:
 - Default: long-poll for 30s
 - Custom: set wait (e.g., '60s', max 120s)
 - Immediate: set wait to '0s'
-- Incremental: use since parameter, accepts event_id or "last"
+`+incrementalBullet+`
 - Filter by type: dns, http, smtp, ftp, ldap, smb, responder
 
 Response includes events/aggregates and optional dropped_count.`),
 		mcp.WithString("oast_id", mcp.Required(), mcp.Description("OAST session ID, label, or domain")),
 		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default) or 'events'")),
-		mcp.WithString("since", mcp.Description("event_id or 'last' (per-session cursor)")),
+		mcp.WithString("since", mcp.Description(sinceDesc)),
 		mcp.WithString("type", mcp.Description("Filter by event type: dns, http, smtp, ftp, ldap, smb, responder")),
 		mcp.WithString("wait", mcp.Description("Long-poll duration (default '30s', max 120s, '0s' to disable)")),
 		mcp.WithNumber("limit", mcp.Description("Max results to return")),

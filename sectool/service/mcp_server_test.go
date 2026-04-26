@@ -53,7 +53,7 @@ func setupMockMCPServer(t *testing.T, cfg *config.Config) (*Server, *mcpclient.C
 
 	srv, err := NewServer(MCPServerFlags{
 		MCPPort:      0, // Let OS pick a port
-		WorkflowMode: WorkflowModeNone,
+		WorkflowMode: protocol.WorkflowModeNone,
 		ConfigPath:   configPath,
 	}, mockHTTP, mockOast, mockCrawler)
 	require.NoError(t, err)
@@ -141,6 +141,34 @@ func TestMCP_ListTools(t *testing.T) {
 	for _, expected := range expectedTools {
 		assert.Contains(t, toolNames, expected)
 	}
+}
+
+func TestMCP_MultiWorkflowHidesLastCursor(t *testing.T) {
+	t.Parallel()
+
+	descriptionTexts := func(m *mcpServer) []string {
+		tools := []mcp.Tool{m.proxyPollTool(), m.oastPollTool(), m.crawlPollTool()}
+		texts := make([]string, 0, len(tools)*2)
+		for _, tool := range tools {
+			texts = append(texts, tool.Description)
+			if since, ok := tool.InputSchema.Properties["since"].(map[string]any); ok {
+				if desc, ok := since["description"].(string); ok {
+					texts = append(texts, desc)
+				}
+			}
+		}
+		return texts
+	}
+
+	multi := &mcpServer{workflowMode: protocol.WorkflowModeMulti}
+	for _, text := range descriptionTexts(multi) {
+		assert.NotContains(t, text, "'last'")
+		assert.NotContains(t, text, `"last"`)
+	}
+
+	none := &mcpServer{workflowMode: protocol.WorkflowModeNone}
+	noneTexts := strings.Join(descriptionTexts(none), "\n")
+	assert.Contains(t, noneTexts, "'last'")
 }
 
 // mockHttpBackend implements HttpBackend at the Go interface level for handler tests.

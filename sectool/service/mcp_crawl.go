@@ -193,6 +193,12 @@ func (m *mcpServer) handleCrawlStatus(ctx context.Context, req mcp.CallToolReque
 }
 
 func (m *mcpServer) crawlPollTool() mcp.Tool {
+	incremental := `Incremental (summary/flows): since accepts flow_id or "last" (cursor); use to window summaries to recent traffic. Only flows mode advances the cursor. Limit caps results in all modes; offset is for paging flows only.`
+	sinceDesc := "flow_id or 'last' (cursor)"
+	if m.workflowMode == protocol.WorkflowModeMulti {
+		incremental = `Incremental (summary/flows): pass a previous flow_id as since to window results to flows after it. Limit caps results in all modes; offset is for paging flows only.`
+		sinceDesc = "flow_id"
+	}
 	return mcp.NewTool("crawl_poll",
 		mcp.WithDescription(`Query crawl session results: summary (default), flows, forms, or errors.
 
@@ -204,7 +210,7 @@ Output modes:
 
 Filters apply to summary and flows modes: host/path/exclude_host/exclude_path use glob (*, ?). method/status are comma-separated (status supports ranges like 2XX).
 Search: search_header/search_body use regex; literal if invalid.
-Incremental (summary/flows): since accepts flow_id or "last" (cursor); use to window summaries to recent traffic. Only flows mode advances the cursor. Limit caps results in all modes; offset is for paging flows only.`),
+`+incremental),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID or label")),
 		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default), 'flows', 'forms', or 'errors'")),
 		mcp.WithString("host", mcp.Description("Filter by host glob. *.example.com = subdomains only; *example.com = domain + subdomains")),
@@ -215,7 +221,7 @@ Incremental (summary/flows): since accepts flow_id or "last" (cursor); use to wi
 		mcp.WithString("search_body", mcp.Description("Search request/response body by regex (RE2, use (?i) for case-insensitive); literal if invalid")),
 		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob pattern")),
 		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob pattern")),
-		mcp.WithString("since", mcp.Description("flow_id or 'last' (cursor)")),
+		mcp.WithString("since", mcp.Description(sinceDesc)),
 		mcp.WithNumber("limit", mcp.Description("Max results to return (default: 100 for flows/forms/errors)")),
 		mcp.WithNumber("offset", mcp.Description("Skip first N results for pagination (flows mode)")),
 	)

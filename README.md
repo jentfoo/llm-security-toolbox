@@ -78,6 +78,7 @@ sectool mcp                        # Default: agent selects task type via workfl
 sectool mcp --workflow explore     # Pre-set exploration mode
 sectool mcp --workflow test-report # Pre-set validation mode
 sectool mcp --workflow none        # No workflow instructions
+sectool mcp --workflow multi       # Multiple users/agents share the server
 ```
 
 | Mode | Description |
@@ -86,6 +87,7 @@ sectool mcp --workflow none        # No workflow instructions
 | `explore` | Exploratory security testing; all tools available |
 | `test-report` | Validating a specific vulnerability report; crawl tools excluded |
 | `none` | No workflow instructions, all tools available immediately |
+| `multi` | For when multiple users or agents share the server; hides features where one agent may confuse another |
 
 Workflow instructions guide agents toward collaborative testing rather than trying to do everything autonomously or stepping you through a process without adding value. If you have ideas for improving agent collaboration, [open an issue](https://github.com/go-appsec/toolbox/issues).
 

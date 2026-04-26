@@ -29,6 +29,7 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/config"
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
+	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service"
 	servicemcp "github.com/go-appsec/toolbox/sectool/service/mcp"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
@@ -220,7 +221,7 @@ func startMCPServerAndClient(t *testing.T, backendType httpBackendType, httpBack
 
 	flags := service.MCPServerFlags{
 		MCPPort:      findAvailablePort(t),
-		WorkflowMode: service.WorkflowModeNone,
+		WorkflowMode: protocol.WorkflowModeNone,
 		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
 	}
 	if backendType == backendBurp {

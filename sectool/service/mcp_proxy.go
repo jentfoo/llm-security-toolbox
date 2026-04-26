@@ -24,6 +24,12 @@ import (
 )
 
 func (m *mcpServer) proxyPollTool() mcp.Tool {
+	incremental := `Incremental: since accepts flow_id or "last" (cursor); use to window summaries to recent traffic. Only flows mode advances the cursor. Limit caps results in both modes; offset is for paging flows only.`
+	sinceDesc := "Entries after flow_id, or 'last' (cursor)"
+	if m.workflowMode == protocol.WorkflowModeMulti {
+		incremental = `Incremental: pass a previous flow_id as since to window results to flows after it. Limit caps results in both modes; offset is for paging flows only.`
+		sinceDesc = "Entries after this flow_id"
+	}
 	return mcp.NewTool("proxy_poll",
 		mcp.WithDescription(`Query proxy history: summary (default) or flows mode.
 
@@ -34,7 +40,7 @@ Output modes:
 Sources: Results include both proxy-captured traffic (source=proxy) and replay-sent traffic (source=replay) in chronological order.
 Filters: host/path/exclude_host/exclude_path use glob (*, ?). method/status are comma-separated (status supports ranges like 2XX).
 Search: search_header/search_body use regex; literal if invalid.
-Incremental: since accepts flow_id or "last" (cursor); use to window summaries to recent traffic. Only flows mode advances the cursor. Limit caps results in both modes; offset is for paging flows only.`),
+`+incremental),
 		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default) or 'flows'")),
 		mcp.WithString("source", mcp.Description("Filter by source: 'proxy', 'replay', or empty for both")),
 		mcp.WithString("host", mcp.Description("Filter by host glob. *.example.com = subdomains only; *example.com = domain + subdomains")),
@@ -43,7 +49,7 @@ Incremental: since accepts flow_id or "last" (cursor); use to window summaries t
 		mcp.WithString("status", mcp.Description("Filter by status code(s) or ranges (e.g., '200,302' or '2XX,4XX')")),
 		mcp.WithString("search_header", mcp.Description("Search request/response headers by regex (RE2); literal if invalid")),
 		mcp.WithString("search_body", mcp.Description("Search request/response body by regex (RE2, use (?i) for case-insensitive); literal if invalid")),
-		mcp.WithString("since", mcp.Description("Entries after flow_id, or 'last' (cursor)")),
+		mcp.WithString("since", mcp.Description(sinceDesc)),
 		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob pattern")),
 		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob pattern")),
 		mcp.WithNumber("limit", mcp.Description("Max results to return")),
