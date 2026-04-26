@@ -93,7 +93,6 @@ bin/secagent \
 |------|---------|-------------|
 | `--proxy-port` | `8181` | Port for sectool's native proxy |
 | `--mcp-port` | `9119` | Port for sectool's MCP server (auto-attaches when one is already running) |
-| `--workflow` | `explore` | Sectool workflow mode |
 
 **Loop**
 
@@ -132,7 +131,7 @@ secagent probes `--mcp-port` at startup. If a sectool MCP server is already serv
 
 ```bash
 # Start the MCP server separately
-sectool mcp --proxy-port 8181 --workflow=explore
+sectool mcp --proxy-port 8181
 
 # In another terminal, run secagent against it — no special flag required
 bin/secagent \

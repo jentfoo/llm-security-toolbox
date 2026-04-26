@@ -443,7 +443,7 @@ func spawnReconWorker(
 // Run starts sectool, connects agents, and runs the iteration loop until
 // max-iterations or a director `done`.
 func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
-	srv, err := StartSectool(cfg.ProxyPort, cfg.MCPPort, cfg.Workflow, log)
+	srv, err := StartSectool(cfg.ProxyPort, cfg.MCPPort, log)
 	if err != nil {
 		return fmt.Errorf("sectool start: %w", err)
 	}
