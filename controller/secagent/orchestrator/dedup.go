@@ -9,6 +9,19 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
+// Dedup verdict actions. Pair-wise (DedupVerdict) uses unique / duplicate /
+// partial; multi-existing (CandidateDedupVerdict) uses unique / duplicate /
+// merge. The "merge" action is only emitted by the candidate classifier
+// because the per-pair classifier was originally designed to compare two
+// finished findings, not a candidate-to-finding match where the candidate
+// is naturally less complete.
+const (
+	dedupActionUnique    = "unique"
+	dedupActionDuplicate = "duplicate"
+	dedupActionPartial   = "partial"
+	dedupActionMerge     = "merge"
+)
+
 // DedupVerdict classifies the relationship between two candidate-duplicate
 // findings. MoreComplete is populated for "duplicate" and "partial" to tell
 // the writer which side to preserve; it's ignored for "unique".
@@ -47,6 +60,40 @@ func (r *OpenAIDedupReviewer) Classify(ctx context.Context, existing, incoming F
 	return parseVerdict(raw)
 }
 
+// CandidateDedupVerdict is the multi-existing classifier's response: the
+// disposition for the incoming candidate and (for non-unique outcomes) the
+// filename of the existing finding that matched.
+type CandidateDedupVerdict struct {
+	Action          string // "unique" | "duplicate" | "merge"
+	MatchedFilename string // populated for "duplicate" and "merge"
+	Reason          string // optional one-liner from the classifier
+}
+
+// CandidateDedupReviewer classifies a worker-reported candidate against the
+// set of existing finding digests. Returns a single verdict identifying
+// which existing finding (if any) covers it. Implemented by
+// OpenAIDedupReviewer; tests can substitute a fake.
+type CandidateDedupReviewer interface {
+	ClassifyCandidate(ctx context.Context, incoming AddInput, digests []FindingDigest) (CandidateDedupVerdict, error)
+}
+
+// ClassifyCandidate runs a single LLM call comparing one incoming worker
+// candidate against every existing finding digest. Cheaper than the
+// pair-wise per-similar Classify path because it folds the whole comparison
+// into one prompt; suited to the worker hot path where latency on every
+// report_finding_candidate matters.
+func (r *OpenAIDedupReviewer) ClassifyCandidate(ctx context.Context, incoming AddInput, digests []FindingDigest) (CandidateDedupVerdict, error) {
+	if len(digests) == 0 {
+		return CandidateDedupVerdict{Action: dedupActionUnique}, nil
+	}
+	prompt := candidateClassifyPrompt(incoming, digests)
+	raw, err := r.oneShot(ctx, dedupSystemPrompt, prompt)
+	if err != nil {
+		return CandidateDedupVerdict{}, fmt.Errorf("dedup classify candidate: %w", err)
+	}
+	return parseCandidateVerdict(raw, digests)
+}
+
 // Merge asks the model to coalesce primary and secondary into one finding.
 // Primary is the more-complete side; its structure leads and secondary's
 // unique details get folded in.
@@ -59,23 +106,47 @@ func (r *OpenAIDedupReviewer) Merge(ctx context.Context, primary, secondary Find
 	return parseMerge(raw, primary)
 }
 
+// oneShot runs a single classify/merge completion with no ReasoningEffort
+// set. Dedup verdicts and merges benefit from full reasoning and emit JSON
+// that extractJSONObject already tolerates fenced/wrapped output for, so
+// capping reasoning here would degrade quality for marginal token savings.
+// MaxTokens defaults high so a thinking model has room to reason before
+// emitting the verdict JSON.
 func (r *OpenAIDedupReviewer) oneShot(ctx context.Context, system, user string) (string, error) {
-	client, err := r.Pool.Acquire(ctx)
+	maxTokens := r.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 20000
+	}
+	return runOneShot(ctx, r.Pool, r.Model, system, user, maxTokens, "")
+}
+
+// runOneShot executes a single non-streaming chat completion against a
+// pooled client and returns the trimmed response content. Shared by
+// OpenAIDedupReviewer and HistoryCompressor — both perform stateless
+// system+user → text completions with no tool dispatch and no agent state.
+//
+// reasoningEffort is forwarded as ChatRequest.ReasoningEffort; pass "" to
+// inherit the model's default and let the backend ignore the field.
+func runOneShot(
+	ctx context.Context,
+	pool *agent.ClientPool,
+	model, system, user string,
+	maxTokens int,
+	reasoningEffort string,
+) (string, error) {
+	client, err := pool.Acquire(ctx)
 	if err != nil {
 		return "", err
 	}
-	defer r.Pool.Release(client)
-	maxTokens := r.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = 2048
-	}
+	defer pool.Release(client)
 	resp, err := client.CreateChatCompletion(ctx, agent.ChatRequest{
-		Model: r.Model,
+		Model: model,
 		Messages: []agent.ChatMessage{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		MaxTokens: maxTokens,
+		MaxTokens:       maxTokens,
+		ReasoningEffort: reasoningEffort,
 	})
 	if err != nil {
 		return "", err
@@ -141,15 +212,95 @@ Return only the JSON object. No explanation.
 	return b.String()
 }
 
+// candidateClassifyPrompt renders the multi-existing classify request.
+// Existing findings are presented as compact digests; the model picks one
+// of three actions and (for duplicate/merge) names the existing filename.
+func candidateClassifyPrompt(incoming AddInput, digests []FindingDigest) string {
+	var b strings.Builder
+	b.WriteString("A worker reported a candidate security finding. Decide whether it is genuinely new or already covered by an existing finding.\n\n")
+	b.WriteString("## Existing findings\n\n")
+	for i, d := range digests {
+		fmt.Fprintf(&b, "[%d] file: %s\n", i+1, d.Filename)
+		fmt.Fprintf(&b, "    title: %s\n", d.Title)
+		fmt.Fprintf(&b, "    severity: %s\n", d.Severity)
+		fmt.Fprintf(&b, "    endpoint: %s\n", d.Endpoint)
+		if d.FirstLines != "" {
+			fmt.Fprintf(&b, "    excerpt:\n      %s\n", strings.ReplaceAll(d.FirstLines, "\n", "\n      "))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("## New candidate\n\n")
+	fmt.Fprintf(&b, "Title: %s\n", incoming.Title)
+	fmt.Fprintf(&b, "Severity: %s\n", incoming.Severity)
+	fmt.Fprintf(&b, "Endpoint: %s\n", incoming.Endpoint)
+	fmt.Fprintf(&b, "Summary: %s\n", orDefault(incoming.Summary, noneSentinel))
+	fmt.Fprintf(&b, "Evidence notes: %s\n", orDefault(incoming.EvidenceNotes, noneSentinel))
+	fmt.Fprintf(&b, "Reproduction hint: %s\n", orDefault(incoming.ReproductionHint, noneSentinel))
+	b.WriteString(`
+## Response
+
+Respond with exactly one JSON object:
+
+  {"action": "unique"}
+  {"action": "duplicate", "matched_filename": "finding-NN-...md", "reason": "short reason"}
+  {"action": "merge", "matched_filename": "finding-NN-...md", "reason": "short reason"}
+
+Meaning:
+- "unique": this candidate describes a vulnerability not covered by any existing finding.
+- "duplicate": an existing finding already covers this candidate fully — nothing new to add.
+- "merge": same vulnerability as an existing finding, but the candidate has unique evidence or details worth folding in.
+
+Return only the JSON object. No prose, no markdown fences.
+`)
+	return b.String()
+}
+
+func parseCandidateVerdict(raw string, digests []FindingDigest) (CandidateDedupVerdict, error) {
+	body := extractJSONObject(raw)
+	var v struct {
+		Action          string `json:"action"`
+		MatchedFilename string `json:"matched_filename"`
+		Reason          string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(body), &v); err != nil {
+		return CandidateDedupVerdict{}, fmt.Errorf("parse candidate verdict: %w (raw: %q)", err, raw)
+	}
+	switch v.Action {
+	case dedupActionUnique:
+		return CandidateDedupVerdict{Action: dedupActionUnique}, nil
+	case dedupActionDuplicate, dedupActionMerge:
+		if v.MatchedFilename == "" {
+			return CandidateDedupVerdict{}, fmt.Errorf("verdict %q missing matched_filename (raw: %q)", v.Action, raw)
+		}
+		known := false
+		for _, d := range digests {
+			if d.Filename == v.MatchedFilename {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return CandidateDedupVerdict{}, fmt.Errorf("verdict references unknown filename %q (raw: %q)", v.MatchedFilename, raw)
+		}
+		return CandidateDedupVerdict{
+			Action:          v.Action,
+			MatchedFilename: v.MatchedFilename,
+			Reason:          v.Reason,
+		}, nil
+	default:
+		return CandidateDedupVerdict{}, fmt.Errorf("unknown action %q (raw: %q)", v.Action, raw)
+	}
+}
+
 func writeFindingBlock(b *strings.Builder, f FindingFiled) {
 	fmt.Fprintf(b, "Title: %s\n", f.Title)
 	fmt.Fprintf(b, "Severity: %s\n", f.Severity)
 	fmt.Fprintf(b, "Endpoint: %s\n", f.Endpoint)
-	fmt.Fprintf(b, "\nDescription:\n%s\n", orDefault(f.Description, "(none)"))
-	fmt.Fprintf(b, "\nReproduction:\n%s\n", orDefault(f.ReproductionSteps, "(none)"))
-	fmt.Fprintf(b, "\nEvidence:\n%s\n", orDefault(f.Evidence, "(none)"))
-	fmt.Fprintf(b, "\nImpact:\n%s\n", orDefault(f.Impact, "(none)"))
-	fmt.Fprintf(b, "\nVerification:\n%s\n", orDefault(f.VerificationNotes, "(none)"))
+	fmt.Fprintf(b, "\nDescription:\n%s\n", orDefault(f.Description, noneSentinel))
+	fmt.Fprintf(b, "\nReproduction:\n%s\n", orDefault(f.ReproductionSteps, noneSentinel))
+	fmt.Fprintf(b, "\nEvidence:\n%s\n", orDefault(f.Evidence, noneSentinel))
+	fmt.Fprintf(b, "\nImpact:\n%s\n", orDefault(f.Impact, noneSentinel))
+	fmt.Fprintf(b, "\nVerification:\n%s\n", orDefault(f.VerificationNotes, noneSentinel))
 }
 
 func parseVerdict(raw string) (DedupVerdict, error) {
@@ -162,9 +313,9 @@ func parseVerdict(raw string) (DedupVerdict, error) {
 		return DedupVerdict{}, fmt.Errorf("parse verdict: %w (raw: %q)", err, raw)
 	}
 	switch v.Action {
-	case "unique":
-		return DedupVerdict{Action: "unique"}, nil
-	case "duplicate", "partial":
+	case dedupActionUnique:
+		return DedupVerdict{Action: dedupActionUnique}, nil
+	case dedupActionDuplicate, dedupActionPartial:
 		if v.MoreComplete != "existing" && v.MoreComplete != "new" {
 			return DedupVerdict{}, fmt.Errorf("verdict %q missing more_complete in/out (raw: %q)", v.Action, raw)
 		}
@@ -298,7 +449,7 @@ func ApplyDedupVerdict(
 	log *Logger,
 ) (wrote bool, resolvedPath string, err error) {
 	switch verdict.Action {
-	case "unique":
+	case dedupActionUnique:
 		path, werr := writer.Write(incoming)
 		if werr != nil {
 			return false, "", werr
@@ -308,7 +459,7 @@ func ApplyDedupVerdict(
 		}
 		return true, path, nil
 
-	case "duplicate":
+	case dedupActionDuplicate:
 		if verdict.MoreComplete == "new" {
 			// replace existing file's content with incoming, keep its sequence
 			newPath, rerr := writer.Replace(similar.Path, incoming)
@@ -330,7 +481,7 @@ func ApplyDedupVerdict(
 		}
 		return false, similar.Path, nil
 
-	case "partial":
+	case dedupActionPartial:
 		primary, secondary := similar.Filed, incoming
 		if verdict.MoreComplete == "new" {
 			primary, secondary = incoming, similar.Filed

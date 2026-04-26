@@ -88,12 +88,27 @@ type OpenAIChatClient struct {
 
 // NewOpenAIChatClient builds a client pointed at baseURL with the given apiKey.
 // Pass an empty apiKey for most local endpoints.
+//
+// Per-request deadlines come from the caller's context (TurnTimeout via
+// DrainBounded). A separate http.Client.Timeout used to live here, hardcoded
+// to 25m — but TurnTimeout is typically 15m, so the HTTP deadline was the
+// looser of the two and added nothing useful. For an outer safety net
+// covering wedged keep-alives with no cancellation, use
+// NewOpenAIChatClientWithTimeout.
 func NewOpenAIChatClient(baseURL, apiKey string) *OpenAIChatClient {
+	return NewOpenAIChatClientWithTimeout(baseURL, apiKey, 0)
+}
+
+// NewOpenAIChatClientWithTimeout is like NewOpenAIChatClient but installs an
+// http.Client.Timeout. Callers should pass a value strictly greater than
+// TurnTimeout so context cancellation, not the HTTP deadline, is the normal
+// termination path. 0 disables the HTTP timeout entirely.
+func NewOpenAIChatClientWithTimeout(baseURL, apiKey string, timeout time.Duration) *OpenAIChatClient {
 	cfg := openai.DefaultConfig(apiKey)
 	if baseURL != "" {
 		cfg.BaseURL = baseURL
 	}
-	cfg.HTTPClient = &http.Client{Timeout: 25 * time.Minute}
+	cfg.HTTPClient = &http.Client{Timeout: timeout}
 	return &OpenAIChatClient{client: openai.NewClientWithConfig(cfg)}
 }
 

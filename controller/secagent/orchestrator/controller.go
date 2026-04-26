@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-analyze/bulk"
@@ -22,22 +24,20 @@ import (
 // tests can inject FakeAgent.
 type AgentFactory interface {
 	NewWorker(id, numWorkers int) (agent.Agent, error)
-	NewVerifier() (agent.Agent, error)
+	NewVerifier(onContextOverflow func()) (agent.Agent, error)
 	NewDirector() (agent.Agent, error)
 	Close() error
 }
 
-// OpenAIFactory builds OpenAIAgent instances against the configured pools.
+// OpenAIFactory builds OpenAIAgent instances against the shared pool.
 type OpenAIFactory struct {
-	Cfg        *config.Config
-	WorkerPool *agent.ClientPool
-	OrchPool   *agent.ClientPool
-	Malformed  *MalformedCounter
-	Log        *Logger
-	// WorkerReasoning / OrchReasoning hold the reasoning handlers detected
-	// at startup for their respective models. Nil falls back to inline.
-	WorkerReasoning agent.ReasoningHandler
-	OrchReasoning   agent.ReasoningHandler
+	Cfg       *config.Config
+	Pool      *agent.ClientPool
+	Malformed *MalformedCounter
+	Log       *Logger
+	// Reasoning is the reasoning handler detected at startup for cfg.Model.
+	// Nil falls back to inline.
+	Reasoning agent.ReasoningHandler
 }
 
 // slowToolThreshold is the elapsed time at which [tool] done is mirrored
@@ -123,15 +123,36 @@ func (f *OpenAIFactory) toolCallbacks(role string) (func(string, json.RawMessage
 	return start, end
 }
 
+// summarizeErrorCallback returns a hook that logs failed boundary-summarize
+// attempts. The agent fails open regardless; this just records the failure
+// so operators can see it in the JSON log.
+func (f *OpenAIFactory) summarizeErrorCallback(role string) func(error) {
+	if f.Log == nil {
+		return nil
+	}
+	return func(err error) {
+		f.Log.Log("agent", "summarize-error", map[string]any{
+			"role": role,
+			"err":  err.Error(),
+		})
+	}
+}
+
 // buildAgent assembles an OpenAIAgent for a role. Workers and verifiers set
 // a FlowIDExtractor so their turn summaries can link reported flow IDs;
 // directors don't dispatch sectool tools, so their extractor stays nil.
+//
+// onContextOverflow, when non-nil, fires once per chat-completion call that
+// the model rejected as over-context. The verifier wires this to a captured
+// bool so the controller can auto-dismiss in-flight candidates after a
+// freshly composed phase still overflows.
 func (f *OpenAIFactory) buildAgent(
 	role, model, systemPrompt string,
 	pool *agent.ClientPool,
 	maxContext int,
 	reasoning agent.ReasoningHandler,
 	setFlowExtractor bool,
+	onContextOverflow func(),
 ) agent.Agent {
 	onReqStart, onReqEnd := f.requestCallbacks(role)
 	onToolStart, onToolEnd := f.toolCallbacks(role)
@@ -146,17 +167,19 @@ func (f *OpenAIFactory) buildAgent(
 			KeepTurns:              f.Cfg.KeepTurns,
 			HardTruncateOnOverflow: true,
 		},
-		TurnTimeout:      f.Cfg.TurnTimeout,
-		PerToolTimeout:   f.Cfg.PerToolTimeout,
-		MaxParallelTools: f.Cfg.MaxParallelTools,
-		MaxTurnsPerAgent: f.Cfg.MaxTurnsPerAgent,
-		KeepThinkTurns:   f.Cfg.EffectiveKeepThinkTurns(maxContext),
-		Reasoning:        reasoning,
-		OnMalformedCall:  f.malformedCallback(model),
-		OnRequestStart:   onReqStart,
-		OnRequestEnd:     onReqEnd,
-		OnToolStart:      onToolStart,
-		OnToolEnd:        onToolEnd,
+		TurnTimeout:       f.Cfg.TurnTimeout,
+		PerToolTimeout:    f.Cfg.PerToolTimeout,
+		MaxParallelTools:  f.Cfg.MaxParallelTools,
+		MaxTurnsPerAgent:  f.Cfg.MaxTurnsPerAgent,
+		KeepThinkTurns:    f.Cfg.EffectiveKeepThinkTurns(maxContext),
+		Reasoning:         reasoning,
+		OnMalformedCall:   f.malformedCallback(model),
+		OnRequestStart:    onReqStart,
+		OnRequestEnd:      onReqEnd,
+		OnToolStart:       onToolStart,
+		OnToolEnd:         onToolEnd,
+		OnContextOverflow: onContextOverflow,
+		OnSummarizeError:  f.summarizeErrorCallback(role),
 	}
 	if setFlowExtractor {
 		cfg.FlowIDExtractor = ExtractFlowIDs
@@ -164,29 +187,46 @@ func (f *OpenAIFactory) buildAgent(
 	return agent.NewOpenAIAgent(cfg)
 }
 
+// withMission appends the run's mission (cfg.Prompt) to a role's system
+// prompt as a non-negotiable anchor. The system prompt is preserved across
+// every ReplaceHistory and every compaction pass, so anchoring the mission
+// here means it survives every context-management operation. Empty mission
+// renders nothing — keeps tests and bare-bones invocations clean.
+func (f *OpenAIFactory) withMission(systemPrompt string) string {
+	mission := strings.TrimSpace(f.Cfg.Prompt)
+	if mission == "" {
+		return systemPrompt
+	}
+	return systemPrompt + "\n\n## Mission (original assignment for this run — do not lose sight of this)\n\n" + mission
+}
+
 // NewWorker builds a worker agent with the given role-sizing.
 func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 	return f.buildAgent(
 		fmt.Sprintf("worker-%d", id),
-		f.Cfg.WorkerModel,
-		prompts.BuildWorkerSystemPrompt(id, numWorkers),
-		f.WorkerPool,
-		f.Cfg.WorkerMaxContext,
-		f.WorkerReasoning,
+		f.Cfg.Model,
+		f.withMission(prompts.BuildWorkerSystemPrompt(id, numWorkers)),
+		f.Pool,
+		f.Cfg.MaxContext,
+		f.Reasoning,
 		true,
+		nil,
 	), nil
 }
 
-// NewVerifier builds a verifier agent.
-func (f *OpenAIFactory) NewVerifier() (agent.Agent, error) {
+// NewVerifier builds a verifier agent. onContextOverflow is wired through
+// to OpenAIAgentConfig so the controller can detect a budget-stuck verifier
+// after a fresh compose and auto-dismiss its in-flight candidates.
+func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, error) {
 	return f.buildAgent(
 		"verifier",
-		f.Cfg.OrchestratorModel,
-		prompts.BuildVerifierSystemPrompt(f.Cfg.MaxWorkers),
-		f.OrchPool,
-		f.Cfg.OrchestratorMaxContext,
-		f.OrchReasoning,
+		f.Cfg.Model,
+		f.withMission(prompts.BuildVerifierSystemPrompt(f.Cfg.MaxWorkers)),
+		f.Pool,
+		f.Cfg.MaxContext,
+		f.Reasoning,
 		true,
+		onContextOverflow,
 	), nil
 }
 
@@ -194,12 +234,13 @@ func (f *OpenAIFactory) NewVerifier() (agent.Agent, error) {
 func (f *OpenAIFactory) NewDirector() (agent.Agent, error) {
 	return f.buildAgent(
 		"director",
-		f.Cfg.OrchestratorModel,
-		prompts.BuildDirectorSystemPrompt(f.Cfg.MaxWorkers),
-		f.OrchPool,
-		f.Cfg.OrchestratorMaxContext,
-		f.OrchReasoning,
+		f.Cfg.Model,
+		f.withMission(prompts.BuildDirectorSystemPrompt(f.Cfg.MaxWorkers)),
+		f.Pool,
+		f.Cfg.MaxContext,
+		f.Reasoning,
 		false,
+		nil,
 	), nil
 }
 
@@ -207,14 +248,18 @@ func (f *OpenAIFactory) NewDirector() (agent.Agent, error) {
 func (f *OpenAIFactory) Close() error { return nil }
 
 // buildClientPool constructs n distinct ChatClient instances against baseURL
-// and wraps them in a bounded-concurrency ClientPool.
-func buildClientPool(baseURL, apiKey string, n int) *agent.ClientPool {
+// and wraps them in a bounded-concurrency ClientPool. httpTimeout is a
+// belt-and-suspenders outer bound for wedged keep-alives; 0 disables it
+// (context deadlines still apply per call). Pass TurnTimeout + a small
+// headroom so context cancellation, not the HTTP deadline, is the normal
+// termination path.
+func buildClientPool(baseURL, apiKey string, n int, httpTimeout time.Duration) *agent.ClientPool {
 	if n < 1 {
 		n = 1
 	}
 	clients := make([]agent.ChatClient, 0, n)
 	for i := 0; i < n; i++ {
-		clients = append(clients, agent.NewOpenAIChatClient(baseURL, apiKey))
+		clients = append(clients, agent.NewOpenAIChatClientWithTimeout(baseURL, apiKey, httpTimeout))
 	}
 	return agent.NewClientPoolWithClients(clients)
 }
@@ -267,11 +312,20 @@ type workerSpawnFunc func(ctx context.Context, id, numWorkers int, assignment st
 // newWorkerSpawner returns a workerSpawnFunc that provisions workers
 // against a live MCP endpoint. Each call opens a fresh mcp.Client so each
 // worker has its own transport state per spec §6.
+//
+// Workers do NOT install an OnSummarizeBoundary callback — the per-iter
+// install in installChronicle already produces a fresh summary from the
+// canonical raw chronicle, so any in-iter boundary summarize would be
+// summary-of-summary. In-iter context pressure is bounded by the iter's
+// tool calls; the existing Compact passes handle that.
 func newWorkerSpawner(
 	mcpURL string,
 	toolResultMaxBytes int,
 	factory AgentFactory,
 	candidates *CandidatePool,
+	writer *FindingWriter,
+	candidateDedup CandidateDedupReviewer,
+	merger MergeSubmitter,
 	autonomousBudget int,
 ) workerSpawnFunc {
 	return func(ctx context.Context, id, numWorkers int, assignment string) (*WorkerState, error) {
@@ -289,10 +343,9 @@ func newWorkerSpawner(
 			_ = m.Close()
 			return nil, fmt.Errorf("new worker %d: %w", id, err)
 		}
-		tools := append(slices.Clone(defs), WorkerToolDefs(candidates, id)...)
+		tools := append(slices.Clone(defs), WorkerToolDefs(candidates, writer, id, candidateDedup, merger)...)
 		a.SetTools(tools)
-		a.Query(assignment)
-		return &WorkerState{
+		ws := &WorkerState{
 			ID:               id,
 			Agent:            a,
 			MCP:              m,
@@ -300,7 +353,8 @@ func newWorkerSpawner(
 			Assignment:       assignment,
 			LastInstruction:  assignment,
 			AutonomousBudget: autonomousBudget,
-		}, nil
+		}
+		return ws, nil
 	}
 }
 
@@ -331,81 +385,106 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 
 	if log != nil {
 		log.Log("server", "models", map[string]any{
-			"worker":       cfg.WorkerModel,
-			"orchestrator": cfg.OrchestratorModel,
-			"summary":      cfg.EffectiveSummaryModel(),
+			"model":     cfg.Model,
+			"log_model": cfg.LogModel,
 		})
 	}
 
-	workerPool := buildClientPool(cfg.EffectiveWorkerBaseURL(), cfg.APIKey, cfg.OpenAIPoolSize)
-	orchPool := workerPool
-	if cfg.OrchestratorPool > 0 ||
-		(cfg.OrchestratorBaseURL != "" && cfg.OrchestratorBaseURL != cfg.EffectiveWorkerBaseURL()) {
-		sz := cfg.OrchestratorPool
-		if sz <= 0 {
-			sz = cfg.OpenAIPoolSize
-		}
-		orchPool = buildClientPool(cfg.EffectiveOrchestratorBaseURL(), cfg.APIKey, sz)
-	}
-	// Build the summary pool alongside worker/orch so all three reasoning-
-	// format probes can run in parallel below, rather than waiting until
-	// narrator construction time to start the third probe.
-	summaryPool := orchPool
-	if cfg.EffectiveSummaryBaseURL() != cfg.EffectiveOrchestratorBaseURL() {
-		summaryPool = buildClientPool(cfg.EffectiveSummaryBaseURL(), cfg.APIKey, 1)
-	}
-
-	// Probe each unique (baseURL, model) in parallel. Reasoning-format
-	// detection on qwen3-class models takes ~30s per probe; sequential
-	// probes add up to ~60-90s of startup latency. errgroup + the shared
-	// cache dedups identical pairs (so if orchestrator model == worker
-	// model, the second probe is a cache hit rather than a duplicate call).
-	formatCache := agent.NewReasoningFormatCache()
-	var (
-		workerFmt  agent.ReasoningFormat
-		orchFmt    agent.ReasoningFormat
-		summaryFmt agent.ReasoningFormat
-	)
-	probeGroup, probeCtx := errgroup.WithContext(ctx)
-	probeGroup.Go(func() error {
-		workerFmt = resolveFormat(probeCtx, formatCache, workerPool, "worker",
-			cfg.EffectiveWorkerBaseURL(), cfg.WorkerModel, log)
-		return nil
-	})
-	probeGroup.Go(func() error {
-		orchFmt = resolveFormat(probeCtx, formatCache, orchPool, "orchestrator",
-			cfg.EffectiveOrchestratorBaseURL(), cfg.OrchestratorModel, log)
-		return nil
-	})
-	probeGroup.Go(func() error {
-		summaryFmt = resolveFormat(probeCtx, formatCache, summaryPool, "summary",
-			cfg.EffectiveSummaryBaseURL(), cfg.EffectiveSummaryModel(), log)
-		return nil
-	})
-	_ = probeGroup.Wait()
-	workerReasoning := agent.NewReasoningHandler(workerFmt)
-	orchReasoning := agent.NewReasoningHandler(orchFmt)
-	summaryReasoning := agent.NewReasoningHandler(summaryFmt)
+	// HTTP timeout is TurnTimeout + 2m headroom so context cancellation is
+	// the normal termination path — the HTTP deadline only catches wedged
+	// keep-alives that survive context cancellation.
+	httpTimeout := cfg.TurnTimeout + 2*time.Minute
+	pool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.AgentPoolSize, httpTimeout)
+	mainReasoning, logReasoning := probeReasoningHandlers(ctx, cfg, pool, log)
 
 	malformed := NewMalformedCounter(log)
 	defer malformed.Flush()
 	factory := &OpenAIFactory{
-		Cfg: cfg, WorkerPool: workerPool, OrchPool: orchPool,
+		Cfg: cfg, Pool: pool,
 		Malformed: malformed, Log: log,
-		WorkerReasoning: workerReasoning,
-		OrchReasoning:   orchReasoning,
+		Reasoning: mainReasoning,
 	}
 
 	candidates := NewCandidatePool()
 	decisions := NewDecisionQueue()
 	writer := NewFindingWriter(cfg.FindingsDir)
 	dedupReviewer := &OpenAIDedupReviewer{
-		Pool:  orchPool,
-		Model: cfg.OrchestratorModel,
+		Pool:  pool,
+		Model: cfg.Model,
 		Log:   log,
 	}
+	// candidateDedup runs at the worker hot path: every report_finding_candidate
+	// classifies the incoming candidate against existing finding digests via
+	// the log model. Lighter than the verifier-side pair-wise reviewer above
+	// and shares the same pool — different model identifier per request.
+	candidateDedup := &OpenAIDedupReviewer{
+		Pool:  pool,
+		Model: cfg.LogModel,
+		Log:   log,
+	}
+	// summarizer runs the on-demand boundary-summarize callback for workers
+	// and the oldest-iters compression for the director. Routed through the
+	// main pool/model — these summaries are load-bearing (they determine what
+	// the worker remembers across long runs and how the director's planning
+	// history compacts) so they get the main model, not the cheap log model.
+	// Fires only when context pressure trips the watermark, not every iter.
+	summarizer := &Summarizer{
+		Pool:  pool,
+		Model: cfg.Model,
+		Log:   log,
+	}
+	// asyncMerger schedules merge-into-existing-finding goroutines when the
+	// worker tool's dedup verdict is "merge". Bounded concurrency (cap=4) so
+	// a flurry of candidates can't saturate the shared pool. Run() waits on
+	// in-flight merges at shutdown so the user doesn't lose work mid-merge.
+	asyncMerger := newAsyncMerger(ctx, candidateDedup, writer, log, 4)
+	defer asyncMerger.Wait()
 
-	verifier, err := factory.NewVerifier()
+	// completed accumulates retired workers as the run progresses. The
+	// director sees these in BuildDirectorPrompt as historical reference
+	// (IDs are gone, not eligible for planning/forking/narration). retire
+	// is invoked from applyDecision (kind=stop) and enforceStallStops; it
+	// generates the canonical summary synchronously from the worker's
+	// chronicle (the canonical raw record) so the summary is one-shot from
+	// the source — never from a prior summary — preserving fidelity.
+	var completed []CompletedWorker
+	retire := func(rctx context.Context, w *WorkerState, reason string, iter int) {
+		entry := CompletedWorker{ID: w.ID, StoppedAt: iter, Reason: reason}
+		if len(w.Chronicle) > 0 {
+			summary, sErr := summarizer.SummarizeCompletedWorker(rctx, w.Chronicle, cfg.Prompt, reason, w.ID)
+			if sErr != nil {
+				if log != nil {
+					log.Log("summarize", "completed-worker fallback", map[string]any{
+						"worker_id": w.ID, "err": sErr.Error(),
+					})
+				}
+				entry.Summary = ""
+			} else {
+				entry.Summary = summary
+			}
+		}
+		completed = append(completed, entry)
+		w.Alive = false
+		_ = w.Agent.Close()
+		if log != nil {
+			log.Log("controller", "worker retired", map[string]any{
+				"worker_id": w.ID, "reason": reason, "iter": iter,
+				"summary_chars": len(entry.Summary),
+			})
+		}
+	}
+
+	// verifierOverflowed is set true by the OpenAIAgent OnContextOverflow
+	// callback when a chat-completion request was rejected as over-context.
+	// The controller resets it before each verification phase compose and
+	// reads it after the phase to drive the auto-dismiss-on-budget-exhaust
+	// path. The write happens inside Drain on the agent's request goroutine
+	// and the read happens after Drain returns on the controller goroutine,
+	// so the goroutine join is the synchronizing event.
+	var verifierOverflowed bool
+	verifier, err := factory.NewVerifier(func() {
+		verifierOverflowed = true
+	})
 	if err != nil {
 		return fmt.Errorf("new verifier: %w", err)
 	}
@@ -415,6 +494,20 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		return fmt.Errorf("new director: %w", err)
 	}
 	defer func() { _ = director.Close() }()
+	// Wire director's boundary-summarize callback. The director's history
+	// is long-lived; when watermark fires, this collapses the oldest
+	// contiguous block of director messages into one concise recap and
+	// returns it as the replacement slice. Different prompt variant from
+	// worker (no goal/directive bias).
+	if oa, ok := director.(*agent.OpenAIAgent); ok {
+		oa.SetOnSummarizeBoundary(func(cctx context.Context, snapshot []agent.Message) ([]agent.Message, error) {
+			out, sErr := summarizer.SummarizeDirectorOldest(cctx, snapshot)
+			if sErr != nil {
+				return nil, sErr
+			}
+			return []agent.Message{{Role: "user", Content: out}}, nil
+		})
+	}
 
 	// per spec §6 each agent gets its own MCP client; workers get theirs in spawnWorker
 	verifierMCP, err := mcp.Connect(ctx, mcpURL)
@@ -440,7 +533,7 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		return guardIteration, writer.RunCount
 	}))
 
-	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, cfg.AutonomousBudget)
+	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, candidateDedup, asyncMerger, cfg.AutonomousBudget)
 
 	workers := make([]*WorkerState, 0, cfg.MaxWorkers)
 	defer func() {
@@ -494,19 +587,16 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 		return nil
 	}
 
-	// summaryPool and summaryReasoning were constructed earlier alongside
-	// worker/orch pools so all three reasoning-format probes could run in
-	// parallel at startup. Narration routes through the shared orchestrator
-	// pool when the summary endpoint matches; a distinct summary URL gets
-	// its own size-1 pool so the "one summary in flight" invariant holds by
-	// construction.
+	// Narration runs through the shared pool with the log model. The
+	// narrator's internal fireMu serializes calls so the "one summary in
+	// flight" invariant holds without a dedicated pool slot.
 	narrator := NewNarrator(NarratorConfig{
 		Interval:   cfg.NarrateInterval,
-		Model:      cfg.EffectiveSummaryModel(),
-		Pool:       summaryPool,
+		Model:      cfg.LogModel,
+		Pool:       pool,
 		CallBudget: cfg.NarrateTimeout,
-		Summarizer: summaryReasoning,
-		// Parent ctx — ctrl+c propagates to in-flight summary HTTP calls
+		Summarizer: logReasoning,
+		// Parent ctx — ctrl+c propagates to in-flight narration HTTP calls
 		// so shutdown doesn't wait on narration that the operator doesn't
 		// care about anymore.
 		Parent: ctx,
@@ -525,8 +615,7 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			fields["enabled"] = true
 			fields["interval"] = cfg.NarrateInterval.String()
 			fields["timeout"] = cfg.NarrateTimeout.String()
-			fields["pool_size"] = summaryPool.Size()
-			fields["shared_pool"] = summaryPool == orchPool
+			fields["pool_size"] = pool.Size()
 		}
 		log.Log("server", "narrator", fields)
 	}
@@ -566,78 +655,107 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 				"alive_workers": len(alive),
 			})
 		}
+
+		// Phase entry: summarize each alive worker's chronicle fresh and
+		// install the result as the worker's pre-iter context. Always
+		// summarized from canonical raw bytes — never from a prior
+		// summary — so worker focus doesn't drift across iterations.
+		installWorkerChroniclesAtIterStart(ctx, alive, summarizer.SummarizeWorkerFromChronicle, cfg.Prompt, iteration, log)
+
 		phaseTransition("idle", "autonomous")
 		narrator.Tick()
 
 		candidatesBefore := candidates.Counter()
+		// Snapshot angles BEFORE applyDecision mutates LastInstruction at the
+		// end of the iteration so history reflects what the worker actually
+		// worked on.
+		angleAt, aliveAtStart := snapshotIterationStart(alive)
 		workerRuns := RunAllWorkersUntilEscalation(ctx, alive, candidates, log)
 		UpdateStallStreaks(alive)
+
+		// Extract this iter's new content into each worker's chronicle so the
+		// next iter's install sees verbatim turns.
+		extractWorkerChroniclesAtIterEnd(alive, iteration, log)
 
 		// stall-force-stop happens before verification so the stalled worker's
 		// run still feeds the verifier (spec §7.3). Both silent and error
 		// escalations count toward ProgressNoneStreak (see UpdateStallStreaks),
 		// so a worker that consistently times out or crashes terminates at
 		// the same threshold as one that goes silent by choice.
-		for _, w := range workers {
-			if w.Alive && w.ProgressNoneStreak >= cfg.StallStopAfter {
-				if log != nil {
-					log.Log("controller", "stall-force-stop", map[string]any{
-						"worker_id": w.ID, "streak": w.ProgressNoneStreak,
-					})
-				}
-				w.Alive = false
-				w.Close()
-			}
-		}
+		enforceStallStops(ctx, workers, cfg.StallStopAfter, retire, iteration, log)
 
 		// Dead-iteration short-circuit: if every worker produced zero tool
 		// calls AND no new candidates were filed this iteration, there is
 		// nothing for the verifier to process and nothing new for the
 		// director to plan against. Skip both phases to save orchestrator
-		// LLM budget. The stall mechanism above still retires dead workers
-		// naturally; once all workers stop, the alive-check ends the run.
-		// Each still-alive worker gets a continuePrompt queued so the next
-		// iteration's Drain has a user message to respond to — otherwise
-		// the chat history would end on an assistant role and the next
-		// request would be rejected or degenerate.
+		// LLM budget. With v3, no follow-up Query is needed — the next
+		// iteration's compose layer rebuilds each worker's history from
+		// scratch.
 		if isDeadIteration(workerRuns, candidatesBefore, candidates.Counter()) {
 			if log != nil {
 				log.Log("controller", "dead-iteration", map[string]any{"iter": iteration})
 			}
-			findingsBrief := writer.SummaryForWorker()
-			for _, w := range workers {
-				if w.Alive {
-					w.Agent.Query(BuildWorkerContinuePrompt(w.ID, WorkerContinueContext{
-						FindingsSummary: findingsBrief,
-					}))
-				}
-			}
+			// Record a history entry even on dead iterations so the director
+			// still sees the streak next time around.
+			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
 			narrator.TriggerNow()
 			continue
 		}
 
 		decisions.Reset()
 
+		// Verification phase entry: install fresh history with the iter's
+		// directive. Reset overflow watchdog for the phase. Mission lives
+		// in the verifier's system prompt and is re-prepended automatically
+		// by ReplaceHistory.
+		verifierOverflowed = false
+		verifierDirective := BuildVerifierPrompt(
+			workers, workerRuns, candidates.Pending(),
+			writer.SummaryForOrchestrator(),
+			iteration, cfg.MaxIterations, writer.RunCount,
+		)
+		verifier.ReplaceHistory(ComposeVerifier(verifierDirective))
+		if log != nil {
+			log.Log("compose", "installed", map[string]any{"role": "verifier", "iter": iteration})
+		}
+
 		phaseTransition("autonomous", "verification")
 		verificationSummary := RunVerificationPhase(
-			ctx, verifier, decisions, candidates, writer, dedupReviewer,
-			workerRuns, workers, iteration, cfg.MaxIterations, log,
+			ctx, verifier, decisions, candidates, writer, dedupReviewer, log,
 		)
+		// If the verifier overflowed even after a fresh compose, the model
+		// can't reproduce its candidates under the current budget. Drop
+		// them so the next iteration doesn't re-burn the same tokens.
+		if verifierOverflowed && !decisions.HasVerificationDone && len(candidates.Pending()) > 0 {
+			AutoDismissOnContextOverflow(candidates, decisions, log)
+		}
 
-		phaseTransition("verification", "direction")
+		// Direction phase entry: director uses a long-lived chat history
+		// that grows naturally across iterations. Mark the iteration
+		// boundary BEFORE the directive Query so the boundary-summarize
+		// callback (configured at director-construction time) can collapse
+		// older director iterations into a single concise recap when
+		// context pressure trips the watermark, leaving this iter's work
+		// verbatim.
 		stallWarnings := FormatStallWarnings(workers, cfg.StallWarnAfter)
 		followUpHints := FormatFollowUpHints(decisions.Findings, decisions.Dismissals)
-		RunDirectionPhase(
-			ctx, director, decisions, workers, workerRuns,
-			verificationSummary, writer.SummaryForOrchestrator(), stallWarnings, followUpHints,
-			iteration, cfg.MaxIterations, writer.RunCount, cfg.MaxWorkers, log,
+		directorDirective := BuildDirectorPrompt(
+			workers, workerRuns, verificationSummary, writer.SummaryForOrchestrator(),
+			stallWarnings, followUpHints, completed,
+			iteration, cfg.MaxIterations, writer.RunCount, cfg.MaxWorkers,
 		)
+		director.MarkIterationBoundary()
+		director.Query(directorDirective)
+
+		phaseTransition("verification", "direction")
+		RunDirectionPhase(ctx, director, decisions, workers, log)
 		LatchStallWarnings(workers, cfg.StallWarnAfter)
 
 		if decisions.HasEndRun {
 			// The end_run tool handler already enforced MinIterationsForDone /
 			// RunCount; by the time HasEndRun is true the director has met the
-			// bar, so the controller just honors it.
+			// bar, so the controller just honors it. Skip summarization —
+			// the next iteration won't run.
 			if log != nil {
 				log.Log("controller", "end_run", map[string]any{"summary": decisions.EndRunSummary})
 			}
@@ -648,6 +766,10 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 			applyPlanDiff(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, log)
 		}
 
+		if decisions.HasForks {
+			applyForkDiff(ctx, decisions.Forks, &workers, spawn, cfg.MaxWorkers, iteration, log)
+		}
+
 		// apply per-worker decisions, after coalescing director duplicates
 		effective := coalesceDecisions(decisions.WorkerDecisions, decisions.Plan)
 		if log != nil && len(effective) != len(decisions.WorkerDecisions) {
@@ -656,36 +778,13 @@ func Run(ctx context.Context, cfg *config.Config, repoRoot string, log *Logger) 
 				"effective": len(effective),
 			})
 		}
-		decidedWIDs := map[int]bool{}
-		for _, d := range effective {
-			w := findWorker(workers, d.WorkerID)
-			if w == nil || !w.Alive {
-				if log != nil {
-					log.Log("controller", "decision for unknown/dead worker", map[string]any{"worker_id": d.WorkerID})
-				}
-				continue
-			}
-			applyDecision(d, w, log)
-			decidedWIDs[d.WorkerID] = true
-		}
+		applyEffectiveDecisions(ctx, effective, workers, retire, iteration, log)
 
-		// implicit continue for undirected alive workers
-		findingsBrief := writer.SummaryForWorker()
-		for _, w := range workers {
-			if !w.Alive || decidedWIDs[w.ID] {
-				continue
-			} else if decisions.HasPlan && slices.ContainsFunc(decisions.Plan, func(p PlanEntry) bool {
-				return p.WorkerID == w.ID
-			}) {
-				continue
-			}
-			if log != nil {
-				log.Log("controller", "implicit continue", map[string]any{"worker_id": w.ID})
-			}
-			w.Agent.Query(BuildWorkerContinuePrompt(w.ID, WorkerContinueContext{
-				FindingsSummary: findingsBrief,
-			}))
-		}
+		// Record per-worker history for this iteration now that autonomous,
+		// verification, and direction have all landed. Outcome derivation
+		// uses decisions + candidates, so it must run after decisions are
+		// applied.
+		appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
 
 		// End-of-iteration: coalesce any events since the last phase transition
 		// into a summary firing so the operator sees a sentence per iteration.
@@ -735,13 +834,27 @@ func findWorker(ws []*WorkerState, id int) *WorkerState {
 	return ws[idx]
 }
 
-func applyDecision(d WorkerDecision, w *WorkerState, log *Logger) {
+// retireFunc summarizes a worker's full investigation and retires it.
+// Implementations append a CompletedWorker entry to the run's registry,
+// then close the worker's agent. The iter parameter is the iteration in
+// which the retirement decision was taken — recorded as StoppedAt on the
+// CompletedWorker so the director prompt can show "stopped iter N".
+// Synchronous so the next director prompt renders the new entry. Pass
+// nil from test contexts where summarization is undesirable; the caller
+// then becomes responsible for closing the agent.
+type retireFunc func(ctx context.Context, w *WorkerState, reason string, iter int)
+
+func applyDecision(ctx context.Context, d WorkerDecision, w *WorkerState, retire retireFunc, iter int, log *Logger) {
 	if d.Kind == "stop" {
 		if log != nil {
 			log.Log("decision", "stop", map[string]any{"worker_id": w.ID, "reason": d.Reason})
 		}
-		w.Alive = false
-		_ = w.Agent.Close()
+		if retire != nil {
+			retire(ctx, w, d.Reason, iter)
+		} else {
+			w.Alive = false
+			_ = w.Agent.Close()
+		}
 		return
 	}
 	budget := d.AutonomousBudget
@@ -751,12 +864,106 @@ func applyDecision(d WorkerDecision, w *WorkerState, log *Logger) {
 	budget = min(budget, 20)
 	w.AutonomousBudget = budget
 	w.LastInstruction = d.Instruction
-	w.Agent.Query(d.Instruction)
+	// v4: no Query here — the next iteration's installChronicle will
+	// re-install the chronicle (wiping any pending Query) and Query
+	// w.LastInstruction itself. Pre-Query'ing would be a no-op at best
+	// and could create transient two-user-message states at worst.
 	if log != nil {
 		log.Log("decision", d.Kind, map[string]any{
 			"worker_id":         w.ID,
 			"autonomous_budget": budget,
 		})
+	}
+}
+
+// applyForkDiff spawns a new worker per ForkEntry, copying the parent's
+// chronicle so the child reads parent's prior investigation on first
+// install. Validation that already happened in the tool handler:
+// parent_worker_id != new_worker_id, instruction non-empty, both >=1. We
+// re-verify at apply time because director state may have shifted between
+// tool call and apply (e.g. parent stopped in the same direction phase).
+//
+// Rules:
+//   - Parent must be alive at apply time. If retired since the tool call,
+//     log and skip — the inheritance contract is no longer meaningful.
+//   - new_worker_id must not collide with an alive worker.
+//   - Hitting maxWorkers cap skips the fork (logged).
+//
+// Inheritance framing: the child's chronicle is prepended with a synthetic
+// inheritance header so the next install's summarizer reads the parent's
+// turns under the correct frame ("you are now worker N picking up the
+// thread") rather than mistakenly treating them as the child's own work.
+func applyForkDiff(
+	ctx context.Context,
+	forks []ForkEntry,
+	workers *[]*WorkerState,
+	spawn workerSpawnFunc,
+	maxWorkers int,
+	iter int,
+	log *Logger,
+) {
+	byID := map[int]*WorkerState{}
+	existing := 0
+	for _, w := range *workers {
+		byID[w.ID] = w
+		if w.Alive {
+			existing++
+		}
+	}
+	for _, f := range forks {
+		parent, ok := byID[f.ParentWorkerID]
+		if !ok || !parent.Alive {
+			if log != nil {
+				log.Log("fork", "skipped: parent unavailable", map[string]any{
+					"parent": f.ParentWorkerID, "new": f.NewWorkerID,
+				})
+			}
+			continue
+		}
+		if w, exists := byID[f.NewWorkerID]; exists && w.Alive {
+			if log != nil {
+				log.Log("fork", "skipped: new id collides with alive worker", map[string]any{
+					"parent": f.ParentWorkerID, "new": f.NewWorkerID,
+				})
+			}
+			continue
+		}
+		if existing >= maxWorkers {
+			if log != nil {
+				log.Log("fork", "skipped: max_workers", map[string]any{
+					"parent": f.ParentWorkerID, "new": f.NewWorkerID,
+				})
+			}
+			continue
+		}
+		nw, err := spawn(ctx, f.NewWorkerID, existing+1, f.Instruction)
+		if err != nil {
+			if log != nil {
+				log.Log("fork", "spawn failed", map[string]any{
+					"parent": f.ParentWorkerID, "new": f.NewWorkerID, "err": err.Error(),
+				})
+			}
+			continue
+		}
+		header := agent.Message{
+			Role: "user",
+			Content: fmt.Sprintf(
+				"[Inherited investigative history from worker %d at iter %d. The remainder of this chronicle records that worker's prior turns; you are now worker %d, picking up the thread under a new directive.]",
+				parent.ID, iter, nw.ID,
+			),
+		}
+		nw.Chronicle = make([]agent.Message, 0, 1+len(parent.Chronicle))
+		nw.Chronicle = append(nw.Chronicle, header)
+		nw.Chronicle = append(nw.Chronicle, parent.Chronicle...)
+		*workers = append(*workers, nw)
+		byID[nw.ID] = nw
+		existing++
+		if log != nil {
+			log.Log("fork", "spawn", map[string]any{
+				"parent": f.ParentWorkerID, "new": f.NewWorkerID,
+				"inherited_msgs": len(nw.Chronicle),
+			})
+		}
 	}
 }
 
@@ -788,7 +995,8 @@ func applyPlanDiff(
 				w.ProgressNoneStreak = 0
 				w.StallWarned = false
 			}
-			w.Agent.Query(p.Assignment)
+			// v4: no Query here — the next iter's installChronicle re-installs
+			// the chronicle and Queries w.LastInstruction (= the new assignment).
 			if log != nil {
 				log.Log("plan", "retarget", map[string]any{"worker_id": p.WorkerID})
 			}
@@ -812,5 +1020,132 @@ func applyPlanDiff(
 		if log != nil {
 			log.Log("plan", "spawn", map[string]any{"worker_id": p.WorkerID})
 		}
+	}
+}
+
+// probeReasoningHandlers detects reasoning-format support for the main and
+// log models. When both names match, a single resolveFormat call covers
+// both; otherwise the two probes run concurrently and share a cache so
+// identical (baseURL, model) pairs only fire one detection call.
+func probeReasoningHandlers(
+	ctx context.Context, cfg *config.Config, pool *agent.ClientPool, log *Logger,
+) (mainR, logR agent.ReasoningHandler) {
+	cache := agent.NewReasoningFormatCache()
+	if cfg.LogModel == cfg.Model {
+		f := resolveFormat(ctx, cache, pool, "main", cfg.BaseURL, cfg.Model, log)
+		h := agent.NewReasoningHandler(f)
+		return h, h
+	}
+	var mainFmt, logFmt agent.ReasoningFormat
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		mainFmt = resolveFormat(gctx, cache, pool, "main", cfg.BaseURL, cfg.Model, log)
+		return nil
+	})
+	g.Go(func() error {
+		logFmt = resolveFormat(gctx, cache, pool, "log", cfg.BaseURL, cfg.LogModel, log)
+		return nil
+	})
+	_ = g.Wait()
+	return agent.NewReasoningHandler(mainFmt), agent.NewReasoningHandler(logFmt)
+}
+
+// installWorkerChroniclesAtIterStart summarizes each alive worker's
+// chronicle fresh and installs the result as that worker's pre-iter
+// context. Workers run concurrently (bounded by the shared LLM pool) so
+// per-iter latency is dominated by the slowest summary, not the sum.
+func installWorkerChroniclesAtIterStart(
+	ctx context.Context,
+	alive []*WorkerState,
+	summarize chronicleSummarizeFn,
+	mission string,
+	iteration int,
+	log *Logger,
+) {
+	if len(alive) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, w := range alive {
+		wg.Add(1)
+		go func(w *WorkerState) {
+			defer wg.Done()
+			installChronicle(ctx, w, w.LastInstruction, summarize, mission, log)
+			if log != nil {
+				log.Log("chronicle", "install", map[string]any{
+					"worker_id":      w.ID,
+					"iter":           iteration,
+					"chronicle_msgs": len(w.Chronicle),
+				})
+			}
+		}(w)
+	}
+	wg.Wait()
+}
+
+// snapshotIterationStart records each worker's current angle before the
+// autonomous phase mutates LastInstruction. Returns the angle map and an
+// alive-set used by appendIterationHistory.
+func snapshotIterationStart(alive []*WorkerState) (angleAt map[int]string, aliveAtStart map[int]bool) {
+	angleAt = map[int]string{}
+	aliveAtStart = map[int]bool{}
+	for _, w := range alive {
+		angleAt[w.ID] = w.LastInstruction
+		aliveAtStart[w.ID] = true
+	}
+	return
+}
+
+// extractWorkerChroniclesAtIterEnd reads each alive worker's iteration
+// boundary onward off its agent and appends it to the worker's chronicle.
+// Called after the autonomous phase so the next iter's installChronicle
+// sees the iter's verbatim turns.
+func extractWorkerChroniclesAtIterEnd(alive []*WorkerState, iteration int, log *Logger) {
+	for _, w := range alive {
+		extractAndAppend(w)
+		if log != nil {
+			log.Log("chronicle", "extract", map[string]any{
+				"worker_id":      w.ID,
+				"iter":           iteration,
+				"chronicle_msgs": len(w.Chronicle),
+			})
+		}
+	}
+}
+
+// enforceStallStops retires every still-alive worker whose
+// ProgressNoneStreak has reached stopAfter. Runs before verification so the
+// stalled worker's run still feeds the verifier (spec §7.3).
+func enforceStallStops(ctx context.Context, workers []*WorkerState, stopAfter int, retire retireFunc, iter int, log *Logger) {
+	for _, w := range workers {
+		if w.Alive && w.ProgressNoneStreak >= stopAfter {
+			if log != nil {
+				log.Log("controller", "stall-force-stop", map[string]any{
+					"worker_id": w.ID, "streak": w.ProgressNoneStreak,
+				})
+			}
+			if retire != nil {
+				retire(ctx, w, "stall-force-stop", iter)
+			} else {
+				w.Alive = false
+				w.Close()
+			}
+		}
+	}
+}
+
+// applyEffectiveDecisions applies each coalesced WorkerDecision onto its
+// target worker. Decisions referencing dead or unknown workers are
+// dropped (and logged when a logger is attached).
+func applyEffectiveDecisions(ctx context.Context, effective []WorkerDecision, workers []*WorkerState, retire retireFunc, iter int, log *Logger) {
+	for _, d := range effective {
+		w := findWorker(workers, d.WorkerID)
+		if w == nil || !w.Alive {
+			if log != nil {
+				log.Log("controller", "decision for unknown/dead worker", map[string]any{"worker_id": d.WorkerID})
+			}
+			continue
+		}
+		applyDecision(ctx, d, w, retire, iter, log)
 	}
 }

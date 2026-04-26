@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"slices"
 	"strings"
 	"sync"
@@ -37,6 +38,29 @@ type OpenAIAgentConfig struct {
 	Reasoning ReasoningHandler
 	// OnCompact is called with each compaction report (optional).
 	OnCompact func(CompactionReport)
+	// OnContextOverflow fires once per sendWithRetry call when the model
+	// rejected the request as over-context. Mirrors OnCompact / OnMalformedCall
+	// shape. The orchestrator uses this signal to drive the verifier's
+	// auto-dismiss-on-budget-exhaust path: if a freshly composed verifier still
+	// overflows, in-flight candidates can't be reproduced under the current
+	// budget and are dismissed rather than carried forward.
+	OnContextOverflow func()
+	// OnSummarizeBoundary, when non-nil, is invoked by maybeCompact AFTER
+	// existing Compact() runs but BEFORE giving up — when the watermark is
+	// still tripped, the iteration boundary has been marked, and no boundary
+	// summary has yet been produced this iteration. The callback receives a
+	// snapshot of the messages eligible for summarization (everything between
+	// the system prompt and the iteration boundary, exclusive of the system
+	// message itself). It returns the replacement slice (typically a single
+	// user-role recap message) or an error to fail open. On success the agent
+	// replaces messages[1:iterationStartIdx] with the returned slice and
+	// updates iterationStartIdx to point past the new replacement so the
+	// iter's in-flight content stays delimited correctly.
+	OnSummarizeBoundary func(ctx context.Context, snapshot []Message) ([]Message, error)
+	// OnSummarizeError fires when OnSummarizeBoundary returned an error.
+	// The agent fails open (proceeds to the next compaction pass) regardless;
+	// this callback exists so the orchestrator can log the failure.
+	OnSummarizeError func(err error)
 	// OnToolStart fires before a tool handler runs (optional).
 	OnToolStart func(name string, args json.RawMessage)
 	// OnToolEnd fires after a tool handler returns (optional). timedOut is true
@@ -52,6 +76,9 @@ type OpenAIAgentConfig struct {
 	OnRequestEnd func(attempt int, elapsed time.Duration, tokensIn, tokensOut int, err error)
 	// FlowIDExtractor (optional) extracts flow IDs from inputs/results/text.
 	FlowIDExtractor func(sources ...any) []string
+	// Rand is the randomness source used by retry backoff jitter. nil → the
+	// package default. Tests inject a seeded *rand.Rand for determinism.
+	Rand *rand.Rand
 }
 
 // OpenAIAgent implements Agent over an OpenAI-compatible endpoint.
@@ -63,6 +90,15 @@ type OpenAIAgent struct {
 	handlers  map[string]ToolHandler
 	mu        sync.Mutex
 	cancelCtx func()
+	// iterationStartIdx records where the current iteration's content begins
+	// in history.messages. Set by MarkIterationBoundary, reset to 0 by
+	// ReplaceHistory. The boundary-summarize path in maybeCompact uses it to
+	// scope summarization to messages BEFORE this iteration's work.
+	iterationStartIdx int
+	// iterationSummarized prevents the boundary-summarize callback from
+	// firing twice in the same iteration. Cleared by MarkIterationBoundary
+	// and ReplaceHistory.
+	iterationSummarized bool
 }
 
 // NewOpenAIAgent constructs an agent and seeds history with system prompt.
@@ -149,9 +185,82 @@ func (a *OpenAIAgent) ContextUsage() (int, int) {
 	return a.history.EstimateTokens(), a.history.MaxContext()
 }
 
+// EffectiveContextUsage is like ContextUsage but reports the post-shrink
+// ceiling. After a context-overflow rejection the effective max stays below
+// the configured one for the rest of the run; this method exposes the value
+// the agent will actually be measured against on the next send.
+func (a *OpenAIAgent) EffectiveContextUsage() (tokens, max int) {
+	return a.history.EstimateTokens(), a.history.EffectiveMaxContext()
+}
+
 // History exposes the agent's history for orchestrator-level diagnostics
 // and compaction tests.
 func (a *OpenAIAgent) History() *History { return a.history }
+
+// Snapshot returns a shallow copy of the agent's message history. Safe for
+// callers that need to inspect the conversation (e.g. an external
+// summarizer) without holding the agent's internal lock.
+func (a *OpenAIAgent) Snapshot() []Message { return a.history.Snapshot() }
+
+// ReplaceHistory replaces the agent's working memory with msgs. The leading
+// system prompt is preserved: if msgs[0] is not a system message and the
+// agent was constructed with a SystemPrompt, the system message is
+// re-prepended automatically. Cancels any in-flight Drain so the next call
+// starts cleanly. Resets iteration-boundary state — the caller must call
+// MarkIterationBoundary again after the install + any subsequent Query
+// chain has settled.
+//
+// Intended for orchestrator-level chronicle install / compression: snapshot
+// the agent, produce a recap slice, hand it back here. Tools and handlers
+// are untouched.
+func (a *OpenAIAgent) ReplaceHistory(msgs []Message) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancelCtx != nil {
+		a.cancelCtx()
+		a.cancelCtx = nil
+	}
+	if len(msgs) == 0 || msgs[0].Role != "system" {
+		if sys := a.cfg.SystemPrompt; sys != "" {
+			msgs = append([]Message{{Role: "system", Content: sys}}, msgs...)
+		}
+	}
+	a.history.ReplaceAll(msgs)
+	a.iterationStartIdx = 0
+	a.iterationSummarized = false
+}
+
+// MarkIterationBoundary records the current history length as the start of
+// the active iteration's content. The boundary-summarize path in
+// maybeCompact summarizes messages BEFORE this index when the watermark
+// fires mid-drain, leaving the iteration's in-flight tool calls and
+// assistant responses verbatim.
+func (a *OpenAIAgent) MarkIterationBoundary() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.iterationStartIdx = a.history.Len()
+	a.iterationSummarized = false
+}
+
+// IterationBoundary returns the current iteration-boundary index.
+// Orchestrator-side chronicle extraction reads this AFTER a worker drain to
+// slice off the iteration's new content for chronicle append.
+func (a *OpenAIAgent) IterationBoundary() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.iterationStartIdx
+}
+
+// SetOnSummarizeBoundary swaps in a new boundary-summarize callback.
+// Lets the orchestrator wire a closure that captures live state
+// (per-worker mission/directive) post-construction, since the closure
+// often needs to reference the WorkerState pointer that doesn't exist
+// at agent-build time.
+func (a *OpenAIAgent) SetOnSummarizeBoundary(f func(ctx context.Context, snapshot []Message) ([]Message, error)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cfg.OnSummarizeBoundary = f
+}
 
 // Drain runs the dispatch loop and returns one TurnSummary.
 func (a *OpenAIAgent) Drain(ctx context.Context) (TurnSummary, error) {
@@ -187,7 +296,7 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 			summary.EscalationReason = escalationSilent
 			return summary, nil
 		}
-		if err := a.maybeCompact(); err != nil {
+		if err := a.maybeCompact(inner); err != nil {
 			summary.EscalationReason = escalationSilent
 			return summary, err
 		}
@@ -459,7 +568,7 @@ func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string
 	)
 }
 
-func (a *OpenAIAgent) maybeCompact() error {
+func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	// EffectiveMaxContext tracks adaptive shrinkage from past rejections;
 	// when none has happened it equals the configured MaxContext.
 	maxCtx := a.history.EffectiveMaxContext()
@@ -470,13 +579,139 @@ func (a *OpenAIAgent) maybeCompact() error {
 	if a.history.EstimateTokens() < high {
 		return nil
 	}
-	report, err := Compact(a.history, a.cfg.Compaction)
+	// Pass 1: existing compaction (think-strip, stub tool results, drop oldest
+	// turn triples). Cheapest option; runs first.
+	report, err := a.compactPreservingBoundary()
+	if a.cfg.OnCompact != nil {
+		a.cfg.OnCompact(report)
+	}
+	if err != nil {
+		return err
+	}
+	if a.history.EstimateTokens() < high {
+		return nil
+	}
+	// Pass 2: boundary-summarize callback. Eligible only when an iteration
+	// boundary has been marked (iterationStartIdx > 1 — must be past the
+	// system message), the callback is wired, and we haven't already done
+	// this in the current iteration.
+	if a.cfg.OnSummarizeBoundary != nil && !a.iterationSummarized && a.iterationStartIdx > 1 {
+		if err := a.runBoundarySummarize(ctx); err != nil && a.cfg.OnSummarizeError != nil {
+			// Fail open — fall through to pass 3 below. The orchestrator
+			// observes the failure via OnSummarizeError.
+			a.cfg.OnSummarizeError(err)
+		}
+		if a.history.EstimateTokens() < high {
+			return nil
+		}
+	}
+	// Pass 3: existing compaction again, now potentially biting into in-iter
+	// content. Last line of defense before sendChat hits its own overflow
+	// path.
+	report, err = a.compactPreservingBoundary()
 	if a.cfg.OnCompact != nil {
 		a.cfg.OnCompact(report)
 	}
 	return err
 }
 
+// compactPreservingBoundary wraps Compact so iterationStartIdx stays
+// pinned to the message it originally pointed to even when Compact drops
+// or modifies messages. The boundary is the controller's contract for
+// where in-iter content begins — extractAndAppend reads from there into
+// the worker chronicle, and runBoundarySummarize summarizes everything
+// before there. A stale boundary silently loses iter content (read past
+// the new history end) or summarizes the wrong slice.
+//
+// Strategy: snapshot the message AT iterationStartIdx (the iter-head
+// message — for workers, the directive Query'd after MarkIterationBoundary)
+// before Compact, then locate it again afterwards by role+content match.
+// Compact only edits assistant/tool content in place (think-strip,
+// stubbing, sentence-truncate); it never touches user-role content. The
+// iter-head message is a user directive, so equality on Role+Content is
+// reliable. If the marker disappeared (the iter itself was dropped by
+// dropOldestTurn), the boundary clamps to history end so extractAndAppend
+// fails open with no append.
+func (a *OpenAIAgent) compactPreservingBoundary() (CompactionReport, error) {
+	var marker Message
+	hasMarker := false
+	preLen := a.history.Len()
+	if a.iterationStartIdx > 0 && a.iterationStartIdx < preLen {
+		snap := a.history.Snapshot()
+		marker = snap[a.iterationStartIdx]
+		hasMarker = true
+	}
+	report, err := Compact(a.history, a.cfg.Compaction)
+	if !hasMarker {
+		if a.iterationStartIdx > a.history.Len() {
+			a.iterationStartIdx = a.history.Len()
+		}
+		return report, err
+	}
+	snap := a.history.Snapshot()
+	for i := range snap {
+		if snap[i].Role == marker.Role &&
+			snap[i].Content == marker.Content &&
+			snap[i].ToolName == marker.ToolName &&
+			snap[i].ToolCallID == marker.ToolCallID {
+			a.iterationStartIdx = i
+			return report, err
+		}
+	}
+	a.iterationStartIdx = len(snap)
+	return report, err
+}
+
+// runBoundarySummarize takes a snapshot of messages[1:iterationStartIdx],
+// hands it to OnSummarizeBoundary, and splices the returned slice back into
+// history in place of the snapshot. Updates iterationStartIdx so that the
+// in-flight iteration content stays correctly delimited.
+func (a *OpenAIAgent) runBoundarySummarize(ctx context.Context) error {
+	full := a.history.Snapshot()
+	// Defensive bounds check — iterationStartIdx may be stale if history
+	// shrank via prior compaction. Clamp.
+	end := a.iterationStartIdx
+	if end > len(full) {
+		end = len(full)
+	}
+	if end <= 1 {
+		return nil
+	}
+	preIter := full[1:end]
+	replacement, err := a.cfg.OnSummarizeBoundary(ctx, preIter)
+	if err != nil {
+		return err
+	}
+	if len(replacement) == 0 {
+		// Callback chose not to summarize (e.g. nothing useful to compress).
+		// Still mark summarized so we don't re-call this iter.
+		a.iterationSummarized = true
+		return nil
+	}
+	// Splice: [system] + replacement + full[end:].
+	rebuilt := make([]Message, 0, 1+len(replacement)+len(full)-end)
+	rebuilt = append(rebuilt, full[0])
+	rebuilt = append(rebuilt, replacement...)
+	rebuilt = append(rebuilt, full[end:]...)
+	a.history.ReplaceAll(rebuilt)
+	a.iterationStartIdx = 1 + len(replacement)
+	a.iterationSummarized = true
+	return nil
+}
+
+// sendWithRetry dispatches one chat-completion request, applying a typed
+// retry policy driven by Classify. Categories:
+//
+//   - ErrDeadline / ErrOther / ErrModelError: propagate immediately.
+//   - ErrContextOverflow: hard-truncate the history in-place and retry
+//     without consuming a retry attempt. Fires at most once per call so a
+//     persistent mismatch still surfaces instead of silently looping.
+//   - ErrRateLimit: sleep for the hinted Retry-After (or fall back to
+//     exponential backoff with jitter) then retry.
+//   - ErrTransientNet: sleep for exponential backoff with jitter, then retry.
+//
+// The retry budget (DrainRetryMax) applies only to the retryable categories;
+// the context-overflow fast-path does not debit it.
 func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	a.mu.Lock()
 	tools := a.tools
@@ -484,55 +719,69 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 
 	msgs := a.buildChatMessages()
 	hardTruncated := false
+	retries := 0
 
-	var lastErr error
-	for attempt := 0; attempt <= a.cfg.DrainRetryMax; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ChatResponse{}, ctx.Err()
-			case <-time.After(a.cfg.DrainRetryBackoff):
-			}
-		}
+	for attempt := 0; ; attempt++ {
 		resp, err := a.dispatchChatRequest(ctx, attempt, msgs, tools)
 		if err == nil {
 			return resp, nil
 		}
-		lastErr = err
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		cat, retryAfter := Classify(err)
+		switch cat {
+		case ErrDeadline, ErrOther, ErrModelError:
 			return ChatResponse{}, err
-		}
-		// Recovery path: the upstream model rejected the request as too
-		// large even though our local compaction thought we were fine.
-		// Two coordinated actions:
-		//  1. Shrink EffectiveMaxContext to 80% of what we just sent. That
-		//     value was clearly over the model's real ceiling, so future
-		//     compactions trigger at a lower watermark instead of re-hitting
-		//     the same rejection next turn. Sticky — only shrinks.
-		//  2. Force-truncate the current history against the new effective
-		//     ceiling so the immediate retry fits.
-		// Fire once per sendWithRetry so a persistent mismatch still surfaces
-		// instead of silently looping.
-		if !hardTruncated && isContextRejectedError(err) {
+
+		case ErrContextOverflow:
+			// Once-per-call fast-path. Shrink EffectiveMaxContext based on
+			// what was just rejected, force-truncate, and retry without
+			// debiting the retry budget — the truncate itself is the fix.
+			if hardTruncated {
+				return ChatResponse{}, err
+			}
 			hardTruncated = true
-			estAtRejection := a.history.EstimateTokens()
-			a.history.ShrinkEffectiveMaxOnRejection(estAtRejection)
+			a.history.ShrinkEffectiveMaxOnRejection(a.history.EstimateTokens())
+			if a.cfg.OnContextOverflow != nil {
+				a.cfg.OnContextOverflow()
+			}
 			target := a.history.EffectiveMaxContext() / 2
 			report := ForceHardTruncate(a.history, target, 2)
 			if a.cfg.OnCompact != nil {
 				a.cfg.OnCompact(report)
 			}
-			if report.DroppedTurns > 0 {
-				msgs = a.buildChatMessages()
-				// Do not consume a retry attempt: the truncate is itself
-				// the remediation, and the next loop iteration tries
-				// again with the shrunk history.
-				attempt--
-				continue
+			if report.DroppedTurns == 0 {
+				return ChatResponse{}, err
 			}
+			msgs = a.buildChatMessages()
+			continue
+
+		case ErrRateLimit, ErrTransientNet:
+			if retries >= a.cfg.DrainRetryMax {
+				return ChatResponse{}, err
+			}
+			wait := BackoffFor(cat, retries, retryAfter, a.cfg.DrainRetryBackoff, a.cfg.Rand)
+			if err := sleepCtx(ctx, wait); err != nil {
+				return ChatResponse{}, err
+			}
+			retries++
+			continue
 		}
 	}
-	return ChatResponse{}, lastErr
+}
+
+// sleepCtx sleeps for d, returning ctx.Err() if the context cancels first.
+// d <= 0 is a no-op.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // isContextRejectedError reports whether the error came from the upstream

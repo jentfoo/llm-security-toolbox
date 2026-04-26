@@ -11,7 +11,7 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// narratorSystemPrompt is the summary-model system message. Word-count
+// narratorSystemPrompt is the log-model system message. Word-count
 // constraints are deliberately avoided — reasoning models echo them as
 // "(17 words)" in output.
 const narratorSystemPrompt = `You narrate autonomous security-testing agent activity to a human operator.
@@ -24,11 +24,13 @@ const narratorMaxTokens = 20000
 // NarratorConfig tunes when and how the Narrator fires.
 type NarratorConfig struct {
 	Interval time.Duration // 0 disables; else min time between fires.
-	Model    string        // summary model ID.
-	// Pool is the shared ClientPool summary calls route through. Narration
-	// counts against the configured concurrency budget rather than bypassing
-	// it with a dedicated client, so total outstanding requests against the
-	// model service never exceeds --openai-pool-size.
+	Model    string        // log model ID.
+	// Pool is the shared ClientPool narration calls route through — the same
+	// pool every other role uses. Narration doesn't need a dedicated pool
+	// because fireMu enforces "one summary firing in flight at a time" at
+	// the narrator level. Pool size affects throughput for the other
+	// consumers (compression, dedup, async merge), not narration's
+	// serialization guarantee.
 	Pool       *agent.ClientPool
 	CallBudget time.Duration // per-summary call timeout; 0 defaults to 5m.
 	// Summarizer handles reasoning-format specifics for the summary model
@@ -380,31 +382,63 @@ func (n *Narrator) runAgentSummary(ctx context.Context, na NamedAgent) {
 		line, tail, e = agent.SummarizeStatusVia(ctx, na.Agent, client, n.cfg.Model, narratorMaxTokens)
 		return e
 	})
+	tokens, max := na.Agent.EffectiveContextUsage()
+	pct := formatContextPercent(tokens, max)
+	ctxField := map[string]any{
+		"context_usage":  pct,
+		"context_tokens": tokens,
+	}
+	mergeFields := func(extra map[string]any) map[string]any {
+		out := make(map[string]any, len(ctxField)+len(extra))
+		for k, v := range ctxField {
+			out[k] = v
+		}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
+	prefix := "agent (" + na.Name + "): "
 	if err != nil {
 		if n.log != nil {
-			n.log.Log("narrate", "agent ("+na.Name+"): error", map[string]any{
-				"err": err.Error(),
-			})
+			n.log.Log("narrate", prefix+"error", mergeFields(map[string]any{"err": err.Error()}))
 		}
 		return
 	}
 	if isUsableNarration(line) {
 		if n.log != nil {
-			n.log.Log("narrate", "agent ("+na.Name+"): "+line, nil)
+			n.log.Log("narrate", prefix+line, mergeFields(nil))
 		}
 		return
 	}
 	if tail != "" {
 		if n.log != nil {
-			n.log.Log("narrate", "agent ("+na.Name+"): …thinking: "+tail, map[string]any{
-				"truncated_think": true,
-			})
+			n.log.Log("narrate", prefix+"…thinking: "+tail, mergeFields(map[string]any{"truncated_think": true}))
 		}
 		return
 	}
 	if n.log != nil {
-		n.log.Log("narrate", "agent ("+na.Name+"): empty", nil)
+		n.log.Log("narrate", prefix+"empty", mergeFields(nil))
 	}
+}
+
+// formatContextPercent renders tokens/max as a "23%" string. Returns "?"
+// when max is non-positive (effective max not yet established).
+func formatContextPercent(tokens, max int) string {
+	if max <= 0 {
+		return "?"
+	}
+	pct := float64(tokens) * 100 / float64(max)
+	if pct < 0 {
+		pct = 0
+	}
+	rounded := int(pct + 0.5)
+	// Clamp the rendered value at 99% so the operator's "we hit the wall"
+	// signal isn't muddied by floating-point overshoot at boundary cases.
+	if rounded >= 100 {
+		rounded = 99
+	}
+	return fmt.Sprintf("%d%%", rounded)
 }
 
 // Close stops the ticker, cancels in-flight summaries, and waits for

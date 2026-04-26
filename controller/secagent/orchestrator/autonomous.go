@@ -108,10 +108,18 @@ func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
 	}
 }
 
+// intraPhaseContinuePrompt is the bare resumption directive injected
+// between worker turns within a single autonomous phase. The cross-iteration
+// directive lives in the worker's freshly composed history at phase entry,
+// so this only needs to nudge the model into producing the next turn — the
+// full task context is already established.
+const intraPhaseContinuePrompt = "Continue your current testing plan. Take the next concrete step."
+
 // RunWorkerUntilEscalation drains up to w.AutonomousBudget turns or until
 // the worker escalates. Each escalation reason is set on the worker.
 // Note: first-turn Query is NOT injected here; the caller is responsible
-// for queuing the initial instruction or having one already queued.
+// for installing the worker's per-iteration composed history (which itself
+// ends with the directive) before invoking.
 func RunWorkerUntilEscalation(
 	ctx context.Context,
 	w *WorkerState,
@@ -123,14 +131,11 @@ func RunWorkerUntilEscalation(
 	var runs []agent.TurnSummary
 	for attempt := 0; attempt < budget; attempt++ {
 		if attempt > 0 {
-			// Intra-iteration turns get the bare resumption directive; the
-			// full findings preamble is reserved for iteration boundaries
-			// (controller.go) so we don't burn tokens every turn.
-			w.Agent.Query(BuildWorkerContinuePrompt(w.ID, WorkerContinueContext{}))
+			w.Agent.Query(intraPhaseContinuePrompt)
 		}
 		summary, err := drainOne(ctx, w, candidates, log)
 		if err != nil {
-			w.EscalationReason = "error"
+			w.EscalationReason = EscalationError
 			return runs, err
 		}
 		runs = append(runs, summary)
@@ -139,7 +144,7 @@ func RunWorkerUntilEscalation(
 			return runs, nil
 		}
 	}
-	w.EscalationReason = "budget"
+	w.EscalationReason = EscalationBudget
 	return runs, nil
 }
 
@@ -175,7 +180,7 @@ func RunAllWorkersUntilEscalation(
 				w.Agent.Query(w.LastInstruction)
 				summary, err2 := drainOne(ectx, w, candidates, log)
 				if err2 != nil {
-					w.EscalationReason = "error"
+					w.EscalationReason = EscalationError
 				} else {
 					runs = append(runs, summary)
 					if summary.EscalationReason != "" {

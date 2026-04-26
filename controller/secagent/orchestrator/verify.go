@@ -13,6 +13,12 @@ const VerificationMaxSubsteps = 6
 // RunVerificationPhase drives the verifier over up to VerificationMaxSubsteps.
 // Returns the summary string for the director prompt.
 //
+// composed is the substep-1 history slice — produced by ComposeVerifier and
+// installed via verifier.ReplaceHistory by the controller BEFORE calling
+// this function. Substep 1 must NOT call verifier.Query: the directive is
+// already in the installed history. Substeps 2..N use BuildVerifierContinuePrompt
+// via Query as before — those add to the in-phase chat history naturally.
+//
 // dedupReviewer arbitrates softer title matches that pass TitlesSimilar but
 // not exact-slug equality. Pass nil to disable agent-mediated dedup (tests).
 func RunVerificationPhase(
@@ -22,9 +28,6 @@ func RunVerificationPhase(
 	candidates *CandidatePool,
 	writer *FindingWriter,
 	dedupReviewer DedupReviewer,
-	workerRuns map[int][]agent.TurnSummary,
-	workers []*WorkerState,
-	iteration, maxIter int,
 	log *Logger,
 ) string {
 	decisions.BeginPhase(agent.PhaseVerification)
@@ -41,26 +44,45 @@ func RunVerificationPhase(
 		if len(pending) == 0 {
 			break
 		}
-		var prompt string
-		if substep == 1 {
-			prompt = BuildVerifierPrompt(
-				workers, workerRuns, pending,
-				writer.SummaryForOrchestrator(),
-				iteration, maxIter, writer.RunCount,
-			)
-		} else {
-			prompt = BuildVerifierContinuePrompt(
+		// Substep 1's directive is already installed via ReplaceHistory by
+		// the controller. Substeps 2..N enqueue a continue prompt.
+		if substep > 1 {
+			prompt := BuildVerifierContinuePrompt(
 				pending,
 				decisions.Findings[:appliedFindings],
 				decisions.Dismissals[:appliedDismissals],
 				substep, VerificationMaxSubsteps,
 			)
+			verifier.Query(prompt)
 		}
-		verifier.Query(prompt)
-		if _, err := verifier.Drain(ctx); err != nil {
-			if log != nil {
-				log.Log("verify", "drain error", map[string]any{"iter": iteration, "substep": substep, "err": err.Error()})
-			}
+		_, err := RunPhaseAttempt(ctx,
+			func(c context.Context) (agent.TurnSummary, error) { return verifier.Drain(c) },
+			PhaseRecover{
+				Compact: func() {
+					verifier.Interrupt()
+					// Re-queue the LAST user message that was already in
+					// history (substep 1: nothing — the installed compose
+					// IS the directive; substeps 2..N: the continue prompt
+					// just queued above).
+					if substep > 1 {
+						verifier.Query(BuildVerifierContinuePrompt(
+							pending,
+							decisions.Findings[:appliedFindings],
+							decisions.Dismissals[:appliedDismissals],
+							substep, VerificationMaxSubsteps,
+						))
+					}
+				},
+				OnExhausted: func(err error) {
+					// Drain failed twice; nothing more to do this phase.
+					// Pending candidates carry to the next iteration where
+					// the verifier's freshly composed history gets a clean
+					// shot. The controller separately watches the
+					// OnContextOverflow signal — if the rerun was over
+					// budget, it will dismiss the pending pool there.
+				},
+			}, log, "verify")
+		if err != nil {
 			break
 		}
 		emitStatusIfDue(ctx, verifier, "verify", substep, log)
@@ -128,7 +150,7 @@ func RunVerificationPhase(
 		// emit a log line each time.
 		for _, dm := range decisions.Dismissals[appliedDismissals:] {
 			c := candidates.ByID(dm.CandidateID)
-			if c == nil || c.Status != "pending" {
+			if c == nil || c.Status != CandidateStatusPending {
 				continue
 			}
 			candidates.Mark(dm.CandidateID, "dismissed")
@@ -147,6 +169,32 @@ func RunVerificationPhase(
 		return decisions.VerificationDoneSummary
 	}
 	return autoSummary(appliedFindings, appliedDismissals, len(candidates.Pending()))
+}
+
+// AutoDismissOnContextOverflow dismisses every still-pending candidate with
+// a "context budget exhausted" reason. The controller calls this after a
+// verification phase whose verifier returned context-overflow at least once
+// even with a freshly composed history — the model can't reproduce these
+// candidates under the current budget, so carrying them forward would just
+// re-burn the same tokens next iteration.
+func AutoDismissOnContextOverflow(
+	candidates *CandidatePool,
+	decisions *DecisionQueue,
+	log *Logger,
+) {
+	pending := candidates.Pending()
+	for _, c := range pending {
+		candidates.Mark(c.CandidateID, "dismissed")
+		decisions.AddDismissal(CandidateDismissal{
+			CandidateID: c.CandidateID,
+			Reason:      "auto: verifier context budget exhausted after fresh compose",
+		})
+		if log != nil {
+			log.Log("verify", "auto-dismiss on context-budget overflow", map[string]any{
+				"candidate_id": c.CandidateID,
+			})
+		}
+	}
 }
 
 func autoSummary(filed, dismissed, stillPending int) string {

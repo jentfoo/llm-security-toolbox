@@ -15,14 +15,22 @@ const DirectionSelfReviewMaxRounds = 2
 
 // RunDirectionPhase drives the director over up to DirectionMaxSubsteps,
 // followed by a mandatory self-review substep.
+//
+// The substep-1 directive is already in the director's long-lived history
+// — the controller called director.MarkIterationBoundary() and
+// director.Query(directorDirective) before invoking. Substep 1 must NOT
+// call director.Query again. Substeps 2..N enqueue continue prompts via
+// Query as today.
+//
+// On context pressure the director's agent runs the boundary-summarize
+// callback (configured at director-construction time) which collapses the
+// oldest contiguous block of director iterations into a single concise
+// recap. This happens transparently inside the agent's maybeCompact path.
 func RunDirectionPhase(
 	ctx context.Context,
 	director agent.Agent,
 	decisions *DecisionQueue,
 	workers []*WorkerState,
-	workerRuns map[int][]agent.TurnSummary,
-	verificationSummary, findingsSummary, stallWarnings, followUpHints string,
-	iteration, maxIter, findingsCount, maxWorkers int,
 	log *Logger,
 ) {
 	decisions.BeginPhase(agent.PhaseDirection)
@@ -42,20 +50,31 @@ func RunDirectionPhase(
 		covered := coveredIDs(decisions)
 		pendingWIDs := diffSet(aliveIDs, covered)
 
-		var prompt string
-		if substep == 1 {
-			prompt = BuildDirectorPrompt(
-				workers, workerRuns, verificationSummary, findingsSummary, stallWarnings, followUpHints,
-				iteration, maxIter, findingsCount, maxWorkers,
-			)
-		} else {
-			prompt = BuildDirectorContinuePrompt(pendingWIDs, substep, DirectionMaxSubsteps)
+		if substep > 1 {
+			director.Query(BuildDirectorContinuePrompt(pendingWIDs, substep, DirectionMaxSubsteps))
 		}
-		director.Query(prompt)
-		if _, err := director.Drain(ctx); err != nil {
-			if log != nil {
-				log.Log("direct", "drain error", map[string]any{"iter": iteration, "substep": substep, "err": err.Error()})
-			}
+		// Capture the substep number so the recover closure re-queues only
+		// for substeps 2..N (substep 1's directive was Query'd by the
+		// controller before this function; re-Query'ing it on retry would
+		// duplicate the user message).
+		s := substep
+		_, err := RunPhaseAttempt(ctx,
+			func(c context.Context) (agent.TurnSummary, error) { return director.Drain(c) },
+			PhaseRecover{
+				Compact: func() {
+					director.Interrupt()
+					if s > 1 {
+						director.Query(BuildDirectorContinuePrompt(pendingWIDs, s, DirectionMaxSubsteps))
+					}
+				},
+				OnExhausted: func(err error) {
+					// Preserve any decisions already made this phase and
+					// signal completion so the controller moves forward
+					// with the next iteration instead of carrying the wedge.
+					decisions.SetDirectionDone("auto: director unavailable after retry")
+				},
+			}, log, "direct")
+		if err != nil {
 			break
 		}
 		emitStatusIfDue(ctx, director, "direct", substep, log)
@@ -74,7 +93,7 @@ func RunDirectionPhase(
 			if noProgressStreak >= 2 {
 				if log != nil {
 					log.Log("direct", "early-exit no progress", map[string]any{
-						"iter": iteration, "substep": substep,
+						"substep": substep,
 					})
 				}
 				break
@@ -90,7 +109,7 @@ func RunDirectionPhase(
 	// the same narration loop.
 	if len(decisions.WorkerDecisions) == 0 && len(decisions.Plan) == 0 {
 		if log != nil {
-			log.Log("direct", "self-review skipped no decisions", map[string]any{"iter": iteration})
+			log.Log("direct", "self-review skipped no decisions", nil)
 		}
 		emitStatusIfDue(ctx, director, "direct", DirectionMaxSubsteps+1, log)
 		return

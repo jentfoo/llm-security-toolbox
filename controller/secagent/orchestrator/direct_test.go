@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -34,8 +35,7 @@ func TestRunDirectionPhase(t *testing.T) {
 			{ID: 1, Alive: true, Agent: director},
 			{ID: 2, Alive: true, Agent: director},
 		}
-		RunDirectionPhase(t.Context(), director, decisions, workers,
-			nil, "verif summary", "no findings", "", "", 1, 10, 0, 4, nil)
+		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
 
 		assert.Equal(t, 2, step)
 		require.NotEmpty(t, director.MaxRoundsSeen)
@@ -69,8 +69,7 @@ func TestRunDirectionPhase(t *testing.T) {
 			{ID: 1, Alive: true, Agent: director},
 			{ID: 2, Alive: true, Agent: director},
 		}
-		RunDirectionPhase(t.Context(), director, decisions, workers,
-			nil, "v", "f", "", "", 1, 10, 0, 4, nil)
+		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
 
 		ids := map[int]string{}
 		for _, d := range decisions.WorkerDecisions {
@@ -92,8 +91,7 @@ func TestRunDirectionPhase(t *testing.T) {
 		director.OnDrain = func(_ int) { phaseTurn++ }
 
 		workers := []*WorkerState{{ID: 1, Alive: true, Agent: director}}
-		RunDirectionPhase(t.Context(), director, decisions, workers,
-			nil, "v", "f", "", "", 1, 10, 0, 4, nil)
+		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
 
 		assert.Empty(t, decisions.WorkerDecisions)
 		assert.Empty(t, decisions.Plan)
@@ -121,11 +119,29 @@ func TestRunDirectionPhase(t *testing.T) {
 			{ID: 1, Alive: true, Agent: director},
 			{ID: 2, Alive: true, Agent: director},
 		}
-		RunDirectionPhase(t.Context(), director, decisions, workers,
-			nil, "v", "f", "", "", 1, 10, 0, 4, nil)
+		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
 
 		assert.Equal(t, 4, phaseTurn)
 		require.NotEmpty(t, director.MaxRoundsSeen)
+	})
+
+	t.Run("drain_error_retries_then_auto_direction_done", func(t *testing.T) {
+		// Director's first substep fails; phase retry exhausts; OnExhausted
+		// sets direction_done with an auto summary so the iteration loop
+		// advances instead of blocking on a wedged director.
+		decisions := NewDecisionQueue()
+		boom := errors.New("simulated director error")
+		director := &agent.FakeAgent{
+			Turns:  []agent.TurnSummary{{}, {}},
+			Errors: []error{boom, boom},
+		}
+		workers := []*WorkerState{{ID: 1, Alive: true, Agent: director}}
+		RunDirectionPhase(t.Context(), director, decisions, workers, nil)
+
+		assert.True(t, decisions.HasDirectionDone)
+		assert.Contains(t, decisions.DirectionDoneSummary, "auto: director unavailable after retry")
+		// Initial + retry consumed both scripted turns.
+		assert.Empty(t, director.Turns)
 	})
 }
 

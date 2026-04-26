@@ -94,5 +94,18 @@ type Agent interface {
 	Interrupt()
 	SetTools(defs []ToolDef)
 	ContextUsage() (tokens, max int)
+	// ReplaceHistory installs msgs as the agent's working memory. The system
+	// prompt is preserved (re-prepended if msgs[0] is not a system message).
+	// Cancels any in-flight Drain so the next call starts cleanly. Also
+	// resets any iteration-boundary state set by MarkIterationBoundary.
+	ReplaceHistory(msgs []Message)
+	// MarkIterationBoundary records the current history length as the start
+	// of the current iteration's content. Used by the v4 boundary-summarize
+	// path: when the watermark fires mid-drain, everything BEFORE this index
+	// is eligible for one-shot summarization (preserving the in-flight iter
+	// content verbatim). Calling this twice in the same iteration is fine —
+	// the second call just updates the index and clears the
+	// already-summarized flag.
+	MarkIterationBoundary()
 	Close() error
 }

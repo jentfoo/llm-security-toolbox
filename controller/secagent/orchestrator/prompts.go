@@ -109,7 +109,7 @@ func formatPendingCandidates(pending []FindingCandidate) string {
 	for _, c := range pending {
 		flows := strings.Join(c.FlowIDs, ", ")
 		if flows == "" {
-			flows = "(none)"
+			flows = noneSentinel
 		}
 		lines = append(lines, fmt.Sprintf(
 			"- `%s` [%s] %s — %s\n  worker: %d\n  flows: %s\n  summary: %s\n  reproduction hint: %s",
@@ -199,41 +199,28 @@ func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissa
 	return "**Verifier follow-up hints (advisory — you decide whether to act):**\n" + strings.Join(lines, "\n")
 }
 
-// WorkerContinueContext is optional state to include in a worker's continue
-// prompt. All fields are optional; when empty the builder returns the bare
-// resumption directive.
-type WorkerContinueContext struct {
-	// FindingsSummary is a short listing of titles + endpoints (typically
-	// FindingWriter.SummaryForWorker()) so the worker avoids re-filing
-	// already-filed vulnerabilities.
-	FindingsSummary string
-	// Note is an optional per-worker annotation, e.g. *"Your candidate c012
-	// was filed as finding-09."* Use for one-shot recognition that the
-	// verifier closed out a candidate this worker reported.
-	Note string
-}
-
-// BuildWorkerContinuePrompt renders the resumption prompt the orchestrator
-// queues between worker turns and iterations. Workers' system prompts
-// describe the base directive; optional context is prepended so workers
-// don't re-investigate already-filed vulns.
-func BuildWorkerContinuePrompt(workerID int, ctx WorkerContinueContext) string {
-	var parts []string
-	if ctx.FindingsSummary != "" {
-		parts = append(parts, ctx.FindingsSummary)
-	}
-	if ctx.Note != "" {
-		parts = append(parts, ctx.Note)
-	}
-	parts = append(parts, "Continue your current testing plan. Take the next concrete step.")
-	return strings.Join(parts, "\n\n")
-}
-
 // BuildDirectorPrompt renders the initial director substep.
+//
+// Director-input contract (load-bearing — preserve when modifying):
+//   - workerRuns is the RAW per-iter TurnSummary for currently alive
+//     workers. The director sees individual tool calls, flow IDs, and
+//     last-turn raw tool records via formatAutonomousRun. NO summarization
+//     is applied to in-flight worker actions — the director makes its
+//     direction decisions against unfiltered evidence.
+//   - For prior iters of alive workers, RecentHistory provides high-level
+//     per-iter outcome rows (Iteration / Angle / Outcome / ToolCalls /
+//     FlowsTouched). This is categorical, not a prose summary of actions.
+//   - verificationSummary is the verifier phase's own decision report
+//     (filings/dismissals/done), not a summary of worker actions.
+//   - completed is the ONLY summarized input. These workers are retired,
+//     IDs are gone, and the LLM-generated CompletedWorker.Summary stands
+//     in for them as historical reference. Live-direction decisions never
+//     consume action summaries; only retired-worker reference does.
 func BuildDirectorPrompt(
 	workers []*WorkerState,
 	workerRuns map[int][]agent.TurnSummary,
 	verificationSummary, findingsSummary, stallWarnings, followUpHints string,
+	completed []CompletedWorker,
 	iteration, maxIter, findingsCount int,
 	maxWorkers int,
 ) string {
@@ -245,32 +232,58 @@ func BuildDirectorPrompt(
 	if followUpHints != "" {
 		parts = append(parts, "", followUpHints)
 	}
+	if len(completed) > 0 {
+		// Render the retired-workers block. At most completedWorkersRenderCap
+		// most-recent entries appear; older entries fold into a single
+		// "(N earlier completed worker(s) omitted)" line so the prompt
+		// stays bounded across long runs. Each summary is truncated only
+		// as a safety net (completedSummaryRenderCap) — the summarizer is
+		// instructed to be exhaustive.
+		lines := []string{
+			"",
+			"**Workers completed earlier this run** (reference context only — these IDs are gone, do NOT plan, fork, or narrate against them):",
+		}
+		start := 0
+		if len(completed) > completedWorkersRenderCap {
+			omitted := len(completed) - completedWorkersRenderCap
+			start = omitted
+			lines = append(lines, fmt.Sprintf("(%d earlier completed worker(s) omitted)", omitted))
+		}
+		for _, c := range completed[start:] {
+			reason := c.Reason
+			if reason == "" {
+				reason = "(no reason given)"
+			}
+			summary := short(c.Summary, completedSummaryRenderCap)
+			if summary == "" {
+				summary = "(summary unavailable)"
+			}
+			lines = append(lines, fmt.Sprintf(
+				"- Worker %d (stopped iter %d, reason: %s):\n  %s",
+				c.ID, c.StoppedAt, short(reason, 200), summary,
+			))
+		}
+		parts = append(parts, lines...)
+	}
 	parts = append(parts, "", "**Worker autonomous runs this iteration:**", "")
 	aliveCount := 0
 	aliveIDs := make([]string, 0, len(workers))
-	stoppedIDs := make([]int, 0, len(workers))
 	for _, w := range workers {
 		if !w.Alive {
-			stoppedIDs = append(stoppedIDs, w.ID)
 			continue
 		}
 		aliveCount++
 		aliveIDs = append(aliveIDs, strconv.Itoa(w.ID))
 		parts = append(parts, formatAutonomousRun(w.ID, workerRuns[w.ID], w.EscalationReason), "")
 	}
-	aliveStr := "(none)"
+	if block := formatWorkerHistory(workers); block != "" {
+		parts = append(parts, "", block)
+	}
+	aliveStr := noneSentinel
 	if len(aliveIDs) > 0 {
 		aliveStr = strings.Join(aliveIDs, ", ")
 	}
 	parts = append(parts, fmt.Sprintf("**Alive:** [%s]  **Parallelism:** %d/%d.", aliveStr, aliveCount, maxWorkers))
-	if len(stoppedIDs) > 0 {
-		sort.Ints(stoppedIDs)
-		ss := make([]string, len(stoppedIDs))
-		for i, id := range stoppedIDs {
-			ss[i] = strconv.Itoa(id)
-		}
-		parts = append(parts, fmt.Sprintf("**Stopped this run:** [%s] (do not re-plan around these; pick fresh worker_ids for new workers).", strings.Join(ss, ", ")))
-	}
 
 	// Iteration 1: worker 1 has just done recon; prompt the director to
 	// dispatch specialised parallel workers rather than pile more onto one.
@@ -281,11 +294,56 @@ func BuildDirectorPrompt(
 	return strings.Join(parts, "\n")
 }
 
+// completedSummaryRenderCap caps the rendered length of each per-worker
+// summary in the director prompt. The summarizer is instructed to be
+// exhaustive on detail (length follows content), so this is a safety net
+// for an absurdly long output — not a primary compaction mechanism.
+const completedSummaryRenderCap = 8000
+
+// completedWorkersRenderCap is the maximum number of completed workers
+// rendered in any one director prompt. Beyond that, the oldest are folded
+// into a single "(N earlier completed worker(s) omitted)" line.
+const completedWorkersRenderCap = 10
+
+// formatWorkerHistory renders the per-worker iteration history block for
+// the director prompt. Returns "" when no worker has recorded entries yet
+// (e.g. iteration 1). Entries are shown oldest → newest so the director
+// reads the trajectory in chronological order. Dead workers are skipped —
+// their canonical record lives in the completed-workers block instead.
+func formatWorkerHistory(workers []*WorkerState) string {
+	var perWorker []string
+	for _, w := range workers {
+		if !w.Alive {
+			continue
+		}
+		entries := w.RecentHistory()
+		if len(entries) == 0 {
+			continue
+		}
+		lines := []string{fmt.Sprintf("- Worker %d:", w.ID)}
+		for _, e := range entries {
+			angle := e.Angle
+			if angle == "" {
+				angle = "(no instruction)"
+			}
+			lines = append(lines, fmt.Sprintf(
+				"  - iter %d [%s] %q — %d tools, %d flows",
+				e.Iteration, e.Outcome, angle, e.ToolCalls, e.FlowsTouched,
+			))
+		}
+		perWorker = append(perWorker, strings.Join(lines, "\n"))
+	}
+	if len(perWorker) == 0 {
+		return ""
+	}
+	return "**Recent worker history (up to 6 iters each):**\n" + strings.Join(perWorker, "\n")
+}
+
 // BuildDirectorContinuePrompt renders direction substeps 2..N.
 func BuildDirectorContinuePrompt(pendingWIDs map[int]bool, substep, maxSubsteps int) string {
 	ids := bulk.MapKeysSlice(pendingWIDs)
 	sort.Ints(ids)
-	pending := "(none)"
+	pending := noneSentinel
 	if len(ids) > 0 {
 		ss := make([]string, 0, len(ids))
 		for _, id := range ids {

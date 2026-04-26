@@ -10,25 +10,20 @@ import (
 // Config is the full runtime configuration parsed from flags.
 type Config struct {
 	// Connection
-	BaseURL             string
-	APIKey              string
-	WorkerBaseURL       string
-	OrchestratorBaseURL string
-	SummaryBaseURL      string
-	WorkerModel         string
-	OrchestratorModel   string
-	SummaryModel        string
-	OpenAIPoolSize      int
-	OrchestratorPool    int
+	BaseURL       string
+	APIKey        string
+	Model         string // workers, verifier, director, Summarizer, verifier-side dedup
+	LogModel      string // narrator, candidate-dedup classifier, async-merge; defaults to Model
+	AgentPoolSize int    // shared pool size
 
 	// Context / compaction
-	WorkerMaxContext       int
-	OrchestratorMaxContext int
-	ToolResultMaxBytes     int
-	HighWatermark          float64
-	LowWatermark           float64
-	KeepTurns              int
-	KeepThinkTurns         int
+	MaxContext         int // workers, verifier, director context window
+	LogMaxContext      int // log-model context window; defaults to MaxContext
+	ToolResultMaxBytes int
+	HighWatermark      float64
+	LowWatermark       float64
+	KeepTurns          int
+	KeepThinkTurns     int
 
 	// Sectool
 	ProxyPort int
@@ -72,19 +67,14 @@ const (
 func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	c := &Config{}
 
-	fs.StringVar(&c.BaseURL, "base-url", "", "default OpenAI-compatible base URL for both roles")
+	fs.StringVar(&c.BaseURL, "base-url", "", "OpenAI-compatible base URL")
 	fs.StringVar(&c.APIKey, "api-key", "", "optional API key")
-	fs.StringVar(&c.WorkerBaseURL, "worker-base-url", "", "override base URL for worker role")
-	fs.StringVar(&c.OrchestratorBaseURL, "orchestrator-base-url", "", "override base URL for orchestrator role")
-	fs.StringVar(&c.SummaryBaseURL, "summary-base-url", "", "override base URL for narration summary model")
-	fs.StringVar(&c.WorkerModel, "worker-model", "", "model ID for worker role")
-	fs.StringVar(&c.OrchestratorModel, "orchestrator-model", "", "model ID for verifier + director")
-	fs.StringVar(&c.SummaryModel, "summary-model", "", "model ID for narrator; defaults to orchestrator then worker")
-	fs.IntVar(&c.OpenAIPoolSize, "openai-client-pool-size", 4, "concurrent model request bound (worker pool)")
-	fs.IntVar(&c.OrchestratorPool, "orchestrator-pool-size", 0, "orchestrator pool size; 0 reuses worker pool")
+	fs.StringVar(&c.Model, "model", "", "main model ID (workers, verifier, director, summarizer)")
+	fs.StringVar(&c.LogModel, "log-model", "", "model ID for narrator + candidate dedup; defaults to --model")
+	fs.IntVar(&c.AgentPoolSize, "agent-pool-size", 4, "concurrent model request bound (shared pool)")
 
-	fs.IntVar(&c.WorkerMaxContext, "worker-max-context", 32768, "worker context window (tokens)")
-	fs.IntVar(&c.OrchestratorMaxContext, "orchestrator-max-context", 32768, "orchestrator context window (tokens)")
+	fs.IntVar(&c.MaxContext, "max-context", 32768, "main-model context window (tokens)")
+	fs.IntVar(&c.LogMaxContext, "log-max-context", 0, "log-model context window; 0 inherits --max-context")
 	fs.IntVar(&c.ToolResultMaxBytes, "tool-result-max-bytes", 8192, "per-tool-result truncation cap")
 	fs.Float64Var(&c.HighWatermark, "compaction-high-watermark", 0.80, "compaction trigger fraction")
 	fs.Float64Var(&c.LowWatermark, "compaction-low-watermark", 0.40, "compaction target fraction")
@@ -131,43 +121,13 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	}
 	c.MaxWorkers = min(max(c.MaxWorkers, MinWorkers), MaxWorkers)
 	c.AutonomousBudget = min(max(c.AutonomousBudget, 1), MaxAutonomousBudget)
+	if c.LogModel == "" {
+		c.LogModel = c.Model
+	}
+	if c.LogMaxContext <= 0 {
+		c.LogMaxContext = c.MaxContext
+	}
 	return c, nil
-}
-
-// EffectiveWorkerBaseURL returns WorkerBaseURL if set, otherwise BaseURL.
-func (c *Config) EffectiveWorkerBaseURL() string {
-	if c.WorkerBaseURL != "" {
-		return c.WorkerBaseURL
-	}
-	return c.BaseURL
-}
-
-// EffectiveOrchestratorBaseURL returns OrchestratorBaseURL if set, otherwise BaseURL.
-func (c *Config) EffectiveOrchestratorBaseURL() string {
-	if c.OrchestratorBaseURL != "" {
-		return c.OrchestratorBaseURL
-	}
-	return c.BaseURL
-}
-
-// EffectiveSummaryBaseURL returns SummaryBaseURL if set, otherwise the
-// orchestrator URL, otherwise worker URL.
-func (c *Config) EffectiveSummaryBaseURL() string {
-	if c.SummaryBaseURL != "" {
-		return c.SummaryBaseURL
-	}
-	return c.EffectiveOrchestratorBaseURL()
-}
-
-// EffectiveSummaryModel returns SummaryModel if set, otherwise OrchestratorModel, otherwise WorkerModel.
-func (c *Config) EffectiveSummaryModel() string {
-	if c.SummaryModel != "" {
-		return c.SummaryModel
-	}
-	if c.OrchestratorModel != "" {
-		return c.OrchestratorModel
-	}
-	return c.WorkerModel
 }
 
 // EffectiveKeepThinkTurns returns the number of recent assistant messages
