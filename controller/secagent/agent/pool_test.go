@@ -50,7 +50,7 @@ func TestClientPool(t *testing.T) {
 		}, 20*time.Millisecond, time.Millisecond)
 		pool.Release(a1)
 		<-done
-		assert.NotNil(t, got)
+		require.NotNil(t, got)
 		pool.Release(a2)
 		pool.Release(got)
 	})
@@ -79,7 +79,7 @@ func TestClientPool(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				c, err := pool.Acquire(ctx)
-				if err != nil {
+				if !assert.NoError(t, err) {
 					return
 				}
 				n := atomic.AddInt32(&current, 1)

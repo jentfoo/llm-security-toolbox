@@ -11,14 +11,11 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// narratorSystemPrompt is the log-model system message. Word-count
-// constraints are deliberately avoided — reasoning models echo them as
-// "(17 words)" in output.
+// narratorSystemPrompt avoids word-count constraints — reasoning models echo them in output.
 const narratorSystemPrompt = `You narrate autonomous security-testing agent activity to a human operator.
 Provide a single concise and clearly worded sentence as a description of the activity shown here.`
 
-// narratorMaxTokens is the output cap for summary calls. Kept high so a
-// long-thinking reasoning model isn't truncated before emitting content.
+// narratorMaxTokens is kept high so reasoning models aren't truncated before emitting content.
 const narratorMaxTokens = 20000
 
 // NarratorConfig tunes when and how the Narrator fires.
@@ -52,12 +49,8 @@ type NamedAgent struct {
 	Agent *agent.OpenAIAgent
 }
 
-// Narrator buffers orchestrator events and periodically asks a summary model
-// to describe what the agent is doing. Firings run on a goroutine but are
-// serialised — only one narration is in flight at a time, and later triggers
-// coalesce behind the same lock so output order always matches wall-clock
-// order. A background ticker fires every Interval regardless of caller
-// triggers so long worker drains still get periodic narration.
+// Narrator buffers events and periodically dispatches summaries to a model.
+// Firings are serialized so output order matches wall-clock.
 type Narrator struct {
 	cfg NarratorConfig
 	log *Logger
@@ -128,9 +121,7 @@ func NewNarrator(cfg NarratorConfig, log *Logger) *Narrator {
 	return n
 }
 
-// runSummaryCall acquires a client from the shared pool and hands it to fn,
-// so narration counts against the configured concurrency budget rather than
-// bypassing it. Serialization is provided by fireMu on the surrounding firing.
+// runSummaryCall acquires a pool client so narration respects the concurrency budget.
 func (n *Narrator) runSummaryCall(ctx context.Context, fn func(agent.ChatClient) error) error {
 	client, err := n.cfg.Pool.Acquire(ctx)
 	if err != nil {
@@ -154,16 +145,8 @@ func (n *Narrator) runTicker() {
 	}
 }
 
-// SetActiveAgents publishes the agents the next firing should summarize
-// alongside the orchestrator event log. Callers should invoke this from
-// the main controller goroutine whenever the active set changes (phase
-// transitions, worker spawn/stop). The narrator takes its own copy, so
-// the caller's slice may be reused.
-// isUsableNarration filters out summary outputs that aren't a natural-
-// language sentence — single-word replies and XML-ish tags like
-// "<tool_call>" happen with smaller models and add no operator value. The
-// minimum bar is "contains whitespace" so the caller falls through to the
-// truncated-think / empty branch instead of logging a noise line.
+// isUsableNarration filters out summary outputs that aren't a natural-language
+// sentence (single tokens, XML-ish tags). Minimum bar is "contains whitespace".
 func isUsableNarration(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -172,6 +155,8 @@ func isUsableNarration(s string) bool {
 	return strings.ContainsAny(s, " \t\n")
 }
 
+// SetActiveAgents publishes the agents the next firing should summarize.
+// The narrator takes its own copy.
 func (n *Narrator) SetActiveAgents(agents []NamedAgent) {
 	if n == nil {
 		return

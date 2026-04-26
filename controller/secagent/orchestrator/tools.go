@@ -5,9 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
+)
+
+// decideAction* are the valid action enum values for decide_worker.
+const (
+	decideActionContinue = "continue"
+	decideActionExpand   = "expand"
+	decideActionStop     = "stop"
 )
 
 // Severities for validation.
@@ -19,12 +28,6 @@ var severities = map[string]bool{
 	"informational": true,
 }
 
-var progressTags = map[string]bool{
-	"none":        true,
-	"incremental": true,
-	"new":         true,
-}
-
 // MergeSubmitter schedules an asynchronous merge of a worker-reported
 // candidate into an already-filed finding. The implementation owns goroutine
 // lifetime and bounded concurrency; the worker tool just calls Submit and
@@ -33,6 +36,19 @@ var progressTags = map[string]bool{
 type MergeSubmitter interface {
 	Submit(matchedFilename string, incoming AddInput)
 }
+
+// The recon worker uses the full sectool surface (same as testing
+// workers) — the only structural restriction is that
+// report_finding_candidate is NOT registered, so recon physically
+// cannot file findings. This narrows the contract to its essential
+// form: "you can use any tool to map the surface, you just can't
+// declare a vulnerability". Active probes (replay_send, request_send)
+// remain available because recon often needs to send shaped requests
+// to learn how endpoints behave under auth, error conditions, etc.
+//
+// The recon-only spawn path in controller.go skips WorkerToolDefs and
+// passes only the sectool defs to SetTools. No allowlist filter on the
+// sectool side is needed.
 
 // WorkerToolDefs builds the per-worker tool set: report_finding_candidate.
 //
@@ -376,15 +392,194 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 	}
 }
 
-// DirectorToolDefs builds the in-process tool set for the director.
+// TakenIDsFunc returns the set of worker IDs that are not eligible for
+// reuse — currently alive workers ∪ already-completed workers. Used by
+// decide_worker.fork and plan_workers to validate new IDs.
+type TakenIDsFunc func() map[int]bool
+
+// DecisionToolDefs builds the per-worker decision tool set. The director
+// gets ONLY decide_worker during the per-worker decision loop; one tool
+// call per call, expected exactly once. The handler validates that the
+// worker_id matches the worker the prompt asked about (rejecting clearly
+// when it doesn't, so the model can retry).
 //
-// guardState returns (iteration, findingsThisRun). It must be non-nil — the
-// end_run handler consults it to reject premature calls that local models
-// emit when they confuse end_run with direction_done. Pass a closure that
-// captures the controller's loop iteration and writer.RunCount.
-func DirectorToolDefs(
+// takenIDs (optional, may be nil) is used to validate fork.new_worker_id
+// against alive ∪ completed worker IDs.
+func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc) []agent.ToolDef {
+	reject := func(name string) agent.ToolResult {
+		cur := decisions.Phase()
+		return agent.ToolResult{
+			Text: fmt.Sprintf(
+				"Rejected: `%s` is not allowed in phase '%s'. Expected phase 'direction'.",
+				name, cur,
+			),
+			IsError: true,
+		}
+	}
+	return []agent.ToolDef{
+		{
+			Name: "decide_worker",
+			Description: `Decide what worker N does next iteration. ` +
+				`Call exactly ONCE per per-worker decision prompt; the worker_id you pass MUST match the worker the prompt asked about. ` +
+				`action="continue" keeps the worker on its current angle (instruction is the next-iter directive). ` +
+				`action="expand" pivots to a new angle (instruction is the new directive). ` +
+				`action="stop" retires the worker (reason explains why). ` +
+				`Optional fork={new_worker_id, instruction} spawns a child worker that inherits this worker's chronicle and gets the steering instruction; pick a new_worker_id NOT in the alive or completed set.`,
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"worker_id":         map[string]any{"type": "integer", "minimum": 1},
+					"action":            map[string]any{"type": "string", "enum": []string{"continue", "expand", "stop"}},
+					"instruction":       map[string]any{"type": "string", "description": "Required for continue/expand."},
+					"reason":            map[string]any{"type": "string", "description": "Required for stop."},
+					"autonomous_budget": map[string]any{"type": "integer", "minimum": 1, "maximum": 20},
+					"fork": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"new_worker_id": map[string]any{"type": "integer", "minimum": 1},
+							"instruction":   map[string]any{"type": "string"},
+						},
+						"required": []string{"new_worker_id", "instruction"},
+					},
+				},
+				"required": []string{"worker_id", "action"},
+			},
+			Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
+				if decisions.Phase() != agent.PhaseDirection {
+					return reject("decide_worker")
+				}
+				var in struct {
+					WorkerID         int    `json:"worker_id"`
+					Action           string `json:"action"`
+					Instruction      string `json:"instruction"`
+					Reason           string `json:"reason"`
+					AutonomousBudget int    `json:"autonomous_budget"`
+					Fork             *struct {
+						NewWorkerID int    `json:"new_worker_id"`
+						Instruction string `json:"instruction"`
+					} `json:"fork"`
+				}
+				if err := unmarshalToolArgs(args, &in); err != nil {
+					return agent.ToolResult{Text: "Rejected: invalid arguments: " + err.Error(), IsError: true}
+				}
+				if in.WorkerID < 1 {
+					return agent.ToolResult{Text: "Rejected: worker_id must be >= 1.", IsError: true}
+				}
+				asked := decisions.AskedWorkerID()
+				if asked > 0 && in.WorkerID != asked {
+					return agent.ToolResult{
+						Text: fmt.Sprintf(
+							"Rejected: this prompt asked about worker %d but decide_worker received worker_id=%d. Re-issue with worker_id=%d.",
+							asked, in.WorkerID, asked,
+						),
+						IsError: true,
+					}
+				}
+				action := strings.ToLower(strings.TrimSpace(in.Action))
+				switch action {
+				case decideActionContinue, decideActionExpand:
+					if strings.TrimSpace(in.Instruction) == "" {
+						return agent.ToolResult{
+							Text:    "Rejected: instruction is required for action=continue|expand.",
+							IsError: true,
+						}
+					}
+				case decideActionStop:
+					if strings.TrimSpace(in.Reason) == "" {
+						return agent.ToolResult{
+							Text:    "Rejected: reason is required for action=stop.",
+							IsError: true,
+						}
+					}
+				default:
+					return agent.ToolResult{
+						Text:    "Rejected: action must be one of continue/expand/stop.",
+						IsError: true,
+					}
+				}
+				var fork *ForkSubAction
+				if in.Fork != nil {
+					if in.Fork.NewWorkerID < 1 {
+						return agent.ToolResult{
+							Text:    "Rejected: fork.new_worker_id must be >= 1.",
+							IsError: true,
+						}
+					}
+					if in.Fork.NewWorkerID == in.WorkerID {
+						return agent.ToolResult{
+							Text:    "Rejected: fork.new_worker_id must differ from the parent worker_id.",
+							IsError: true,
+						}
+					}
+					if strings.TrimSpace(in.Fork.Instruction) == "" {
+						return agent.ToolResult{
+							Text:    "Rejected: fork.instruction is required.",
+							IsError: true,
+						}
+					}
+					if takenIDs != nil {
+						taken := takenIDs()
+						if taken[in.Fork.NewWorkerID] {
+							return agent.ToolResult{
+								Text: fmt.Sprintf(
+									"Rejected: fork.new_worker_id=%d collides with an existing or retired worker. Taken IDs: %s. Pick a fresh integer.",
+									in.Fork.NewWorkerID, formatTakenIDs(taken),
+								),
+								IsError: true,
+							}
+						}
+					}
+					fork = &ForkSubAction{
+						NewWorkerID: in.Fork.NewWorkerID,
+						Instruction: in.Fork.Instruction,
+					}
+				}
+				budget := in.AutonomousBudget
+				if budget <= 0 {
+					budget = defaultAutonomousBudget
+				}
+				if budget > 20 {
+					budget = 20
+				}
+				decisions.AddDecision(WorkerDecision{
+					Kind:             action,
+					WorkerID:         in.WorkerID,
+					Instruction:      strings.TrimSpace(in.Instruction),
+					Reason:           strings.TrimSpace(in.Reason),
+					AutonomousBudget: budget,
+					Fork:             fork,
+				})
+				note := ""
+				if fork != nil {
+					note = fmt.Sprintf(" with fork → worker %d", fork.NewWorkerID)
+				}
+				return agent.ToolResult{
+					Text: fmt.Sprintf(
+						"decide_worker recorded: worker %d → %s%s.",
+						in.WorkerID, action, note,
+					),
+				}
+			},
+		},
+	}
+}
+
+// SynthesisToolDefs builds the synthesis tool set used after the
+// per-worker decision loop completes. plan_workers spawns/retargets fresh
+// workers; direction_done closes the iter; end_run closes the entire run
+// (gated by guardState).
+//
+// guardState returns (iteration, findingsThisRun) for the end_run guard
+// (rejects premature calls). Must be non-nil.
+//
+// takenIDs (optional) validates each plan_workers entry's worker_id —
+// retarget is allowed (alive ID stays alive); but a completed ID is
+// rejected with the list of taken IDs so the model can pick a fresh one.
+func SynthesisToolDefs(
 	decisions *DecisionQueue,
 	guardState func() (iter, runFindings int),
+	takenIDs TakenIDsFunc,
+	completedIDs func() map[int]bool,
 ) []agent.ToolDef {
 	reject := func(name string) agent.ToolResult {
 		cur := decisions.Phase()
@@ -396,67 +591,13 @@ func DirectorToolDefs(
 			IsError: true,
 		}
 	}
-
-	workerDirectiveSchema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"worker_id":         map[string]any{"type": "integer", "minimum": 1},
-			"instruction":       map[string]any{"type": "string"},
-			"progress":          map[string]any{"type": "string", "enum": []string{"none", "incremental", "new"}},
-			"autonomous_budget": map[string]any{"type": "integer", "minimum": 1, "maximum": 20},
-		},
-		"required": []string{"worker_id", "instruction", "progress"},
-	}
-
-	recordDecision := func(kind string, args json.RawMessage) agent.ToolResult {
-		if decisions.Phase() != agent.PhaseDirection {
-			return reject(kind + "_worker")
-		}
-		var in struct {
-			WorkerID         int    `json:"worker_id"`
-			Instruction      string `json:"instruction"`
-			Progress         string `json:"progress"`
-			AutonomousBudget int    `json:"autonomous_budget"`
-		}
-		if err := unmarshalToolArgs(args, &in); err != nil {
-			return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
-		}
-		if in.WorkerID < 1 {
-			return agent.ToolResult{Text: "Rejected: worker_id required.", IsError: true}
-		}
-		if !progressTags[in.Progress] {
-			return agent.ToolResult{
-				Text:    "Rejected: progress must be one of none/incremental/new.",
-				IsError: true,
-			}
-		}
-		if strings.TrimSpace(in.Instruction) == "" {
-			return agent.ToolResult{Text: "Rejected: instruction is required.", IsError: true}
-		}
-		budget := in.AutonomousBudget
-		if budget <= 0 {
-			budget = defaultAutonomousBudget
-		}
-		budget = min(budget, 20)
-		decisions.AddDecision(WorkerDecision{
-			Kind:             kind,
-			WorkerID:         in.WorkerID,
-			Instruction:      in.Instruction,
-			Progress:         in.Progress,
-			AutonomousBudget: budget,
-		})
-		return agent.ToolResult{
-			Text: fmt.Sprintf(
-				"%s recorded for worker %d (progress=%s, autonomous_budget=%d).",
-				kind, in.WorkerID, in.Progress, budget,
-			),
-		}
-	}
-
 	return []agent.ToolDef{
 		{
-			Name:        "plan_workers",
-			Description: `Spawn or retarget workers for parallel testing.`,
+			Name: "plan_workers",
+			Description: `Spawn fresh workers and/or retarget existing alive workers. ` +
+				`Each entry's worker_id must be either an existing alive worker (→ retarget) ` +
+				`or an integer NOT in the alive or completed set (→ spawn). ` +
+				`Completed worker IDs are gone — picking one is rejected.`,
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -499,6 +640,14 @@ func DirectorToolDefs(
 						IsError: true,
 					}
 				}
+				var taken map[int]bool
+				if takenIDs != nil {
+					taken = takenIDs()
+				}
+				var done map[int]bool
+				if completedIDs != nil {
+					done = completedIDs()
+				}
 				var entries []PlanEntry
 				var reasons []string
 				for i, p := range in.Plans {
@@ -509,6 +658,15 @@ func DirectorToolDefs(
 					}
 					if asg == "" {
 						reasons = append(reasons, fmt.Sprintf("plans[%d] (worker_id=%d): assignment is empty", i, p.WorkerID))
+						continue
+					}
+					// Reject completed IDs explicitly. Alive IDs are fine
+					// (retarget). Fresh IDs are fine (spawn).
+					if done != nil && done[p.WorkerID] {
+						reasons = append(reasons, fmt.Sprintf(
+							"plans[%d]: worker_id=%d is a retired worker — pick a fresh integer (taken: %s)",
+							i, p.WorkerID, formatTakenIDs(taken),
+						))
 						continue
 					}
 					entries = append(entries, PlanEntry{WorkerID: p.WorkerID, Assignment: asg})
@@ -529,105 +687,8 @@ func DirectorToolDefs(
 			},
 		},
 		{
-			Name:        "continue_worker",
-			Description: `Tell worker N to keep going with its current plan.`,
-			Schema:      workerDirectiveSchema,
-			Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
-				return recordDecision("continue", args)
-			},
-		},
-		{
-			Name:        "expand_worker",
-			Description: `Pivot worker N with an adjusted plan.`,
-			Schema:      workerDirectiveSchema,
-			Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
-				return recordDecision("expand", args)
-			},
-		},
-		{
-			Name: "fork_worker",
-			Description: `Spawn a new worker that inherits the parent's investigative summary plus a steering instruction. ` +
-				`Use when an in-progress worker has uncovered a permutation worth a parallel deep-dive while the parent continues its current line. ` +
-				`Distinct from plan_workers (fresh, no inherited memory) and expand_worker (retargets the same worker in place). ` +
-				`Example: {"parent_worker_id":3,"new_worker_id":9,"instruction":"Pursue the JWT alg=none variant on /oauth2/userinfo that worker 3 just discovered."}`,
-			Schema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"parent_worker_id": map[string]any{"type": "integer", "minimum": 1},
-					"new_worker_id":    map[string]any{"type": "integer", "minimum": 1},
-					"instruction":      map[string]any{"type": "string"},
-				},
-				"required": []string{"parent_worker_id", "new_worker_id", "instruction"},
-			},
-			Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
-				if decisions.Phase() != agent.PhaseDirection {
-					return reject("fork_worker")
-				}
-				var in struct {
-					ParentWorkerID int    `json:"parent_worker_id"`
-					NewWorkerID    int    `json:"new_worker_id"`
-					Instruction    string `json:"instruction"`
-				}
-				if err := unmarshalToolArgs(args, &in); err != nil {
-					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
-				}
-				if in.ParentWorkerID < 1 || in.NewWorkerID < 1 {
-					return agent.ToolResult{Text: "Rejected: parent_worker_id and new_worker_id must both be >= 1.", IsError: true}
-				}
-				if in.ParentWorkerID == in.NewWorkerID {
-					return agent.ToolResult{Text: "Rejected: parent_worker_id and new_worker_id must differ.", IsError: true}
-				}
-				if strings.TrimSpace(in.Instruction) == "" {
-					return agent.ToolResult{Text: "Rejected: instruction is required.", IsError: true}
-				}
-				decisions.AddFork(ForkEntry{
-					ParentWorkerID: in.ParentWorkerID,
-					NewWorkerID:    in.NewWorkerID,
-					Instruction:    in.Instruction,
-				})
-				return agent.ToolResult{Text: fmt.Sprintf(
-					"fork recorded: worker %d will inherit worker %d's investigation.",
-					in.NewWorkerID, in.ParentWorkerID,
-				)}
-			},
-		},
-		{
-			Name:        "stop_worker",
-			Description: `Stop worker N.`,
-			Schema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"worker_id": map[string]any{"type": "integer", "minimum": 1},
-					"reason":    map[string]any{"type": "string"},
-				},
-				"required": []string{"worker_id", "reason"},
-			},
-			Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
-				if decisions.Phase() != agent.PhaseDirection {
-					return reject("stop_worker")
-				}
-				var in struct {
-					WorkerID int    `json:"worker_id"`
-					Reason   string `json:"reason"`
-				}
-				if err := unmarshalToolArgs(args, &in); err != nil {
-					return agent.ToolResult{Text: "Rejected: invalid arguments.", IsError: true}
-				}
-				if in.WorkerID < 1 {
-					return agent.ToolResult{Text: "Rejected: worker_id required.", IsError: true}
-				}
-				if strings.TrimSpace(in.Reason) == "" {
-					return agent.ToolResult{Text: "Rejected: reason is required.", IsError: true}
-				}
-				decisions.AddDecision(WorkerDecision{
-					Kind: "stop", WorkerID: in.WorkerID, Reason: in.Reason,
-				})
-				return agent.ToolResult{Text: fmt.Sprintf("stop recorded for worker %d.", in.WorkerID)}
-			},
-		},
-		{
 			Name:        "direction_done",
-			Description: `Signal direction phase complete.`,
+			Description: `Signal direction phase complete. Use this to close almost every iteration.`,
 			Schema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"summary": map[string]any{"type": "string"}},
@@ -692,4 +753,26 @@ func DirectorToolDefs(
 			},
 		},
 	}
+}
+
+// formatTakenIDs renders a sorted list of taken IDs for inclusion in a
+// rejection message. Caps at 20 entries to keep the response small even
+// when many workers have come and gone.
+func formatTakenIDs(taken map[int]bool) string {
+	if len(taken) == 0 {
+		return "(none)"
+	}
+	ids := make([]int, 0, len(taken))
+	for id := range taken {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	if len(ids) > 20 {
+		ids = ids[:20]
+	}
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.Itoa(id)
+	}
+	return strings.Join(parts, ", ")
 }

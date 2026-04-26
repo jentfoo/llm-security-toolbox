@@ -10,13 +10,9 @@ type CompactionOptions struct {
 	HighWatermark float64 // e.g. 0.80
 	LowWatermark  float64 // e.g. 0.40
 	KeepTurns     int     // e.g. 4
-	// HardTruncateOnOverflow controls whether a last-resort hard-truncate
-	// pass runs when passes 1-4 can't reduce below HighWatermark. When true
-	// (default), the pass shrinks the keep window to 2 turns (4 messages)
-	// and drops additional turns while preserving tool-call/tool-result
-	// pairing. When false, the original overflow error is returned
-	// verbatim — used by tests and by callers that want fail-closed
-	// behavior.
+	// HardTruncateOnOverflow controls the final fallback. When true (default),
+	// drops turns down to a 2-turn window. When false, returns the overflow
+	// error (for tests and fail-closed callers).
 	HardTruncateOnOverflow bool
 }
 
@@ -30,6 +26,54 @@ type CompactionReport struct {
 	Truncated        int
 	ThinkStripped    int
 	RepairsProtected int // tool-result repair errors skipped in pass 2
+}
+
+// StripAssistantThink removes <think>...</think> blocks from an assistant
+// message's content. Returns true when m.Content actually changed.
+// Idempotent. Non-assistant messages are left untouched and return false.
+//
+// Exposed so orchestrator-level chronicle and director-chat compaction can
+// share the in-place mutation logic that Compact uses internally.
+func StripAssistantThink(m *Message) bool {
+	if m.Role != roleAssistant {
+		return false
+	}
+	before := m.Content
+	after := StripThinkBlocks(before)
+	if after == before {
+		return false
+	}
+	m.Content = after
+	return true
+}
+
+// stubPrefix is the literal start-of-content marker used by StubToolResult
+// to detect "this message has already been stubbed" and short-circuit.
+// Without this, re-stubbing recomputes the byte count from the existing
+// stub bytes — non-idempotent across compaction passes.
+const stubPrefix = "(compacted: "
+
+// StubToolResult replaces a tool-result message's content with a compact stub.
+// Idempotent. Skips repair-error messages (they carry schema guidance the
+// model needs). Returns true when m.Content changed.
+func StubToolResult(m *Message) bool {
+	if m.Role != roleTool || m.IsRepairError {
+		return false
+	}
+	if strings.HasPrefix(m.Content, stubPrefix) {
+		return false
+	}
+	approxTokens := EstimateStringTokens(m.Content)
+	stub := fmt.Sprintf(
+		"%s%s returned ~%d tokens — %s)",
+		stubPrefix, fallback(m.ToolName, "tool"), approxTokens,
+		fallback(m.Summary120, truncate(m.Content, 120)),
+	)
+	if m.Content == stub {
+		return false
+	}
+	m.Content = stub
+	return true
 }
 
 // Compact shrinks history in place until tokens <= LowWatermark * max.
@@ -65,13 +109,7 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 	// Pass 1: <think>-strip every message older than last keep turns.
 	thinkCount := 0
 	for i := 0; i < len(msgs)-keep*2; i++ {
-		if msgs[i].Role != roleAssistant {
-			continue
-		}
-		before := msgs[i].Content
-		after := StripThinkBlocks(before)
-		if after != before {
-			msgs[i].Content = after
+		if StripAssistantThink(&msgs[i]) {
 			thinkCount++
 		}
 	}
@@ -98,14 +136,7 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 			repairsProtected++
 			continue
 		}
-		approxTokens := len(msgs[i].Content) / 4
-		stub := fmt.Sprintf(
-			"(compacted: %s returned ~%d tokens — %s)",
-			fallback(msgs[i].ToolName, "tool"), approxTokens,
-			fallback(msgs[i].Summary120, truncate(msgs[i].Content, 120)),
-		)
-		if msgs[i].Content != stub {
-			msgs[i].Content = stub
+		if StubToolResult(&msgs[i]) {
 			stubbed++
 			h.ReplaceAll(msgs)
 			if h.EstimateTokens() <= target {
@@ -132,7 +163,13 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		if msgs[i].Content == "" {
 			continue
 		}
-		first := firstSentence(msgs[i].Content)
+		first := msgs[i].Content
+		for j, r := range msgs[i].Content {
+			if r == '.' || r == '!' || r == '?' || r == '\n' {
+				first = strings.TrimSpace(msgs[i].Content[:j+1])
+				break
+			}
+		}
 		if first != msgs[i].Content {
 			msgs[i].Content = first
 			truncCount++
@@ -281,13 +318,4 @@ func fallback(v, def string) string {
 		return def
 	}
 	return v
-}
-
-func firstSentence(s string) string {
-	for i, r := range s {
-		if r == '.' || r == '!' || r == '?' || r == '\n' {
-			return strings.TrimSpace(s[:i+1])
-		}
-	}
-	return s
 }

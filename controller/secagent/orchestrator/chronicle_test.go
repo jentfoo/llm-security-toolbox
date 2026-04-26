@@ -10,282 +10,168 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-func TestInstallChronicle_FirstIterationEmpty(t *testing.T) {
+func TestInstallChronicle(t *testing.T) {
 	t.Parallel()
-	fake := &agent.FakeAgent{}
-	w := &WorkerState{ID: 1, Agent: fake}
-	installChronicle(t.Context(), w, "investigate /login", nil, "", nil)
-	require.Equal(t, 1, fake.BoundaryCalls, "exactly one boundary mark per install")
-	assert.Empty(t, fake.LastReplacedHistory,
-		"empty chronicle on iter 1 → ReplaceHistory called with empty slice")
-	require.Len(t, fake.QueriedInputs, 1)
-	assert.Equal(t, "investigate /login", fake.QueriedInputs[0])
-}
 
-func TestInstallChronicle_NonEmptyChronicleSummarized(t *testing.T) {
-	t.Parallel()
-	fake := &agent.FakeAgent{}
-	w := &WorkerState{
-		ID:    1,
-		Agent: fake,
-		Chronicle: []agent.Message{
-			{Role: "user", Content: "iter 1 directive"},
-			{Role: "assistant", Content: "I tested /admin and found nothing"},
-		},
-	}
-	var calledWith []agent.Message
-	summarize := func(_ context.Context, chronicle []agent.Message, _ string, _ int) (string, error) {
-		calledWith = chronicle
-		return "I previously tested /admin and confirmed it is locked down.", nil
-	}
-	installChronicle(t.Context(), w, "investigate /api this iteration", summarize, "the mission", nil)
-	// The chronicle was summarized from the raw record; the summary is
-	// installed as a single user-role message, NOT the raw chronicle.
-	require.Len(t, calledWith, 2, "summarize sees the raw chronicle")
-	require.Len(t, fake.LastReplacedHistory, 1, "single summary message installed")
-	assert.Equal(t, "I previously tested /admin and confirmed it is locked down.",
-		fake.LastReplacedHistory[0].Content)
-	assert.Equal(t, "user", fake.LastReplacedHistory[0].Role)
-	require.Len(t, fake.QueriedInputs, 1)
-	assert.Equal(t, "investigate /api this iteration", fake.QueriedInputs[0])
-	assert.Equal(t, 1, fake.BoundaryCalls)
-	// Boundary fires AFTER ReplaceHistory (1 summary msg installed) and
-	// BEFORE Query, so it equals 1.
-	assert.Equal(t, 1, fake.LastBoundaryIdx)
-	// Crucially: w.Chronicle is unchanged — the canonical raw record is
-	// preserved for the next install's fresh summarization.
-	require.Len(t, w.Chronicle, 2)
-	assert.Equal(t, "iter 1 directive", w.Chronicle[0].Content)
-}
-
-func TestInstallChronicle_SummarizeFailureFallsBackToEmpty(t *testing.T) {
-	t.Parallel()
-	fake := &agent.FakeAgent{}
-	w := &WorkerState{
-		ID:        1,
-		Agent:     fake,
-		Chronicle: []agent.Message{{Role: "user", Content: "prior work"}},
-	}
-	summarize := func(_ context.Context, _ []agent.Message, _ string, _ int) (string, error) {
-		return "", assert.AnError
-	}
-	installChronicle(t.Context(), w, "next directive", summarize, "", nil)
-	// Failure path with no cached fallback: empty pre-iter, directive
-	// Query'd, chronicle preserved.
-	assert.Empty(t, fake.LastReplacedHistory)
-	require.Len(t, fake.QueriedInputs, 1)
-	assert.Equal(t, "next directive", fake.QueriedInputs[0])
-	require.Len(t, w.Chronicle, 1, "chronicle is untouched on summarize failure")
-	assert.Empty(t, w.SummaryCache, "no cache populated when summarize failed")
-}
-
-func TestInstallChronicle_ReusesCacheWhenDirectiveAndChronicleUnchanged(t *testing.T) {
-	t.Parallel()
-	fake := &agent.FakeAgent{}
-	w := &WorkerState{
-		ID:        1,
-		Agent:     fake,
-		Chronicle: []agent.Message{{Role: "user", Content: "prior"}, {Role: "assistant", Content: "work"}},
-	}
-	calls := 0
-	summarize := func(_ context.Context, _ []agent.Message, _ string, _ int) (string, error) {
-		calls++
-		return "fresh recap", nil
-	}
-	// First install: cache miss, summarize called once, cache populated.
-	installChronicle(t.Context(), w, "directive A", summarize, "mission", nil)
-	require.Equal(t, 1, calls)
-	require.Equal(t, "fresh recap", w.SummaryCache)
-	require.Equal(t, "directive A", w.SummaryCacheDirective)
-	require.Equal(t, 2, w.SummaryCacheChronLen)
-
-	// Second install with same directive and same chronicle length: cache hit.
-	fake2 := &agent.FakeAgent{}
-	w.Agent = fake2
-	installChronicle(t.Context(), w, "directive A", summarize, "mission", nil)
-	assert.Equal(t, 1, calls, "summarize must NOT be called when cache is valid")
-	require.Len(t, fake2.LastReplacedHistory, 1)
-	assert.Equal(t, "fresh recap", fake2.LastReplacedHistory[0].Content,
-		"cached summary installed verbatim")
-}
-
-func TestInstallChronicle_InvalidatesCacheOnDirectiveChange(t *testing.T) {
-	t.Parallel()
-	fake := &agent.FakeAgent{}
-	w := &WorkerState{
-		ID:        1,
-		Agent:     fake,
-		Chronicle: []agent.Message{{Role: "user", Content: "prior"}, {Role: "assistant", Content: "work"}},
-		// Pre-populated cache from a prior install under directive A.
-		SummaryCache:          "old recap for A",
-		SummaryCacheDirective: "directive A",
-		SummaryCacheChronLen:  2,
-	}
-	calls := 0
-	summarize := func(_ context.Context, _ []agent.Message, _ string, _ int) (string, error) {
-		calls++
-		return "new recap for B", nil
-	}
-	installChronicle(t.Context(), w, "directive B", summarize, "mission", nil)
-	assert.Equal(t, 1, calls, "directive change forces re-summarize")
-	require.Len(t, fake.LastReplacedHistory, 1)
-	assert.Equal(t, "new recap for B", fake.LastReplacedHistory[0].Content)
-	assert.Equal(t, "new recap for B", w.SummaryCache, "cache updated to new summary")
-	assert.Equal(t, "directive B", w.SummaryCacheDirective)
-}
-
-func TestInstallChronicle_InvalidatesCacheOnChronicleGrowth(t *testing.T) {
-	t.Parallel()
-	fake := &agent.FakeAgent{}
-	w := &WorkerState{
-		ID: 1, Agent: fake,
-		Chronicle: []agent.Message{
-			{Role: "user", Content: "prior"},
-			{Role: "assistant", Content: "work"},
-			{Role: "tool", Content: "result"}, // chronicle is now length 3
-		},
-		// Cache was built when chronicle length was 2.
-		SummaryCache:          "stale recap",
-		SummaryCacheDirective: "directive A",
-		SummaryCacheChronLen:  2,
-	}
-	calls := 0
-	summarize := func(_ context.Context, _ []agent.Message, _ string, _ int) (string, error) {
-		calls++
-		return "fresh recap covering new tool result", nil
-	}
-	installChronicle(t.Context(), w, "directive A", summarize, "mission", nil)
-	assert.Equal(t, 1, calls, "chronicle growth forces re-summarize")
-	require.Len(t, fake.LastReplacedHistory, 1)
-	assert.Equal(t, "fresh recap covering new tool result", fake.LastReplacedHistory[0].Content)
-	assert.Equal(t, 3, w.SummaryCacheChronLen, "cache length advanced to current chronicle")
-}
-
-func TestInstallChronicle_FallsBackToCachedSummaryOnError(t *testing.T) {
-	t.Parallel()
-	fake := &agent.FakeAgent{}
-	w := &WorkerState{
-		ID: 1, Agent: fake,
-		Chronicle: []agent.Message{
-			{Role: "user", Content: "prior"},
-			{Role: "assistant", Content: "work"},
-			{Role: "tool", Content: "new result"},
-		},
-		// Stale cache from a prior iter (chronicle has grown since).
-		SummaryCache:          "older recap from previous iter",
-		SummaryCacheDirective: "directive A",
-		SummaryCacheChronLen:  2,
-	}
-	summarize := func(_ context.Context, _ []agent.Message, _ string, _ int) (string, error) {
-		return "", assert.AnError
-	}
-	installChronicle(t.Context(), w, "directive A", summarize, "mission", nil)
-	// Summarize errored; cache exists; fallback installs the stale cached summary.
-	require.Len(t, fake.LastReplacedHistory, 1)
-	assert.Equal(t, "older recap from previous iter", fake.LastReplacedHistory[0].Content,
-		"stale cached summary preserves worker memory when fresh summarize fails")
-	require.Len(t, fake.QueriedInputs, 1)
-	assert.Equal(t, "directive A", fake.QueriedInputs[0])
-	// Cache fields are NOT advanced because no fresh summary was produced.
-	assert.Equal(t, 2, w.SummaryCacheChronLen)
-}
-
-func TestExtractAndAppend_NewIterContent(t *testing.T) {
-	t.Parallel()
-	fake := &agent.FakeAgent{
-		// Pre-existing chronicle is 2 messages; install marks boundary at 2
-		// (BEFORE the directive Query). During drain the agent appended 5
-		// more messages (directive + 4 turn elements). After drain, snapshot
-		// is 7 messages; boundary is 2; iter content is the trailing 5
-		// messages, starting with the directive.
-		LastBoundaryIdx: 2,
-		SnapshotMessages: []agent.Message{
-			{Role: "user", Content: "iter1 directive"},
-			{Role: "assistant", Content: "iter1 work"},
-			{Role: "user", Content: "iter2 directive"},
-			{Role: "assistant", Content: "iter2 thinking", ToolCalls: []agent.ToolCall{{ID: "t1"}}},
-			{Role: "tool", Content: "iter2 tool result", ToolCallID: "t1"},
-			{Role: "assistant", Content: "iter2 conclusion"},
-			{Role: "user", Content: "intra-phase continue"},
-		},
-	}
-	w := &WorkerState{
-		ID:    1,
-		Agent: fake,
-		Chronicle: []agent.Message{
-			{Role: "user", Content: "iter1 directive"},
-			{Role: "assistant", Content: "iter1 work"},
-		},
-	}
-	extractAndAppend(w)
-	require.Len(t, w.Chronicle, 7, "2 existing + 5 new from boundary onward")
-	assert.Equal(t, "iter2 directive", w.Chronicle[2].Content,
-		"directive is part of iter content (so next iter's chronicle starts with a user message)")
-	assert.Equal(t, "intra-phase continue", w.Chronicle[6].Content)
-}
-
-func TestExtractAndAppend_BoundaryShiftedBySummarization(t *testing.T) {
-	t.Parallel()
-	// Simulates the boundary-summarize callback firing mid-drain: the
-	// boundary index moves to point past a freshly inserted summary
-	// message. Extraction reads from the (smaller) shifted boundary.
-	fake := &agent.FakeAgent{
-		// Snapshot layout post-summarization:
-		// [0] user: <recap>          (the summary that replaced pre-iter chunk)
-		// [1] user: iter5 directive  (was after boundary; survives)
-		// [2] assistant: iter5 finding
-		// [3] tool: iter5 tool result
-		// After summarization, boundary points to position 1 (right after the
-		// summary message, which is itself the new "pre-iter content"). Iter
-		// content is everything from index 1 onward.
-		LastBoundaryIdx: 1,
-		SnapshotMessages: []agent.Message{
-			{Role: "user", Content: "<recap of pre-iter chunk>"},
-			{Role: "user", Content: "iter5 directive"},
-			{Role: "assistant", Content: "iter5 finding"},
-			{Role: "tool", Content: "iter5 tool result"},
-		},
-	}
-	w := &WorkerState{ID: 1, Agent: fake}
-	extractAndAppend(w)
-	require.Len(t, w.Chronicle, 3, "everything from boundary (1) onward")
-	assert.Equal(t, "iter5 directive", w.Chronicle[0].Content)
-	assert.Equal(t, "iter5 tool result", w.Chronicle[2].Content)
-}
-
-func TestExtractAndAppend_NoNewContent(t *testing.T) {
-	t.Parallel()
-	// Worker drained but produced nothing past the boundary (silent
-	// turn that never produced an assistant response — degenerate case).
-	fake := &agent.FakeAgent{
-		LastBoundaryIdx: 3,
-		SnapshotMessages: []agent.Message{
-			{Role: "user", Content: "old"},
-			{Role: "user", Content: "new directive"},
-			{Role: "assistant", Content: "ack"},
-		},
-	}
-	w := &WorkerState{ID: 1, Agent: fake, Chronicle: nil}
-	extractAndAppend(w)
-	assert.Empty(t, w.Chronicle, "no append when boundary == len(snapshot)")
-}
-
-func TestBoundaryOf_OpenAIAgentImplements(t *testing.T) {
-	t.Parallel()
-	// *OpenAIAgent must satisfy boundaryReader so chronicle extraction
-	// works against real agents.
-	oa := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{
-		Model: "x", SystemPrompt: "sys",
+	t.Run("installs_raw_and_queries", func(t *testing.T) {
+		fake := &agent.FakeAgent{}
+		w := &WorkerState{
+			ID:    1,
+			Agent: fake,
+			Chronicle: []agent.Message{
+				{Role: "user", Content: "iter 1 directive"},
+				{Role: "assistant", Content: "I tested /admin"},
+			},
+		}
+		installChronicle(w, "investigate /api this iteration")
+		require.Len(t, fake.LastReplacedHistory, 2)
+		assert.Equal(t, "iter 1 directive", fake.LastReplacedHistory[0].Content)
+		assert.Equal(t, "I tested /admin", fake.LastReplacedHistory[1].Content)
+		require.Len(t, fake.QueriedInputs, 1)
+		assert.Equal(t, "investigate /api this iteration", fake.QueriedInputs[0])
+		assert.Equal(t, 1, fake.BoundaryCalls)
 	})
-	br, ok := agent.Agent(oa).(boundaryReader)
-	require.True(t, ok, "*OpenAIAgent must implement IterationBoundary()")
-	assert.Equal(t, 0, br.IterationBoundary(),
-		"fresh agent has boundary 0 (no MarkIterationBoundary call yet)")
 
-	oa.MarkIterationBoundary()
-	assert.Equal(t, 1, br.IterationBoundary(),
-		"after Mark on a [system]-only history, boundary = 1")
-	oa.Query("hello")
-	assert.Equal(t, 1, br.IterationBoundary(),
-		"Query does not advance the boundary; iter content includes the directive")
+	t.Run("empty_chronicle_iter_one", func(t *testing.T) {
+		fake := &agent.FakeAgent{}
+		w := &WorkerState{ID: 1, Agent: fake}
+		installChronicle(w, "investigate /login")
+		assert.Empty(t, fake.LastReplacedHistory)
+		require.Len(t, fake.QueriedInputs, 1)
+		assert.Equal(t, "investigate /login", fake.QueriedInputs[0])
+		assert.Equal(t, 1, fake.BoundaryCalls)
+	})
 }
+
+func TestExtractAndAppend(t *testing.T) {
+	t.Parallel()
+
+	t.Run("tags_messages_with_iter", func(t *testing.T) {
+		fake := &agent.FakeAgent{
+			LastBoundaryIdx: 1,
+			SnapshotMessages: []agent.Message{
+				{Role: "user", Content: "directive"},
+				{Role: "assistant", Content: "thinking"},
+				{Role: "tool", ToolName: "proxy_poll", Content: "result"},
+			},
+		}
+		w := &WorkerState{ID: 1, Agent: fake}
+		extractAndAppend(w, 5)
+		require.Len(t, w.Chronicle, 2)
+		require.Len(t, w.ChronicleIter, 2)
+		assert.Equal(t, []int{5, 5}, w.ChronicleIter)
+		assert.Equal(t, "assistant", w.Chronicle[0].Role)
+		assert.Equal(t, "tool", w.Chronicle[1].Role)
+	})
+
+	t.Run("no_snapshotter_is_noop", func(t *testing.T) {
+		w := &WorkerState{ID: 1, Agent: &noopAgent{}}
+		w.Chronicle = []agent.Message{{Role: "user", Content: "preexisting"}}
+		w.ChronicleIter = []int{1}
+		extractAndAppend(w, 2)
+		assert.Len(t, w.Chronicle, 1)
+		assert.Equal(t, []int{1}, w.ChronicleIter)
+	})
+}
+
+func TestCompactChronicle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("strips_and_stubs_old", func(t *testing.T) {
+		w := &WorkerState{
+			Chronicle: []agent.Message{
+				{Role: "assistant", Content: "<think>plotting</think>I will fetch /admin"},
+				{Role: "tool", ToolName: "proxy_poll", Content: "(very long tool output here that should be stubbed)"},
+				{Role: "user", Content: "iter 2 directive"},
+				{Role: "assistant", Content: "<think>recent reasoning</think>Trying again"},
+				{Role: "tool", ToolName: "replay_send", Content: "fresh result"},
+			},
+			ChronicleIter: []int{1, 1, 2, 2, 2},
+		}
+		stripped, stubbed := compactChronicle(w, 3, 2)
+		assert.Equal(t, 1, stripped)
+		assert.Equal(t, 1, stubbed)
+		assert.NotContains(t, w.Chronicle[0].Content, "<think>")
+		assert.Contains(t, w.Chronicle[0].Content, "I will fetch /admin")
+		assert.Contains(t, w.Chronicle[1].Content, "compacted:")
+		assert.Contains(t, w.Chronicle[3].Content, "<think>recent reasoning</think>")
+		assert.Equal(t, "fresh result", w.Chronicle[4].Content)
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		w := &WorkerState{
+			Chronicle: []agent.Message{
+				{Role: "assistant", Content: "<think>plotting</think>fetch /admin"},
+				{Role: "tool", ToolName: "proxy_poll", Content: "long output"},
+			},
+			ChronicleIter: []int{1, 1},
+		}
+		stripped1, stubbed1 := compactChronicle(w, 5, 2)
+		require.Equal(t, 1, stripped1)
+		require.Equal(t, 1, stubbed1)
+		stripped2, stubbed2 := compactChronicle(w, 5, 2)
+		assert.Equal(t, 0, stripped2)
+		assert.Equal(t, 0, stubbed2)
+	})
+
+	t.Run("preserves_length_and_order", func(t *testing.T) {
+		w := &WorkerState{
+			Chronicle: []agent.Message{
+				{Role: "user", Content: "directive 1"},
+				{Role: "assistant", Content: "<think>x</think>y"},
+				{Role: "tool", ToolName: "t", Content: "long"},
+				{Role: "user", Content: "directive 2"},
+			},
+			ChronicleIter: []int{1, 1, 1, 2},
+		}
+		preLen := len(w.Chronicle)
+		compactChronicle(w, 3, 2)
+		assert.Len(t, w.Chronicle, preLen)
+		assert.Equal(t, "directive 1", w.Chronicle[0].Content)
+		assert.Equal(t, "directive 2", w.Chronicle[3].Content)
+	})
+
+	t.Run("nothing_old_is_noop", func(t *testing.T) {
+		w := &WorkerState{
+			Chronicle: []agent.Message{
+				{Role: "assistant", Content: "<think>x</think>recent"},
+			},
+			ChronicleIter: []int{5},
+		}
+		stripped, stubbed := compactChronicle(w, 5, 2)
+		assert.Equal(t, 0, stripped)
+		assert.Equal(t, 0, stubbed)
+		assert.Equal(t, "<think>x</think>recent", w.Chronicle[0].Content)
+	})
+
+	t.Run("repair_errors_protected", func(t *testing.T) {
+		w := &WorkerState{
+			Chronicle: []agent.Message{
+				{Role: "tool", ToolName: "t", IsRepairError: true,
+					Content: "ERROR: your arguments did not parse..."},
+			},
+			ChronicleIter: []int{1},
+		}
+		_, stubbed := compactChronicle(w, 5, 2)
+		assert.Equal(t, 0, stubbed)
+		assert.Contains(t, w.Chronicle[0].Content, "did not parse")
+	})
+}
+
+// noopAgent is a minimal agent.Agent that exposes neither Snapshot nor
+// IterationBoundary. Used to verify extractAndAppend's fail-open path.
+type noopAgent struct{}
+
+func (n *noopAgent) Query(string) {}
+func (n *noopAgent) Drain(context.Context) (agent.TurnSummary, error) {
+	return agent.TurnSummary{}, nil
+}
+func (n *noopAgent) DrainBounded(context.Context, int) (agent.TurnSummary, error) {
+	return agent.TurnSummary{}, nil
+}
+func (n *noopAgent) Close() error                   { return nil }
+func (n *noopAgent) Interrupt()                     {}
+func (n *noopAgent) SetTools([]agent.ToolDef)       {}
+func (n *noopAgent) ReplaceHistory([]agent.Message) {}
+func (n *noopAgent) MarkIterationBoundary()         {}
+func (n *noopAgent) ContextUsage() (int, int)       { return 0, 0 }

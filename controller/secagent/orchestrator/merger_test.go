@@ -49,128 +49,131 @@ func (r *fakeReviewer) Merge(_ context.Context, primary, secondary FindingFiled)
 	}, nil
 }
 
-func TestAsyncMergerSubmitMergesIntoExisting(t *testing.T) {
+func TestAsyncMerger(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	writer := NewFindingWriter(dir)
-	path, err := writer.Write(FindingFiled{
-		Title: "OAuth client enum", Severity: "medium", Endpoint: "GET /oauth2/authorize",
-		Description: "Existing notes.",
-	})
-	require.NoError(t, err)
-	filename := filepath.Base(path)
 
-	rev := &fakeReviewer{}
-	m := newAsyncMerger(t.Context(), rev, writer, nil, 2)
-
-	m.Submit(filename, AddInput{
-		Title: "OAuth client enum (more)", Severity: "medium", Endpoint: "GET /oauth2/authorize",
-		Summary: "Discovered additional client_ids", EvidenceNotes: "tested 5 IDs",
-	})
-	m.Wait()
-
-	rev.mu.Lock()
-	require.Len(t, rev.merges, 1)
-	assert.Equal(t, "OAuth client enum", rev.merges[0].primary.Title)
-	assert.Equal(t, "tested 5 IDs", rev.merges[0].secondary.Evidence)
-	rev.mu.Unlock()
-
-	body, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Contains(t, string(body), "Existing notes.")
-	assert.Contains(t, string(body), "tested 5 IDs")
-}
-
-func TestAsyncMergerLogsTargetMissing(t *testing.T) {
-	t.Parallel()
-	writer := NewFindingWriter(t.TempDir())
-	rev := &fakeReviewer{}
-	log, path, _ := newCapturedLogger(t)
-
-	m := newAsyncMerger(t.Context(), rev, writer, log, 1)
-	m.Submit("does-not-exist.md", AddInput{Title: "x", Severity: "low", Endpoint: "GET /"})
-	m.Wait()
-	require.NoError(t, log.Close())
-
-	assert.Empty(t, rev.merges)
-	logged := mustReadFile(t, path)
-	assert.Contains(t, logged, "async-merge target missing")
-}
-
-func TestAsyncMergerLogsClassifyError(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writer := NewFindingWriter(dir)
-	p, err := writer.Write(FindingFiled{
-		Title: "T", Severity: "low", Endpoint: "GET /",
-	})
-	require.NoError(t, err)
-	rev := &fakeReviewer{mergeErr: errors.New("boom")}
-	log, lpath, _ := newCapturedLogger(t)
-
-	m := newAsyncMerger(t.Context(), rev, writer, log, 1)
-	m.Submit(filepath.Base(p), AddInput{Title: "y", Severity: "low", Endpoint: "GET /"})
-	m.Wait()
-	require.NoError(t, log.Close())
-
-	logged := mustReadFile(t, lpath)
-	assert.Contains(t, logged, "async-merge classify error")
-}
-
-func TestAsyncMergerWaitOnSubmitsBeforeShutdown(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writer := NewFindingWriter(dir)
-	for i := 0; i < 3; i++ {
-		_, err := writer.Write(FindingFiled{
-			Title: "F" + string(rune('A'+i)), Severity: "low", Endpoint: "GET /",
+	t.Run("submit_merges_into_existing", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writer := NewFindingWriter(dir)
+		path, err := writer.Write(FindingFiled{
+			Title: "OAuth client enum", Severity: "medium", Endpoint: "GET /oauth2/authorize",
+			Description: "Existing notes.",
 		})
 		require.NoError(t, err)
-	}
-	rev := &fakeReviewer{}
-	m := newAsyncMerger(t.Context(), rev, writer, nil, 1)
+		filename := filepath.Base(path)
 
-	digests := writer.Digests()
-	for _, d := range digests {
-		m.Submit(d.Filename, AddInput{Title: "extra", Severity: "low", Endpoint: "GET /"})
-	}
-	m.Wait()
+		rev := &fakeReviewer{}
+		m := newAsyncMerger(t.Context(), rev, writer, nil, 2)
 
-	rev.mu.Lock()
-	assert.Len(t, rev.merges, 3, "Wait must block until every submitted merge completes")
-	rev.mu.Unlock()
-}
+		m.Submit(filename, AddInput{
+			Title: "OAuth client enum (more)", Severity: "medium", Endpoint: "GET /oauth2/authorize",
+			Summary: "Discovered additional client_ids", EvidenceNotes: "tested 5 IDs",
+		})
+		m.Wait()
 
-func TestAsyncMergerCanceledContextSkips(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writer := NewFindingWriter(dir)
-	p, err := writer.Write(FindingFiled{
-		Title: "T", Severity: "low", Endpoint: "GET /",
+		rev.mu.Lock()
+		require.Len(t, rev.merges, 1)
+		assert.Equal(t, "OAuth client enum", rev.merges[0].primary.Title)
+		assert.Equal(t, "tested 5 IDs", rev.merges[0].secondary.Evidence)
+		rev.mu.Unlock()
+
+		body, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), "Existing notes.")
+		assert.Contains(t, string(body), "tested 5 IDs")
 	})
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel() // pre-cancel
 
-	rev := &fakeReviewer{}
-	m := newAsyncMerger(ctx, rev, writer, nil, 1)
-	m.Submit(filepath.Base(p), AddInput{Title: "y"})
-	m.Wait()
+	t.Run("logs_target_missing", func(t *testing.T) {
+		t.Parallel()
+		writer := NewFindingWriter(t.TempDir())
+		rev := &fakeReviewer{}
+		log, path, _ := newCapturedLogger(t)
 
-	rev.mu.Lock()
-	defer rev.mu.Unlock()
-	// Goroutine hits ctx.Done in the semaphore acquire and returns without
-	// touching the reviewer. May or may not have entered runOne — assert
-	// that it did NOT issue a merge.
-	assert.Empty(t, rev.merges)
-}
+		m := newAsyncMerger(t.Context(), rev, writer, log, 1)
+		m.Submit("does-not-exist.md", AddInput{Title: "x", Severity: "low", Endpoint: "GET /"})
+		m.Wait()
+		require.NoError(t, log.Close())
 
-// nilReceiverGuard verifies the package-level helpers tolerate nil values.
-func TestAsyncMergerNilReceiver(t *testing.T) {
-	t.Parallel()
-	var m *asyncMerger
-	m.Submit("x", AddInput{}) // must not panic
-	m.Wait()                  // must not panic
+		assert.Empty(t, rev.merges)
+		logged := mustReadFile(t, path)
+		assert.Contains(t, logged, "async-merge target missing")
+	})
+
+	t.Run("logs_classify_error", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writer := NewFindingWriter(dir)
+		p, err := writer.Write(FindingFiled{
+			Title: "T", Severity: "low", Endpoint: "GET /",
+		})
+		require.NoError(t, err)
+		rev := &fakeReviewer{mergeErr: errors.New("boom")}
+		log, lpath, _ := newCapturedLogger(t)
+
+		m := newAsyncMerger(t.Context(), rev, writer, log, 1)
+		m.Submit(filepath.Base(p), AddInput{Title: "y", Severity: "low", Endpoint: "GET /"})
+		m.Wait()
+		require.NoError(t, log.Close())
+
+		logged := mustReadFile(t, lpath)
+		assert.Contains(t, logged, "async-merge classify error")
+	})
+
+	t.Run("wait_blocks_on_submits", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writer := NewFindingWriter(dir)
+		for i := range 3 {
+			_, err := writer.Write(FindingFiled{
+				Title: "F" + string(rune('A'+i)), Severity: "low", Endpoint: "GET /",
+			})
+			require.NoError(t, err)
+		}
+		rev := &fakeReviewer{}
+		m := newAsyncMerger(t.Context(), rev, writer, nil, 1)
+
+		digests := writer.Digests()
+		for _, d := range digests {
+			m.Submit(d.Filename, AddInput{Title: "extra", Severity: "low", Endpoint: "GET /"})
+		}
+		m.Wait()
+
+		rev.mu.Lock()
+		assert.Len(t, rev.merges, 3, "Wait must block until every submitted merge completes")
+		rev.mu.Unlock()
+	})
+
+	t.Run("canceled_context_skips", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writer := NewFindingWriter(dir)
+		p, err := writer.Write(FindingFiled{
+			Title: "T", Severity: "low", Endpoint: "GET /",
+		})
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // pre-cancel
+
+		rev := &fakeReviewer{}
+		m := newAsyncMerger(ctx, rev, writer, nil, 1)
+		m.Submit(filepath.Base(p), AddInput{Title: "y"})
+		m.Wait()
+
+		rev.mu.Lock()
+		defer rev.mu.Unlock()
+		// Goroutine hits ctx.Done in the semaphore acquire and returns without
+		// touching the reviewer. May or may not have entered runOne — assert
+		// that it did NOT issue a merge.
+		assert.Empty(t, rev.merges)
+	})
+
+	t.Run("nil_receiver_safe", func(t *testing.T) {
+		t.Parallel()
+		var m *asyncMerger
+		m.Submit("x", AddInput{}) // must not panic
+		m.Wait()                  // must not panic
+	})
 }
 
 func TestCandidateAsFindingFiledMapping(t *testing.T) {

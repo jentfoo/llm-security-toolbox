@@ -2,11 +2,8 @@ package orchestrator
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/go-analyze/bulk"
 
 	"github.com/go-appsec/secagent/agent"
 )
@@ -124,24 +121,32 @@ func statusLine(iteration, maxIter, findings int) string {
 	return fmt.Sprintf("**Status:** iteration %d/%d, findings filed: %d", iteration, maxIter, findings)
 }
 
-// BuildVerifierPrompt renders the initial verifier substep.
+// BuildVerifierPrompt renders the initial verifier substep. Structure:
+// status → context (recon, findings, candidates, worker runs) → action.
+//
+// reconSummary, when non-empty, is the iter-1 recon worker's
+// investigation summary; included as a header so the verifier knows
+// the surface mapped during recon. Empty before iter 2.
 func BuildVerifierPrompt(
 	workers []*WorkerState,
 	workerRuns map[int][]agent.TurnSummary,
 	pending []FindingCandidate,
-	findingsSummary string,
+	findingsSummary, reconSummary string,
 	iteration, maxIter, findingsCount int,
 ) string {
 	var parts []string
 	parts = append(parts, statusLine(iteration, maxIter, findingsCount))
-	parts = append(parts, "", findingsSummary, "", formatPendingCandidates(pending), "", "**Worker autonomous runs this iteration:**", "")
+	if reconSummary != "" {
+		parts = append(parts, "", "## Recon summary (initial scope mapping by retired worker 1)", "", reconSummary)
+	}
+	parts = append(parts, "", findingsSummary, "", formatPendingCandidates(pending), "", "## Worker autonomous runs this iteration", "")
 	for _, w := range workers {
 		if !w.Alive {
 			continue
 		}
 		parts = append(parts, formatAutonomousRun(w.ID, workerRuns[w.ID], w.EscalationReason), "")
 	}
-	parts = append(parts, "Reproduce and dispose of every pending candidate. `verification_done(summary)` when all are filed or dismissed.")
+	parts = append(parts, "Reproduce and dispose of every pending candidate. Call `verification_done(summary)` when all are filed or dismissed.")
 	return strings.Join(parts, "\n")
 }
 
@@ -175,8 +180,11 @@ func BuildVerifierContinuePrompt(
 	return strings.Join(parts, "\n")
 }
 
-// FormatFollowUpHints renders optional verifier follow-up hints for the director.
-// Returns "" when no hints are present.
+// FormatFollowUpHints renders optional verifier follow-up hints for the
+// director's synthesis prompt. Returns "" when no hints are present.
+//
+// Per-worker decision prompts deliberately do NOT include hints — hints
+// are advisory for run-wide direction (spawn / end), not per-worker pivots.
 func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissal) string {
 	var lines []string
 	for _, f := range findings {
@@ -199,73 +207,121 @@ func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissa
 	return "**Verifier follow-up hints (advisory — you decide whether to act):**\n" + strings.Join(lines, "\n")
 }
 
-// BuildDirectorPrompt renders the initial director substep.
+// BuildPerWorkerDecisionPrompt renders the user message appended after the
+// director's selectively-compacted chat view for one per-worker decision
+// call. Structure: status → single-tool restriction (primacy effect) →
+// worker context → action lines.
 //
-// Director-input contract (load-bearing — preserve when modifying):
-//   - workerRuns is the RAW per-iter TurnSummary for currently alive
-//     workers. The director sees individual tool calls, flow IDs, and
-//     last-turn raw tool records via formatAutonomousRun. NO summarization
-//     is applied to in-flight worker actions — the director makes its
-//     direction decisions against unfiltered evidence.
-//   - For prior iters of alive workers, RecentHistory provides high-level
-//     per-iter outcome rows (Iteration / Angle / Outcome / ToolCalls /
-//     FlowsTouched). This is categorical, not a prose summary of actions.
-//   - verificationSummary is the verifier phase's own decision report
-//     (filings/dismissals/done), not a summary of worker actions.
-//   - completed is the ONLY summarized input. These workers are retired,
-//     IDs are gone, and the LLM-generated CompletedWorker.Summary stands
-//     in for them as historical reference. Live-direction decisions never
-//     consume action summaries; only retired-worker reference does.
-func BuildDirectorPrompt(
+// peerSummary is a one-line snapshot of every other alive worker's
+// current angle so the director can avoid duplicating efforts. takenIDs
+// is the set of worker IDs that must NOT be picked as fork.new_worker_id.
+// iterationStatus is the run-level "iter N/M, findings filed K" line.
+func BuildPerWorkerDecisionPrompt(
+	workerID int,
+	w *WorkerState,
+	turns []agent.TurnSummary,
+	peerSummary, iterationStatus string,
+	takenIDs map[int]bool,
+) string {
+	idStr := strconv.Itoa(workerID)
+	var parts []string
+	parts = append(parts, iterationStatus)
+	parts = append(parts, "", fmt.Sprintf(
+		"**Single tool call: `decide_worker(worker_id=%s, ...)`.** Only `decide_worker` is registered for this prompt — every other tool errors out. Output exactly one call.",
+		idStr,
+	))
+	parts = append(parts, "", fmt.Sprintf(
+		"## Worker %s activity (escalation: %s, %d autonomous turn(s))",
+		idStr, orDefault(w.EscalationReason, "unknown"), len(turns),
+	), "", formatAutonomousRun(workerID, turns, w.EscalationReason))
+	if peerSummary != "" {
+		parts = append(parts, "", "## Other alive workers (current angles, for coordination — do not duplicate)", "", peerSummary)
+	}
+	if hist := formatSingleWorkerHistory(w); hist != "" {
+		parts = append(parts, "", hist)
+	}
+	parts = append(parts, "", "## decide_worker(worker_id="+idStr+", ...)",
+		"- `action=\"continue\"`: keep the worker on its current angle. Provide `instruction` (next-iter directive).",
+		"- `action=\"expand\"`: pivot to a new angle. Provide `instruction` (new directive).",
+		"- `action=\"stop\"`: retire the worker. Provide `reason` (informs the recap).",
+		"- Optional `fork={new_worker_id, instruction}`: spawn a child that inherits this worker's chronicle. `new_worker_id` must NOT be in the taken set.",
+	)
+	if len(takenIDs) > 0 {
+		parts = append(parts, "",
+			"Taken worker IDs (alive + completed — never reuse): ["+formatTakenIDs(takenIDs)+"].")
+	}
+	return strings.Join(parts, "\n")
+}
+
+// formatSingleWorkerHistory renders the per-worker iteration history
+// for one worker — the recent-iter outcome rows surfaced to the director.
+// Returns "" when no entries are recorded yet.
+func formatSingleWorkerHistory(w *WorkerState) string {
+	entries := w.RecentHistory()
+	if len(entries) == 0 {
+		return ""
+	}
+	lines := []string{fmt.Sprintf("**Worker %d recent iter history (up to %d):**", w.ID, WorkerHistoryRing)}
+	for _, e := range entries {
+		angle := e.Angle
+		if angle == "" {
+			angle = "(no instruction)"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"- iter %d [%s] %q — %d tools, %d flows",
+			e.Iteration, e.Outcome, angle, e.ToolCalls, e.FlowsTouched,
+		))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// FormatPeerSummary renders one line per OTHER alive worker (excluding
+// the worker being asked about) so the director can avoid duplicating
+// angles. Excludes workers whose decision has already landed earlier in
+// the per-worker loop — they're still alive but already retargeted.
+func FormatPeerSummary(workers []*WorkerState, exceptID int) string {
+	var lines []string
+	for _, w := range workers {
+		if !w.Alive || w.ID == exceptID {
+			continue
+		}
+		angle := w.LastInstruction
+		if angle == "" {
+			angle = "(no instruction)"
+		}
+		lines = append(lines, fmt.Sprintf("- Worker %d: %s", w.ID, short(angle, 200)))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+// BuildSynthesisPrompt renders the user message for the synthesis call
+// after the per-worker decision loop completes. Structure:
+// status → tool restriction → run-wide context → action lines.
+func BuildSynthesisPrompt(
 	workers []*WorkerState,
-	workerRuns map[int][]agent.TurnSummary,
-	verificationSummary, findingsSummary, stallWarnings, followUpHints string,
 	completed []CompletedWorker,
-	iteration, maxIter, findingsCount int,
+	verificationSummary, findingsSummary, stallWarnings, followUpHints string,
+	iterationStatus string,
 	maxWorkers int,
 ) string {
-	var parts []string
-	parts = append(parts, statusLine(iteration, maxIter, findingsCount), "", findingsSummary, "", "**Verification:** "+verificationSummary)
+	parts := make([]string, 0, 16)
+	parts = append(parts, iterationStatus)
+	parts = append(parts, "",
+		"**Synthesis call.** Registered tools: `plan_workers` (optional), `direction_done` (close this iteration), `end_run` (close the entire run, rarely). `decide_worker` is NOT registered — per-worker decisions are already recorded above.",
+	)
+	parts = append(parts, "", findingsSummary, "", "**Verification:** "+verificationSummary)
 	if stallWarnings != "" {
 		parts = append(parts, "", stallWarnings)
 	}
 	if followUpHints != "" {
 		parts = append(parts, "", followUpHints)
 	}
-	if len(completed) > 0 {
-		// Render the retired-workers block. At most completedWorkersRenderCap
-		// most-recent entries appear; older entries fold into a single
-		// "(N earlier completed worker(s) omitted)" line so the prompt
-		// stays bounded across long runs. Each summary is truncated only
-		// as a safety net (completedSummaryRenderCap) — the summarizer is
-		// instructed to be exhaustive.
-		lines := []string{
-			"",
-			"**Workers completed earlier this run** (reference context only — these IDs are gone, do NOT plan, fork, or narrate against them):",
-		}
-		start := 0
-		if len(completed) > completedWorkersRenderCap {
-			omitted := len(completed) - completedWorkersRenderCap
-			start = omitted
-			lines = append(lines, fmt.Sprintf("(%d earlier completed worker(s) omitted)", omitted))
-		}
-		for _, c := range completed[start:] {
-			reason := c.Reason
-			if reason == "" {
-				reason = "(no reason given)"
-			}
-			summary := short(c.Summary, completedSummaryRenderCap)
-			if summary == "" {
-				summary = "(summary unavailable)"
-			}
-			lines = append(lines, fmt.Sprintf(
-				"- Worker %d (stopped iter %d, reason: %s):\n  %s",
-				c.ID, c.StoppedAt, short(reason, 200), summary,
-			))
-		}
-		parts = append(parts, lines...)
+	if block := formatCompletedRoster(completed); block != "" {
+		parts = append(parts, "", block)
 	}
-	parts = append(parts, "", "**Worker autonomous runs this iteration:**", "")
 	aliveCount := 0
 	aliveIDs := make([]string, 0, len(workers))
 	for _, w := range workers {
@@ -274,87 +330,113 @@ func BuildDirectorPrompt(
 		}
 		aliveCount++
 		aliveIDs = append(aliveIDs, strconv.Itoa(w.ID))
-		parts = append(parts, formatAutonomousRun(w.ID, workerRuns[w.ID], w.EscalationReason), "")
-	}
-	if block := formatWorkerHistory(workers); block != "" {
-		parts = append(parts, "", block)
 	}
 	aliveStr := noneSentinel
 	if len(aliveIDs) > 0 {
 		aliveStr = strings.Join(aliveIDs, ", ")
 	}
-	parts = append(parts, fmt.Sprintf("**Alive:** [%s]  **Parallelism:** %d/%d.", aliveStr, aliveCount, maxWorkers))
-
-	// Iteration 1: worker 1 has just done recon; prompt the director to
-	// dispatch specialised parallel workers rather than pile more onto one.
-	if iteration == 1 && aliveCount < maxWorkers {
-		parts = append(parts, "",
-			"Iteration 1 is the attack-surface dispatch moment. If the assignment has a broad surface, split it across 3–4 specialised workers via `plan_workers` using fresh worker_ids now.")
-	}
+	parts = append(parts, "", fmt.Sprintf("**Alive workers (after this iter's per-worker decisions):** [%s]  **Parallelism:** %d/%d.", aliveStr, aliveCount, maxWorkers))
+	parts = append(parts, "", "## Action",
+		"- `plan_workers`: spawn fresh workers and/or retarget alive ones. Use when uncovered surface remains.",
+		"- `direction_done(summary)`: close this iteration. Use for almost every iteration.",
+		"- `end_run(summary)`: close the entire run. Only after many iterations when the assignment is exhausted and findings have been filed.",
+	)
 	return strings.Join(parts, "\n")
 }
 
+// formatCompletedRoster renders the retired-workers reference block for
+// the synthesis prompt. At most completedWorkersRenderCap most-recent
+// entries are shown; older entries fold into a single "(N omitted)" line.
+func formatCompletedRoster(completed []CompletedWorker) string {
+	if len(completed) == 0 {
+		return ""
+	}
+	lines := []string{
+		"**Workers completed earlier this run** (reference context — these IDs are gone, do NOT plan or fork against them):",
+	}
+	start := 0
+	if len(completed) > completedWorkersRenderCap {
+		omitted := len(completed) - completedWorkersRenderCap
+		start = omitted
+		lines = append(lines, fmt.Sprintf("(%d earlier completed worker(s) omitted)", omitted))
+	}
+	for _, c := range completed[start:] {
+		reason := c.Reason
+		if reason == "" {
+			reason = "(no reason given)"
+		}
+		summary := short(c.Summary, completedSummaryRenderCap)
+		if summary == "" {
+			summary = "(summary unavailable)"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"- Worker %d (stopped iter %d, reason: %s):\n  %s",
+			c.ID, c.StoppedAt, short(reason, 200), summary,
+		))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // completedSummaryRenderCap caps the rendered length of each per-worker
-// summary in the director prompt. The summarizer is instructed to be
+// summary in the synthesis prompt. The summarizer is instructed to be
 // exhaustive on detail (length follows content), so this is a safety net
 // for an absurdly long output — not a primary compaction mechanism.
 const completedSummaryRenderCap = 8000
 
 // completedWorkersRenderCap is the maximum number of completed workers
-// rendered in any one director prompt. Beyond that, the oldest are folded
+// rendered in any one synthesis prompt. Beyond that, the oldest are folded
 // into a single "(N earlier completed worker(s) omitted)" line.
 const completedWorkersRenderCap = 10
 
-// formatWorkerHistory renders the per-worker iteration history block for
-// the director prompt. Returns "" when no worker has recorded entries yet
-// (e.g. iteration 1). Entries are shown oldest → newest so the director
-// reads the trajectory in chronological order. Dead workers are skipped —
-// their canonical record lives in the completed-workers block instead.
-func formatWorkerHistory(workers []*WorkerState) string {
-	var perWorker []string
-	for _, w := range workers {
-		if !w.Alive {
-			continue
-		}
-		entries := w.RecentHistory()
-		if len(entries) == 0 {
-			continue
-		}
-		lines := []string{fmt.Sprintf("- Worker %d:", w.ID)}
-		for _, e := range entries {
-			angle := e.Angle
-			if angle == "" {
-				angle = "(no instruction)"
-			}
-			lines = append(lines, fmt.Sprintf(
-				"  - iter %d [%s] %q — %d tools, %d flows",
-				e.Iteration, e.Outcome, angle, e.ToolCalls, e.FlowsTouched,
-			))
-		}
-		perWorker = append(perWorker, strings.Join(lines, "\n"))
-	}
-	if len(perWorker) == 0 {
-		return ""
-	}
-	return "**Recent worker history (up to 6 iters each):**\n" + strings.Join(perWorker, "\n")
+// BuildIter1ReconReviewPrompt is the FIRST iter-1 synthesis prompt:
+// the director reads the recon summary above in dirChat and produces a
+// free-form text response describing scope understanding and proposed
+// iter-2 worker assignments. NO tools are registered for this call —
+// the response IS the deliverable, captured into dirChat for the
+// subsequent plan call.
+//
+// The split exists because constrained / local models often try to do
+// "review the recon AND plan_workers AND direction_done" in one shot
+// and drop one or more steps. Splitting the cognitive task into
+// "understand first, then formalize" is more reliable.
+func BuildIter1ReconReviewPrompt(iterationStatus string, maxWorkers int) string {
+	parts := make([]string, 0, 8)
+	parts = append(parts, iterationStatus)
+	parts = append(parts, "",
+		"**Step 1 of 2: text response, NO tool calls.** No tools are registered for this call — every tool errors out. Plan in plain text; the next prompt will ask you to formalize via `plan_workers`.",
+		"",
+		"## Recon iteration complete",
+		"",
+		"The recon worker (worker 1) has finished its scope-mapping pass — pure exploration, no planning, no proposals. The recon record above is a factual map of what exists, not a testing plan. Planning is your job now.",
+		"",
+		"## Your response",
+		"",
+		"1. Describe the target's scope, attack surface, technology stack, and authentication boundaries as you now understand them.",
+		fmt.Sprintf("2. Propose **at least 2 and up to %d** concrete, mutually-exclusive worker assignments for iteration 2. A single worker is not enough — parallelism across distinct angles is the whole point of the loop. Each assignment names a specific endpoint, technique, or attack vector. Number them starting from 2 (worker 1 is retired).", maxWorkers),
+	)
+	return strings.Join(parts, "\n")
 }
 
-// BuildDirectorContinuePrompt renders direction substeps 2..N.
-func BuildDirectorContinuePrompt(pendingWIDs map[int]bool, substep, maxSubsteps int) string {
-	ids := bulk.MapKeysSlice(pendingWIDs)
-	sort.Ints(ids)
-	pending := noneSentinel
-	if len(ids) > 0 {
-		ss := make([]string, 0, len(ids))
-		for _, id := range ids {
-			ss = append(ss, strconv.Itoa(id))
-		}
-		pending = strings.Join(ss, ", ")
-	}
-	return fmt.Sprintf("**Direction substep %d/%d.** Workers still uncovered: [%s].", substep, maxSubsteps, pending)
+// BuildIter1ReconPlanPrompt is the SECOND iter-1 synthesis prompt:
+// the director now has its own review response in dirChat (appended by
+// RunIter1ReconReviewCall) and is asked to formalize the iter-2 roster
+// via plan_workers + direction_done.
+func BuildIter1ReconPlanPrompt(iterationStatus string, maxWorkers int) string {
+	parts := make([]string, 0, 8)
+	parts = append(parts, iterationStatus)
+	parts = append(parts, "",
+		"**Step 2 of 2: formalize the iter-2 roster.** Registered tools: `plan_workers`, `direction_done`. `decide_worker` and `end_run` are NOT registered — worker 1 is already retired and the run is just starting.",
+		"",
+		fmt.Sprintf("1. Call `plan_workers` once with the assignments you proposed above. Include **at least 2 entries and up to %d**. Pick fresh integer worker_ids starting from 2.", maxWorkers),
+		"2. Call `direction_done(summary)` to close this iteration. The summary briefly recaps the recon findings and the iter-2 plan.",
+	)
+	return strings.Join(parts, "\n")
 }
 
-// BuildDirectorSelfReviewPrompt prompts the director to re-check coverage.
-func BuildDirectorSelfReviewPrompt() string {
-	return "**Self-review.** Any alive worker uncovered or misassigned? Make final adjustments, then `direction_done(summary)`."
+// BuildIter1ReconPlanRetryPrompt is the pointed retry message used
+// when the iter-1 plan call returned without plan_workers being
+// called. Without a worker roster the run cannot continue, so this is
+// a hard ask: call plan_workers now with at least 2 entries.
+func BuildIter1ReconPlanRetryPrompt() string {
+	return "**You did NOT call `plan_workers` in your last response.** A worker roster is required to continue. Call `plan_workers` now with **at least 2** `{worker_id, assignment}` entries on distinct angles (worker_ids starting from 2; each assignment names a specific endpoint or technique). Then call `direction_done(summary)` to close. This is your last chance — without a `plan_workers` call the run ends."
 }

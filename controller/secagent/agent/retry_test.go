@@ -52,47 +52,65 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-func TestBackoffFor_RateLimit_HonorsRetryAfter(t *testing.T) {
+func TestBackoffFor(t *testing.T) {
 	t.Parallel()
-	rng := rand.New(rand.NewSource(1))
-	got := BackoffFor(ErrRateLimit, 0, 500*time.Millisecond, time.Second, rng)
-	assert.Equal(t, 500*time.Millisecond, got, "Retry-After takes precedence over base backoff")
-}
 
-func TestBackoffFor_RateLimit_FallsBackToExponential(t *testing.T) {
-	t.Parallel()
-	rng := rand.New(rand.NewSource(1))
-	base := 100 * time.Millisecond
-	// Attempt 2: base * 2^2 = 400ms before jitter; jitter ±20% → [320ms, 480ms).
-	got := BackoffFor(ErrRateLimit, 2, 0, base, rng)
-	assert.GreaterOrEqual(t, got, 320*time.Millisecond)
-	assert.Less(t, got, 480*time.Millisecond)
-}
+	cases := []struct {
+		name       string
+		cat        ErrCategory
+		attempt    int
+		retryAfter time.Duration
+		base       time.Duration
+		wantMin    time.Duration // inclusive
+		wantMax    time.Duration // exclusive
+	}{
+		{
+			name:       "rate_limit_honors_retry_after",
+			cat:        ErrRateLimit,
+			retryAfter: 500 * time.Millisecond,
+			base:       time.Second,
+			wantMin:    500 * time.Millisecond,
+			wantMax:    500*time.Millisecond + 1,
+		},
+		{
+			// attempt 2: base * 2^2 = 400ms before jitter; jitter ±20% → [320ms, 480ms).
+			name:    "rate_limit_falls_back_to_exponential",
+			cat:     ErrRateLimit,
+			attempt: 2,
+			base:    100 * time.Millisecond,
+			wantMin: 320 * time.Millisecond,
+			wantMax: 480 * time.Millisecond,
+		},
+		{
+			// attempt 0: base * 2^0 = 200ms before jitter → [160ms, 240ms).
+			name:    "transient_net_jittered_exponential",
+			cat:     ErrTransientNet,
+			base:    200 * time.Millisecond,
+			wantMin: 160 * time.Millisecond,
+			wantMax: 240 * time.Millisecond,
+		},
+		{
+			// attempt 20: exponential would be enormous; capped at 30s then jittered.
+			name:    "transient_net_capped_at_30s",
+			cat:     ErrTransientNet,
+			attempt: 20,
+			base:    time.Second,
+			wantMin: 24 * time.Second,
+			wantMax: 37 * time.Second,
+		},
+		{name: "non_retryable_other", cat: ErrOther, base: time.Second, wantMax: 1},
+		{name: "non_retryable_deadline", cat: ErrDeadline, base: time.Second, wantMax: 1},
+		{name: "non_retryable_context_overflow", cat: ErrContextOverflow, base: time.Second, wantMax: 1},
+		{name: "non_retryable_model_error", cat: ErrModelError, base: time.Second, wantMax: 1},
+	}
 
-func TestBackoffFor_TransientNet_JitteredExponential(t *testing.T) {
-	t.Parallel()
-	rng := rand.New(rand.NewSource(42))
-	base := 200 * time.Millisecond
-	// Attempt 0: base * 2^0 = 200ms before jitter → [160ms, 240ms).
-	got := BackoffFor(ErrTransientNet, 0, 0, base, rng)
-	assert.GreaterOrEqual(t, got, 160*time.Millisecond)
-	assert.Less(t, got, 240*time.Millisecond)
-}
-
-func TestBackoffFor_TransientNet_CappedAt30s(t *testing.T) {
-	t.Parallel()
-	rng := rand.New(rand.NewSource(1))
-	// Attempt 20: base * 2^20 would be enormous; cap at 30s then jitter.
-	got := BackoffFor(ErrTransientNet, 20, 0, time.Second, rng)
-	// Max possible: 30s * 1.2 = 36s.
-	assert.Less(t, got, 37*time.Second)
-	assert.GreaterOrEqual(t, got, 24*time.Second)
-}
-
-func TestBackoffFor_NonRetryableCategoriesReturnZero(t *testing.T) {
-	t.Parallel()
-	for _, cat := range []ErrCategory{ErrOther, ErrDeadline, ErrContextOverflow, ErrModelError} {
-		assert.Zero(t, BackoffFor(cat, 0, 0, time.Second, nil), "cat=%v should not back off", cat)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rng := rand.New(rand.NewSource(1))
+			got := BackoffFor(tc.cat, tc.attempt, tc.retryAfter, tc.base, rng)
+			assert.GreaterOrEqual(t, got, tc.wantMin)
+			assert.Less(t, got, tc.wantMax)
+		})
 	}
 }
 

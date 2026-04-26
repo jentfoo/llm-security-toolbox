@@ -67,7 +67,7 @@ func TestTitlesSimilar(t *testing.T) {
 	}
 }
 
-func TestFindingWriter(t *testing.T) {
+func TestFindingWriterIsDuplicate(t *testing.T) {
 	t.Parallel()
 	finding := FindingFiled{
 		Title:             "Reflected XSS",
@@ -79,14 +79,6 @@ func TestFindingWriter(t *testing.T) {
 		Impact:            "impact",
 		VerificationNotes: "notes",
 	}
-
-	t.Run("writes_file", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
-		path, err := w.Write(finding)
-		require.NoError(t, err)
-		_, err = os.Stat(path)
-		require.NoError(t, err)
-	})
 
 	t.Run("detects_duplicate", func(t *testing.T) {
 		w := NewFindingWriter(t.TempDir())
@@ -105,9 +97,7 @@ func TestFindingWriter(t *testing.T) {
 	})
 
 	t.Run("underscore_vs_hyphen_client_secret", func(t *testing.T) {
-		// Regression: the secagent run at 2026-04-22 produced finding-02
-		// "Plaintext client_secret Exposure ..." and finding-03 "Plaintext
-		// Client Secret Exposure ..." — same class, different punctuation.
+		// Regression: underscore/hyphen punctuation must collapse to same slug.
 		first := FindingFiled{
 			Title:    "Plaintext client_secret Exposure in OAuth2 Registration Response",
 			Severity: "high",
@@ -125,7 +115,6 @@ func TestFindingWriter(t *testing.T) {
 	})
 
 	t.Run("same_title_missing_endpoint_is_duplicate", func(t *testing.T) {
-		// Same title regardless of endpoint → exact slug match.
 		w := NewFindingWriter(t.TempDir())
 		_, err := w.Write(finding)
 		require.NoError(t, err)
@@ -135,9 +124,6 @@ func TestFindingWriter(t *testing.T) {
 	})
 
 	t.Run("similar_title_not_exact_slug_not_duplicate", func(t *testing.T) {
-		// Softer match: TitlesSimilar but slug differs — IsDuplicate no
-		// longer returns true. Agent-mediated dedup (FindSimilarEntries +
-		// reviewer) handles these.
 		w := NewFindingWriter(t.TempDir())
 		_, err := w.Write(finding)
 		require.NoError(t, err)
@@ -150,7 +136,69 @@ func TestFindingWriter(t *testing.T) {
 	})
 }
 
-func TestFindingWriter_MatchesFiled(t *testing.T) {
+func TestFindSimilarEntries(t *testing.T) {
+	t.Parallel()
+	w := NewFindingWriter(t.TempDir())
+	_, err := w.Write(FindingFiled{
+		Title: "Reflected XSS in search", Severity: "high", Endpoint: "GET /search",
+	})
+	require.NoError(t, err)
+
+	t.Run("exact_slug_excluded", func(t *testing.T) {
+		got := w.FindSimilarEntries(FindingFiled{Title: "Reflected XSS in search", Endpoint: "GET /search"})
+		assert.Empty(t, got)
+	})
+	t.Run("similar_title_missing_endpoint", func(t *testing.T) {
+		got := w.FindSimilarEntries(FindingFiled{Title: "Reflected XSS", Endpoint: ""})
+		require.Len(t, got, 1)
+		assert.Equal(t, "Reflected XSS in search", got[0].Filed.Title)
+	})
+	t.Run("similar_title_explicit_different_endpoint", func(t *testing.T) {
+		got := w.FindSimilarEntries(FindingFiled{Title: "Reflected XSS in login", Endpoint: "GET /login"})
+		assert.Empty(t, got)
+	})
+	t.Run("different_title_no_match", func(t *testing.T) {
+		got := w.FindSimilarEntries(FindingFiled{Title: "SQL Injection", Endpoint: "GET /search"})
+		assert.Empty(t, got)
+	})
+}
+
+func TestFindingWriterReplace(t *testing.T) {
+	t.Parallel()
+	t.Run("preserves_sequence_renames_on_title_change", func(t *testing.T) {
+		dir := t.TempDir()
+		w := NewFindingWriter(dir)
+		p1, err := w.Write(FindingFiled{Title: "Original Title", Severity: "low", Endpoint: "GET /"})
+		require.NoError(t, err)
+
+		p2, err := w.Replace(p1, FindingFiled{Title: "Merged Title", Severity: "high", Endpoint: "GET /x"})
+		require.NoError(t, err)
+		assert.NotEqual(t, p1, p2, "rename on slug change")
+		assert.Contains(t, filepath.Base(p2), "finding-01-")
+		_, err = os.Stat(p1)
+		assert.True(t, os.IsNotExist(err))
+		body, err := os.ReadFile(p2)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), "Merged Title")
+	})
+	t.Run("same_title_writes_in_place", func(t *testing.T) {
+		dir := t.TempDir()
+		w := NewFindingWriter(dir)
+		p1, err := w.Write(FindingFiled{Title: "Same", Severity: "low", Endpoint: "GET /"})
+		require.NoError(t, err)
+		p2, err := w.Replace(p1, FindingFiled{Title: "Same", Severity: "high", Endpoint: "GET /"})
+		require.NoError(t, err)
+		assert.Equal(t, p1, p2)
+	})
+	t.Run("untracked_path_errors", func(t *testing.T) {
+		dir := t.TempDir()
+		w := NewFindingWriter(dir)
+		_, err := w.Replace(filepath.Join(dir, "finding-01-nope.md"), FindingFiled{Title: "x"})
+		assert.Error(t, err)
+	})
+}
+
+func TestFindingWriterMatchesFiled(t *testing.T) {
 	t.Parallel()
 	seed := FindingFiled{
 		Title:    "Reflected XSS in search",
@@ -172,7 +220,6 @@ func TestFindingWriter_MatchesFiled(t *testing.T) {
 		w := NewFindingWriter(t.TempDir())
 		_, err := w.Write(seed)
 		require.NoError(t, err)
-		// Slightly reworded title, same canonical endpoint — should match.
 		title, _, ok := w.MatchesFiled("Reflected XSS in search endpoint", "GET /search")
 		assert.True(t, ok)
 		assert.Equal(t, seed.Title, title)
@@ -187,7 +234,6 @@ func TestFindingWriter_MatchesFiled(t *testing.T) {
 	})
 
 	t.Run("endpoint_equal_but_unrelated_title_miss", func(t *testing.T) {
-		// Same endpoint, entirely different vuln class → not a match.
 		w := NewFindingWriter(t.TempDir())
 		_, err := w.Write(seed)
 		require.NoError(t, err)
@@ -196,7 +242,7 @@ func TestFindingWriter_MatchesFiled(t *testing.T) {
 	})
 }
 
-func TestFindingWriter_SummaryForWorker(t *testing.T) {
+func TestFindingWriterSummaryForWorker(t *testing.T) {
 	t.Parallel()
 
 	t.Run("empty_returns_empty_string", func(t *testing.T) {
@@ -220,7 +266,7 @@ func TestFindingWriter_SummaryForWorker(t *testing.T) {
 		assert.Contains(t, out, "GET /search")
 		assert.Contains(t, out, "Open Redirect")
 		assert.Contains(t, out, "do not re-file")
-		// severity must be omitted per plan (keeps worker from arguing with verifier)
+		// severity omitted to keep worker from arguing with verifier
 		assert.NotContains(t, out, "critical")
 		assert.NotContains(t, out, "high")
 	})
@@ -291,9 +337,6 @@ func TestMatchPendingCandidates(t *testing.T) {
 			[]string{"c001", "c002"},
 		},
 		{
-			// Different endpoint but identical title falls back to the
-			// title-only tier (loosened to catch the stuck-candidate pattern
-			// where worker and verifier disagree on endpoint wording).
 			"different_endpoint_title_tier_matches",
 			FindingFiled{Title: "Reflected XSS in search", Endpoint: "GET /search"},
 			[]FindingCandidate{
@@ -302,7 +345,6 @@ func TestMatchPendingCandidates(t *testing.T) {
 			[]string{"c001"},
 		},
 		{
-			// Neither title nor endpoint matches — truly unrelated.
 			"truly_unrelated_no_match",
 			FindingFiled{Title: "Reflected XSS in search", Endpoint: "GET /search"},
 			[]FindingCandidate{
@@ -311,14 +353,12 @@ func TestMatchPendingCandidates(t *testing.T) {
 			nil,
 		},
 		{
-			// Fallback tier: filed title missing → endpoint-only match.
 			"missing_filed_title_falls_back_to_endpoint",
 			FindingFiled{Title: "", Endpoint: "GET /search"},
 			[]FindingCandidate{{CandidateID: "c001", Title: "anything", Endpoint: "GET /search"}},
 			[]string{"c001"},
 		},
 		{
-			// Fallback tier: filed endpoint missing → title-only match.
 			"missing_filed_endpoint_falls_back_to_title",
 			FindingFiled{Title: "Reflected XSS", Endpoint: ""},
 			[]FindingCandidate{{CandidateID: "c001", Title: "Reflected XSS", Endpoint: "GET /search"}},
@@ -355,9 +395,6 @@ func TestMatchPendingCandidatesTiered(t *testing.T) {
 	})
 
 	t.Run("endpoint_only_when_title_diverged", func(t *testing.T) {
-		// Verifier filed under a totally different title but the same endpoint
-		// — the live-run c001 failure mode where worker reported "cookie
-		// reuse" and verifier filed "Admin API Requires JWT Bearer Auth".
 		ids, tier := MatchPendingCandidatesTiered(FindingFiled{
 			Title:    "Admin API Endpoints Require JWT Bearer Auth",
 			Endpoint: "GET /admin/api/settings",

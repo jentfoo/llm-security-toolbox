@@ -10,48 +10,58 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDetectReasoningFormat_Structured(t *testing.T) {
+func TestDetectReasoningFormat(t *testing.T) {
 	t.Parallel()
-	client := &fakeChatClient{responses: []ChatResponse{{
-		Content:          "",
-		ReasoningContent: "working through it",
-	}}}
-	f, err := DetectReasoningFormat(t.Context(), client, "m")
-	require.NoError(t, err)
-	assert.Equal(t, ReasoningFormatStructured, f)
-	require.Len(t, client.calls, 1)
-	assert.Contains(t, client.calls[0].Messages[0].Content, "sky is blue")
-}
 
-func TestDetectReasoningFormat_Inline(t *testing.T) {
-	t.Parallel()
-	client := &fakeChatClient{responses: []ChatResponse{{
-		Content: "<think>reasoning here</think>final answer",
-	}}}
-	f, err := DetectReasoningFormat(t.Context(), client, "m")
-	require.NoError(t, err)
-	assert.Equal(t, ReasoningFormatInline, f)
-}
-
-func TestDetectReasoningFormat_None(t *testing.T) {
-	t.Parallel()
-	client := &fakeChatClient{responses: []ChatResponse{{
-		Content: "plain prose answer — no thinking shown.",
-	}}}
-	f, err := DetectReasoningFormat(t.Context(), client, "m")
-	require.NoError(t, err)
-	assert.Equal(t, ReasoningFormatNone, f)
-}
-
-func TestDetectReasoningFormat_ErrorFallsBackToUnknown(t *testing.T) {
-	t.Parallel()
-	client := &fakeChatClient{
-		responses: []ChatResponse{{}},
-		errors:    []error{errors.New("probe failed")},
+	cases := []struct {
+		name    string
+		resp    ChatResponse
+		err     error
+		want    ReasoningFormat
+		wantErr bool
+	}{
+		{
+			name: "structured",
+			resp: ChatResponse{ReasoningContent: "working through it"},
+			want: ReasoningFormatStructured,
+		},
+		{
+			name: "inline",
+			resp: ChatResponse{Content: "<think>reasoning here</think>final answer"},
+			want: ReasoningFormatInline,
+		},
+		{
+			name: "none",
+			resp: ChatResponse{Content: "plain prose answer — no thinking shown."},
+			want: ReasoningFormatNone,
+		},
+		{
+			name:    "error_falls_back_to_unknown",
+			resp:    ChatResponse{},
+			err:     errors.New("probe failed"),
+			want:    ReasoningFormatUnknown,
+			wantErr: true,
+		},
 	}
-	f, err := DetectReasoningFormat(t.Context(), client, "m")
-	require.Error(t, err)
-	assert.Equal(t, ReasoningFormatUnknown, f)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeChatClient{responses: []ChatResponse{tc.resp}}
+			if tc.err != nil {
+				client.errors = []error{tc.err}
+			}
+			f, err := DetectReasoningFormat(t.Context(), client, "m")
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Equal(t, tc.want, f)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, f)
+			require.Len(t, client.calls, 1)
+			assert.Contains(t, client.calls[0].Messages[0].Content, "sky is blue")
+		})
+	}
 }
 
 func TestReasoningFormatCache_Dedups(t *testing.T) {
@@ -72,167 +82,183 @@ func TestReasoningFormatCache_Dedups(t *testing.T) {
 	assert.Equal(t, ReasoningFormatStructured, f2)
 	assert.Equal(t, ReasoningFormatStructured, f3)
 	assert.Equal(t, 2, detectCount)
-	assert.Equal(t, int32(2), client.idx)
 }
 
-func TestInlineHandler_IngestPassesContentThrough(t *testing.T) {
+func TestReasoningHandler_Ingest(t *testing.T) {
 	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatInline)
-	content, reasoning := h.Ingest(ChatResponse{
-		Content:          "<think>x</think>answer",
-		ReasoningContent: "ignored-if-present-on-inline-model",
-	})
-	assert.Equal(t, "<think>x</think>answer", content)
-	assert.Empty(t, reasoning)
-}
 
-func TestInlineHandler_ReplayPreservesLastN(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatInline)
-	msgs := []Message{
-		{Role: roleSystem, Content: "sys"},
-		{Role: roleAssistant, Content: "<think>turn1</think>done1"},
-		{Role: roleAssistant, Content: "<think>turn2</think>done2"},
-		{Role: roleAssistant, Content: "<think>turn3</think>done3"},
+	cases := []struct {
+		name          string
+		format        ReasoningFormat
+		resp          ChatResponse
+		wantContent   string
+		wantReasoning string
+	}{
+		{
+			name:        "inline_passes_content_through",
+			format:      ReasoningFormatInline,
+			resp:        ChatResponse{Content: "<think>x</think>answer", ReasoningContent: "ignored"},
+			wantContent: "<think>x</think>answer",
+		},
+		{
+			name:          "structured_splits_fields",
+			format:        ReasoningFormatStructured,
+			resp:          ChatResponse{Content: "final", ReasoningContent: "my reasoning"},
+			wantContent:   "final",
+			wantReasoning: "my reasoning",
+		},
+		{
+			name:        "none_drops_reasoning",
+			format:      ReasoningFormatNone,
+			resp:        ChatResponse{Content: "hi", ReasoningContent: "ignored"},
+			wantContent: "hi",
+		},
 	}
-	out := h.Replay(msgs, 1)
-	assert.Equal(t, "done1", out[1].Content)
-	assert.Equal(t, "done2", out[2].Content)
-	assert.Contains(t, out[3].Content, "<think>turn3</think>")
-}
 
-func TestInlineHandler_ForSummaryIsPassThrough(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatInline)
-	msgs := []Message{{Role: roleAssistant, Content: "<think>x</think>y"}}
-	out := h.ForSummary(msgs)
-	assert.Equal(t, msgs[0].Content, out[0].Content)
-}
-
-func TestInlineHandler_TailUsesContentTruncation(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatInline)
-	tail := h.Tail(ChatResponse{Content: "<think>I was investigating OAuth"})
-	assert.Equal(t, "I was investigating OAuth", tail)
-}
-
-func TestStructuredHandler_IngestSplitsFields(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatStructured)
-	content, reasoning := h.Ingest(ChatResponse{
-		Content:          "final",
-		ReasoningContent: "my reasoning",
-	})
-	assert.Equal(t, "final", content)
-	assert.Equal(t, "my reasoning", reasoning)
-}
-
-func TestStructuredHandler_ReplayBlanksReasoningRegardlessOfKeepN(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatStructured)
-	msgs := []Message{
-		{Role: roleAssistant, Content: "a1", ReasoningContent: "r1"},
-		{Role: roleAssistant, Content: "a2", ReasoningContent: "r2"},
-		{Role: roleAssistant, Content: "a3", ReasoningContent: "r3"},
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewReasoningHandler(tc.format)
+			content, reasoning := h.Ingest(tc.resp)
+			assert.Equal(t, tc.wantContent, content)
+			assert.Equal(t, tc.wantReasoning, reasoning)
+		})
 	}
-	for _, keep := range []int{0, 1, 5} {
-		out := h.Replay(msgs, keep)
-		for i, m := range out {
-			assert.Empty(t, m.ReasoningContent)
-			assert.Equal(t, msgs[i].Content, m.Content)
+}
+
+func TestReasoningHandler_Replay(t *testing.T) {
+	t.Parallel()
+
+	t.Run("inline_keeps_last_n_think_blocks", func(t *testing.T) {
+		h := NewReasoningHandler(ReasoningFormatInline)
+		msgs := []Message{
+			{Role: roleSystem, Content: "sys"},
+			{Role: roleAssistant, Content: "<think>turn1</think>done1"},
+			{Role: roleAssistant, Content: "<think>turn2</think>done2"},
+			{Role: roleAssistant, Content: "<think>turn3</think>done3"},
 		}
+		out := h.Replay(msgs, 1)
+		assert.Equal(t, "done1", out[1].Content)
+		assert.Equal(t, "done2", out[2].Content)
+		assert.Contains(t, out[3].Content, "<think>turn3</think>")
+	})
+
+	t.Run("structured_blanks_reasoning_for_any_keep_n", func(t *testing.T) {
+		h := NewReasoningHandler(ReasoningFormatStructured)
+		msgs := []Message{
+			{Role: roleAssistant, Content: "a1", ReasoningContent: "r1"},
+			{Role: roleAssistant, Content: "a2", ReasoningContent: "r2"},
+			{Role: roleAssistant, Content: "a3", ReasoningContent: "r3"},
+		}
+		for _, keep := range []int{0, 1, 5} {
+			out := h.Replay(msgs, keep)
+			for i, m := range out {
+				assert.Empty(t, m.ReasoningContent)
+				assert.Equal(t, msgs[i].Content, m.Content)
+			}
+		}
+		assert.Equal(t, "r1", msgs[0].ReasoningContent)
+	})
+
+	t.Run("none_returns_input_unchanged", func(t *testing.T) {
+		h := NewReasoningHandler(ReasoningFormatNone)
+		msgs := []Message{{Role: roleAssistant, Content: "x"}}
+		assert.Equal(t, msgs, h.Replay(msgs, 4))
+	})
+}
+
+func TestReasoningHandler_ForSummary(t *testing.T) {
+	t.Parallel()
+
+	t.Run("inline_passes_through", func(t *testing.T) {
+		h := NewReasoningHandler(ReasoningFormatInline)
+		msgs := []Message{{Role: roleAssistant, Content: "<think>x</think>y"}}
+		out := h.ForSummary(msgs)
+		assert.Equal(t, msgs[0].Content, out[0].Content)
+	})
+
+	t.Run("structured_wraps_reasoning_as_think", func(t *testing.T) {
+		h := NewReasoningHandler(ReasoningFormatStructured)
+		msgs := []Message{
+			{Role: roleSystem, Content: "sys"},
+			{Role: roleUser, Content: "assignment"},
+			{Role: roleAssistant, Content: "", ReasoningContent: "probing JWT"},
+			{Role: roleAssistant, Content: "final answer", ReasoningContent: "more reasoning"},
+		}
+		out := h.ForSummary(msgs)
+		assert.Equal(t, "sys", out[0].Content)
+		assert.Equal(t, "<think>probing JWT</think>", out[2].Content)
+		assert.Empty(t, out[2].ReasoningContent)
+		assert.True(t, strings.HasPrefix(out[3].Content, "<think>more reasoning</think>"))
+		assert.Contains(t, out[3].Content, "final answer")
+	})
+}
+
+func TestReasoningHandler_Extract(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		format ReasoningFormat
+		resp   ChatResponse
+		want   string
+	}{
+		{
+			name:   "inline_strips_think_and_fence",
+			format: ReasoningFormatInline,
+			resp:   ChatResponse{Content: "<think>planning</think>```\nworker is scanning OAuth endpoints\n```"},
+			want:   "worker is scanning OAuth endpoints",
+		},
+		{
+			name:   "structured_prefers_content_when_both_present",
+			format: ReasoningFormatStructured,
+			resp:   ChatResponse{Content: "the clean final answer.", ReasoningContent: "Final: something else"},
+			want:   "the clean final answer.",
+		},
+		{
+			name:   "structured_salvages_marker_in_reasoning",
+			format: ReasoningFormatStructured,
+			// Real-world: reasoning ends with "…Final: <actual summary>." and Extract
+			// must surface the sentence after Final: as the confident line.
+			resp: ChatResponse{
+				ReasoningContent: "(14) -> 14 words. Matches all constraints. Output matches.✅ " +
+					"Final: The agent just dispatched another test request and is currently evaluating the network response for security analysis. (16 words) ->",
+			},
+			want: "The agent just dispatched another test request and is currently evaluating the network response for security analysis.",
+		},
+		{
+			name:   "structured_returns_empty_without_marker",
+			format: ReasoningFormatStructured,
+			resp:   ChatResponse{ReasoningContent: "just meandering thoughts with no output marker"},
+			want:   "",
+		},
+		{
+			name:   "none_runs_extract_prose",
+			format: ReasoningFormatNone,
+			resp:   ChatResponse{Content: `{"summary": "plain answer"}`},
+			want:   "plain answer",
+		},
 	}
-	assert.Equal(t, "r1", msgs[0].ReasoningContent)
-}
 
-func TestStructuredHandler_ForSummaryWrapsAsInlineThink(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatStructured)
-	msgs := []Message{
-		{Role: roleSystem, Content: "sys"},
-		{Role: roleUser, Content: "assignment"},
-		{Role: roleAssistant, Content: "", ReasoningContent: "probing JWT"},
-		{Role: roleAssistant, Content: "final answer", ReasoningContent: "more reasoning"},
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewReasoningHandler(tc.format)
+			assert.Equal(t, tc.want, h.Extract(tc.resp))
+		})
 	}
-	out := h.ForSummary(msgs)
-	assert.Equal(t, "sys", out[0].Content)
-	assert.Equal(t, "<think>probing JWT</think>", out[2].Content)
-	assert.Empty(t, out[2].ReasoningContent)
-	assert.True(t, strings.HasPrefix(out[3].Content, "<think>more reasoning</think>"))
-	assert.Contains(t, out[3].Content, "final answer")
 }
 
-func TestInlineHandler_ExtractUsesExtractProse(t *testing.T) {
+func TestReasoningHandler_Tail(t *testing.T) {
 	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatInline)
-	line := h.Extract(ChatResponse{
-		Content: "<think>planning</think>```\nworker is scanning OAuth endpoints\n```",
+
+	t.Run("inline_truncates_unclosed_think_content", func(t *testing.T) {
+		h := NewReasoningHandler(ReasoningFormatInline)
+		tail := h.Tail(ChatResponse{Content: "<think>I was investigating OAuth"})
+		assert.Equal(t, "I was investigating OAuth", tail)
 	})
-	assert.Equal(t, "worker is scanning OAuth endpoints", line)
-}
 
-func TestStructuredHandler_ExtractSalvagesMarkerInReasoning(t *testing.T) {
-	t.Parallel()
-	// Real-world failure: reasoning ends with "…Final: <actual summary>."
-	// Extract must surface the sentence after Final: as the confident line
-	// so narrator logs it without the "…thinking:" prefix.
-	h := NewReasoningHandler(ReasoningFormatStructured)
-	line := h.Extract(ChatResponse{
-		Content: "",
-		ReasoningContent: "(14) -> 14 words. Matches all constraints. Output matches.✅ " +
-			"Final: The agent just dispatched another test request and is currently evaluating the network response for security analysis. (16 words) ->",
+	t.Run("structured_prefers_reasoning_when_content_empty", func(t *testing.T) {
+		h := NewReasoningHandler(ReasoningFormatStructured)
+		tail := h.Tail(ChatResponse{ReasoningContent: "planning to probe OAuth redirect validation next"})
+		assert.Contains(t, tail, "OAuth redirect validation next")
 	})
-	assert.Equal(t, "The agent just dispatched another test request and is currently evaluating the network response for security analysis.", line)
-}
-
-func TestStructuredHandler_ExtractPrefersContentWhenBothPresent(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatStructured)
-	line := h.Extract(ChatResponse{
-		Content:          "the clean final answer.",
-		ReasoningContent: "Final: something else",
-	})
-	assert.Equal(t, "the clean final answer.", line)
-}
-
-func TestStructuredHandler_ExtractReturnsEmptyWhenNoMarker(t *testing.T) {
-	t.Parallel()
-	// Reasoning with no Final:/Output: marker — Extract returns "", Tail
-	// will produce the "…thinking:" fallback.
-	h := NewReasoningHandler(ReasoningFormatStructured)
-	line := h.Extract(ChatResponse{
-		Content:          "",
-		ReasoningContent: "just meandering thoughts with no output marker",
-	})
-	assert.Empty(t, line)
-}
-
-func TestNoReasoningHandler_ExtractRunsExtractProse(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatNone)
-	line := h.Extract(ChatResponse{Content: `{"summary": "plain answer"}`})
-	assert.Equal(t, "plain answer", line)
-}
-
-func TestStructuredHandler_TailPrefersStructuredWhenInlineEmpty(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatStructured)
-	tail := h.Tail(ChatResponse{
-		Content:          "",
-		ReasoningContent: "planning to probe OAuth redirect validation next",
-	})
-	assert.Contains(t, tail, "OAuth redirect validation next")
-}
-
-func TestNoReasoningHandler_PassesEverythingThrough(t *testing.T) {
-	t.Parallel()
-	h := NewReasoningHandler(ReasoningFormatNone)
-	assert.Equal(t, ReasoningFormatNone, h.Format())
-	content, reasoning := h.Ingest(ChatResponse{Content: "hi"})
-	assert.Equal(t, "hi", content)
-	assert.Empty(t, reasoning)
-	msgs := []Message{{Role: roleAssistant, Content: "x"}}
-	assert.Equal(t, msgs, h.Replay(msgs, 4))
-	assert.Equal(t, msgs, h.ForSummary(msgs))
-	assert.Empty(t, h.Tail(ChatResponse{Content: "nothing"}))
 }

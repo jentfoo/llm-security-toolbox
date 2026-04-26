@@ -148,6 +148,44 @@ func RunWorkerUntilEscalation(
 	return runs, nil
 }
 
+// runOneWorker executes one alive worker for one iteration: drains until
+// escalation, makes one recovery attempt on mid-iter error (spec §7.7),
+// and returns the turn summaries. Resets EscalationReason and
+// AutonomousTurns on the worker so a fresh run starts cleanly.
+//
+// Used as the building block for both RunAllWorkersUntilEscalation
+// (parallel batch) and the per-worker async-fire path used by
+// RunDecisionPhase.
+func runOneWorker(
+	ctx context.Context,
+	w *WorkerState,
+	candidates *CandidatePool,
+	log *Logger,
+) []agent.TurnSummary {
+	w.EscalationReason = ""
+	w.AutonomousTurns = nil
+	runs, err := RunWorkerUntilEscalation(ctx, w, candidates, log)
+	if err != nil && w.LastInstruction != "" {
+		if log != nil {
+			log.Log("worker", "recover", map[string]any{
+				"worker_id": w.ID, "attempt": 1, "err": err.Error(),
+			})
+		}
+		w.Agent.Interrupt()
+		w.Agent.Query(w.LastInstruction)
+		summary, err2 := drainOne(ctx, w, candidates, log)
+		if err2 != nil {
+			w.EscalationReason = EscalationError
+		} else {
+			runs = append(runs, summary)
+			if summary.EscalationReason != "" {
+				w.EscalationReason = summary.EscalationReason
+			}
+		}
+	}
+	return runs
+}
+
 // RunAllWorkersUntilEscalation runs every alive worker concurrently.
 // On mid-iteration drain error (after the agent's own retry budget) the
 // controller makes exactly one further recovery attempt: interrupt the
@@ -166,28 +204,8 @@ func RunAllWorkersUntilEscalation(
 		if !w.Alive {
 			continue
 		}
-		w.EscalationReason = ""
-		w.AutonomousTurns = nil
 		eg.Go(func() error {
-			runs, err := RunWorkerUntilEscalation(ectx, w, candidates, log)
-			if err != nil && w.LastInstruction != "" {
-				if log != nil {
-					log.Log("worker", "recover", map[string]any{
-						"worker_id": w.ID, "attempt": 1, "err": err.Error(),
-					})
-				}
-				w.Agent.Interrupt()
-				w.Agent.Query(w.LastInstruction)
-				summary, err2 := drainOne(ectx, w, candidates, log)
-				if err2 != nil {
-					w.EscalationReason = EscalationError
-				} else {
-					runs = append(runs, summary)
-					if summary.EscalationReason != "" {
-						w.EscalationReason = summary.EscalationReason
-					}
-				}
-			}
+			runs := runOneWorker(ectx, w, candidates, log)
 			mu.Lock()
 			results[w.ID] = runs
 			mu.Unlock()

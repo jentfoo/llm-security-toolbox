@@ -10,17 +10,9 @@ import (
 // VerificationMaxSubsteps is the hard cap on verifier substeps per iteration.
 const VerificationMaxSubsteps = 6
 
-// RunVerificationPhase drives the verifier over up to VerificationMaxSubsteps.
-// Returns the summary string for the director prompt.
-//
-// composed is the substep-1 history slice — produced by ComposeVerifier and
-// installed via verifier.ReplaceHistory by the controller BEFORE calling
-// this function. Substep 1 must NOT call verifier.Query: the directive is
-// already in the installed history. Substeps 2..N use BuildVerifierContinuePrompt
-// via Query as before — those add to the in-phase chat history naturally.
-//
-// dedupReviewer arbitrates softer title matches that pass TitlesSimilar but
-// not exact-slug equality. Pass nil to disable agent-mediated dedup (tests).
+// RunVerificationPhase drives the verifier through up to VerificationMaxSubsteps,
+// returning the summary for the director prompt. dedupReviewer may be nil to
+// disable agent-mediated dedup.
 func RunVerificationPhase(
 	ctx context.Context,
 	verifier agent.Agent,

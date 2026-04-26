@@ -1,119 +1,26 @@
 package orchestrator
 
-// Worker chronicle: per-worker canonical investigative history accumulated
-// across iterations. Lives at the controller as raw messages — never
-// loaded into the worker agent's chat history directly. Instead, at iter
-// start the chronicle is summarized fresh (one-shot from the canonical
-// raw record, never from a prior summary) and the resulting summary is
-// installed as the worker agent's pre-iter context. This avoids the
-// summary-of-summary dilution that biased workers back to their original
-// angle.
+// Worker chronicle: per-worker investigative history accumulated across
+// iterations. Stored at the controller and installed onto each worker at
+// iteration start. In-place compaction folds older iterations' think blocks
+// and tool-result bodies into stubs to bound message growth.
 //
-// Lifecycle per iteration:
-//
-//  1. installChronicle(ctx, w, directive, summarizer, mission)
-//     - If the chronicle is empty (iter 1): ReplaceHistory(nil); just the
-//       system prompt remains.
-//     - Otherwise: Summarizer.SummarizeWorkerFromChronicle(chronicle, ...)
-//       produces a fresh first-person recap; ReplaceHistory installs it as
-//       a single user-role message under the system prompt.
-//     - MarkIterationBoundary records the position right after the
-//       installed context — anything before that index is the (possibly
-//       summarized) memory; anything from there on is this iter's work.
-//     - Query(directive) appends the iter's directive as a user message.
-//
-//  2. The agent drains. The pre-iter content is just one short summary
-//     message, so context pressure within an iteration is bounded by the
-//     iter's tool calls; no boundary-summarize callback is needed for
-//     workers (it would be summarizing a summary).
-//
-//  3. extractAndAppend(w) reads everything from the iteration boundary
-//     through the end of the agent's history, and appends to w.Chronicle.
-//     The chronicle therefore accumulates raw byte-level texture (tool
-//     calls, tool results, assistant turns) — the canonical record from
-//     which every future summary is freshly derived.
+// See per-function godocs (installChronicle, extractAndAppend,
+// compactChronicle) for lifecycle details.
 
 import (
-	"context"
-
 	"github.com/go-appsec/secagent/agent"
 )
 
-// chronicleSummarizeFn produces a fresh first-person recap from a worker's
-// canonical chronicle. *Summarizer.SummarizeWorkerFromChronicle satisfies
-// this in production; tests pass simpler stubs.
-type chronicleSummarizeFn func(ctx context.Context, chronicle []agent.Message, mission string, workerID int) (string, error)
+// ChronicleKeepRecentIters is the number of trailing iterations whose
+// chronicle messages stay raw. Older iters get compacted in place.
+const ChronicleKeepRecentIters = 2
 
-// installChronicle prepares the worker agent for a new iteration. When the
-// chronicle is non-empty and a summarize function is supplied:
-//
-//   - Cache hit: when w.SummaryCache is populated AND the cached summary
-//     was generated against the same directive AND the chronicle has not
-//     grown since (len match), reuse the cached summary verbatim — saves
-//     one LLM call per no-op iter while preserving the "always derived
-//     from raw chronicle" invariant (the cache IS a fresh-from-raw output,
-//     just one we already paid for).
-//   - Cache miss: re-summarize from the raw chronicle and store the result
-//     in the cache for next iter.
-//   - Summarize error with cache available: fall back to the cached
-//     summary so the worker keeps its memory of prior work. A stale cache
-//     is far better than an empty pre-iter (which makes the worker forget
-//     everything and likely repeat itself).
-//   - Summarize error with no cache: install with empty pre-iter (only
-//     option). The chronicle itself is preserved for the next attempt.
-//
-// Order is load-bearing:
-//
-//  1. ReplaceHistory(...) — clears boundary state, installs the (possibly
-//     empty) pre-iter context under the system prompt.
-//  2. MarkIterationBoundary — records boundary just past the install and
-//     BEFORE the directive Query.
-//  3. Query(directive) — appends the directive as a user message.
-func installChronicle(
-	ctx context.Context,
-	w *WorkerState,
-	directive string,
-	summarize chronicleSummarizeFn,
-	mission string,
-	log *Logger,
-) {
-	var preIter []agent.Message
-	if len(w.Chronicle) > 0 && summarize != nil {
-		if w.SummaryCache != "" &&
-			w.SummaryCacheDirective == directive &&
-			w.SummaryCacheChronLen == len(w.Chronicle) {
-			preIter = []agent.Message{{Role: "user", Content: w.SummaryCache}}
-			if log != nil {
-				log.Log("summarize", "worker chronicle install cache-hit", map[string]any{
-					"worker_id":      w.ID,
-					"chronicle_msgs": len(w.Chronicle),
-				})
-			}
-		} else {
-			summary, err := summarize(ctx, w.Chronicle, mission, w.ID)
-			switch {
-			case err == nil && summary != "":
-				preIter = []agent.Message{{Role: "user", Content: summary}}
-				w.SummaryCache = summary
-				w.SummaryCacheDirective = directive
-				w.SummaryCacheChronLen = len(w.Chronicle)
-			case err != nil && w.SummaryCache != "":
-				preIter = []agent.Message{{Role: "user", Content: w.SummaryCache}}
-				if log != nil {
-					log.Log("summarize", "worker chronicle install cache-fallback", map[string]any{
-						"worker_id": w.ID, "err": err.Error(),
-					})
-				}
-			case err != nil:
-				if log != nil {
-					log.Log("summarize", "worker chronicle install empty-fallback", map[string]any{
-						"worker_id": w.ID, "err": err.Error(),
-					})
-				}
-			}
-		}
-	}
-	w.Agent.ReplaceHistory(preIter)
+// installChronicle installs the worker's chronicle and queues the iter's
+// directive. The three-step order (ReplaceHistory, MarkIterationBoundary,
+// Query) is load-bearing for boundary-based extraction next iter.
+func installChronicle(w *WorkerState, directive string) {
+	w.Agent.ReplaceHistory(w.Chronicle)
 	w.Agent.MarkIterationBoundary()
 	w.Agent.Query(directive)
 }
@@ -125,15 +32,10 @@ type snapshotter interface {
 	Snapshot() []agent.Message
 }
 
-// extractAndAppend reads the worker agent's current history, takes
-// everything from the iteration boundary onward (the iter's new turns),
-// and appends it to w.Chronicle.
-//
-// If the agent doesn't expose Snapshot (i.e. the agent isn't an
-// *OpenAIAgent or a FakeAgent that implements it), this is a no-op — the
-// chronicle simply doesn't grow this iter, which is correct fail-open
-// behavior for test fakes that didn't script any post-install activity.
-func extractAndAppend(w *WorkerState) {
+// extractAndAppend appends the iter's new turns (everything past the
+// iteration boundary) onto w.Chronicle, tagging each with iter.
+// No-op when the agent doesn't expose Snapshot.
+func extractAndAppend(w *WorkerState, iter int) {
 	s, ok := w.Agent.(snapshotter)
 	if !ok {
 		return
@@ -143,7 +45,11 @@ func extractAndAppend(w *WorkerState) {
 	if boundary < 0 || boundary >= len(full) {
 		return
 	}
-	w.Chronicle = append(w.Chronicle, full[boundary:]...)
+	newMsgs := full[boundary:]
+	w.Chronicle = append(w.Chronicle, newMsgs...)
+	for range newMsgs {
+		w.ChronicleIter = append(w.ChronicleIter, iter)
+	}
 }
 
 // boundaryReader is implemented by agents that expose their iteration
@@ -161,4 +67,39 @@ func boundaryOf(a agent.Agent) int {
 		return br.IterationBoundary()
 	}
 	return -1
+}
+
+// compactChronicle applies in-place compaction to chronicle messages
+// tagged with an iter older than (currentIter - keepRecentIters + 1):
+//   - assistant messages get their <think>...</think> blocks stripped.
+//   - tool-result messages (non-repair) get replaced with a compact stub
+//     ("(compacted: <tool> returned ~N tokens — ...)").
+//
+// Idempotent: re-running on an already-compacted message does nothing.
+// Returns counts of stripped/stubbed messages for logging.
+//
+// Length-preserving by design: we never drop messages, so the parallel
+// w.ChronicleIter stays in lockstep with w.Chronicle indexes.
+func compactChronicle(w *WorkerState, currentIter, keepRecentIters int) (stripped, stubbed int) {
+	if len(w.Chronicle) == 0 || keepRecentIters < 1 {
+		return 0, 0
+	}
+	cutoff := currentIter - keepRecentIters + 1
+	for i := range w.Chronicle {
+		if i >= len(w.ChronicleIter) {
+			// Defensive: lengths drifted (shouldn't happen). Stop early so
+			// we don't mis-classify uncached messages.
+			break
+		}
+		if w.ChronicleIter[i] >= cutoff {
+			continue
+		}
+		if agent.StripAssistantThink(&w.Chronicle[i]) {
+			stripped++
+		}
+		if agent.StubToolResult(&w.Chronicle[i]) {
+			stubbed++
+		}
+	}
+	return stripped, stubbed
 }

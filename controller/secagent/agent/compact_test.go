@@ -31,6 +31,42 @@ func buildFattyHistory(maxCtx int, big string) *History {
 	return h
 }
 
+// buildToolCallHistory seeds n assistant/tool turns of identical bulk payload.
+func buildToolCallHistory(maxCtx int, big string, n int) *History {
+	h := NewHistory(maxCtx)
+	h.Append(Message{Role: "system", Content: "sys"})
+	for i := 0; i < n; i++ {
+		h.Append(Message{
+			Role:      "assistant",
+			Content:   big,
+			ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+		})
+		h.Append(Message{
+			Role: "tool", ToolCallID: "t", ToolName: "t",
+			Content: big, Summary120: "summary",
+		})
+	}
+	return h
+}
+
+// assertToolPairing verifies every tool message traces back to an assistant-with-tool-calls.
+func assertToolPairing(t *testing.T, snap []Message) {
+	t.Helper()
+	for i, m := range snap {
+		if m.Role != roleTool {
+			continue
+		}
+		require.Positive(t, i)
+		j := i - 1
+		for j >= 0 && snap[j].Role == roleTool {
+			j--
+		}
+		require.GreaterOrEqual(t, j, 0)
+		assert.Equal(t, roleAssistant, snap[j].Role)
+		assert.NotEmpty(t, snap[j].ToolCalls)
+	}
+}
+
 func TestCompact(t *testing.T) {
 	t.Parallel()
 	t.Run("think_strip_tool_stub", func(t *testing.T) {
@@ -67,7 +103,7 @@ func TestCompact(t *testing.T) {
 		assert.Contains(t, report.PassesApplied, "turn-drop")
 	})
 
-	t.Run("fail_fast_over_high_watermark_when_hard_truncate_disabled", func(t *testing.T) {
+	t.Run("fail_fast_without_hard_truncate", func(t *testing.T) {
 		big := strings.Repeat("z", 8_000)
 		h := NewHistory(1024)
 		h.Append(Message{Role: "system", Content: "sys"})
@@ -75,8 +111,6 @@ func TestCompact(t *testing.T) {
 			h.Append(Message{Role: "assistant", Content: big})
 			h.Append(Message{Role: "user", Content: big})
 		}
-		// Explicitly disable hard-truncate so callers who want fail-closed
-		// behavior still get it.
 		_, err := Compact(h, CompactionOptions{
 			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 8,
 			HardTruncateOnOverflow: false,
@@ -98,9 +132,7 @@ func TestCompact(t *testing.T) {
 	})
 
 	t.Run("repair_errors_protected_from_stub", func(t *testing.T) {
-		// Regression: worker-3 kept emitting the same malformed flow_get
-		// call 46 minutes apart because the repair schema hint was stubbed
-		// out of history. Pass 2 must preserve IsRepairError messages.
+		// Regression: repair schema hint was stubbed; Pass 2 must preserve IsRepairError.
 		big := strings.Repeat("x", 6_000)
 		h := NewHistory(8192)
 		h.Append(Message{Role: "system", Content: "sys prompt"})
@@ -133,7 +165,7 @@ func TestCompact(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Contains(t, report.PassesApplied, "tool-stub")
-		assert.Positive(t, report.RepairsProtected, "should have protected at least one repair error")
+		assert.Positive(t, report.RepairsProtected)
 
 		// The repair text must survive verbatim somewhere in history; the
 		// large tool result should not.
@@ -154,9 +186,7 @@ func TestCompact(t *testing.T) {
 
 func TestCompact_UsesEffectiveMaxContext(t *testing.T) {
 	t.Parallel()
-	// After a context-rejection shrinks the effective ceiling, Compact's
-	// watermark math must follow so the next maybeCompact fires at the
-	// tighter threshold instead of against the original (too-large) max.
+	// Watermark math must follow EffectiveMaxContext after a rejection shrink.
 	big := strings.Repeat("y", 3_000)
 	h := NewHistory(200_000)
 	h.Append(Message{Role: "system", Content: "sys"})
@@ -172,16 +202,14 @@ func TestCompact_UsesEffectiveMaxContext(t *testing.T) {
 		})
 	}
 
-	// Against MaxContext=200k and HighWatermark=0.80 the ~18k estimate is
-	// well under the trigger, so Compact should early-return.
+	// 18k estimate is well under 200k × 0.80 trigger → early-return.
 	report, err := Compact(h, CompactionOptions{
 		HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
 	})
 	require.NoError(t, err)
 	assert.Empty(t, report.PassesApplied, "no compaction needed at configured ceiling")
 
-	// Shrink effective max down to 20k; now the same history's ~18k is
-	// above LowWatermark × 20k = 8k, so Compact should engage.
+	// Shrink effective max to 20k → same history is now above LowWatermark.
 	h.ShrinkEffectiveMaxOnRejection(25_000) // × 0.80 = 20k
 	report, err = Compact(h, CompactionOptions{
 		HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
@@ -196,46 +224,14 @@ func TestForceHardTruncate(t *testing.T) {
 
 	t.Run("reduces_below_target_and_preserves_pairing", func(t *testing.T) {
 		big := strings.Repeat("y", 3_000)
-		h := NewHistory(8192)
-		h.Append(Message{Role: "system", Content: "sys"})
-		for i := 0; i < 8; i++ {
-			h.Append(Message{
-				Role:      "assistant",
-				Content:   big,
-				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
-			})
-			h.Append(Message{
-				Role: "tool", ToolCallID: "t", ToolName: "t",
-				Content: big, Summary120: "summary",
-			})
-		}
+		h := buildToolCallHistory(8192, big, 8)
 		before := h.EstimateTokens()
-		target := before / 4
-		report := ForceHardTruncate(h, target, 2)
+		report := ForceHardTruncate(h, before/4, 2)
 
 		assert.Contains(t, report.PassesApplied, "force-hard-truncate")
 		assert.Less(t, h.EstimateTokens(), before)
-		// dropOldestTurn may stop before reaching target if the keep window
-		// already pins enough trailing turns that nothing more can be cut.
-		// What matters is that it dropped something AND the result is well
-		// below the original.
 		assert.Positive(t, report.DroppedTurns)
-		// No orphaned tool results: every tool message must trace back to
-		// an assistant-with-tool-calls through any preceding tools.
-		snap := h.Snapshot()
-		for i, m := range snap {
-			if m.Role != roleTool {
-				continue
-			}
-			require.Positive(t, i)
-			j := i - 1
-			for j >= 0 && snap[j].Role == roleTool {
-				j--
-			}
-			require.GreaterOrEqual(t, j, 0)
-			assert.Equal(t, roleAssistant, snap[j].Role)
-			assert.NotEmpty(t, snap[j].ToolCalls)
-		}
+		assertToolPairing(t, h.Snapshot())
 	})
 
 	t.Run("already_under_target_is_noop", func(t *testing.T) {
@@ -250,73 +246,14 @@ func TestForceHardTruncate(t *testing.T) {
 
 func TestCompact_HardTruncateOnOverflow(t *testing.T) {
 	t.Parallel()
-
-	t.Run("hard_truncate_rescues_overflowing_history", func(t *testing.T) {
-		// 8 tool-call turns of 1200-token messages. maxCtx=8192, KeepTurns=4
-		// → keep*2=8 trailing messages = ~9600 tokens, still over
-		// high=4096. Hard-truncate drops to keep=2 (4 trailing messages =
-		// ~4800 tokens → still over briefly → keeps dropping until under).
-		big := strings.Repeat("y", 3_000)
-		h := NewHistory(8192)
-		h.Append(Message{Role: "system", Content: "sys"})
-		for i := 0; i < 8; i++ {
-			h.Append(Message{
-				Role:      "assistant",
-				Content:   big,
-				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
-			})
-			h.Append(Message{
-				Role: "tool", ToolCallID: "t", ToolName: "t",
-				Content: big, Summary120: "summary",
-			})
-		}
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 4,
-			HardTruncateOnOverflow: true,
-		})
-		require.NoError(t, err)
-		assert.Contains(t, report.PassesApplied, "hard-truncate")
+	// KeepTurns=4 trailing window still overflows; hard-truncate must drop further.
+	big := strings.Repeat("y", 3_000)
+	h := buildToolCallHistory(8192, big, 8)
+	report, err := Compact(h, CompactionOptions{
+		HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 4,
+		HardTruncateOnOverflow: true,
 	})
-
-	t.Run("hard_truncate_preserves_tool_pairing", func(t *testing.T) {
-		big := strings.Repeat("y", 3_000)
-		h := NewHistory(8192)
-		h.Append(Message{Role: "system", Content: "sys"})
-		for i := 0; i < 8; i++ {
-			h.Append(Message{
-				Role:      "assistant",
-				Content:   big,
-				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
-			})
-			h.Append(Message{
-				Role: "tool", ToolCallID: "t", ToolName: "t",
-				Content: big, Summary120: "summary",
-			})
-		}
-		_, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 4,
-			HardTruncateOnOverflow: true,
-		})
-		require.NoError(t, err)
-		// Walk the surviving messages; every tool message must be
-		// preceded by an assistant (possibly a couple of steps earlier
-		// via other tool results) — at minimum a tool must never be the
-		// first non-system message.
-		snap := h.Snapshot()
-		for i, m := range snap {
-			if m.Role == roleTool {
-				require.Positive(t, i)
-				// Walk backward to find the nearest non-tool message.
-				// It must be an assistant with tool calls — else we
-				// orphaned a tool result.
-				j := i - 1
-				for j >= 0 && snap[j].Role == roleTool {
-					j--
-				}
-				require.GreaterOrEqual(t, j, 0)
-				assert.Equal(t, roleAssistant, snap[j].Role)
-				assert.NotEmpty(t, snap[j].ToolCalls)
-			}
-		}
-	})
+	require.NoError(t, err)
+	assert.Contains(t, report.PassesApplied, "hard-truncate")
+	assertToolPairing(t, h.Snapshot())
 }

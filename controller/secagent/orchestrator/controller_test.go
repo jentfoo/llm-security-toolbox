@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -58,58 +57,6 @@ func TestIsDeadIteration(t *testing.T) {
 	}
 }
 
-func TestApplyDecision(t *testing.T) {
-	t.Parallel()
-	t.Run("stop_without_retire_closes_directly", func(t *testing.T) {
-		a := &agent.FakeAgent{}
-		w := &WorkerState{ID: 1, Alive: true, Agent: a}
-		applyDecision(t.Context(), WorkerDecision{Kind: "stop", WorkerID: 1, Reason: "done"}, w, nil, 5, nil)
-		assert.False(t, w.Alive)
-		assert.True(t, a.Closed)
-	})
-
-	t.Run("stop_invokes_retire_with_iter", func(t *testing.T) {
-		a := &agent.FakeAgent{}
-		w := &WorkerState{ID: 1, Alive: true, Agent: a}
-		var capturedReason string
-		var capturedIter int
-		retire := func(_ context.Context, ww *WorkerState, reason string, iter int) {
-			capturedReason = reason
-			capturedIter = iter
-			ww.Alive = false
-			_ = ww.Agent.Close()
-		}
-		applyDecision(t.Context(), WorkerDecision{Kind: "stop", WorkerID: 1, Reason: "exhausted"}, w, retire, 7, nil)
-		assert.Equal(t, "exhausted", capturedReason)
-		assert.Equal(t, 7, capturedIter, "iter parameter is threaded into retire")
-		assert.False(t, w.Alive)
-		assert.True(t, a.Closed)
-	})
-
-	t.Run("continue_clamps_budget", func(t *testing.T) {
-		a := &agent.FakeAgent{}
-		w := &WorkerState{ID: 1, Alive: true, Agent: a}
-		applyDecision(t.Context(), WorkerDecision{
-			Kind: "continue", WorkerID: 1, Instruction: "keep going",
-			AutonomousBudget: 999,
-		}, w, nil, 1, nil)
-		assert.Equal(t, 20, w.AutonomousBudget)
-		assert.Equal(t, "keep going", w.LastInstruction)
-		// v4: applyDecision does NOT call Query — the next iter's
-		// installChronicle re-installs the chronicle and Queries
-		// w.LastInstruction itself.
-		assert.Empty(t, a.QueriedInputs,
-			"applyDecision must not pre-Query; chronicle install does it")
-	})
-
-	t.Run("expand_defaults_budget", func(t *testing.T) {
-		a := &agent.FakeAgent{}
-		w := &WorkerState{ID: 1, Alive: true, Agent: a}
-		applyDecision(t.Context(), WorkerDecision{Kind: "expand", WorkerID: 1, Instruction: "new scope"}, w, nil, 1, nil)
-		assert.Equal(t, defaultAutonomousBudget, w.AutonomousBudget)
-	})
-}
-
 func TestRunAllWorkersUntilEscalation(t *testing.T) {
 	t.Parallel()
 
@@ -164,14 +111,6 @@ func TestBuildClientPoolDefaults(t *testing.T) {
 	assert.Equal(t, 1, pool2.Size())
 }
 
-func TestAutoSummary(t *testing.T) {
-	t.Parallel()
-	s := autoSummary(2, 3, 1)
-	assert.Contains(t, s, "2 filed")
-	assert.Contains(t, s, "3 dismissed")
-	assert.Contains(t, s, "1 still pending")
-}
-
 func TestWorkerStateClose(t *testing.T) {
 	t.Parallel()
 	a := &agent.FakeAgent{}
@@ -187,7 +126,7 @@ func TestWorkerStateClose(t *testing.T) {
 func TestRunWorkerUntilEscalationBudget(t *testing.T) {
 	t.Parallel()
 
-	t.Run("exhausted", func(t *testing.T) {
+	t.Run("budget_exhausted", func(t *testing.T) {
 		a := &agent.FakeAgent{Turns: []agent.TurnSummary{
 			{ToolCalls: []agent.ToolCallRecord{{Name: "x"}}},
 			{ToolCalls: []agent.ToolCallRecord{{Name: "y"}}},
@@ -197,7 +136,6 @@ func TestRunWorkerUntilEscalationBudget(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, runs, 2)
 		assert.Equal(t, "budget", w.EscalationReason)
-		// second turn (attempt>0) injects the continue prompt
 		require.Len(t, a.QueriedInputs, 1)
 		assert.Contains(t, a.QueriedInputs[0], "Continue")
 	})
@@ -239,9 +177,3 @@ func TestOpenAIFactory(t *testing.T) {
 	f.Malformed = nil
 	assert.Nil(t, f.malformedCallback("m"))
 }
-
-// v4 controller-side chronicle install/extract is exercised by
-// chronicle_test.go via installChronicle and extractAndAppend. The
-// per-iter loop's chronicle wiring (loop body) is exercised by integration
-// scenarios that drive RunAllWorkersUntilEscalation against FakeAgent
-// chains; covered in autonomous_test.go.

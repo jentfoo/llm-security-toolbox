@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"slices"
 	"strings"
 	"sync"
 )
@@ -27,7 +28,9 @@ type Message struct {
 	IsRepairError bool
 }
 
-// History is a goroutine-safe message log for one agent.
+// History is a goroutine-safe message log for one agent. The token
+// calibration EMA lives in the package-level estimator (tokens.go); every
+// History feeds the same calibration via SetPromptTokens.
 type History struct {
 	mu       sync.Mutex
 	messages []Message
@@ -35,12 +38,6 @@ type History struct {
 	lastPromptTokens int
 	baselineMsgCount int // messages length when lastPromptTokens was recorded
 	maxContext       int
-	// calibration is a learned multiplier applied to the char/4 heuristic,
-	// smoothed by EMA from observed PromptTokens. Seed at 1.0 preserves the
-	// current behavior until a real count gives us something to calibrate
-	// against. Bounded to [calibrationMin, calibrationMax] so a single
-	// outlier measurement cannot wreck the estimator.
-	calibration float64
 	// effectiveMax is a sticky-downward ceiling set by callers when the
 	// upstream rejects a request as too large. 0 means "use maxContext".
 	// Shrinks never grow — a worker that got wedged at 180k stays
@@ -49,11 +46,7 @@ type History struct {
 	effectiveMax int
 }
 
-// Tunables for the learned token calibration.
 const (
-	calibrationMin   = 0.5
-	calibrationMax   = 3.0
-	calibrationAlpha = 0.3 // EMA weight for newest observation
 	// effectiveMaxFloor prevents a runaway rejection from shrinking the
 	// ceiling to something the agent cannot function inside.
 	effectiveMaxFloor = 4096
@@ -67,7 +60,7 @@ func NewHistory(maxContext int) *History {
 	if maxContext <= 0 {
 		maxContext = 32768
 	}
-	return &History{maxContext: maxContext, calibration: 1.0}
+	return &History{maxContext: maxContext}
 }
 
 // Append adds one message. For tool messages the caller should pre-populate
@@ -80,33 +73,18 @@ func (h *History) Append(m Message) {
 
 // SetPromptTokens records the most recent server-reported prompt token count
 // along with the message-count baseline that count was measured against, so
-// EstimateTokens can add growth since. Also uses the real count to calibrate
-// the char/4 estimator against observed behavior — a model whose tokenizer
-// emits more tokens per char than English prose (JSON-heavy, non-ASCII) will
-// push calibration above 1.0 so future compaction triggers trip at the right
-// watermark instead of 30-50% below it.
+// EstimateTokens can add growth since. Also feeds the real count into the
+// package-level calibration EMA — a model whose tokenizer emits more tokens
+// per char than English prose (JSON-heavy, non-ASCII) will push calibration
+// above 1.0 so future compaction triggers trip at the right watermark
+// instead of 30-50% below it.
 func (h *History) SetPromptTokens(n int) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if n > 0 {
-		raw := h.rawEstimateRangeLocked(0, len(h.messages))
-		if raw > 0 {
-			observed := float64(n) / float64(raw)
-			prior := h.calibration
-			if prior <= 0 {
-				prior = 1.0
-			}
-			next := (1-calibrationAlpha)*prior + calibrationAlpha*observed
-			if next < calibrationMin {
-				next = calibrationMin
-			} else if next > calibrationMax {
-				next = calibrationMax
-			}
-			h.calibration = next
-		}
-	}
+	raw := h.rawEstimateRangeLocked(0, len(h.messages))
 	h.lastPromptTokens = n
 	h.baselineMsgCount = len(h.messages)
+	h.mu.Unlock()
+	ObservePromptTokens(n, raw)
 }
 
 // MaxContext returns the configured ceiling (never adjusted).
@@ -151,11 +129,9 @@ func (h *History) ShrinkEffectiveMaxOnRejection(estimateAtRejection int) {
 }
 
 // Calibration returns the current learned multiplier. Exposed for tests and
-// diagnostics; callers should not mutate it.
+// diagnostics; delegates to the package-level estimator.
 func (h *History) Calibration() float64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.calibration
+	return Calibration()
 }
 
 // EstimateTokens returns the server-reported prompt count plus a char/4
@@ -177,20 +153,17 @@ func (h *History) EstimateTokens() int {
 }
 
 // estimateRangeLocked returns the calibrated token estimate for the given
-// message range. The raw char/4 heuristic under-counts on JSON-heavy and
+// message range. The raw char/N heuristic under-counts on JSON-heavy and
 // non-ASCII payloads; calibration corrects that based on observed real
 // counts. Use rawEstimateRangeLocked when computing the calibration ratio
 // itself, otherwise the EMA feedback loop self-cancels.
 func (h *History) estimateRangeLocked(start, end int) int {
-	raw := h.rawEstimateRangeLocked(start, end)
-	cal := h.calibration
-	if cal <= 0 {
-		cal = 1.0
-	}
-	return int(float64(raw) * cal)
+	return int(float64(h.rawEstimateRangeLocked(start, end)) * Calibration())
 }
 
-// rawEstimateRangeLocked is the uncalibrated char/4 estimate.
+// rawEstimateRangeLocked is the uncalibrated char/N estimate. Sums
+// rawMessageTokens over the range so the calibration update path sees
+// the same shape that EstimateMessageTokens calibrates against.
 func (h *History) rawEstimateRangeLocked(start, end int) int {
 	if start < 0 {
 		start = 0
@@ -200,23 +173,16 @@ func (h *History) rawEstimateRangeLocked(start, end int) int {
 	}
 	total := 0
 	for i := start; i < end; i++ {
-		m := h.messages[i]
-		total += len(m.Content) / 4
-		for _, tc := range m.ToolCalls {
-			total += (len(tc.Function.Name) + len(tc.Function.Arguments)) / 4
-		}
-		total += 4 // per-message overhead
+		total += rawMessageTokens(h.messages[i])
 	}
 	return total
 }
 
-// Snapshot returns a shallow copy of the message list, safe for sending.
+// Snapshot returns a copy of the message list.
 func (h *History) Snapshot() []Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make([]Message, len(h.messages))
-	copy(out, h.messages)
-	return out
+	return slices.Clone(h.messages)
 }
 
 // ReplaceAll swaps the entire message slice under lock. Resets the token

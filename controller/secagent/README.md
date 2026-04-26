@@ -4,7 +4,9 @@ Autonomous security exploration controller written in Go that runs multiple LLM 
 
 - **Worker(s)** - agents connected to sectool's MCP server plus a small in-process tool (`report_finding_candidate`). Workers execute security tests with sectool (proxy, replay, crawl, OAST, analysis tools) and, when they find something suspicious, call `report_finding_candidate(...)` to flag it. Each worker carries a private investigative chronicle that persists across iterations.
 - **Verifier** - dedicated agent whose only job is to reproduce worker-reported candidates using the full sectool tool surface (`flow_get`, `replay_send`, `request_send`, `diff_flow`, `find_reflected`, `proxy_rule_*`, `crawl_*`, `oast_*`, …) and either `file_finding` or `dismiss_candidate`. Runs over multiple substeps per iteration so it can reflect between reproductions. Composed fresh each iteration.
-- **Director** - dedicated agent whose only job is to decide what each alive worker does next (`continue_worker`, `expand_worker`, `stop_worker`, `plan_workers`, `direction_done`, `end_run`) and how long it may run autonomously before escalating back (`autonomous_budget`). Also runs over multiple substeps per iteration. The director's chat history is long-lived (it grows across iterations and is summarised under context pressure).
+- **Director** - dedicated agent whose only job is to decide what each alive worker does next via a single `decide_worker(action: continue|expand|stop, instruction?, reason?, autonomous_budget?, fork?)` tool call per worker, then close the iteration via a separate synthesis call (`plan_workers`, `direction_done`, `end_run`). The controller maintains the director's canonical chat at the orchestrator level (worker activity tagged by id, retired-worker summaries replace dead workers' messages in place); per-worker decision calls install a selectively-compacted view (current worker raw, others compacted) so the director coordinates without drowning in peer detail.
+
+By default, the run begins with an **initial recon** pass — a dedicated recon worker that maps the target's surface area, retires at the end of iteration 1, and whose summary is anchored into every subsequent worker's system prompt and the verifier's per-iter compose. Pass `--skip-recon` to disable this and have the run start with a regular testing worker against `--prompt` (no recon summary anchor for downstream workers). See "How It Works" step 3 for the full mechanics.
 
 A separate **log model** can be configured (`--log-model`) for cheap LLM operations that don't need the main flagship model: the narrator, candidate-dedup classification, and async-merge classification. It shares the main client pool — only the model identifier on each request differs. Defaults to `--model` when unset. Boundary-summarize stays on the main model since those recaps are load-bearing.
 
@@ -15,6 +17,7 @@ Any OpenAI-compatible endpoint works: OpenAI, Azure OpenAI, vLLM, llama.cpp serv
 ## Prerequisites
 
 - Go 1.25+ (for building secagent and sectool)
+- `sectool` available on `$PATH` — secagent shells out to `sectool mcp` when no MCP server is already running on `--mcp-port`
 - An OpenAI-compatible chat-completions endpoint (with tool-calling support)
 - The endpoint's API key (when required)
 
@@ -27,6 +30,8 @@ make build         # builds bin/sectool and bin/secagent
 # or:
 make build-secagent
 ```
+
+Make sure `sectool` is on your `$PATH` (e.g. add `bin/` to `$PATH`, or copy/symlink `bin/sectool` into a directory that already is) so secagent can launch its MCP server.
 
 ## Usage
 
@@ -87,10 +92,8 @@ bin/secagent \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--proxy-port` | `8181` | Port for sectool's native proxy |
-| `--mcp-port` | `9119` | Port for sectool's MCP server |
+| `--mcp-port` | `9119` | Port for sectool's MCP server (auto-attaches when one is already running) |
 | `--workflow` | `explore` | Sectool workflow mode |
-| `--external` | `false` | Attach to a running MCP server; skips build, start, and teardown |
-| `--skip-build` | `false` | Skip `make build-sectool` (use existing binary) |
 
 **Loop**
 
@@ -105,6 +108,7 @@ bin/secagent \
 | `--max-parallel-tools` | `4` | Max concurrent in-flight tool calls per assistant response |
 | `--max-turns-per-agent` | `100` | Hard cap per Drain chain |
 | `--findings-dir` | `./findings` | Directory for finding report files |
+| `--skip-recon` | `false` | Skip the initial recon pass; the run starts with a normal testing worker against `--prompt`. See "How It Works" step 3 |
 
 **Stall detection**
 
@@ -124,16 +128,18 @@ bin/secagent \
 
 ## Using with an Existing MCP Server
 
+secagent probes `--mcp-port` at startup. If a sectool MCP server is already serving on that port, secagent attaches to it (no child process started, no teardown on exit). Otherwise it launches `sectool mcp` from `$PATH` and tears it down at exit.
+
 ```bash
 # Start the MCP server separately
-bin/sectool mcp --proxy-port 8181 --workflow=explore
+sectool mcp --proxy-port 8181 --workflow=explore
 
-# In another terminal, run secagent against it
+# In another terminal, run secagent against it — no special flag required
 bin/secagent \
   --base-url https://api.openai.com/v1 --api-key "$OPENAI_API_KEY" \
   --model gpt-4.1 \
   --prompt "Explore https://target.example.com for auth vulnerabilities." \
-  --external --proxy-port 8181 --mcp-port 9119
+  --proxy-port 8181 --mcp-port 9119
 ```
 
 ## How It Works
@@ -154,9 +160,9 @@ Each loop around the cycle is one **iteration**. The controller keeps iterating 
 
 Operational details:
 
-1. **Build & launch MCP** - unless `--external`, runs `make build-sectool`, then starts `bin/sectool mcp` as a child process on `--mcp-port` and waits for HTTP readiness.
+1. **Launch or attach to MCP** - probes `http://127.0.0.1:<mcp-port>/mcp` first; if a server is already responding, secagent attaches to it. Otherwise it launches `sectool mcp` from `$PATH` as a child process on `--mcp-port` and waits for HTTP readiness.
 2. **Build client pool & connect agents** - a single bounded-concurrency client pool is constructed against `--base-url` and shared by every role; the narrator and candidate-dedup classifier issue requests through it with the log-model identifier. The verifier and director each open their own MCP connection; each worker opens its own MCP connection on spawn. Mission text from `--prompt` is appended to every role's system prompt as a non-negotiable anchor that survives every history replace and compaction pass.
-3. **Initial prompt** - the user's `--prompt` becomes worker 1's first assignment.
+3. **Initial prompt & initial recon** - by default, the user's `--prompt` is first run through an LLM `SummarizeReconMission` pass that distills it into a recon-scoped goal, and worker 1 is spawned as a dedicated **recon worker**: anchored to that recon mission, given the hardcoded `ReconDirective` (scope-mapping, observation-only), and registered with the sectool tool surface but **without** `report_finding_candidate` so it structurally cannot file candidates. At the end of iteration 1 the recon worker is retired, its chronicle is summarized, and the result is held as `factory.ReconSummary` — anchored into every subsequent worker's system prompt and the verifier's per-iter compose. If `SummarizeReconMission` fails (model error / empty output) the controller fails soft and uses `--prompt` verbatim as the recon mission. With `--skip-recon`, the run instead starts with a regular testing worker against `--prompt` (no recon directive, full tool surface including `report_finding_candidate`, no anchored `ReconSummary` for downstream workers) — useful for A/B comparing the value of recon on a given target, or when the target is small enough that recon is overhead.
 4. **Per-iteration anatomy** (three phases):
 
    **Phase 1: Autonomous worker run.** At iteration start the controller installs each worker's accumulated chronicle (its own prior tool calls, candidate reports, and verifier verdicts) via `ReplaceHistory`, marks the iteration boundary, and queries the worker with its current instruction. Workers then run concurrently for up to their `autonomous_budget` turns (default 8). Between turns the controller queues a terse continue prompt — no orchestrator intervention. A worker **escalates back** early if it reports a finding candidate, produces a silent turn (no tool calls, no new flow IDs), or hits an error. On a mid-iteration drain error the controller makes one recovery attempt: interrupt, re-queue the worker's last instruction, run a single Drain. Each turn's summary (tool calls, flow IDs, candidates raised) is recorded on the worker. The controller waits until every alive worker has escalated, then extracts the new turns and appends them to the worker's chronicle for next iteration.
@@ -170,7 +176,7 @@ Operational details:
 5. **Phase gating.** Each orchestrator tool checks the current phase and rejects calls made in the wrong phase. Verification phase may call `file_finding`, `dismiss_candidate`, and `verification_done` (plus the sectool tools). Direction phase may call `plan_workers`, `continue_worker`, `expand_worker`, `stop_worker`, `direction_done`, and `end_run`.
 6. **Stall detection** - controller-observed via each worker's `escalation_reason`. Silent escalations increment `progress_none_streak`; candidate escalations or turns that touched new flow IDs reset it. `--stall-warn-after` (default 3) consecutive silent escalations triggers a stall warning in the director prompt; `--stall-stop-after` (default 4) forces the worker stopped before the next iteration.
 7. **Context management** - three-pass: existing structural compaction (drop oldest turn-triples, stub stale tool results) → boundary-summarize when an iteration boundary has been marked (LLM-compresses pre-iteration messages into one concise recap, leaving the in-flight iteration verbatim) → final compaction pass. The mission anchor in the system prompt is preserved across every step. Workers and the director both have boundary-summarize wired; the verifier doesn't (it's already fresh per iteration).
-8. **Teardown** - terminates the MCP child server (unless `--external`), waits on any in-flight async finding merges, and writes a final summary line to the log.
+8. **Teardown** - terminates the MCP child server if secagent started it (no-op when attached to a pre-existing one), waits on any in-flight async finding merges, and writes a final summary line to the log.
 
 ## Worker Tool
 

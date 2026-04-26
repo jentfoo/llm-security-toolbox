@@ -41,13 +41,6 @@ func EnableColors() {
 	useColor = true
 }
 
-func styleWrap(code, s string) string {
-	if useColor {
-		return code + s + ansiReset
-	}
-	return s
-}
-
 func styleAppend(sb *strings.Builder, code, s string) {
 	if useColor {
 		sb.WriteString(code)

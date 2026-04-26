@@ -8,7 +8,7 @@ import (
 
 func TestExtractFlowIDs(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
+	tests := []struct {
 		name   string
 		inputs []any
 		want   []string
@@ -42,7 +42,7 @@ func TestExtractFlowIDs(t *testing.T) {
 			want:   nil,
 		},
 	}
-	for _, c := range cases {
+	for _, c := range tests {
 		t.Run(c.name, func(t *testing.T) {
 			assert.Equal(t, c.want, ExtractFlowIDs(c.inputs...))
 		})

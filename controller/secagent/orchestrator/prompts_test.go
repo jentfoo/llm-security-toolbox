@@ -8,15 +8,7 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-func TestIntraPhaseContinuePrompt(t *testing.T) {
-	t.Parallel()
-	// Sanity check on the bare intra-phase directive — the cross-iteration
-	// directive lives in the per-iteration compose now, so this is the
-	// only between-turns Query a worker still receives in a phase.
-	assert.Equal(t, "Continue your current testing plan. Take the next concrete step.", intraPhaseContinuePrompt)
-}
-
-func TestBuildVerifierContinuePrompt_PhaseProgress(t *testing.T) {
+func TestBuildVerifierContinuePrompt(t *testing.T) {
 	t.Parallel()
 
 	t.Run("no_progress_yet_keeps_pending_only", func(t *testing.T) {
@@ -50,10 +42,10 @@ func TestBuildVerifierContinuePrompt_PhaseProgress(t *testing.T) {
 	})
 }
 
-func TestBuildDirectorPrompt_RosterSections(t *testing.T) {
+func TestBuildSynthesisPrompt(t *testing.T) {
 	t.Parallel()
 
-	t.Run("completed_block_renders_when_workers_retired", func(t *testing.T) {
+	t.Run("completed_block_renders", func(t *testing.T) {
 		workers := []*WorkerState{
 			{ID: 4, Alive: true},
 			{ID: 8, Alive: true},
@@ -62,34 +54,31 @@ func TestBuildDirectorPrompt_RosterSections(t *testing.T) {
 			{ID: 1, StoppedAt: 2, Reason: "exhausted angle", Summary: "the worker tested /admin endpoints with user-role tokens; all returned 403."},
 			{ID: 7, StoppedAt: 3, Reason: "stall-force-stop", Summary: "the worker probed mass-assignment on /account/api/profile; no privileged fields accepted."},
 		}
-		out := BuildDirectorPrompt(
-			workers, map[int][]agent.TurnSummary{},
-			"vs", "fs", "", "", completed,
-			3, 10, 2, 5,
+		out := BuildSynthesisPrompt(
+			workers, completed, "vs", "fs", "", "", statusLine(3, 10, 2), 5,
 		)
-		assert.Contains(t, out, "**Alive:** [4, 8]")
+		assert.Contains(t, out, "**Alive workers")
+		assert.Contains(t, out, "[4, 8]")
 		assert.Contains(t, out, "**Workers completed earlier this run**")
 		assert.Contains(t, out, "Worker 1 (stopped iter 2, reason: exhausted angle)")
 		assert.Contains(t, out, "Worker 7 (stopped iter 3, reason: stall-force-stop)")
 		assert.Contains(t, out, "the worker tested /admin")
-		assert.Contains(t, out, "do NOT plan, fork, or narrate")
+		assert.Contains(t, out, "do NOT plan or fork")
 	})
 
-	t.Run("completed_block_omitted_when_empty", func(t *testing.T) {
+	t.Run("completed_block_omitted", func(t *testing.T) {
 		workers := []*WorkerState{
 			{ID: 1, Alive: true},
 			{ID: 2, Alive: true},
 		}
-		out := BuildDirectorPrompt(
-			workers, map[int][]agent.TurnSummary{},
-			"vs", "fs", "", "", nil,
-			1, 10, 0, 5,
+		out := BuildSynthesisPrompt(
+			workers, nil, "vs", "fs", "", "", statusLine(1, 10, 0), 5,
 		)
-		assert.Contains(t, out, "**Alive:** [1, 2]")
+		assert.Contains(t, out, "[1, 2]")
 		assert.NotContains(t, out, "**Workers completed earlier this run**")
 	})
 
-	t.Run("completed_block_caps_oldest_with_omitted_note", func(t *testing.T) {
+	t.Run("completed_caps_oldest", func(t *testing.T) {
 		workers := []*WorkerState{{ID: 100, Alive: true}}
 		var completed []CompletedWorker
 		for i := 1; i <= 13; i++ {
@@ -97,54 +86,90 @@ func TestBuildDirectorPrompt_RosterSections(t *testing.T) {
 				ID: i, StoppedAt: i, Reason: "r", Summary: "s",
 			})
 		}
-		out := BuildDirectorPrompt(
-			workers, map[int][]agent.TurnSummary{},
-			"vs", "fs", "", "", completed,
-			14, 20, 0, 5,
+		out := BuildSynthesisPrompt(
+			workers, completed, "vs", "fs", "", "", statusLine(14, 20, 0), 5,
 		)
-		// Rendered: cap=10, so oldest 3 are folded into the omitted note.
+		// cap=10, so oldest 3 fold into the omitted note.
 		assert.Contains(t, out, "(3 earlier completed worker(s) omitted)")
 		assert.Contains(t, out, "Worker 4 (stopped iter 4")
 		assert.Contains(t, out, "Worker 13 (stopped iter 13")
 		assert.NotContains(t, out, "Worker 1 (stopped iter 1")
 	})
+
+	t.Run("action_block_lists_tools", func(t *testing.T) {
+		out := BuildSynthesisPrompt(
+			[]*WorkerState{{ID: 1, Alive: true}}, nil, "vs", "fs", "", "",
+			statusLine(2, 10, 0), 5,
+		)
+		assert.Contains(t, out, "plan_workers")
+		assert.Contains(t, out, "direction_done")
+		assert.Contains(t, out, "end_run")
+	})
 }
 
-func TestBuildDirectorPrompt_IncludesWorkerHistory(t *testing.T) {
+func TestBuildPerWorkerDecisionPrompt(t *testing.T) {
 	t.Parallel()
-
-	t.Run("renders_history_block_when_entries_present", func(t *testing.T) {
-		w := &WorkerState{ID: 1, Alive: true}
-		w.AppendHistory(IterationEntry{
-			Iteration: 4, Angle: "probe /admin for IDOR", Outcome: OutcomeSilent,
-			ToolCalls: 12, FlowsTouched: 2,
-		})
-		w.AppendHistory(IterationEntry{
-			Iteration: 5, Angle: "probe /admin for IDOR variants", Outcome: OutcomeSilent,
-			ToolCalls: 8, FlowsTouched: 1,
-		})
-		out := BuildDirectorPrompt(
-			[]*WorkerState{w}, map[int][]agent.TurnSummary{},
-			"vs", "fs", "", "", nil,
-			6, 10, 0, 5,
-		)
-		assert.Contains(t, out, "Recent worker history")
-		assert.Contains(t, out, "Worker 1:")
-		assert.Contains(t, out, "iter 4 [silent]")
-		assert.Contains(t, out, "iter 5 [silent]")
-		assert.Contains(t, out, `"probe /admin for IDOR"`)
-		assert.Contains(t, out, "12 tools, 2 flows")
+	w := &WorkerState{ID: 5, Alive: true, EscalationReason: "candidate"}
+	w.AppendHistory(IterationEntry{
+		Iteration: 4, Angle: "probe /admin", Outcome: OutcomeFinding,
+		ToolCalls: 7, FlowsTouched: 2,
 	})
+	taken := map[int]bool{5: true, 6: true, 99: true}
+	turns := []agent.TurnSummary{{AssistantText: "found it", ToolCalls: []agent.ToolCallRecord{{Name: "replay_send"}}}}
+	out := BuildPerWorkerDecisionPrompt(5, w, turns, "- Worker 6: scanning /api/users", "iter status line", taken)
+	assert.Contains(t, out, "iter status line")
+	// Single-tool restriction is the leading line after status (primacy effect).
+	assert.Contains(t, out, "Single tool call: `decide_worker(worker_id=5")
+	assert.Contains(t, out, "Only `decide_worker` is registered")
+	assert.Contains(t, out, "every other tool errors out")
+	assert.Contains(t, out, "candidate")
+	assert.Contains(t, out, "Worker 5")
+	assert.Contains(t, out, "replay_send")
+	assert.Contains(t, out, "Worker 6: scanning /api/users")
+	assert.Contains(t, out, "Taken worker IDs")
+}
 
-	t.Run("history_block_omitted_when_empty", func(t *testing.T) {
-		w := &WorkerState{ID: 1, Alive: true}
-		out := BuildDirectorPrompt(
-			[]*WorkerState{w}, map[int][]agent.TurnSummary{},
-			"vs", "fs", "", "", nil,
-			1, 10, 0, 5,
-		)
-		assert.NotContains(t, out, "Recent worker history")
-	})
+func TestBuildIter1ReconReviewPrompt(t *testing.T) {
+	t.Parallel()
+	out := BuildIter1ReconReviewPrompt(statusLine(1, 10, 0), 5)
+	assert.Contains(t, out, "Recon iteration complete")
+	assert.Contains(t, out, "Step 1 of 2")
+	assert.Contains(t, out, "NO tool calls")
+	assert.Contains(t, out, "scope")
+	assert.Contains(t, out, "starting from 2")
+}
+
+func TestBuildIter1ReconPlanPrompt(t *testing.T) {
+	t.Parallel()
+	out := BuildIter1ReconPlanPrompt(statusLine(1, 10, 0), 5)
+	assert.Contains(t, out, "Step 2 of 2")
+	assert.Contains(t, out, "plan_workers")
+	assert.Contains(t, out, "direction_done")
+	// Tool restriction is named explicitly (decide_worker / end_run unregistered).
+	assert.Contains(t, out, "decide_worker")
+	assert.Contains(t, out, "end_run")
+	assert.Contains(t, out, "NOT registered")
+}
+
+func TestBuildIter1ReconPlanRetryPrompt(t *testing.T) {
+	t.Parallel()
+	out := BuildIter1ReconPlanRetryPrompt()
+	assert.Contains(t, out, "did NOT call `plan_workers`")
+	assert.Contains(t, out, "worker roster is required")
+	assert.Contains(t, out, "last chance")
+}
+
+func TestFormatPeerSummary(t *testing.T) {
+	t.Parallel()
+	workers := []*WorkerState{
+		{ID: 1, Alive: true, LastInstruction: "probe /admin"},
+		{ID: 2, Alive: false, LastInstruction: "stopped"},
+		{ID: 3, Alive: true, LastInstruction: "probe /api"},
+	}
+	out := FormatPeerSummary(workers, 3)
+	assert.Contains(t, out, "Worker 1: probe /admin")
+	assert.NotContains(t, out, "Worker 3")
+	assert.NotContains(t, out, "Worker 2")
 }
 
 func TestShort(t *testing.T) {
@@ -234,21 +259,6 @@ func TestFormatAutonomousRun(t *testing.T) {
 		assert.Contains(t, out, "flow_get, replay_send")
 		assert.Contains(t, out, "abc12345")
 		assert.Contains(t, out, "looking into it")
-	})
-}
-
-func TestBuildDirectorContinuePrompt(t *testing.T) {
-	t.Parallel()
-
-	t.Run("with_workers", func(t *testing.T) {
-		out := BuildDirectorContinuePrompt(map[int]bool{2: true, 4: true}, 2, 4)
-		assert.Contains(t, out, "substep 2/4")
-		assert.Contains(t, out, "2, 4")
-	})
-
-	t.Run("none", func(t *testing.T) {
-		out := BuildDirectorContinuePrompt(nil, 3, 4)
-		assert.Contains(t, out, "(none)")
 	})
 }
 

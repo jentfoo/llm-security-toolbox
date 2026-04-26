@@ -236,7 +236,7 @@ func TestRunVerificationPhase(t *testing.T) {
 		verifier.OnDrain = func(_ int) {
 			// Verifier calls file_finding four times in one substep with the
 			// identical title (the live-run failure mode at 01:47:56).
-			for i := 0; i < 4; i++ {
+			for range 4 {
 				decisions.AddFinding(FindingFiled{
 					Title: "Same title", Severity: "high", Endpoint: "GET /x",
 					VerificationNotes: "dup",
@@ -277,8 +277,8 @@ func TestRunVerificationPhase(t *testing.T) {
 
 		c := candidates.ByID(c1)
 		require.NotNil(t, c)
-		assert.Equal(t, "pending", c.Status, "LLM wedge must leave candidate pending")
-		assert.Empty(t, decisions.Dismissals, "no auto-dismiss without context-overflow signal")
+		assert.Equal(t, "pending", c.Status)
+		assert.Empty(t, decisions.Dismissals)
 	})
 }
 

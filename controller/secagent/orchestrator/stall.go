@@ -86,7 +86,7 @@ func buildRepeatedErrorCoaching(sig string) string {
 // hasProductiveTurn returns true when any turn in the slice made real
 // progress — tool calls issued or flow IDs touched. Prompt tokens alone
 // don't count: any successful round-trip (including the model saying "I'll
-// keep looking" with no tool calls) consumes them. Used by applyPlanDiff
+// keep looking" with no tool calls) consumes them. Used by applyPlanAndFire
 // so the director's retarget cannot reset the stall counter when the
 // worker was dead this iteration.
 func hasProductiveTurn(turns []agent.TurnSummary) bool {

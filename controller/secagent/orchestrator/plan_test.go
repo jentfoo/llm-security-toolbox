@@ -19,53 +19,66 @@ func stubSpawn(counter *int) workerSpawnFunc {
 			ID:              id,
 			Agent:           &agent.FakeAgent{},
 			Alive:           true,
-			Assignment:      assignment,
 			LastInstruction: assignment,
 		}, nil
 	}
 }
 
-func TestApplyPlanDiff(t *testing.T) {
+// stubFire returns a fire callback that records every fired worker id
+// and yields nil turn summaries on join.
+func stubFire(t *testing.T) (func(context.Context, *WorkerState) func() []agent.TurnSummary, *[]int) {
+	t.Helper()
+	fired := []int{}
+	return func(_ context.Context, w *WorkerState) func() []agent.TurnSummary {
+		fired = append(fired, w.ID)
+		return func() []agent.TurnSummary { return nil }
+	}, &fired
+}
+
+func TestApplyPlanAndFire(t *testing.T) {
 	t.Parallel()
-	t.Run("spawn", func(t *testing.T) {
+
+	t.Run("spawn_and_fire", func(t *testing.T) {
 		workers := []*WorkerState{
-			{ID: 1, Agent: &agent.FakeAgent{}, Alive: true},
+			{ID: 1, Agent: &agent.FakeAgent{}, Alive: true, LastInstruction: "old1"},
 		}
 		var built int
-		applyPlanDiff(t.Context(),
+		fire, fired := stubFire(t)
+		inflight := map[int]func() []agent.TurnSummary{}
+		applyPlanAndFire(t.Context(),
 			[]PlanEntry{{WorkerID: 1, Assignment: "new plan"}, {WorkerID: 2, Assignment: "second"}},
-			&workers, stubSpawn(&built), 5, nil,
+			&workers, stubSpawn(&built), 5, fire, inflight, nil,
 		)
 		require.Len(t, workers, 2)
-		assert.Equal(t, "new plan", workers[0].Assignment)
+		assert.Equal(t, "new plan", workers[0].LastInstruction)
 		assert.Equal(t, 2, workers[1].ID)
 		assert.Equal(t, 1, built)
+		assert.ElementsMatch(t, []int{1, 2}, *fired)
+		assert.Len(t, inflight, 2)
 	})
 
-	t.Run("retarget_preserves_streak_on_dead_iteration", func(t *testing.T) {
-		// Regression: the director was retargeting dead workers every
-		// iteration, resetting ProgressNoneStreak and preventing the stall
-		// force-stop from ever firing. Retarget must only clear the counter
-		// when the worker actually produced something this iteration.
+	t.Run("retarget_preserves_streak", func(t *testing.T) {
 		w := &WorkerState{
 			ID:                 1,
 			Agent:              &agent.FakeAgent{},
 			Alive:              true,
 			ProgressNoneStreak: 3,
 			StallWarned:        true,
-			AutonomousTurns:    []agent.TurnSummary{{}, {}}, // all dead
+			AutonomousTurns:    []agent.TurnSummary{{}, {}},
 		}
 		workers := []*WorkerState{w}
 		var built int
-		applyPlanDiff(t.Context(),
+		fire, _ := stubFire(t)
+		applyPlanAndFire(t.Context(),
 			[]PlanEntry{{WorkerID: 1, Assignment: "try something new"}},
-			&workers, stubSpawn(&built), 5, nil,
+			&workers, stubSpawn(&built), 5, fire,
+			map[int]func() []agent.TurnSummary{}, nil,
 		)
-		assert.Equal(t, 3, w.ProgressNoneStreak, "dead-iteration retarget must not reset streak")
-		assert.True(t, w.StallWarned, "dead-iteration retarget must not clear warn latch")
+		assert.Equal(t, 3, w.ProgressNoneStreak)
+		assert.True(t, w.StallWarned)
 	})
 
-	t.Run("retarget_resets_streak_when_productive", func(t *testing.T) {
+	t.Run("retarget_resets_when_productive", func(t *testing.T) {
 		w := &WorkerState{
 			ID:                 1,
 			Agent:              &agent.FakeAgent{},
@@ -76,9 +89,11 @@ func TestApplyPlanDiff(t *testing.T) {
 		}
 		workers := []*WorkerState{w}
 		var built int
-		applyPlanDiff(t.Context(),
+		fire, _ := stubFire(t)
+		applyPlanAndFire(t.Context(),
 			[]PlanEntry{{WorkerID: 1, Assignment: "continue"}},
-			&workers, stubSpawn(&built), 5, nil,
+			&workers, stubSpawn(&built), 5, fire,
+			map[int]func() []agent.TurnSummary{}, nil,
 		)
 		assert.Equal(t, 0, w.ProgressNoneStreak)
 		assert.False(t, w.StallWarned)
@@ -90,85 +105,60 @@ func TestApplyPlanDiff(t *testing.T) {
 			{ID: 2, Agent: &agent.FakeAgent{}, Alive: true},
 		}
 		var built int
-		applyPlanDiff(t.Context(),
+		fire, fired := stubFire(t)
+		applyPlanAndFire(t.Context(),
 			[]PlanEntry{
 				{WorkerID: 3, Assignment: "x"},
 				{WorkerID: 4, Assignment: "y"},
 				{WorkerID: 5, Assignment: "z"},
 			},
-			&workers, stubSpawn(&built), 2, nil,
+			&workers, stubSpawn(&built), 2, fire,
+			map[int]func() []agent.TurnSummary{}, nil,
 		)
-		// max=2 existing → no spawns allowed.
 		assert.Len(t, workers, 2)
 		assert.Equal(t, 0, built)
+		assert.Empty(t, *fired)
 	})
-}
 
-func TestApplyForkDiff(t *testing.T) {
-	t.Parallel()
-	t.Run("inherits_parent_chronicle_with_header", func(t *testing.T) {
-		parent := &WorkerState{
-			ID: 1, Agent: &agent.FakeAgent{}, Alive: true,
-			Chronicle: []agent.Message{
-				{Role: "user", Content: "directive"},
-				{Role: "assistant", Content: "I tested /admin"},
-			},
+	t.Run("skips_dead_id", func(t *testing.T) {
+		workers := []*WorkerState{
+			{ID: 1, Agent: &agent.FakeAgent{}, Alive: false},
 		}
-		workers := []*WorkerState{parent}
 		var built int
-		applyForkDiff(t.Context(),
-			[]ForkEntry{{ParentWorkerID: 1, NewWorkerID: 2, Instruction: "follow up X"}},
-			&workers, stubSpawn(&built), 5, 3, nil,
-		)
-		require.Len(t, workers, 2)
-		child := workers[1]
-		assert.Equal(t, 2, child.ID)
-		require.Len(t, child.Chronicle, 3, "child gets inheritance header + parent's 2 chronicle msgs")
-		assert.Equal(t, "user", child.Chronicle[0].Role)
-		assert.Contains(t, child.Chronicle[0].Content, "Inherited investigative history from worker 1",
-			"header names parent worker")
-		assert.Contains(t, child.Chronicle[0].Content, "iter 3", "header includes the fork iter")
-		assert.Contains(t, child.Chronicle[0].Content, "you are now worker 2", "header reframes for child")
-		assert.Equal(t, "I tested /admin", child.Chronicle[2].Content,
-			"parent's chronicle follows the header verbatim")
-		assert.Equal(t, 1, built)
-	})
-
-	t.Run("skips_when_parent_dead", func(t *testing.T) {
-		parent := &WorkerState{ID: 1, Agent: &agent.FakeAgent{}, Alive: false}
-		workers := []*WorkerState{parent}
-		var built int
-		applyForkDiff(t.Context(),
-			[]ForkEntry{{ParentWorkerID: 1, NewWorkerID: 2, Instruction: "x"}},
-			&workers, stubSpawn(&built), 5, 1, nil,
+		fire, fired := stubFire(t)
+		applyPlanAndFire(t.Context(),
+			[]PlanEntry{{WorkerID: 1, Assignment: "ghost"}},
+			&workers, stubSpawn(&built), 5, fire,
+			map[int]func() []agent.TurnSummary{}, nil,
 		)
 		assert.Len(t, workers, 1)
 		assert.Equal(t, 0, built)
+		assert.Empty(t, *fired)
 	})
+}
 
-	t.Run("skips_when_new_id_collides_with_alive", func(t *testing.T) {
-		parent := &WorkerState{ID: 1, Agent: &agent.FakeAgent{}, Alive: true}
-		other := &WorkerState{ID: 2, Agent: &agent.FakeAgent{}, Alive: true}
-		workers := []*WorkerState{parent, other}
-		var built int
-		applyForkDiff(t.Context(),
-			[]ForkEntry{{ParentWorkerID: 1, NewWorkerID: 2, Instruction: "x"}},
-			&workers, stubSpawn(&built), 5, 1, nil,
-		)
-		assert.Len(t, workers, 2)
-		assert.Equal(t, 0, built)
-	})
+func TestRefireAlive(t *testing.T) {
+	t.Parallel()
 
-	t.Run("respects_max_workers_cap", func(t *testing.T) {
-		w1 := &WorkerState{ID: 1, Agent: &agent.FakeAgent{}, Alive: true}
-		w2 := &WorkerState{ID: 2, Agent: &agent.FakeAgent{}, Alive: true}
-		workers := []*WorkerState{w1, w2}
-		var built int
-		applyForkDiff(t.Context(),
-			[]ForkEntry{{ParentWorkerID: 1, NewWorkerID: 3, Instruction: "x"}},
-			&workers, stubSpawn(&built), 2, 1, nil,
-		)
-		assert.Len(t, workers, 2)
-		assert.Equal(t, 0, built)
-	})
+	w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: "go w1"}
+	w2 := &WorkerState{ID: 2, Alive: false, Agent: &agent.FakeAgent{}}
+	workers := []*WorkerState{w1, w2}
+	fire, fired := stubFire(t)
+	inflight := map[int]func() []agent.TurnSummary{}
+	refireAlive(t.Context(), workers, fire, inflight, nil)
+	assert.Equal(t, []int{1}, *fired)
+	assert.Len(t, inflight, 1)
+}
+
+func TestHarvestInflight(t *testing.T) {
+	t.Parallel()
+
+	inflight := map[int]func() []agent.TurnSummary{
+		1: func() []agent.TurnSummary { return []agent.TurnSummary{{AssistantText: "w1"}} },
+		2: func() []agent.TurnSummary { return nil },
+	}
+	out := harvestInflight(inflight)
+	assert.Len(t, out, 2)
+	require.Len(t, out[1], 1)
+	assert.Equal(t, "w1", out[1][0].AssistantText)
 }

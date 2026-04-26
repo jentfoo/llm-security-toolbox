@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+
+	"github.com/go-analyze/bulk"
 )
 
 // outputMarkers are common patterns reasoning models use to demarcate their
@@ -27,20 +29,9 @@ var jsonSummaryFields = []string{
 	"text", "content", "response", "output", "answer",
 }
 
-// ExtractProse returns a best-effort single-line prose summary from s,
-// applying defensive fallbacks for common model-output misbehaviours:
-//
-//  1. Balanced `<think>...</think>` blocks are stripped first.
-//  2. Surrounding markdown code fences are peeled.
-//  3. If the remaining content parses as a JSON object, the first non-empty
-//     string value from a known summary-field name is returned.
-//  4. If a "final output" marker is present (Final:, Output:, Answer:,
-//     Response:, …), the prose following the last marker is returned,
-//     capped at the first newline or sentence boundary.
-//  5. Leading structural-only lines (`{`, `}`, `[`, `]`, `"`, `'`, ``` ``` ```, etc.)
-//     are skipped; the first substantive line is returned.
-//
-// Returns "" when every fallback produces nothing usable.
+// ExtractProse returns a best-effort single-line prose summary from s. Strips
+// think blocks, peels code fences, probes JSON fields, looks for output
+// markers, and skips structural lines. Returns "" when nothing usable remains.
 func ExtractProse(s string) string {
 	s = StripCodeFences(StripThinkBlocks(s))
 	s = strings.TrimSpace(s)
@@ -110,10 +101,7 @@ func extractFromJSON(s string) (string, bool) {
 			}
 		}
 	}
-	keys := make([]string, 0, len(obj))
-	for k := range obj {
-		keys = append(keys, k)
-	}
+	keys := bulk.MapKeysSlice(obj)
 	sort.Strings(keys)
 	for _, k := range keys {
 		if v, ok := obj[k].(string); ok {
