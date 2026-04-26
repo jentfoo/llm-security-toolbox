@@ -28,7 +28,7 @@ const readinessProbeTimeout = 500 * time.Millisecond
 // server is already responding on that port it attaches without starting
 // a child process; otherwise it launches `sectool mcp` from $PATH and
 // waits for HTTP readiness.
-func StartSectool(proxyPort, mcpPort int, workflow string, log *Logger) (*SectoolServer, error) {
+func StartSectool(proxyPort, mcpPort int, log *Logger) (*SectoolServer, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort)
 
 	if mcpReachable(url) {
@@ -57,7 +57,7 @@ func StartSectool(proxyPort, mcpPort int, workflow string, log *Logger) (*Sectoo
 	cmd := exec.Command(binary, "mcp",
 		fmt.Sprintf("--proxy-port=%d", proxyPort),
 		fmt.Sprintf("--port=%d", mcpPort),
-		"--workflow="+workflow,
+		"--workflow=multi",
 	)
 	cmd.Stdout = f
 	cmd.Stderr = f

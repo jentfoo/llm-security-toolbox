@@ -28,7 +28,6 @@ type Config struct {
 	// Sectool
 	ProxyPort int
 	MCPPort   int
-	Workflow  string
 
 	// Loop
 	Prompt           string
@@ -82,7 +81,6 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 
 	fs.IntVar(&c.ProxyPort, "proxy-port", 8181, "sectool proxy port")
 	fs.IntVar(&c.MCPPort, "mcp-port", 9119, "sectool MCP port")
-	fs.StringVar(&c.Workflow, "workflow", "explore", "sectool workflow mode")
 
 	fs.StringVar(&c.Prompt, "prompt", "", "initial task prompt (required)")
 	fs.IntVar(&c.MaxIterations, "max-iterations", 30, "hard iteration cap")
