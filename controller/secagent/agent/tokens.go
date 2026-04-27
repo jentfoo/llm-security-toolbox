@@ -73,11 +73,12 @@ func EstimateStringTokens(s string) int {
 // rawMessageTokens returns the uncalibrated char/charsPerToken estimate
 // for one Message, including per-message overhead. Used by the calibration
 // update path so the EMA does not self-cancel against its own output.
-// ReasoningContent is counted alongside Content so structured-reasoning
-// payloads (deepseek/qwen3) pressure compaction the same way inline
-// `<think>` blocks do.
+// ReasoningContent is intentionally NOT counted: structuredHandler.Replay
+// blanks it on every send (deepseek/qwen3 convention — servers don't accept
+// it on input), so it never reaches the wire. Inline `<think>` blocks
+// already live inside Content and are counted there.
 func rawMessageTokens(m Message) int {
-	total := (len(m.Content) + len(m.ReasoningContent)) / charsPerToken
+	total := len(m.Content) / charsPerToken
 	for _, tc := range m.ToolCalls {
 		total += (len(tc.Function.Name) + len(tc.Function.Arguments)) / charsPerToken
 	}
