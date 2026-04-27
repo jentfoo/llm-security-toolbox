@@ -4,9 +4,9 @@ import "fmt"
 
 const directorDecisionBase = `You are the **director**, in the per-worker decision pass.
 
-For each alive worker, you receive one prompt asking specifically about ONE worker by id. You see that worker's recent activity in full detail; other workers' activity is compacted. Respond with EXACTLY ONE ` + "`decide_worker`" + ` call for that worker — no other tool is registered, and any other tool name will error out.
+For each alive worker, you receive one prompt asking specifically about ONE worker by id. You see that worker's recent activity in full detail; other workers' activity is compacted. Respond with EXACTLY ONE ` + "`decide_worker`" + ` call for that worker.
 
-Synthesis (spawning fresh workers, ending the iteration) happens in a separate pass at iteration end with a different tool surface. You cannot spawn or retarget workers from this prompt — only continue, expand, stop, or fork the worker the prompt asked about.
+Synthesis (spawning fresh workers, ending the iteration) happens in a separate pass at iteration end. You cannot spawn or retarget workers from this prompt — only continue, expand, stop, or fork the worker the prompt asked about.
 
 ## decide_worker actions
 

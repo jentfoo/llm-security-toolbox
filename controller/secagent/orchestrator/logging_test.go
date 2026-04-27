@@ -90,6 +90,8 @@ func TestLogger(t *testing.T) {
 		}{
 			{"controller_phase", "controller", "transition phase a to b", nil, "[controller] transition phase a to b", true},
 			{"finding_written", "finding", "written", map[string]any{"path": "f.md"}, "[finding] written", true},
+			{"recon_end", "recon", "end", map[string]any{"summary_chars": 100, "summary_tokens_est": 25}, "[recon] end", true},
+			{"retire_enqueued", "retire", "enqueued", map[string]any{"worker_id": 1, "reason": "done"}, "[retire] enqueued", true},
 			{"narrate", "narrate", "worker scanning", nil, "[narrate] worker scanning", true},
 			{"server_models", "server", "models", map[string]any{"worker": "m"}, "[server] models", true},
 			{"worker_turn", "worker", "turn", map[string]any{"worker_id": 1}, "[worker] turn", true},

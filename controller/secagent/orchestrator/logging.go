@@ -104,7 +104,7 @@ func shouldNarrate(tag, msg string) bool {
 // The JSON file always gets every event; stderr gets only the signal.
 func shouldMirror(tag, msg string, fields map[string]any) bool {
 	switch tag {
-	case "server", "controller", "decision", "finding", "summary", "plan", "verify":
+	case "server", "controller", "decision", "finding", "summary", "plan", "verify", "recon", "retire":
 		return true
 	case "narrate":
 		// "empty" fires every tick when a reasoning model burns its whole
