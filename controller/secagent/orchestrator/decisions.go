@@ -172,6 +172,20 @@ func (q *DecisionQueue) AddDecision(d WorkerDecision) {
 	q.WorkerDecisions = append(q.WorkerDecisions, d)
 }
 
+// DecisionsByWorker returns a per-worker map of the latest decision Kind
+// (continue | expand | stop) made this phase, keyed by WorkerID. Used by
+// the end_run handler to verify that every alive worker has been
+// explicitly stopped before the run ends.
+func (q *DecisionQueue) DecisionsByWorker() map[int]string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make(map[int]string, len(q.WorkerDecisions))
+	for _, d := range q.WorkerDecisions {
+		out[d.WorkerID] = d.Kind
+	}
+	return out
+}
+
 // AddFinding records a filed finding.
 func (q *DecisionQueue) AddFinding(f FindingFiled) {
 	q.mu.Lock()

@@ -32,6 +32,7 @@ If you're unsure about something the worker reported, do NOT call other tools to
 
 - **Angle exhaustion:** when a worker's recent-history block shows the same or near-identical angle across 2+ iterations with no finding filed, treat it as exhausted. Stop the worker or pivot to a materially different vector — do not re-issue a lightly-reworded variant of the same instruction.
 - **Cross-worker context transfer:** each worker has its own private investigative memory — workers do NOT see each other's tool calls or evidence. When retargeting a worker onto a vector that depends on context another worker discovered (a captured token, a mapped endpoint, an OAST callback), embed that context verbatim in the instruction. The receiving worker has no other way to learn it.
+- **The ` + "`reason`" + ` field is NOT a findings channel.** If a worker's chat shows it discovered a vulnerability but did not call ` + "`report_finding_candidate`" + `, do NOT stop the worker with a finding-shaped reason. The reason text is logged and discarded — only filed candidates persist into the deliverable. Issue ` + "`continue`" + ` with ` + "`instruction=\"You discovered <X>; call report_finding_candidate now with the evidence flow IDs before any further work.\"`" + ` so the worker files it. Stop only after the candidate is filed, or stop with a non-finding reason like "exhausted" or "blocked."
 
 ## Escalation reasons
 
@@ -52,8 +53,8 @@ Per-worker decisions for every alive worker have already landed in a separate pa
 ## Synthesis tools
 
 - ` + "`plan_workers(plans=[{worker_id, assignment}, ...])`" + ` — spawn fresh workers (no inherited memory) and/or retarget alive workers. Each ` + "`worker_id`" + ` must be either an existing alive worker (→ retarget) or a fresh integer not in the alive or completed set (→ spawn). Completed IDs are gone and rejected.
-- ` + "`direction_done(summary)`" + ` — close the iteration. Use this for almost every iteration.
-- ` + "`end_run(summary)`" + ` — end the ENTIRE run. Only after many iterations when the assignment is exhausted and findings have been filed (or the target is confidently clean). Never an alias for ` + "`direction_done`" + `. Early calls are rejected.
+- ` + "`direction_done(summary)`" + ` — close the iteration. Use this for almost every iteration. Workers continue next iter on the angles they already have.
+- ` + "`end_run(summary)`" + ` — end the ENTIRE run. Use ONLY when the assignment is genuinely exhausted: every angle worth pursuing is dead, no productive workers are mid-investigation, and the deliverable (filed findings) reflects everything worth reporting. The handler rejects ` + "`end_run`" + ` if any alive worker had a ` + "`continue`" + ` or ` + "`expand`" + ` decision in this iter — you cannot abandon live work. To end a run with workers still alive, first stop them all explicitly via the per-worker decision pass (next iter), then call end_run on the iter after that. If your summary mentions "in progress," "remaining angle," "still testing," etc., you are calling end_run wrong — use direction_done instead.
 
 ## Writing assignments
 

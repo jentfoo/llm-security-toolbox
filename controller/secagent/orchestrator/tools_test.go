@@ -476,7 +476,7 @@ func TestSynthesisToolDefs(t *testing.T) {
 	t.Run("plan_records_valid", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		pw := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted), "plan_workers")
+		pw := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, nil), "plan_workers")
 		require.NotNil(t, pw)
 		res := pw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"plans": []map[string]any{
@@ -499,7 +499,7 @@ func TestSynthesisToolDefs(t *testing.T) {
 		dq.BeginPhase(agent.PhaseDirection)
 		taken := func() map[int]bool { return map[int]bool{4: true} }
 		done := func() map[int]bool { return map[int]bool{4: true} }
-		pw := findTool(SynthesisToolDefs(dq, guardAccept, taken, done), "plan_workers")
+		pw := findTool(SynthesisToolDefs(dq, guardAccept, taken, done, nil), "plan_workers")
 		res := pw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"plans": []map[string]any{{"worker_id": 4, "assignment": "x"}},
 		}))
@@ -510,7 +510,7 @@ func TestSynthesisToolDefs(t *testing.T) {
 	t.Run("plan_recovers_string_array", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		pw := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted), "plan_workers")
+		pw := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, nil), "plan_workers")
 		res := pw.Handler(t.Context(), json.RawMessage(
 			`{"plans": "[{\"worker_id\":1,\"assignment\":\"scan auth\"}]"}`,
 		))
@@ -522,7 +522,7 @@ func TestSynthesisToolDefs(t *testing.T) {
 	t.Run("direction_done_records", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		dd := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted), "direction_done")
+		dd := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, nil), "direction_done")
 		res := dd.Handler(t.Context(), mustMarshal(t, map[string]any{"summary": "ok"}))
 		assert.False(t, res.IsError)
 		assert.True(t, dq.HasDirectionDone)
@@ -531,7 +531,7 @@ func TestSynthesisToolDefs(t *testing.T) {
 	t.Run("end_run_premature_rejected", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		er := findTool(SynthesisToolDefs(dq, guardPremature, noTaken, noCompleted), "end_run")
+		er := findTool(SynthesisToolDefs(dq, guardPremature, noTaken, noCompleted, nil), "end_run")
 		res := er.Handler(t.Context(), mustMarshal(t, map[string]any{"summary": "s"}))
 		assert.True(t, res.IsError)
 		assert.Contains(t, res.Text, "premature")
@@ -540,7 +540,7 @@ func TestSynthesisToolDefs(t *testing.T) {
 	t.Run("end_run_accepted", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		er := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted), "end_run")
+		er := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, nil), "end_run")
 		res := er.Handler(t.Context(), mustMarshal(t, map[string]any{"summary": "s"}))
 		assert.False(t, res.IsError)
 		assert.True(t, dq.HasEndRun)
@@ -548,12 +548,60 @@ func TestSynthesisToolDefs(t *testing.T) {
 
 	t.Run("phase_mismatch_rejects", func(t *testing.T) {
 		dq := NewDecisionQueue()
-		defs := SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted)
+		defs := SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, nil)
 		for _, name := range []string{"plan_workers", "direction_done", "end_run"} {
 			d := findTool(defs, name)
 			require.NotNil(t, d, name)
 			res := d.Handler(t.Context(), []byte(`{}`))
 			assert.True(t, res.IsError, name)
 		}
+	})
+
+	t.Run("end_run_rejects_when_alive_workers_have_non_stop_decisions", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		dq.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 4})
+		dq.AddDecision(WorkerDecision{Kind: "stop", WorkerID: 5, Reason: "exhausted"})
+		alive := func() []int { return []int{4, 5} }
+		er := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, alive), "end_run")
+		res := er.Handler(t.Context(), mustMarshal(t, map[string]any{"summary": "s"}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "[4]")
+		assert.NotContains(t, res.Text, "[5]")
+		assert.False(t, dq.HasEndRun)
+	})
+
+	t.Run("end_run_rejects_when_alive_worker_has_no_decision", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		dq.AddDecision(WorkerDecision{Kind: "stop", WorkerID: 4, Reason: "x"})
+		alive := func() []int { return []int{4, 5} }
+		er := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, alive), "end_run")
+		res := er.Handler(t.Context(), mustMarshal(t, map[string]any{"summary": "s"}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "[5]")
+		assert.False(t, dq.HasEndRun)
+	})
+
+	t.Run("end_run_accepted_when_all_alive_stopped", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		dq.AddDecision(WorkerDecision{Kind: "stop", WorkerID: 4, Reason: "x"})
+		dq.AddDecision(WorkerDecision{Kind: "stop", WorkerID: 5, Reason: "y"})
+		alive := func() []int { return []int{4, 5} }
+		er := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, alive), "end_run")
+		res := er.Handler(t.Context(), mustMarshal(t, map[string]any{"summary": "s"}))
+		assert.False(t, res.IsError)
+		assert.True(t, dq.HasEndRun)
+	})
+
+	t.Run("end_run_accepted_when_no_alive_workers", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		alive := func() []int { return nil }
+		er := findTool(SynthesisToolDefs(dq, guardAccept, noTaken, noCompleted, alive), "end_run")
+		res := er.Handler(t.Context(), mustMarshal(t, map[string]any{"summary": "s"}))
+		assert.False(t, res.IsError)
+		assert.True(t, dq.HasEndRun)
 	})
 }

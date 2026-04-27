@@ -734,6 +734,15 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		}
 		return out
 	}
+	aliveWorkerIDsFn := func() []int {
+		var out []int
+		for _, w := range workers {
+			if w.Alive {
+				out = append(out, w.ID)
+			}
+		}
+		return out
+	}
 
 	// currentPhase drives which agents the narrator summarizes per firing.
 	// Mutated only on the main loop goroutine (phaseTransition); snapshots
@@ -1045,7 +1054,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			RunIter1ReconReviewCall(ctx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
 
 			synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
-				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn)...))
+				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
 			RunIter1ReconPlanCall(ctx, synthesisDirector, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
 
 			if decisions.HasEndRun {
@@ -1100,7 +1109,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 
 		// Synthesis call.
 		synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
-			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn)...))
+			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
 		RunSynthesisPhase(ctx, SynthesisPhaseInput{
 			Director: synthesisDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, Completed: completed,
