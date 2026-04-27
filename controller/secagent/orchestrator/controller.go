@@ -31,7 +31,8 @@ type AgentFactory interface {
 	NewWorker(id, numWorkers int) (agent.Agent, error)
 	NewReconWorker(reconMission string) (agent.Agent, error)
 	NewVerifier(onContextOverflow func()) (agent.Agent, error)
-	NewDirector() (agent.Agent, error)
+	NewDecisionDirector() (agent.Agent, error)
+	NewSynthesisDirector() (agent.Agent, error)
 	Close() error
 }
 
@@ -274,12 +275,30 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 	), nil
 }
 
-// NewDirector builds a director agent.
-func (f *OpenAIFactory) NewDirector() (agent.Agent, error) {
+// NewDecisionDirector builds the per-worker decision director. Its system
+// prompt only describes decide_worker — synthesis tools are deliberately
+// absent so the model does not hallucinate calls to them mid-decision.
+func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 	return f.buildAgent(
-		"director",
+		"director-decision",
 		f.Cfg.Model,
-		f.withMission(prompts.BuildDirectorSystemPrompt(f.Cfg.MaxWorkers)),
+		f.withMission(prompts.BuildDirectorDecisionSystemPrompt(f.Cfg.MaxWorkers)),
+		f.Pool,
+		f.Cfg.MaxContext,
+		f.Reasoning,
+		false,
+		nil,
+	), nil
+}
+
+// NewSynthesisDirector builds the iteration-end synthesis director. Its
+// system prompt describes plan_workers / direction_done / end_run only;
+// per-worker decisions land in a separate pass before this agent runs.
+func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
+	return f.buildAgent(
+		"director-synthesis",
+		f.Cfg.Model,
+		f.withMission(prompts.BuildDirectorSynthesisSystemPrompt(f.Cfg.MaxWorkers)),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -542,11 +561,21 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		return fmt.Errorf("new verifier: %w", err)
 	}
 	defer func() { _ = verifier.Close() }()
-	director, err := factory.NewDirector()
+	// Two phase-scoped director agents share the canonical DirectorChat.
+	// The decision agent's system prompt only describes decide_worker; the
+	// synthesis agent's only describes plan_workers / direction_done /
+	// end_run. Splitting them keeps the model from hallucinating tools that
+	// aren't registered for the current phase.
+	decisionDirector, err := factory.NewDecisionDirector()
 	if err != nil {
-		return fmt.Errorf("new director: %w", err)
+		return fmt.Errorf("new decision director: %w", err)
 	}
-	defer func() { _ = director.Close() }()
+	defer func() { _ = decisionDirector.Close() }()
+	synthesisDirector, err := factory.NewSynthesisDirector()
+	if err != nil {
+		return fmt.Errorf("new synthesis director: %w", err)
+	}
+	defer func() { _ = synthesisDirector.Close() }()
 
 	// per spec §6 each agent gets its own MCP client; workers get theirs in spawnWorker
 	verifierMCP, err := mcp.Connect(ctx, mcpURL)
@@ -692,9 +721,14 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 				return []NamedAgent{{Name: "verifier", Agent: oa}}
 			}
 		case "direction":
-			if oa, ok := director.(*agent.OpenAIAgent); ok {
-				return []NamedAgent{{Name: "director", Agent: oa}}
+			var out []NamedAgent
+			if oa, ok := decisionDirector.(*agent.OpenAIAgent); ok {
+				out = append(out, NamedAgent{Name: "director-decision", Agent: oa})
 			}
+			if oa, ok := synthesisDirector.(*agent.OpenAIAgent); ok {
+				out = append(out, NamedAgent{Name: "director-synthesis", Agent: oa})
+			}
+			return out
 		}
 		return nil
 	}
@@ -963,11 +997,11 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			}
 			LatchStallWarnings(workers, cfg.StallWarnAfter)
 
-			director.SetTools(nil)
-			RunIter1ReconReviewCall(ctx, director, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
+			synthesisDirector.SetTools(nil)
+			RunIter1ReconReviewCall(ctx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
 
-			director.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
-			RunIter1ReconPlanCall(ctx, director, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
+			synthesisDirector.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
+			RunIter1ReconPlanCall(ctx, synthesisDirector, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
 
 			if decisions.HasEndRun {
 				if log != nil {
@@ -1000,9 +1034,9 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		}
 
 		// Iter 2+: per-worker decision loop, then synthesis.
-		director.SetTools(DecisionToolDefs(decisions, takenIDsFn))
+		decisionDirector.SetTools(DecisionToolDefs(decisions, takenIDsFn))
 		decRes := RunDecisionPhase(ctx, DecisionPhaseInput{
-			Director: director, DirChat: dirChat, Decisions: decisions,
+			Director: decisionDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, WorkerRuns: workerRuns,
 			IterationStatus: iterStatus, Iter: iteration, MaxWorkers: cfg.MaxWorkers,
 			TakenIDs:   takenIDsFn,
@@ -1015,9 +1049,9 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		applyRetiredSummaries()
 
 		// Synthesis call.
-		director.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
+		synthesisDirector.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
 		RunSynthesisPhase(ctx, SynthesisPhaseInput{
-			Director: director, DirChat: dirChat, Decisions: decisions,
+			Director: synthesisDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, Completed: completed,
 			VerifierSummary: verificationSummary, FindingsSummary: writer.SummaryForOrchestrator(),
 			StallWarnings: stallWarnings, FollowUpHints: followUpHints,

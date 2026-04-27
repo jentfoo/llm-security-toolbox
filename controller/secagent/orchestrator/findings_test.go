@@ -59,6 +59,15 @@ func TestTitlesSimilar(t *testing.T) {
 		{"case_insensitive", "Reflected XSS in search", "reflected xss in search", true},
 		{"prefix_substring", "Reflected XSS", "Reflected XSS in login flow", true},
 		{"different_vulns", "SQL Injection", "Reflected XSS", false},
+		// Real-world CORS pair that previously slipped past the > 0.8
+		// threshold (8/12 word overlap = 0.667). Locks the new threshold
+		// against regression.
+		{
+			"cors_near_duplicate",
+			"Wildcard CORS Enables Cross-Origin Token Status Enumeration and Response Leakage",
+			"Wildcard CORS Enables Cross-OAuth Response Leakage at Token and Introspection Endpoints",
+			true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -174,11 +183,14 @@ func TestFindSimilarEntries(t *testing.T) {
 		assert.Equal(t, "Reflected XSS in search", got[0].Filed.Title)
 	})
 	t.Run("similar_title_explicit_different_endpoint", func(t *testing.T) {
-		// Word-overlap on these titles is below TitlesSimilar's threshold,
-		// so they don't surface — endpoint divergence is no longer the
-		// gating factor.
+		// Word-overlap on these titles ("Reflected XSS in login" vs "Reflected
+		// XSS in search") clears TitlesSimilar's threshold, so the pair
+		// surfaces for the LLM reviewer to adjudicate even though endpoints
+		// differ. Routing borderline pairs to the reviewer is intentional —
+		// missing a real duplicate is more costly than asking the model.
 		got := w.FindSimilarEntries(FindingFiled{Title: "Reflected XSS in login", Endpoint: "GET /login"})
-		assert.Empty(t, got)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Reflected XSS in search", got[0].Filed.Title)
 	})
 	t.Run("different_title_no_match", func(t *testing.T) {
 		got := w.FindSimilarEntries(FindingFiled{Title: "SQL Injection", Endpoint: "GET /search"})

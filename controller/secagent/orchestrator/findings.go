@@ -89,7 +89,7 @@ func TitlesSimilar(a, b string) bool {
 	if len(wb) > denom {
 		denom = len(wb)
 	}
-	return float64(overlap)/float64(denom) > 0.8
+	return float64(overlap)/float64(denom) > 0.5
 }
 
 // MatchTier reports which rule matched a pending candidate to a filed finding.
