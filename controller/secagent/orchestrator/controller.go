@@ -607,6 +607,32 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		return fmt.Errorf("list verifier sectool tools: %w", err)
 	}
 
+	// Both directors get full sectool access so they can spot-check worker
+	// claims directly instead of either spawning a verification worker or
+	// hallucinating tool calls from worker history. Each director gets its
+	// own MCP client per spec §6. Decision and synthesis directors run
+	// sequentially per phase, but separate clients keep tool dispatch state
+	// cleanly scoped per agent and match the existing one-client-per-agent
+	// pattern.
+	decisionDirectorMCP, err := mcp.Connect(ctx, mcpURL)
+	if err != nil {
+		return fmt.Errorf("mcp connect (decision director): %w", err)
+	}
+	defer func() { _ = decisionDirectorMCP.Close() }()
+	decisionDirectorSectoolDefs, err := decisionDirectorMCP.BuildToolDefs(ctx, "mcp__sectool__", cfg.ToolResultMaxBytes)
+	if err != nil {
+		return fmt.Errorf("list decision director sectool tools: %w", err)
+	}
+	synthesisDirectorMCP, err := mcp.Connect(ctx, mcpURL)
+	if err != nil {
+		return fmt.Errorf("mcp connect (synthesis director): %w", err)
+	}
+	defer func() { _ = synthesisDirectorMCP.Close() }()
+	synthesisDirectorSectoolDefs, err := synthesisDirectorMCP.BuildToolDefs(ctx, "mcp__sectool__", cfg.ToolResultMaxBytes)
+	if err != nil {
+		return fmt.Errorf("list synthesis director sectool tools: %w", err)
+	}
+
 	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions)...)
 	verifier.SetTools(verifierTools)
 
@@ -1018,7 +1044,8 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			synthesisDirector.SetTools(nil)
 			RunIter1ReconReviewCall(ctx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
 
-			synthesisDirector.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
+			synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
+				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn)...))
 			RunIter1ReconPlanCall(ctx, synthesisDirector, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
 
 			if decisions.HasEndRun {
@@ -1051,8 +1078,13 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			continue
 		}
 
-		// Iter 2+: per-worker decision loop, then synthesis.
-		decisionDirector.SetTools(DecisionToolDefs(decisions, takenIDsFn))
+		// Iter 2+: per-worker decision loop, then synthesis. Both directors
+		// get sectool tools alongside their phase-primary tools so the
+		// model can spot-check worker activity instead of either spawning
+		// a verification worker or hallucinating tool calls from the
+		// worker history that's already in its rendered view.
+		decisionDirector.SetTools(append(slices.Clone(decisionDirectorSectoolDefs),
+			DecisionToolDefs(decisions, takenIDsFn)...))
 		decRes := RunDecisionPhase(ctx, DecisionPhaseInput{
 			Director: decisionDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, WorkerRuns: workerRuns,
@@ -1067,7 +1099,8 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		applyRetiredSummaries()
 
 		// Synthesis call.
-		synthesisDirector.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
+		synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
+			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn)...))
 		RunSynthesisPhase(ctx, SynthesisPhaseInput{
 			Director: synthesisDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, Completed: completed,
