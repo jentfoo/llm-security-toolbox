@@ -168,9 +168,13 @@ func TestOpenAIFactory(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, v)
 
-	d, err := f.NewDirector()
+	dd, err := f.NewDecisionDirector()
 	require.NoError(t, err)
-	assert.NotNil(t, d)
+	assert.NotNil(t, dd)
+
+	sd, err := f.NewSynthesisDirector()
+	require.NoError(t, err)
+	assert.NotNil(t, sd)
 
 	require.NoError(t, f.Close())
 

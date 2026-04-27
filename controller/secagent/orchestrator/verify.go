@@ -80,29 +80,33 @@ func RunVerificationPhase(
 		emitStatusIfDue(ctx, verifier, "verify", substep, log)
 		// Apply new findings through the dedup pipeline (exact-slug skip,
 		// agent review for soft matches, fall through to a fresh write).
-		// Skip titles already processed this substep so a verifier repeatedly
-		// calling file_finding in one burst doesn't emit N log lines.
-		seenTitles := map[string]bool{}
+		// Skip exact same-title/same-endpoint filings already processed this
+		// substep so a verifier repeatedly calling file_finding in one burst
+		// doesn't emit N log lines or duplicate state transitions.
+		seenFindings := map[string]bool{}
 		for _, filed := range decisions.Findings[appliedFindings:] {
-			if seenTitles[filed.Title] {
+			key := processedFindingKey(filed)
+			if seenFindings[key] {
 				continue
 			}
-			seenTitles[filed.Title] = true
+			seenFindings[key] = true
 			wrote, path, err := ReviewAndWrite(ctx, dedupReviewer, writer, filed, log)
 			if err != nil {
 				if log != nil {
 					log.Log("finding", "write failed", map[string]any{"err": err.Error()})
 				}
+				continue
 			} else if wrote && log != nil {
 				log.Log("finding", "written", map[string]any{"path": path, "title": filed.Title})
 			}
 			resolved := append([]string{}, filed.SupersedesCandidateIDs...)
 			matchTier := MatchNone
+			pendingNow := candidates.Pending()
 			if len(resolved) == 0 {
-				resolved, matchTier = MatchPendingCandidatesTiered(filed, candidates.Pending())
+				resolved, matchTier = MatchPendingCandidatesTiered(filed, pendingNow)
 			}
 			for _, cid := range resolved {
-				candidates.Mark(cid, "verified")
+				candidates.Mark(cid, CandidateStatusVerified)
 			}
 			if log != nil {
 				switch {
@@ -118,13 +122,12 @@ func RunVerificationPhase(
 						"endpoint": filed.Endpoint,
 						"resolved": resolved,
 					})
-				case len(candidates.Pending()) > 0:
+				case len(resolved) == 0 && len(pendingNow) > 0:
 					// Finding was written but NO pending candidate resolved.
 					// Those candidates will otherwise loop forever because
 					// the verifier keeps trying to reproduce them.
-					pending := candidates.Pending()
-					pendingIDs := make([]string, len(pending))
-					for i, c := range pending {
+					pendingIDs := make([]string, len(pendingNow))
+					for i, c := range pendingNow {
 						pendingIDs[i] = c.CandidateID
 					}
 					log.Log("finding", "orphan — no pending candidate matched", map[string]any{
@@ -145,7 +148,7 @@ func RunVerificationPhase(
 			if c == nil || c.Status != CandidateStatusPending {
 				continue
 			}
-			candidates.Mark(dm.CandidateID, "dismissed")
+			candidates.Mark(dm.CandidateID, CandidateStatusDismissed)
 			if log != nil {
 				log.Log("finding", "candidate dismissed", map[string]any{"candidate_id": dm.CandidateID})
 			}
@@ -176,7 +179,7 @@ func AutoDismissOnContextOverflow(
 ) {
 	pending := candidates.Pending()
 	for _, c := range pending {
-		candidates.Mark(c.CandidateID, "dismissed")
+		candidates.Mark(c.CandidateID, CandidateStatusDismissed)
 		decisions.AddDismissal(CandidateDismissal{
 			CandidateID: c.CandidateID,
 			Reason:      "auto: verifier context budget exhausted after fresh compose",
@@ -194,4 +197,12 @@ func autoSummary(filed, dismissed, stillPending int) string {
 		"Verification phase ended with %d filed, %d dismissed, %d still pending.",
 		filed, dismissed, stillPending,
 	)
+}
+
+func processedFindingKey(f FindingFiled) string {
+	titleKey := Slugify(f.Title)
+	if titleKey == "" {
+		titleKey = f.Title
+	}
+	return fmt.Sprintf("%s|%s", titleKey, CanonicalEndpoint(f.Endpoint))
 }

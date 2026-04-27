@@ -54,7 +54,7 @@ func (q *RetireQueue) Submit(w *WorkerState, reason string, iter int) {
 	}
 	w.Alive = false
 	chronicle := w.Chronicle
-	_ = w.Agent.Close()
+	w.Close()
 	if q.log != nil {
 		q.log.Log("retire", "enqueued", map[string]any{
 			"worker_id": w.ID, "reason": reason, "iter": iter,

@@ -209,7 +209,7 @@ const SummaryReasoningEffort = "none"
 const CompressionReasoningEffort = "low"
 
 // reasoningProbeTimeout bounds probe latency.
-const reasoningProbeTimeout = 60 * time.Second
+const reasoningProbeTimeout = 5 * time.Minute
 
 // DetectReasoningFormat sends a single probe query and classifies the
 // response. Errors (network, timeout) return ReasoningFormatUnknown so the

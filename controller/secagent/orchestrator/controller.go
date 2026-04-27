@@ -31,7 +31,8 @@ type AgentFactory interface {
 	NewWorker(id, numWorkers int) (agent.Agent, error)
 	NewReconWorker(reconMission string) (agent.Agent, error)
 	NewVerifier(onContextOverflow func()) (agent.Agent, error)
-	NewDirector() (agent.Agent, error)
+	NewDecisionDirector() (agent.Agent, error)
+	NewSynthesisDirector() (agent.Agent, error)
 	Close() error
 }
 
@@ -274,12 +275,30 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 	), nil
 }
 
-// NewDirector builds a director agent.
-func (f *OpenAIFactory) NewDirector() (agent.Agent, error) {
+// NewDecisionDirector builds the per-worker decision director. Its system
+// prompt only describes decide_worker — synthesis tools are deliberately
+// absent so the model does not hallucinate calls to them mid-decision.
+func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 	return f.buildAgent(
-		"director",
+		"director-decision",
 		f.Cfg.Model,
-		f.withMission(prompts.BuildDirectorSystemPrompt(f.Cfg.MaxWorkers)),
+		f.withMission(prompts.BuildDirectorDecisionSystemPrompt(f.Cfg.MaxWorkers)),
+		f.Pool,
+		f.Cfg.MaxContext,
+		f.Reasoning,
+		false,
+		nil,
+	), nil
+}
+
+// NewSynthesisDirector builds the iteration-end synthesis director. Its
+// system prompt describes plan_workers / direction_done / end_run only;
+// per-worker decisions land in a separate pass before this agent runs.
+func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
+	return f.buildAgent(
+		"director-synthesis",
+		f.Cfg.Model,
+		f.withMission(prompts.BuildDirectorSynthesisSystemPrompt(f.Cfg.MaxWorkers)),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -542,11 +561,21 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		return fmt.Errorf("new verifier: %w", err)
 	}
 	defer func() { _ = verifier.Close() }()
-	director, err := factory.NewDirector()
+	// Two phase-scoped director agents share the canonical DirectorChat.
+	// The decision agent's system prompt only describes decide_worker; the
+	// synthesis agent's only describes plan_workers / direction_done /
+	// end_run. Splitting them keeps the model from hallucinating tools that
+	// aren't registered for the current phase.
+	decisionDirector, err := factory.NewDecisionDirector()
 	if err != nil {
-		return fmt.Errorf("new director: %w", err)
+		return fmt.Errorf("new decision director: %w", err)
 	}
-	defer func() { _ = director.Close() }()
+	defer func() { _ = decisionDirector.Close() }()
+	synthesisDirector, err := factory.NewSynthesisDirector()
+	if err != nil {
+		return fmt.Errorf("new synthesis director: %w", err)
+	}
+	defer func() { _ = synthesisDirector.Close() }()
 
 	// per spec §6 each agent gets its own MCP client; workers get theirs in spawnWorker
 	verifierMCP, err := mcp.Connect(ctx, mcpURL)
@@ -692,9 +721,14 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 				return []NamedAgent{{Name: "verifier", Agent: oa}}
 			}
 		case "direction":
-			if oa, ok := director.(*agent.OpenAIAgent); ok {
-				return []NamedAgent{{Name: "director", Agent: oa}}
+			var out []NamedAgent
+			if oa, ok := decisionDirector.(*agent.OpenAIAgent); ok {
+				out = append(out, NamedAgent{Name: "director-decision", Agent: oa})
 			}
+			if oa, ok := synthesisDirector.(*agent.OpenAIAgent); ok {
+				out = append(out, NamedAgent{Name: "director-synthesis", Agent: oa})
+			}
+			return out
 		}
 		return nil
 	}
@@ -785,19 +819,27 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 	}
 
 	// applyRetiredSummaries drains every completed retire result from the
-	// queue, replaces the worker's messages in dirChat with the summary,
-	// and appends to the controller-side completed registry. Idempotent /
-	// safe to call repeatedly.
+	// queue, replaces the worker's messages in dirChat with the summary
+	// when one exists, and appends to the controller-side completed
+	// registry. Idempotent / safe to call repeatedly.
 	applyRetiredSummaries := func() {
 		for _, r := range retireQueue.DrainCompleted() {
-			dirChat.ReplaceWorkerWithSummary(r.WorkerID, r.Summary, r.Iter)
+			if r.Summary != "" {
+				dirChat.ReplaceWorkerWithSummary(r.WorkerID, r.Summary, r.Iter)
+			}
 			completed = append(completed, CompletedWorker{
 				ID: r.WorkerID, StoppedAt: r.Iter, Reason: r.Reason, Summary: r.Summary,
 			})
 			if log != nil {
-				log.Log("retire", "summary-applied", map[string]any{
-					"worker_id": r.WorkerID, "iter": r.Iter, "summary_chars": len(r.Summary),
-				})
+				if r.Summary != "" {
+					log.Log("retire", "summary-applied", map[string]any{
+						"worker_id": r.WorkerID, "iter": r.Iter, "summary_chars": len(r.Summary),
+					})
+				} else {
+					log.Log("retire", "empty summary — keeping raw worker activity in dirChat", map[string]any{
+						"worker_id": r.WorkerID, "iter": r.Iter,
+					})
+				}
 			}
 		}
 	}
@@ -955,11 +997,11 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			}
 			LatchStallWarnings(workers, cfg.StallWarnAfter)
 
-			director.SetTools(nil)
-			RunIter1ReconReviewCall(ctx, director, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
+			synthesisDirector.SetTools(nil)
+			RunIter1ReconReviewCall(ctx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
 
-			director.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
-			RunIter1ReconPlanCall(ctx, director, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
+			synthesisDirector.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
+			RunIter1ReconPlanCall(ctx, synthesisDirector, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
 
 			if decisions.HasEndRun {
 				if log != nil {
@@ -992,9 +1034,9 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		}
 
 		// Iter 2+: per-worker decision loop, then synthesis.
-		director.SetTools(DecisionToolDefs(decisions, takenIDsFn))
+		decisionDirector.SetTools(DecisionToolDefs(decisions, takenIDsFn))
 		decRes := RunDecisionPhase(ctx, DecisionPhaseInput{
-			Director: director, DirChat: dirChat, Decisions: decisions,
+			Director: decisionDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, WorkerRuns: workerRuns,
 			IterationStatus: iterStatus, Iter: iteration, MaxWorkers: cfg.MaxWorkers,
 			TakenIDs:   takenIDsFn,
@@ -1007,9 +1049,9 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		applyRetiredSummaries()
 
 		// Synthesis call.
-		director.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
+		synthesisDirector.SetTools(SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn))
 		RunSynthesisPhase(ctx, SynthesisPhaseInput{
-			Director: director, DirChat: dirChat, Decisions: decisions,
+			Director: synthesisDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, Completed: completed,
 			VerifierSummary: verificationSummary, FindingsSummary: writer.SummaryForOrchestrator(),
 			StallWarnings: stallWarnings, FollowUpHints: followUpHints,
@@ -1024,15 +1066,18 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			break
 		}
 
+		// Per-worker decisions may already have fired iter+1 runs. Publish them
+		// before synthesis-plan apply so retargeting the same worker can cancel
+		// and replace that in-flight run instead of launching a concurrent second
+		// Drain on the same WorkerState.
+		for id, j := range decRes.joins {
+			inflight[id] = j
+		}
 		// Apply plan_workers (spawn fresh / retarget alive) and fire
 		// iter+1 runs for the affected workers. Merge their joins into
 		// inflight alongside the per-worker decision-fired runs.
 		if decisions.HasPlan {
 			applyPlanAndFire(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
-		}
-		// Merge per-worker decision-fired runs into inflight.
-		for id, j := range decRes.joins {
-			inflight[id] = j
 		}
 
 		appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
@@ -1103,6 +1148,7 @@ func applyPlanAndFire(
 ) {
 	byID := map[int]*WorkerState{}
 	existing := 0
+	planned := map[int]bool{}
 	for _, w := range *workers {
 		byID[w.ID] = w
 		if w.Alive {
@@ -1110,7 +1156,15 @@ func applyPlanAndFire(
 		}
 	}
 	for _, p := range plan {
+		if planned[p.WorkerID] {
+			if log != nil {
+				log.Log("plan", "duplicate entry skipped", map[string]any{"worker_id": p.WorkerID})
+			}
+			continue
+		}
+		planned[p.WorkerID] = true
 		if w, ok := byID[p.WorkerID]; ok && w.Alive {
+			stopInflightWorkerRun(w, inflight, log)
 			w.LastInstruction = p.Assignment
 			if hasProductiveTurn(w.AutonomousTurns) {
 				w.ProgressNoneStreak = 0
@@ -1149,12 +1203,31 @@ func applyPlanAndFire(
 			continue
 		}
 		*workers = append(*workers, nw)
+		byID[nw.ID] = nw
 		existing++
 		installChronicle(nw, nw.LastInstruction)
 		inflight[nw.ID] = fire(ctx, nw)
 		if log != nil {
 			log.Log("plan", "spawn", map[string]any{"worker_id": p.WorkerID})
 		}
+	}
+}
+
+func stopInflightWorkerRun(w *WorkerState, inflight map[int]func() []agent.TurnSummary, log *Logger) {
+	if w == nil || inflight == nil {
+		return
+	}
+	join, exists := inflight[w.ID]
+	if !exists {
+		return
+	}
+	if w.Agent != nil {
+		w.Agent.Interrupt()
+	}
+	_ = join()
+	delete(inflight, w.ID)
+	if log != nil {
+		log.Log("plan", "replaced in-flight run", map[string]any{"worker_id": w.ID})
 	}
 }
 

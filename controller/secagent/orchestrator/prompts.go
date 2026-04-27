@@ -127,6 +127,10 @@ func statusLine(iteration, maxIter, findings int) string {
 // reconSummary, when non-empty, is the iter-1 recon worker's
 // investigation summary; included as a header so the verifier knows
 // the surface mapped during recon. Empty before iter 2.
+//
+// workers that were stall-stopped after the autonomous phase still render
+// here when they produced a run this iteration — the verifier needs their
+// evidence even though they won't receive more work.
 func BuildVerifierPrompt(
 	workers []*WorkerState,
 	workerRuns map[int][]agent.TurnSummary,
@@ -141,10 +145,11 @@ func BuildVerifierPrompt(
 	}
 	parts = append(parts, "", findingsSummary, "", formatPendingCandidates(pending), "", "## Worker autonomous runs this iteration", "")
 	for _, w := range workers {
-		if !w.Alive {
+		runs, ok := workerRuns[w.ID]
+		if !ok {
 			continue
 		}
-		parts = append(parts, formatAutonomousRun(w.ID, workerRuns[w.ID], w.EscalationReason), "")
+		parts = append(parts, formatAutonomousRun(w.ID, runs, w.EscalationReason), "")
 	}
 	parts = append(parts, "Reproduce and dispose of every pending candidate. Call `verification_done(summary)` when all are filed or dismissed.")
 	return strings.Join(parts, "\n")

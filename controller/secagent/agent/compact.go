@@ -28,9 +28,12 @@ type CompactionReport struct {
 	RepairsProtected int // tool-result repair errors skipped in pass 2
 }
 
-// StripAssistantThink removes <think>...</think> blocks from an assistant
-// message's content. Returns true when m.Content actually changed.
+// StripAssistantThink removes inline `<think>...</think>` blocks from an
+// assistant message's Content. Returns true when Content changed.
 // Idempotent. Non-assistant messages are left untouched and return false.
+// ReasoningContent is intentionally not cleared: it is neither counted by
+// the token estimator nor sent on the wire (structuredHandler.Replay
+// blanks it on every send), so clearing it would not free any budget.
 //
 // Exposed so orchestrator-level chronicle and director-chat compaction can
 // share the in-place mutation logic that Compact uses internally.
@@ -106,18 +109,25 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 	msgs := h.Snapshot()
 	keep := opt.KeepTurns
 
-	// Pass 1: <think>-strip every message older than last keep turns.
+	// Pass 1: strip inline `<think>` blocks from oldest assistant messages
+	// outside the keep*2 trailing window. Early-break the moment the
+	// estimate drops to target so recent chain-of-thought continuity is
+	// preserved when only a small overflow needed to be reclaimed.
 	thinkCount := 0
 	for i := 0; i < len(msgs)-keep*2; i++ {
-		if StripAssistantThink(&msgs[i]) {
-			thinkCount++
+		if !StripAssistantThink(&msgs[i]) {
+			continue
+		}
+		thinkCount++
+		h.ReplaceAll(msgs)
+		if h.EstimateTokens() <= target {
+			break
 		}
 	}
 	if thinkCount > 0 {
 		report.PassesApplied = append(report.PassesApplied, "think-strip")
 		report.ThinkStripped = thinkCount
 	}
-	h.ReplaceAll(msgs)
 	if h.EstimateTokens() <= target {
 		report.After = h.EstimateTokens()
 		return report, nil
