@@ -178,9 +178,9 @@ func applyDecisionAndFire(
 	log *Logger,
 ) {
 	switch d.Kind {
-	case "stop":
+	case decideActionStop:
 		if log != nil {
-			log.Log("decision", "stop", map[string]any{"worker_id": w.ID, "reason": d.Reason})
+			log.Log("decision", decideActionStop, map[string]any{"worker_id": w.ID, "reason": d.Reason})
 		}
 		if in.Retire != nil {
 			in.Retire(w, d.Reason, in.Iter)
@@ -188,7 +188,7 @@ func applyDecisionAndFire(
 			w.Alive = false
 			_ = w.Agent.Close()
 		}
-	case "continue", "expand":
+	case decideActionContinue, decideActionExpand:
 		budget := d.AutonomousBudget
 		if budget <= 0 {
 			budget = defaultAutonomousBudget

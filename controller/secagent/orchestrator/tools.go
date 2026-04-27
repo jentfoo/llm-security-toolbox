@@ -567,19 +567,25 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc) []agent.T
 // SynthesisToolDefs builds the synthesis tool set used after the
 // per-worker decision loop completes. plan_workers spawns/retargets fresh
 // workers; direction_done closes the iter; end_run closes the entire run
-// (gated by guardState).
+// (gated by guardState and by the alive-worker stop check).
 //
-// guardState returns (iteration, findingsThisRun) for the end_run guard
-// (rejects premature calls). Must be non-nil.
+// guardState returns (iteration, findingsThisRun) for the end_run iteration
+// floor (rejects premature calls when zero findings filed). Must be non-nil.
 //
 // takenIDs (optional) validates each plan_workers entry's worker_id —
 // retarget is allowed (alive ID stays alive); but a completed ID is
 // rejected with the list of taken IDs so the model can pick a fresh one.
+//
+// aliveWorkerIDs (optional) returns the IDs of currently-alive workers.
+// Used by end_run to enforce that the director cannot abandon live work:
+// every alive worker must have a decide_worker(action=stop) in this iter
+// before end_run is accepted. Pass nil to skip the check (tests).
 func SynthesisToolDefs(
 	decisions *DecisionQueue,
 	guardState func() (iter, runFindings int),
 	takenIDs TakenIDsFunc,
 	completedIDs func() map[int]bool,
+	aliveWorkerIDs func() []int,
 ) []agent.ToolDef {
 	reject := func(name string) agent.ToolResult {
 		cur := decisions.Phase()
@@ -757,11 +763,52 @@ func SynthesisToolDefs(
 						IsError: true,
 					}
 				}
+				if aliveWorkerIDs != nil {
+					if msg := checkAliveWorkersStopped(aliveWorkerIDs(), decisions.DecisionsByWorker()); msg != "" {
+						return agent.ToolResult{Text: msg, IsError: true}
+					}
+				}
 				decisions.SetEndRun(s)
 				return agent.ToolResult{Text: "Run end signaled."}
 			},
 		},
 	}
+}
+
+// checkAliveWorkersStopped returns a rejection message describing any
+// alive worker whose decision this iter was not "stop", or "" when
+// end_run is structurally allowed (every alive worker stopped, or the
+// alive list is empty). Decisions map is "WorkerID → Kind" produced by
+// DecisionQueue.DecisionsByWorker.
+func checkAliveWorkersStopped(alive []int, decisions map[int]string) string {
+	var notStopped []int
+	var noDecision []int
+	for _, id := range alive {
+		kind, ok := decisions[id]
+		if !ok {
+			noDecision = append(noDecision, id)
+			continue
+		}
+		if kind != decideActionStop {
+			notStopped = append(notStopped, id)
+		}
+	}
+	if len(notStopped) == 0 && len(noDecision) == 0 {
+		return ""
+	}
+	sort.Ints(notStopped)
+	sort.Ints(noDecision)
+	var parts []string
+	if len(notStopped) > 0 {
+		parts = append(parts, fmt.Sprintf("workers %v have decisions other than stop this iter", notStopped))
+	}
+	if len(noDecision) > 0 {
+		parts = append(parts, fmt.Sprintf("workers %v have no decision recorded this iter", noDecision))
+	}
+	return "Rejected: `end_run` would abandon live work — " + strings.Join(parts, "; ") +
+		". Either stop them all via decide_worker(action=\"" + decideActionStop + "\", reason=...) " +
+		"in this iter and re-issue `end_run`, or call `direction_done(summary)` to close this iter " +
+		"and let the workers continue next iter."
 }
 
 // formatTakenIDs renders a sorted list of taken IDs for inclusion in a

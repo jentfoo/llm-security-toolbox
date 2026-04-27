@@ -29,7 +29,7 @@ type Summarizer struct {
 
 const (
 	summarizeMaxTokens = 20000
-	summarizeTimeout   = 5 * time.Minute
+	summarizeTimeout   = 10 * time.Minute
 )
 
 // SummarizeReconMission converts a mission prompt into a recon-scoped goal,
