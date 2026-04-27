@@ -1031,3 +1031,55 @@ func TestOpenAIAgent_CompactPreservingBoundary_ClampsWhenMarkerDropped(t *testin
 	assert.LessOrEqual(t, a.IterationBoundary(), a.History().Len(),
 		"boundary clamped to history length when marker disappears")
 }
+
+func TestOpenAIAgent_RetireOnPressure_StopsCleanlyAtHighWatermark(t *testing.T) {
+	t.Parallel()
+	// fakeChatClient with no responses scripted — the test asserts the
+	// agent must NOT issue an LLM call once pressure is hit.
+	client := &fakeChatClient{}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", SystemPrompt: "sys",
+		Pool:             newPoolWith(client),
+		MaxContext:       200,
+		Compaction:       CompactionOptions{HighWatermark: 0.5, KeepTurns: 2},
+		RetireOnPressure: true,
+	})
+	// Bulk content above the high watermark (200 * 0.5 = 100 tokens =
+	// 400 chars at default charsPerToken=4).
+	bulk := strings.Repeat("x", 600)
+	a.History().Append(Message{Role: roleAssistant, Content: bulk})
+
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, escalationContextExhausted, sum.EscalationReason)
+	assert.Empty(t, client.calls, "no LLM call should fire once retire-on-pressure trips")
+}
+
+func TestOpenAIAgent_RetireOnPressure_RunsNormallyBelowWatermark(t *testing.T) {
+	t.Parallel()
+	client := &fakeChatClient{
+		responses: []ChatResponse{{Content: "done"}},
+	}
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", SystemPrompt: "sys",
+		Pool:             newPoolWith(client),
+		MaxContext:       4096,
+		Compaction:       CompactionOptions{HighWatermark: 0.8, KeepTurns: 2},
+		RetireOnPressure: true,
+	})
+	a.Query("go")
+	sum, err := a.Drain(t.Context())
+	require.NoError(t, err)
+	assert.NotEqual(t, escalationContextExhausted, sum.EscalationReason,
+		"below watermark RetireOnPressure does not interfere with normal turns")
+	assert.Len(t, client.calls, 1)
+}
+
+func TestClassifyEscalation_PreservesContextExhausted(t *testing.T) {
+	t.Parallel()
+	in := TurnSummary{EscalationReason: escalationContextExhausted}
+	// Even with TimedOut and zero tool calls (which would normally yield
+	// "silent"), the context-exhausted signal wins.
+	in.TimedOut = true
+	assert.Equal(t, escalationContextExhausted, ClassifyEscalation(in, false))
+}

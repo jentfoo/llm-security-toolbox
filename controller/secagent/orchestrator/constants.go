@@ -28,6 +28,6 @@ const ReconDirective = `Map the target's surface area and scope so future testin
 
 Capture: every endpoint you see, the authentication boundary on each, the technology stack and frameworks in use, the data flows between services, and any service-level configuration that's externally visible. Note dynamic elements (CSRF tokens, session cookies, JWT structures, OAST callbacks if any).
 
-Stay non-destructive — do not delete data, escalate privileges, or otherwise change target state. Active probes are fine when shaping a request is the only way to learn how an endpoint behaves; just don't pursue exploitation.
+Explore and query — do not update state on the target service. Read endpoints (GET / HEAD / OPTIONS) and authentication flows (login, token exchange) are fine, because mapping authenticated surface requires them. Do NOT send requests that create, modify, or delete resources (POST / PUT / PATCH / DELETE on resource endpoints), do NOT trigger state-changing workflows (cancel / send / enable / disable / publish), and do NOT escalate privileges.
 
 When the surface is mapped, end your turn with a concise observation summary. Your work will be distilled into a recon summary that anchors the testing workers spawned after you.`

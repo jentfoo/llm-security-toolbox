@@ -17,9 +17,10 @@ const (
 
 // EscalationReason values surfaced to the orchestrator.
 const (
-	escalationCandidate = "candidate"
-	escalationSilent    = "silent"
-	escalationError     = "error"
+	escalationCandidate        = "candidate"
+	escalationSilent           = "silent"
+	escalationError            = "error"
+	escalationContextExhausted = "context_exhausted"
 )
 
 // Phase identifies which orchestrator phase an in-process tool is gated for.
@@ -79,7 +80,7 @@ type TurnSummary struct {
 	FlowIDs          []string
 	TokensIn         int
 	TokensOut        int
-	EscalationReason string // "" | "candidate" | "silent" | "budget" | "error"
+	EscalationReason string // "" | "candidate" | "silent" | "budget" | "error" | "context_exhausted"
 	TimedOut         bool
 }
 

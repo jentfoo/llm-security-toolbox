@@ -26,6 +26,7 @@ type CompactionReport struct {
 	Truncated        int
 	ThinkStripped    int
 	RepairsProtected int // tool-result repair errors skipped in pass 2
+	CollapsedErrors  int // pass 0: redundant same-tool errors dropped
 }
 
 // StripAssistantThink removes inline `<think>...</think>` blocks from an
@@ -108,6 +109,28 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 
 	msgs := h.Snapshot()
 	keep := opt.KeepTurns
+
+	// Pass 0: collapse same-tool consecutive error streaks. When a worker
+	// retried the same tool and got back-to-back errors (e.g. repeated
+	// malformed-arg failures against the same endpoint), only the most
+	// recent error in each streak carries information — the earlier ones
+	// are pure redundancy. Drops the older tool-result errors and strips
+	// their matching ToolCall entries from the preceding assistant
+	// messages. Cheapest pure-noise reduction so it runs first; subsequent
+	// passes operate on a smaller working set. The repair-error guarantee
+	// (pass 2 skips IsRepairError) does NOT apply here — repeated repair
+	// failures from the same tool are exactly the streak we want to
+	// collapse, since only the last carries the freshest schema guidance.
+	if collapsed, dropped := collapseSameToolErrorStreaks(msgs); dropped > 0 {
+		msgs = collapsed
+		report.CollapsedErrors = dropped
+		report.PassesApplied = append(report.PassesApplied, "error-collapse")
+		h.ReplaceAll(msgs)
+		if h.EstimateTokens() <= target {
+			report.After = h.EstimateTokens()
+			return report, nil
+		}
+	}
 
 	// Pass 1: strip inline `<think>` blocks from oldest assistant messages
 	// outside the keep*2 trailing window. Early-break the moment the

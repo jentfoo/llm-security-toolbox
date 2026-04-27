@@ -71,6 +71,14 @@ type OpenAIAgentConfig struct {
 	// Rand is the randomness source used by retry backoff jitter. nil → the
 	// package default. Tests inject a seeded *rand.Rand for determinism.
 	Rand *rand.Rand
+	// RetireOnPressure flips compaction off entirely. When usage crosses
+	// the high watermark, instead of compacting, the next Drain round
+	// returns immediately with EscalationReason="context_exhausted" and
+	// no tool dispatch — the controller's retire path then summarizes the
+	// full uncompacted chronicle. Used by the recon worker, where every
+	// observation matters and compaction-time stubbing would destroy the
+	// raw data the recon summary should be drawn from.
+	RetireOnPressure bool
 }
 
 // OpenAIAgent implements Agent over an OpenAI-compatible endpoint.
@@ -285,6 +293,16 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 			return summary, nil
 		}
 		if err := a.maybeCompact(inner); err != nil {
+			if errors.Is(err, errRetireOnPressure) {
+				// RetireOnPressure agents (currently: recon worker) hit
+				// the high-watermark and stop cleanly so the controller
+				// can retire and summarize the full chronicle. This is a
+				// successful end-of-work signal, not a failure — return
+				// nil error so the autonomous loop treats it like any
+				// other turn boundary.
+				summary.EscalationReason = escalationContextExhausted
+				return summary, nil
+			}
 			summary.EscalationReason = escalationSilent
 			return summary, err
 		}
@@ -553,6 +571,13 @@ func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string
 	)
 }
 
+// errRetireOnPressure is returned by maybeCompact when RetireOnPressure
+// is set and the high watermark has been crossed. The Drain loop catches
+// this sentinel and ends the turn cleanly with EscalationReason set to
+// context_exhausted; the controller's retire path then summarizes the
+// uncompacted chronicle.
+var errRetireOnPressure = errors.New("retire on context pressure")
+
 func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	// EffectiveMaxContext tracks adaptive shrinkage from past rejections;
 	// when none has happened it equals the configured MaxContext.
@@ -563,6 +588,9 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	}
 	if a.history.EstimateTokens() < high {
 		return nil
+	}
+	if a.cfg.RetireOnPressure {
+		return errRetireOnPressure
 	}
 	// Pass 1: existing compaction (think-strip, stub tool results, drop oldest
 	// turn triples). Cheapest option; runs first.

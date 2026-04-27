@@ -160,6 +160,12 @@ func (f *OpenAIFactory) summarizeErrorCallback(role string) func(error) {
 // the model rejected as over-context. The verifier wires this to a captured
 // bool so the controller can auto-dismiss in-flight candidates after a
 // freshly composed phase still overflows.
+//
+// retireOnPressure flips compaction off entirely — when usage crosses the
+// high watermark, the next Drain returns immediately with
+// EscalationReason="context_exhausted" so the caller can retire and
+// summarize the uncompacted chronicle. Currently set only by the recon
+// worker; everyone else gets normal compaction.
 func (f *OpenAIFactory) buildAgent(
 	role, model, systemPrompt string,
 	pool *agent.ClientPool,
@@ -167,6 +173,7 @@ func (f *OpenAIFactory) buildAgent(
 	reasoning agent.ReasoningHandler,
 	setFlowExtractor bool,
 	onContextOverflow func(),
+	retireOnPressure bool,
 ) agent.Agent {
 	onReqStart, onReqEnd := f.requestCallbacks(role)
 	onToolStart, onToolEnd := f.toolCallbacks(role)
@@ -194,6 +201,7 @@ func (f *OpenAIFactory) buildAgent(
 		OnToolEnd:         onToolEnd,
 		OnContextOverflow: onContextOverflow,
 		OnSummarizeError:  f.summarizeErrorCallback(role),
+		RetireOnPressure:  retireOnPressure,
 	}
 	if setFlowExtractor {
 		cfg.FlowIDExtractor = ExtractFlowIDs
@@ -239,6 +247,7 @@ func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 		f.Reasoning,
 		true,
 		nil,
+		false,
 	), nil
 }
 
@@ -246,6 +255,11 @@ func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 // prompt anchors the recon-mission summary (NOT cfg.Prompt) so the
 // worker has no testing motivation. The recon role-sizing is hardcoded
 // to (id=1, numWorkers=1) — recon is always solo and always worker 1.
+//
+// RetireOnPressure is set so the agent stops cleanly at the high
+// watermark instead of compacting. Recon's only durable output is the
+// retire summary built from its chronicle; compaction-time stubbing
+// would destroy the raw observations the summary should be drawn from.
 func (f *OpenAIFactory) NewReconWorker(reconMission string) (agent.Agent, error) {
 	return f.buildAgent(
 		"worker-1-recon",
@@ -256,6 +270,7 @@ func (f *OpenAIFactory) NewReconWorker(reconMission string) (agent.Agent, error)
 		f.Reasoning,
 		true,
 		nil,
+		true,
 	), nil
 }
 
@@ -272,6 +287,7 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 		f.Reasoning,
 		true,
 		onContextOverflow,
+		false,
 	), nil
 }
 
@@ -288,6 +304,7 @@ func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 		f.Reasoning,
 		false,
 		nil,
+		false,
 	), nil
 }
 
@@ -304,6 +321,7 @@ func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
 		f.Reasoning,
 		false,
 		nil,
+		false,
 	), nil
 }
 
