@@ -77,6 +77,11 @@ func (s *Summarizer) SummarizeCompletedWorker(
 	if len(transcript) == 0 {
 		return "", errors.New("summarizer: empty transcript")
 	}
+	// Tool errors (unknown-tool synthetics, MCP failures, malformed-arg
+	// repair stubs) are noise to the summarizer — the recap describes what
+	// the worker LEARNED, not what it bumbled. Stripping them reclaims a
+	// large slice of context on noisy runs.
+	transcript = agent.FilterErrorMessages(transcript)
 	user := buildCompletedWorkerPrompt(transcript, mission, reason, workerID)
 	out, err := s.oneShot(ctx, completedWorkerSystemPrompt, user)
 	if err != nil {

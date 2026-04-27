@@ -106,18 +106,17 @@ func (r *OpenAIDedupReviewer) Merge(ctx context.Context, primary, secondary Find
 	return parseMerge(raw, primary)
 }
 
-// oneShot runs a single classify/merge completion with no ReasoningEffort
-// set. Dedup verdicts and merges benefit from full reasoning and emit JSON
-// that extractJSONObject already tolerates fenced/wrapped output for, so
-// capping reasoning here would degrade quality for marginal token savings.
-// MaxTokens defaults high so a thinking model has room to reason before
-// emitting the verdict JSON.
+// oneShot runs a single classify/merge completion at low reasoning effort.
+// Dedup verdicts and merges are short structured outputs (a few-field JSON
+// verdict, or a merged finding); full reasoning burns tokens that don't
+// improve verdict quality at the margin. MaxTokens still defaults high so a
+// thinking model has room to reason before emitting the verdict JSON.
 func (r *OpenAIDedupReviewer) oneShot(ctx context.Context, system, user string) (string, error) {
 	maxTokens := r.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 20000
 	}
-	return runOneShot(ctx, r.Pool, r.Model, system, user, maxTokens, "")
+	return runOneShot(ctx, r.Pool, r.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
 }
 
 // runOneShot executes a single non-streaming chat completion against a
