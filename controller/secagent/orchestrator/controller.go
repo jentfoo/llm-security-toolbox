@@ -785,19 +785,27 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 	}
 
 	// applyRetiredSummaries drains every completed retire result from the
-	// queue, replaces the worker's messages in dirChat with the summary,
-	// and appends to the controller-side completed registry. Idempotent /
-	// safe to call repeatedly.
+	// queue, replaces the worker's messages in dirChat with the summary
+	// when one exists, and appends to the controller-side completed
+	// registry. Idempotent / safe to call repeatedly.
 	applyRetiredSummaries := func() {
 		for _, r := range retireQueue.DrainCompleted() {
-			dirChat.ReplaceWorkerWithSummary(r.WorkerID, r.Summary, r.Iter)
+			if r.Summary != "" {
+				dirChat.ReplaceWorkerWithSummary(r.WorkerID, r.Summary, r.Iter)
+			}
 			completed = append(completed, CompletedWorker{
 				ID: r.WorkerID, StoppedAt: r.Iter, Reason: r.Reason, Summary: r.Summary,
 			})
 			if log != nil {
-				log.Log("retire", "summary-applied", map[string]any{
-					"worker_id": r.WorkerID, "iter": r.Iter, "summary_chars": len(r.Summary),
-				})
+				if r.Summary != "" {
+					log.Log("retire", "summary-applied", map[string]any{
+						"worker_id": r.WorkerID, "iter": r.Iter, "summary_chars": len(r.Summary),
+					})
+				} else {
+					log.Log("retire", "empty summary — keeping raw worker activity in dirChat", map[string]any{
+						"worker_id": r.WorkerID, "iter": r.Iter,
+					})
+				}
 			}
 		}
 	}
@@ -1024,15 +1032,18 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			break
 		}
 
+		// Per-worker decisions may already have fired iter+1 runs. Publish them
+		// before synthesis-plan apply so retargeting the same worker can cancel
+		// and replace that in-flight run instead of launching a concurrent second
+		// Drain on the same WorkerState.
+		for id, j := range decRes.joins {
+			inflight[id] = j
+		}
 		// Apply plan_workers (spawn fresh / retarget alive) and fire
 		// iter+1 runs for the affected workers. Merge their joins into
 		// inflight alongside the per-worker decision-fired runs.
 		if decisions.HasPlan {
 			applyPlanAndFire(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
-		}
-		// Merge per-worker decision-fired runs into inflight.
-		for id, j := range decRes.joins {
-			inflight[id] = j
 		}
 
 		appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
@@ -1103,6 +1114,7 @@ func applyPlanAndFire(
 ) {
 	byID := map[int]*WorkerState{}
 	existing := 0
+	planned := map[int]bool{}
 	for _, w := range *workers {
 		byID[w.ID] = w
 		if w.Alive {
@@ -1110,7 +1122,15 @@ func applyPlanAndFire(
 		}
 	}
 	for _, p := range plan {
+		if planned[p.WorkerID] {
+			if log != nil {
+				log.Log("plan", "duplicate entry skipped", map[string]any{"worker_id": p.WorkerID})
+			}
+			continue
+		}
+		planned[p.WorkerID] = true
 		if w, ok := byID[p.WorkerID]; ok && w.Alive {
+			stopInflightWorkerRun(w, inflight, log)
 			w.LastInstruction = p.Assignment
 			if hasProductiveTurn(w.AutonomousTurns) {
 				w.ProgressNoneStreak = 0
@@ -1149,12 +1169,31 @@ func applyPlanAndFire(
 			continue
 		}
 		*workers = append(*workers, nw)
+		byID[nw.ID] = nw
 		existing++
 		installChronicle(nw, nw.LastInstruction)
 		inflight[nw.ID] = fire(ctx, nw)
 		if log != nil {
 			log.Log("plan", "spawn", map[string]any{"worker_id": p.WorkerID})
 		}
+	}
+}
+
+func stopInflightWorkerRun(w *WorkerState, inflight map[int]func() []agent.TurnSummary, log *Logger) {
+	if w == nil || inflight == nil {
+		return
+	}
+	join, exists := inflight[w.ID]
+	if !exists {
+		return
+	}
+	if w.Agent != nil {
+		w.Agent.Interrupt()
+	}
+	_ = join()
+	delete(inflight, w.ID)
+	if log != nil {
+		log.Log("plan", "replaced in-flight run", map[string]any{"worker_id": w.ID})
 	}
 }
 

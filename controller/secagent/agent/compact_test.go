@@ -182,6 +182,63 @@ func TestCompact(t *testing.T) {
 		}
 		assert.True(t, foundRepair, "repair error schema hint must survive compaction")
 	})
+
+	t.Run("strips_reasoning_content_field", func(t *testing.T) {
+		// Structured-reasoning models store thinking in ReasoningContent, not inline tags.
+		big := strings.Repeat("r", 4_000)
+		h := NewHistory(8192)
+		h.Append(Message{Role: "system", Content: "sys"})
+		for i := 0; i < 5; i++ {
+			h.Append(Message{
+				Role: "assistant", Content: "step",
+				ReasoningContent: big,
+				ToolCalls:        []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: "tool", ToolCallID: "t", ToolName: "t",
+				Content: "small", Summary120: "small",
+			})
+		}
+		report, err := Compact(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, report.PassesApplied, "think-strip")
+
+		snap := h.Snapshot()
+		guard := len(snap) - 2
+		for i, m := range snap {
+			if m.Role != roleAssistant || i >= guard {
+				continue
+			}
+			assert.Empty(t, m.ReasoningContent)
+		}
+	})
+
+	t.Run("think_strip_early_breaks_at_target", func(t *testing.T) {
+		// Small overflow: Pass 1 should stop stripping as soon as estimate hits target.
+		think := "<think>" + strings.Repeat("r", 2_000) + "</think>"
+		h := NewHistory(4096)
+		h.Append(Message{Role: "system", Content: "sys"})
+		for i := 0; i < 6; i++ {
+			h.Append(Message{
+				Role: "assistant", Content: think + "answer",
+				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: "tool", ToolCallID: "t", ToolName: "t",
+				Content: "ok", Summary120: "ok",
+			})
+		}
+		report, err := Compact(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 2,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, report.PassesApplied, "think-strip")
+		assert.Positive(t, report.ThinkStripped)
+		// 6 assistants total minus the keep*2 trailing window (last 2 assistants) = 4 eligible.
+		assert.Less(t, report.ThinkStripped, 4)
+	})
 }
 
 func TestCompact_UsesEffectiveMaxContext(t *testing.T) {

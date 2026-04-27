@@ -10,6 +10,10 @@ import (
 type Message struct {
 	Role    string // system | user | assistant | tool
 	Content string // for assistant+tool_calls this may be empty
+	// HistoryID is an internal stable identity assigned by History so
+	// boundary tracking survives compaction/truncation even when multiple
+	// messages have identical role/content.
+	HistoryID uint64
 	// ReasoningContent holds structured reasoning surfaced via the
 	// `reasoning_content` field of the OpenAI-compatible response (deepseek /
 	// qwen3-style). Inline-think models leave this empty and carry thinking
@@ -44,6 +48,7 @@ type History struct {
 	// compacted against that lower ceiling for the rest of its life so it
 	// doesn't re-hit the same rejection next turn.
 	effectiveMax int
+	nextID       uint64
 }
 
 const (
@@ -68,6 +73,12 @@ func NewHistory(maxContext int) *History {
 func (h *History) Append(m Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if m.HistoryID == 0 {
+		h.nextID++
+		m.HistoryID = h.nextID
+	} else if m.HistoryID > h.nextID {
+		h.nextID = m.HistoryID
+	}
 	h.messages = append(h.messages, m)
 }
 
@@ -190,6 +201,17 @@ func (h *History) Snapshot() []Message {
 // send rather than adding growth against a now-invalid prior count.
 func (h *History) ReplaceAll(msgs []Message) {
 	h.mu.Lock()
+	h.nextID = 0
+	for i := range msgs {
+		if msgs[i].HistoryID == 0 {
+			h.nextID++
+			msgs[i].HistoryID = h.nextID
+			continue
+		}
+		if msgs[i].HistoryID > h.nextID {
+			h.nextID = msgs[i].HistoryID
+		}
+	}
 	h.messages = msgs
 	h.lastPromptTokens = 0
 	h.baselineMsgCount = 0

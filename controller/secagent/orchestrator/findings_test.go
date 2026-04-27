@@ -114,13 +114,25 @@ func TestFindingWriterIsDuplicate(t *testing.T) {
 		assert.True(t, w.IsDuplicate(second))
 	})
 
-	t.Run("same_title_missing_endpoint_is_duplicate", func(t *testing.T) {
+	t.Run("same_title_missing_endpoint_not_duplicate", func(t *testing.T) {
+		// Endpoint divergence (one side empty) is no longer treated as
+		// duplicate here — it falls through to FindSimilarEntries so the
+		// LLM reviewer can decide.
 		w := NewFindingWriter(t.TempDir())
 		_, err := w.Write(finding)
 		require.NoError(t, err)
 		other := finding
 		other.Endpoint = ""
-		assert.True(t, w.IsDuplicate(other))
+		assert.False(t, w.IsDuplicate(other))
+	})
+
+	t.Run("same_title_different_endpoint_not_duplicate", func(t *testing.T) {
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(finding)
+		require.NoError(t, err)
+		other := finding
+		other.Endpoint = "GET /login"
+		assert.False(t, w.IsDuplicate(other))
 	})
 
 	t.Run("similar_title_not_exact_slug_not_duplicate", func(t *testing.T) {
@@ -144,9 +156,17 @@ func TestFindSimilarEntries(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	t.Run("exact_slug_excluded", func(t *testing.T) {
+	t.Run("exact_slug_surfaced", func(t *testing.T) {
+		// FindSimilarEntries no longer dedupes exact matches — that's the
+		// upstream IsDuplicate's job. Slug match always surfaces here so
+		// the LLM reviewer adjudicates if IsDuplicate didn't short-circuit.
 		got := w.FindSimilarEntries(FindingFiled{Title: "Reflected XSS in search", Endpoint: "GET /search"})
-		assert.Empty(t, got)
+		require.Len(t, got, 1)
+	})
+	t.Run("same_slug_different_endpoint_surfaced", func(t *testing.T) {
+		got := w.FindSimilarEntries(FindingFiled{Title: "Reflected XSS in search", Endpoint: "GET /admin"})
+		require.Len(t, got, 1)
+		assert.Equal(t, "Reflected XSS in search", got[0].Filed.Title)
 	})
 	t.Run("similar_title_missing_endpoint", func(t *testing.T) {
 		got := w.FindSimilarEntries(FindingFiled{Title: "Reflected XSS", Endpoint: ""})
@@ -154,6 +174,9 @@ func TestFindSimilarEntries(t *testing.T) {
 		assert.Equal(t, "Reflected XSS in search", got[0].Filed.Title)
 	})
 	t.Run("similar_title_explicit_different_endpoint", func(t *testing.T) {
+		// Word-overlap on these titles is below TitlesSimilar's threshold,
+		// so they don't surface — endpoint divergence is no longer the
+		// gating factor.
 		got := w.FindSimilarEntries(FindingFiled{Title: "Reflected XSS in login", Endpoint: "GET /login"})
 		assert.Empty(t, got)
 	})
@@ -216,13 +239,22 @@ func TestFindingWriterMatchesFiled(t *testing.T) {
 		assert.NotEmpty(t, path)
 	})
 
-	t.Run("endpoint_plus_similar_title", func(t *testing.T) {
+	t.Run("endpoint_plus_similar_title_miss", func(t *testing.T) {
+		// Fuzzy title match no longer satisfies the deterministic fallback —
+		// it routes to the LLM CandidateDedupReviewer instead.
 		w := NewFindingWriter(t.TempDir())
 		_, err := w.Write(seed)
 		require.NoError(t, err)
-		title, _, ok := w.MatchesFiled("Reflected XSS in search endpoint", "GET /search")
-		assert.True(t, ok)
-		assert.Equal(t, seed.Title, title)
+		_, _, ok := w.MatchesFiled("Reflected XSS in search endpoint", "GET /search")
+		assert.False(t, ok)
+	})
+
+	t.Run("same_title_different_endpoint_miss", func(t *testing.T) {
+		w := NewFindingWriter(t.TempDir())
+		_, err := w.Write(seed)
+		require.NoError(t, err)
+		_, _, ok := w.MatchesFiled("Reflected XSS in search", "GET /admin")
+		assert.False(t, ok)
 	})
 
 	t.Run("distinct_title_and_endpoint_miss", func(t *testing.T) {

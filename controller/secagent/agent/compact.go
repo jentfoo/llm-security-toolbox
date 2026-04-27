@@ -28,9 +28,11 @@ type CompactionReport struct {
 	RepairsProtected int // tool-result repair errors skipped in pass 2
 }
 
-// StripAssistantThink removes <think>...</think> blocks from an assistant
-// message's content. Returns true when m.Content actually changed.
-// Idempotent. Non-assistant messages are left untouched and return false.
+// StripAssistantThink clears reasoning from an assistant message regardless
+// of where the model stored it: inline `<think>...</think>` blocks in
+// Content and the structured ReasoningContent field. Returns true when
+// either field actually changed. Idempotent. Non-assistant messages are
+// left untouched and return false.
 //
 // Exposed so orchestrator-level chronicle and director-chat compaction can
 // share the in-place mutation logic that Compact uses internally.
@@ -38,13 +40,18 @@ func StripAssistantThink(m *Message) bool {
 	if m.Role != roleAssistant {
 		return false
 	}
+	changed := false
+	if m.ReasoningContent != "" {
+		m.ReasoningContent = ""
+		changed = true
+	}
 	before := m.Content
 	after := StripThinkBlocks(before)
-	if after == before {
-		return false
+	if after != before {
+		m.Content = after
+		changed = true
 	}
-	m.Content = after
-	return true
+	return changed
 }
 
 // stubPrefix is the literal start-of-content marker used by StubToolResult
@@ -106,18 +113,26 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 	msgs := h.Snapshot()
 	keep := opt.KeepTurns
 
-	// Pass 1: <think>-strip every message older than last keep turns.
+	// Pass 1: clear reasoning (inline `<think>` blocks and ReasoningContent)
+	// from oldest assistant messages outside the keep*2 trailing window.
+	// Early-break the moment the estimate drops to target so recent
+	// chain-of-thought continuity is preserved when only a small overflow
+	// needed to be reclaimed.
 	thinkCount := 0
 	for i := 0; i < len(msgs)-keep*2; i++ {
-		if StripAssistantThink(&msgs[i]) {
-			thinkCount++
+		if !StripAssistantThink(&msgs[i]) {
+			continue
+		}
+		thinkCount++
+		h.ReplaceAll(msgs)
+		if h.EstimateTokens() <= target {
+			break
 		}
 	}
 	if thinkCount > 0 {
 		report.PassesApplied = append(report.PassesApplied, "think-strip")
 		report.ThinkStripped = thinkCount
 	}
-	h.ReplaceAll(msgs)
 	if h.EstimateTokens() <= target {
 		report.After = h.EstimateTokens()
 		return report, nil

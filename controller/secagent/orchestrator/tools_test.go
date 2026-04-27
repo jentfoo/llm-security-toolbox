@@ -99,7 +99,10 @@ func TestWorkerToolDefs(t *testing.T) {
 		assert.Empty(t, pool.Pending())
 	})
 
-	t.Run("rejects_endpoint_with_similar_title", func(t *testing.T) {
+	t.Run("admits_similar_title_when_no_reviewer", func(t *testing.T) {
+		// Without a CandidateDedupReviewer the deterministic MatchesFiled
+		// fallback only short-circuits exact slug+endpoint matches. Similar
+		// titles route to the verifier-side dedup pipeline instead.
 		pool := NewCandidatePool()
 		writer := NewFindingWriter(t.TempDir())
 		_, err := writer.Write(FindingFiled{
@@ -115,9 +118,8 @@ func TestWorkerToolDefs(t *testing.T) {
 		args["title"] = "Reflected XSS in search endpoint"
 		args["endpoint"] = "GET /search"
 		res := rc.Handler(t.Context(), mustMarshal(t, args))
-		assert.True(t, res.IsError)
-		assert.Contains(t, res.Text, "already-filed")
-		assert.Empty(t, pool.Pending())
+		assert.False(t, res.IsError, res.Text)
+		assert.Len(t, pool.Pending(), 1)
 	})
 
 	t.Run("admits_distinct_title_and_endpoint", func(t *testing.T) {

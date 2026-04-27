@@ -608,43 +608,49 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 // before there. A stale boundary silently loses iter content (read past
 // the new history end) or summarizes the wrong slice.
 //
-// Strategy: snapshot the message AT iterationStartIdx (the iter-head
-// message — for workers, the directive Query'd after MarkIterationBoundary)
-// before Compact, then locate it again afterwards by role+content match.
-// Compact only edits assistant/tool content in place (think-strip,
-// stubbing, sentence-truncate); it never touches user-role content. The
-// iter-head message is a user directive, so equality on Role+Content is
-// reliable. If the marker disappeared (the iter itself was dropped by
-// dropOldestTurn), the boundary clamps to history end so extractAndAppend
-// fails open with no append.
+// Strategy: snapshot the internal HistoryID of the iter-head message (for
+// workers, the directive Query'd after MarkIterationBoundary) before
+// Compact, then relocate that exact message afterwards. If the marker
+// disappeared (the iter itself was dropped by dropOldestTurn), the boundary
+// clamps to history end so extractAndAppend fails open with no append.
 func (a *OpenAIAgent) compactPreservingBoundary() (CompactionReport, error) {
-	var marker Message
-	hasMarker := false
-	preLen := a.history.Len()
-	if a.iterationStartIdx > 0 && a.iterationStartIdx < preLen {
-		snap := a.history.Snapshot()
-		marker = snap[a.iterationStartIdx]
-		hasMarker = true
-	}
+	markerID, hasMarker := a.iterationBoundaryMarker()
 	report, err := Compact(a.history, a.cfg.Compaction)
+	a.rebaseIterationBoundary(markerID, hasMarker)
+	return report, err
+}
+
+func (a *OpenAIAgent) forceHardTruncatePreservingBoundary(targetTokens, keep int) CompactionReport {
+	markerID, hasMarker := a.iterationBoundaryMarker()
+	report := ForceHardTruncate(a.history, targetTokens, keep)
+	a.rebaseIterationBoundary(markerID, hasMarker)
+	return report
+}
+
+func (a *OpenAIAgent) iterationBoundaryMarker() (uint64, bool) {
+	preLen := a.history.Len()
+	if a.iterationStartIdx <= 0 || a.iterationStartIdx >= preLen {
+		return 0, false
+	}
+	snap := a.history.Snapshot()
+	return snap[a.iterationStartIdx].HistoryID, true
+}
+
+func (a *OpenAIAgent) rebaseIterationBoundary(markerID uint64, hasMarker bool) {
 	if !hasMarker {
 		if a.iterationStartIdx > a.history.Len() {
 			a.iterationStartIdx = a.history.Len()
 		}
-		return report, err
+		return
 	}
 	snap := a.history.Snapshot()
 	for i := range snap {
-		if snap[i].Role == marker.Role &&
-			snap[i].Content == marker.Content &&
-			snap[i].ToolName == marker.ToolName &&
-			snap[i].ToolCallID == marker.ToolCallID {
+		if snap[i].HistoryID == markerID {
 			a.iterationStartIdx = i
-			return report, err
+			return
 		}
 	}
 	a.iterationStartIdx = len(snap)
-	return report, err
 }
 
 // runBoundarySummarize takes a snapshot of messages[1:iterationStartIdx],
@@ -729,7 +735,7 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 				a.cfg.OnContextOverflow()
 			}
 			target := a.history.EffectiveMaxContext() / 2
-			report := ForceHardTruncate(a.history, target, 2)
+			report := a.forceHardTruncatePreservingBoundary(target, 2)
 			if a.cfg.OnCompact != nil {
 				a.cfg.OnCompact(report)
 			}

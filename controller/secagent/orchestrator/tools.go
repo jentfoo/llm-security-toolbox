@@ -650,6 +650,7 @@ func SynthesisToolDefs(
 				}
 				var entries []PlanEntry
 				var reasons []string
+				seen := map[int]bool{}
 				for i, p := range in.Plans {
 					asg := strings.TrimSpace(p.Assignment)
 					if p.WorkerID < 1 {
@@ -660,6 +661,14 @@ func SynthesisToolDefs(
 						reasons = append(reasons, fmt.Sprintf("plans[%d] (worker_id=%d): assignment is empty", i, p.WorkerID))
 						continue
 					}
+					if seen[p.WorkerID] {
+						reasons = append(reasons, fmt.Sprintf(
+							"plans[%d]: worker_id=%d appears more than once in this plan",
+							i, p.WorkerID,
+						))
+						continue
+					}
+					seen[p.WorkerID] = true
 					// Reject completed IDs explicitly. Alive IDs are fine
 					// (retarget). Fresh IDs are fine (spawn).
 					if done != nil && done[p.WorkerID] {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -243,15 +244,26 @@ type SimilarFinding struct {
 // Seeds Count from the highest existing finding-NN-*.md file so new findings
 // get unique indexes across process restarts.
 func NewFindingWriter(findingsDir string) *FindingWriter {
-	return &FindingWriter{findingsDir: findingsDir, Count: maxExistingFindingIndex(findingsDir)}
+	index, count := loadExistingFindingIndex(findingsDir)
+	return &FindingWriter{
+		findingsDir: findingsDir,
+		Count:       count,
+		index:       index,
+	}
 }
 
-func maxExistingFindingIndex(findingsDir string) int {
+func loadExistingFindingIndex(findingsDir string) ([]findingIndexEntry, int) {
 	entries, err := os.ReadDir(findingsDir)
 	if err != nil {
-		return 0
+		return nil, 0
 	}
+	type diskFinding struct {
+		seq   int
+		entry findingIndexEntry
+	}
+
 	max := 0
+	var loaded []diskFinding
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -267,22 +279,99 @@ func maxExistingFindingIndex(findingsDir string) int {
 		if n > max {
 			max = n
 		}
+		path := filepath.Join(findingsDir, e.Name())
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		filed, ok := parseFindingMarkdown(string(raw))
+		if !ok {
+			continue
+		}
+		loaded = append(loaded, diskFinding{
+			seq:   n,
+			entry: indexEntry(filed, path),
+		})
 	}
-	return max
+	sort.Slice(loaded, func(i, j int) bool { return loaded[i].seq < loaded[j].seq })
+
+	index := make([]findingIndexEntry, 0, len(loaded))
+	for _, item := range loaded {
+		index = append(index, item.entry)
+	}
+	return index, max
+}
+
+func parseFindingMarkdown(raw string) (FindingFiled, bool) {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	lines := strings.Split(raw, "\n")
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "# ") {
+		return FindingFiled{}, false
+	}
+	filed := FindingFiled{
+		Title:    strings.TrimSpace(strings.TrimPrefix(lines[0], "# ")),
+		Severity: findMarkdownField(lines, "- **Severity**: "),
+		Endpoint: normalizeStoredEndpoint(findMarkdownField(lines, "- **Affected Endpoint**: ")),
+	}
+	filed.Description = findingSection(raw, "Description", "Reproduction Steps")
+	filed.ReproductionSteps = findingSection(raw, "Reproduction Steps", "Evidence")
+	filed.Evidence = findingSection(raw, "Evidence", "Impact")
+	filed.Impact = findingSection(raw, "Impact", "Verification")
+	filed.VerificationNotes = findingSection(raw, "Verification", "")
+	if filed.Title == "" {
+		return FindingFiled{}, false
+	}
+	return filed, true
+}
+
+func findMarkdownField(lines []string, prefix string) string {
+	for _, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func findingSection(raw, heading, next string) string {
+	marker := "## " + heading + "\n\n"
+	start := strings.Index(raw, marker)
+	if start < 0 {
+		return ""
+	}
+	start += len(marker)
+	end := len(raw)
+	if next != "" {
+		nextMarker := "\n\n## " + next + "\n\n"
+		if idx := strings.Index(raw[start:], nextMarker); idx >= 0 {
+			end = start + idx
+		}
+	}
+	return strings.TrimSpace(raw[start:end])
+}
+
+func normalizeStoredEndpoint(endpoint string) string {
+	if endpoint == "N/A" {
+		return ""
+	}
+	return endpoint
 }
 
 // IsDuplicate returns true when filed matches a previously written finding
-// by exact title-slug equality. Softer matches (TitlesSimilar + ambiguous
-// endpoints) go through FindSimilarEntries + agent review instead.
+// on exact title-slug AND exact canonical-endpoint equality. Anything
+// fuzzier (slug match with endpoint divergence, similar title) falls
+// through to FindSimilarEntries so the LLM dedup reviewer can adjudicate
+// with both endpoints in view.
 func (w *FindingWriter) IsDuplicate(filed FindingFiled) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	titleSlug := Slugify(filed.Title)
+	canonEP := CanonicalEndpoint(filed.Endpoint)
 	if titleSlug == "" {
 		return false
 	}
 	for _, e := range w.index {
-		if titleSlug == e.titleSlug {
+		if titleSlug == e.titleSlug && canonEP == e.endpoint {
 			return true
 		}
 	}
@@ -290,47 +379,47 @@ func (w *FindingWriter) IsDuplicate(filed FindingFiled) bool {
 }
 
 // MatchesFiled reports whether (title, endpoint) matches an already-filed
-// finding deterministically: exact title slug, or canonical endpoint equal
-// AND TitlesSimilar. Returns the matched finding's title and path so the
-// caller can cite it. Intended for the worker hot path — no LLM review.
+// finding on exact title-slug AND exact canonical-endpoint equality.
+// Returns the matched finding's title and path so the caller can cite it.
+// Intended for the worker hot path as the deterministic fallback when the
+// LLM CandidateDedupReviewer is not configured; anything fuzzier should go
+// through that reviewer rather than getting suppressed here.
 func (w *FindingWriter) MatchesFiled(title, endpoint string) (matchedTitle, path string, ok bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	titleSlug := Slugify(title)
 	canonEP := CanonicalEndpoint(endpoint)
+	if titleSlug == "" {
+		return "", "", false
+	}
 	for _, e := range w.index {
-		if titleSlug != "" && titleSlug == e.titleSlug {
-			return e.filed.Title, e.path, true
-		}
-		if canonEP != "" && canonEP == e.endpoint && TitlesSimilar(title, e.filed.Title) {
+		if titleSlug == e.titleSlug && canonEP == e.endpoint {
 			return e.filed.Title, e.path, true
 		}
 	}
 	return "", "", false
 }
 
-// FindSimilarEntries returns previously written findings whose titles pass
-// TitlesSimilar against filed AND whose endpoints are not explicitly
-// different (either side missing, or equal after canonicalization). Exact
-// slug matches are excluded — callers should check IsDuplicate first.
-// Returned snapshots drive agent-mediated dedup review.
+// FindSimilarEntries returns previously written findings whose titles
+// match the filed entry closely enough to warrant LLM dedup review. Slug
+// matches with a divergent endpoint surface here (the LLM gets both
+// endpoints in its prompt and decides unique / duplicate / partial-merge);
+// title-similar (non-slug-equal) entries surface regardless of endpoint
+// for the same reason. Exact title-slug + canonical-endpoint matches are
+// already filtered upstream by IsDuplicate.
 func (w *FindingWriter) FindSimilarEntries(filed FindingFiled) []SimilarFinding {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	titleSlug := Slugify(filed.Title)
-	ep := CanonicalEndpoint(filed.Endpoint)
 	var out []SimilarFinding
 	for _, e := range w.index {
 		if titleSlug != "" && titleSlug == e.titleSlug {
+			out = append(out, SimilarFinding{Filed: e.filed, Path: e.path})
 			continue
 		}
-		if !TitlesSimilar(filed.Title, e.filed.Title) {
-			continue
+		if TitlesSimilar(filed.Title, e.filed.Title) {
+			out = append(out, SimilarFinding{Filed: e.filed, Path: e.path})
 		}
-		if ep != "" && e.endpoint != "" && ep != e.endpoint {
-			continue
-		}
-		out = append(out, SimilarFinding{Filed: e.filed, Path: e.path})
 	}
 	return out
 }
@@ -342,12 +431,13 @@ func (w *FindingWriter) Write(filed FindingFiled) (string, error) {
 	if err := os.MkdirAll(w.findingsDir, 0o755); err != nil {
 		return "", err
 	}
-	w.Count++
-	w.RunCount++
-	path := filepath.Join(w.findingsDir, findingFilename(w.Count, filed.Title))
+	nextCount := w.Count + 1
+	path := filepath.Join(w.findingsDir, findingFilename(nextCount, filed.Title))
 	if err := os.WriteFile(path, []byte(renderFinding(filed)), 0o644); err != nil {
 		return "", err
 	}
+	w.Count = nextCount
+	w.RunCount++
 	w.Paths = append(w.Paths, path)
 	w.index = append(w.index, indexEntry(filed, path))
 	return path, nil
@@ -376,8 +466,13 @@ func (w *FindingWriter) Replace(oldPath string, filed FindingFiled) (string, err
 			return "", err
 		}
 	}
-	w.Paths[idx] = newPath
 	w.index[idx] = indexEntry(filed, newPath)
+	for i := range w.Paths {
+		if w.Paths[i] == oldPath {
+			w.Paths[i] = newPath
+			break
+		}
+	}
 	return newPath, nil
 }
 
