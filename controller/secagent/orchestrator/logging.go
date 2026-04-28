@@ -179,20 +179,14 @@ func buildPrettyLine(now time.Time, tag, msg string, fields map[string]any) []by
 	return []byte(b.String())
 }
 
-// writeNarrateMsg colors the "orchestrator:" / "agent (name):" prefix in narrator output.
+// writeNarrateMsg colors the speaker prefix ("orchestrator:", "worker-N:",
+// "director-review:", etc.) in narrator output. Any single-token prefix
+// (no spaces) terminated by ':' is treated as the speaker.
 func writeNarrateMsg(b *strings.Builder, msg string) {
-	const orchPrefix = "orchestrator:"
-	if strings.HasPrefix(msg, orchPrefix) {
-		styleAppend(b, ansiMedGreen, orchPrefix)
-		b.WriteString(msg[len(orchPrefix):])
+	if colon := strings.IndexByte(msg, ':'); colon > 0 && !strings.ContainsAny(msg[:colon], " \t") {
+		styleAppend(b, ansiMedGreen, msg[:colon+1])
+		b.WriteString(msg[colon+1:])
 		return
-	}
-	if strings.HasPrefix(msg, "agent (") {
-		if end := strings.Index(msg, "):"); end != -1 {
-			styleAppend(b, ansiMedGreen, msg[:end+2])
-			b.WriteString(msg[end+2:])
-			return
-		}
 	}
 	b.WriteString(msg)
 }

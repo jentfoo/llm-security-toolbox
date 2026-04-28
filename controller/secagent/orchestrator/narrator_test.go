@@ -484,12 +484,12 @@ func TestNarratorAgentDispatch(t *testing.T) {
 
 		content := buf.String()
 		assert.Contains(t, content, "orchestrator: current focus")
-		assert.Contains(t, content, "agent (worker-1):")
-		assert.Contains(t, content, "agent (worker-2):")
+		assert.Contains(t, content, "worker-1:")
+		assert.Contains(t, content, "worker-2:")
 
 		jsonLog := mustReadFile(t, path)
-		assert.Contains(t, jsonLog, `"msg":"agent (worker-1):`)
-		assert.Contains(t, jsonLog, `"msg":"agent (worker-2):`)
+		assert.Contains(t, jsonLog, `"msg":"worker-1:`)
+		assert.Contains(t, jsonLog, `"msg":"worker-2:`)
 		assert.Contains(t, jsonLog, `"context_usage":`)
 		assert.NotContains(t, jsonLog, `"role":`)
 		assert.NotContains(t, jsonLog, `"agent":`)

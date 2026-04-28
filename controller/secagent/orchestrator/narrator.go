@@ -383,7 +383,7 @@ func (n *Narrator) runAgentSummary(ctx context.Context, na NamedAgent) {
 		}
 		return out
 	}
-	prefix := "agent (" + na.Name + "): "
+	prefix := na.Name + ": "
 	if err != nil {
 		if n.log != nil {
 			n.log.Log("narrate", prefix+"error", mergeFields(map[string]any{"err": err.Error()}))

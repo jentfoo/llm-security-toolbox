@@ -143,8 +143,11 @@ func RunDecisionPhase(
 
 // askWorker installs the selectively-compacted view + per-worker prompt
 // onto the director agent, sets the asked-worker hint on the decision
-// queue, and drains. The decide_worker handler validates the worker_id
-// match and appends one WorkerDecision.
+// queue, and drains (bounded by decisionDrainMaxRounds). The
+// decide_worker handler validates the worker_id match and appends one
+// WorkerDecision. If the bounded drain exits without a decision (e.g.
+// the model loops on rejected tool calls), RunDecisionPhase's
+// no-decision-defaulting-to-continue fallback takes over.
 func askWorker(ctx context.Context, in DecisionPhaseInput, w *WorkerState, log *Logger) {
 	view := in.DirChat.RenderForWorker(w.ID)
 	peer := FormatPeerSummary(in.Workers, w.ID)
@@ -158,7 +161,7 @@ func askWorker(ctx context.Context, in DecisionPhaseInput, w *WorkerState, log *
 	in.Director.ReplaceHistory(view)
 	in.Director.Query(prompt)
 	in.Decisions.BeginPerWorkerDecision(w.ID)
-	if _, err := in.Director.Drain(ctx); err != nil && log != nil {
+	if _, err := in.Director.DrainBounded(ctx, decisionDrainMaxRounds); err != nil && log != nil {
 		log.Log("decision", "drain error", map[string]any{
 			"worker_id": w.ID, "err": err.Error(),
 		})

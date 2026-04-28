@@ -26,8 +26,10 @@ const readinessProbeTimeout = 500 * time.Millisecond
 
 // StartSectool returns a SectoolServer for the configured MCP port. If a
 // server is already responding on that port it attaches without starting
-// a child process; otherwise it launches `sectool mcp` from $PATH and
-// waits for HTTP readiness.
+// a child process; otherwise it launches `sectool mcp` and waits for HTTP
+// readiness. The binary is resolved by checking for a co-located `sectool`
+// next to the running secagent executable first, then falling back to
+// $PATH.
 func StartSectool(proxyPort, mcpPort int, log *Logger) (*SectoolServer, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort)
 
@@ -40,9 +42,9 @@ func StartSectool(proxyPort, mcpPort int, log *Logger) (*SectoolServer, error) {
 		return &SectoolServer{URL: url}, nil
 	}
 
-	binary, err := exec.LookPath("sectool")
+	binary, err := resolveSectoolBinary()
 	if err != nil {
-		return nil, fmt.Errorf("sectool not found in $PATH: %w", err)
+		return nil, err
 	}
 
 	cwd, _ := os.Getwd()
@@ -95,6 +97,26 @@ func StartSectool(proxyPort, mcpPort int, log *Logger) (*SectoolServer, error) {
 	_ = cmd.Process.Kill()
 	_ = f.Close()
 	return nil, errors.New("sectool MCP server did not become ready within 10s")
+}
+
+// resolveSectoolBinary finds the sectool executable, preferring a binary
+// co-located with the running secagent (handy for `bin/secagent` +
+// `bin/sectool` repo layouts) and falling back to $PATH.
+func resolveSectoolBinary() (string, error) {
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
+		candidate := filepath.Join(filepath.Dir(exe), "sectool")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	binary, err := exec.LookPath("sectool")
+	if err != nil {
+		return "", fmt.Errorf("sectool not found alongside secagent or in $PATH: %w", err)
+	}
+	return binary, nil
 }
 
 // mcpReachable reports whether the MCP endpoint accepts an HTTP request

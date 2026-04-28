@@ -34,14 +34,35 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sig := make(chan os.Signal, 1)
+	sd := orchestrator.NewShutdown(ctx, log)
+
+	// Three-stage Ctrl+C / SIGTERM handling:
+	//   1. cancel non-validation workers, run final verification
+	//   2. interrupt the verifier, dump still-pending candidates as UNVALIDATED
+	//   3. hard-exit with status 130
+	sig := make(chan os.Signal, 4)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sig
-		cancel()
+		n := 0
+		for range sig {
+			n++
+			switch n {
+			case 1:
+				fmt.Fprintln(os.Stderr, "Ctrl+C — finishing verification of pending candidates. Press again to dump unvalidated. Press a third time to kill.")
+				sd.RequestVerifyOnly()
+			case 2:
+				fmt.Fprintln(os.Stderr, "Ctrl+C (2/3) — dumping unvalidated candidates. Press once more to kill.")
+				sd.RequestDumpUnvalidated()
+			default:
+				fmt.Fprintln(os.Stderr, "Ctrl+C (3/3) — killing.")
+				sd.RequestKill()
+				_ = log.Close()
+				os.Exit(130)
+			}
+		}
 	}()
 
-	if err := orchestrator.Run(ctx, cfg, log); err != nil {
+	if err := orchestrator.Run(ctx, cfg, log, sd); err != nil {
 		log.Log("controller", "fatal", map[string]any{"err": err.Error()})
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)

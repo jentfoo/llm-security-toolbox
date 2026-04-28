@@ -14,6 +14,7 @@ import (
 var nonSlugChar = regexp.MustCompile(`[^a-z0-9\s-]+`)
 var slugDashes = regexp.MustCompile(`[-\s]+`)
 var findingIndexRe = regexp.MustCompile(`^finding-(\d+)-.*\.md$`)
+var unvalidatedIndexRe = regexp.MustCompile(`^unvalidated-(\d+)-.*\.md$`)
 
 var httpMethods = map[string]bool{
 	"GET": true, "POST": true, "PUT": true, "PATCH": true,
@@ -215,6 +216,9 @@ type FindingWriter struct {
 	// Count is the highest finding index on disk (seeded from prior runs) and
 	// drives the finding-NN-*.md filename numbering.
 	Count int
+	// UnvalidatedCount is the highest unvalidated index on disk, seeded from
+	// prior runs so unvalidated-NN-*.md files don't collide across runs.
+	UnvalidatedCount int
 	// RunCount counts findings filed in this process only; used by the
 	// premature-done guard so stale findings left on disk from earlier runs
 	// can't bypass it.
@@ -245,11 +249,40 @@ type SimilarFinding struct {
 // get unique indexes across process restarts.
 func NewFindingWriter(findingsDir string) *FindingWriter {
 	index, count := loadExistingFindingIndex(findingsDir)
+	unvalidated := loadExistingUnvalidatedMax(findingsDir)
 	return &FindingWriter{
-		findingsDir: findingsDir,
-		Count:       count,
-		index:       index,
+		findingsDir:      findingsDir,
+		Count:            count,
+		UnvalidatedCount: unvalidated,
+		index:            index,
 	}
+}
+
+// loadExistingUnvalidatedMax returns the highest unvalidated-NN-*.md sequence
+// found in findingsDir, or 0 if none / dir missing.
+func loadExistingUnvalidatedMax(findingsDir string) int {
+	entries, err := os.ReadDir(findingsDir)
+	if err != nil {
+		return 0
+	}
+	max := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		m := unvalidatedIndexRe.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		if n > max {
+			max = n
+		}
+	}
+	return max
 }
 
 func loadExistingFindingIndex(findingsDir string) ([]findingIndexEntry, int) {
@@ -634,4 +667,86 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// unvalidatedTemplate renders a worker-reported candidate that the verifier
+// never confirmed. Operator must treat the contents as an investigative tip,
+// not a confirmed vulnerability.
+const unvalidatedTemplate = `# UNVALIDATED — %s
+
+> ⚠ **THIS FINDING IS UNVALIDATED.** A worker reported it during the run, but
+> the verifier never independently reproduced it because the operator
+> interrupted the run before validation completed. The reported issue may be
+> a false positive, already-known behavior, or unreachable in practice.
+> **Do not rely on this as a confirmed finding.**
+
+- **Severity (claimed)**: %s
+- **Affected Endpoint (claimed)**: %s
+- **Originating Worker**: %d
+- **Candidate ID**: %s
+
+## Worker Summary
+
+%s
+
+## Evidence Notes (worker-reported)
+
+%s
+
+## Reproduction Hint (worker-reported)
+
+%s
+
+## Flow IDs Touched
+
+%s
+`
+
+// WriteUnvalidated persists a still-pending candidate to disk under an
+// UNVALIDATED banner. Uses an `unvalidated-NN-slug.md` filename so the
+// regular findings index doesn't pick these up on the next run.
+func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := os.MkdirAll(w.findingsDir, 0o755); err != nil {
+		return "", err
+	}
+	next := w.UnvalidatedCount + 1
+	slug := Slugify(c.Title)
+	if slug == "" {
+		slug = "untitled"
+	}
+	if len(slug) > 60 {
+		slug = strings.TrimRight(slug[:60], "-")
+	}
+	name := fmt.Sprintf("unvalidated-%02d-%s.md", next, slug)
+	path := filepath.Join(w.findingsDir, name)
+	body := fmt.Sprintf(unvalidatedTemplate,
+		c.Title,
+		orDefault(c.Severity, "unknown"),
+		orDefault(c.Endpoint, "N/A"),
+		c.WorkerID,
+		c.CandidateID,
+		orDefault(c.Summary, noneSentinel),
+		orDefault(c.EvidenceNotes, noneSentinel),
+		orDefault(c.ReproductionHint, noneSentinel),
+		formatFlowIDList(c.FlowIDs),
+	)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return "", err
+	}
+	w.UnvalidatedCount = next
+	w.Paths = append(w.Paths, path)
+	return path, nil
+}
+
+func formatFlowIDList(ids []string) string {
+	if len(ids) == 0 {
+		return noneSentinel
+	}
+	var b strings.Builder
+	for _, id := range ids {
+		fmt.Fprintf(&b, "- %s\n", id)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

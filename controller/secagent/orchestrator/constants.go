@@ -5,6 +5,15 @@ package orchestrator
 // Mirrors config.DefaultAutoBudget and spec §8 default.
 const defaultAutonomousBudget = 8
 
+// decisionDrainMaxRounds caps the director's per-worker decide_worker
+// drain. The call is supposed to be a single tool invocation; this small
+// budget allows a few recovery rounds (schema repair, one wrong-worker
+// mistake) before the controller's no-decision-defaulting-to-continue
+// fallback in RunDecisionPhase takes over. Without it, a model that
+// keeps re-issuing rejected calls (e.g. wrong worker_id) runs to
+// MaxTurnsPerAgent and wastes ~20 minutes per stuck decision.
+const decisionDrainMaxRounds = 4
+
 // MinIterationsForDone is the earliest iteration at which the director's
 // `done(summary)` decision is accepted when zero findings have been filed.
 // Earlier calls are rejected as premature so local models that conflate

@@ -130,7 +130,7 @@ func TestLogger(t *testing.T) {
 		l, _, buf := newCapturedLogger(t)
 		l.Log("worker", "turn", map[string]any{"worker_id": 1})
 		l.Log("narrate", "orchestrator: running scans", nil)
-		l.Log("narrate", "agent (worker-2): probing login", nil)
+		l.Log("narrate", "worker-2: probing login", nil)
 		l.Log("narrate", "empty-ish line", nil)
 
 		out := buf.String()
@@ -139,7 +139,7 @@ func TestLogger(t *testing.T) {
 		assert.Contains(t, out, "["+ansiBlue+"narrate"+ansiReset+"]")
 		assert.Contains(t, out, " "+ansiGray+"worker_id=1"+ansiReset)
 		assert.Contains(t, out, ansiMedGreen+"orchestrator:"+ansiReset+" running scans")
-		assert.Contains(t, out, ansiMedGreen+"agent (worker-2):"+ansiReset+" probing login")
+		assert.Contains(t, out, ansiMedGreen+"worker-2:"+ansiReset+" probing login")
 		assert.Contains(t, out, "] empty-ish line")
 	})
 }
@@ -153,10 +153,12 @@ func TestWriteNarrateMsg(t *testing.T) {
 	}{
 		{"orchestrator_plain", "orchestrator: did a thing", false, "orchestrator: did a thing"},
 		{"orchestrator_colored", "orchestrator: did a thing", true, ansiMedGreen + "orchestrator:" + ansiReset + " did a thing"},
-		{"agent_plain", "agent (worker-1): probing", false, "agent (worker-1): probing"},
-		{"agent_colored", "agent (worker-1): probing", true, ansiMedGreen + "agent (worker-1):" + ansiReset + " probing"},
+		{"worker_plain", "worker-1: probing", false, "worker-1: probing"},
+		{"worker_colored", "worker-1: probing", true, ansiMedGreen + "worker-1:" + ansiReset + " probing"},
+		{"director_review_colored", "director-review: deciding", true, ansiMedGreen + "director-review:" + ansiReset + " deciding"},
+		{"director_plan_colored", "director-plan: planning", true, ansiMedGreen + "director-plan:" + ansiReset + " planning"},
 		{"unmatched_passthrough", "some other narrate", true, "some other narrate"},
-		{"agent_open_no_close", "agent (oops no close", true, "agent (oops no close"},
+		{"prefix_with_space_passthrough", "not a speaker: rest", true, "not a speaker: rest"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

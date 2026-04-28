@@ -296,7 +296,7 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 // absent so the model does not hallucinate calls to them mid-decision.
 func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 	return f.buildAgent(
-		"director-decision",
+		"director-review",
 		f.Cfg.Model,
 		f.withMission(prompts.BuildDirectorDecisionSystemPrompt(f.Cfg.MaxWorkers)),
 		f.Pool,
@@ -313,7 +313,7 @@ func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 // per-worker decisions land in a separate pass before this agent runs.
 func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
 	return f.buildAgent(
-		"director-synthesis",
+		"director-plan",
 		f.Cfg.Model,
 		f.withMission(prompts.BuildDirectorSynthesisSystemPrompt(f.Cfg.MaxWorkers)),
 		f.Pool,
@@ -479,7 +479,10 @@ func spawnReconWorker(
 
 // Run starts sectool, connects agents, and runs the iteration loop until
 // max-iterations or a director `done`.
-func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
+func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) error {
+	if sd == nil {
+		sd = NewShutdown(ctx, log)
+	}
 	srv, err := StartSectool(cfg.ProxyPort, cfg.MCPPort, log)
 	if err != nil {
 		return fmt.Errorf("sectool start: %w", err)
@@ -521,18 +524,15 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 	candidates := NewCandidatePool()
 	decisions := NewDecisionQueue()
 	writer := NewFindingWriter(cfg.FindingsDir)
+	// dedupReviewer is shared between the verifier-side filed-finding dedup
+	// pipeline, the worker-hot-path candidate classifier, and the async
+	// merger. All three feed verdicts back into agent context (worker tool
+	// results, merged finding bodies the director reads), so they run on
+	// the main model — the cheaper log model produced too many false-merge
+	// verdicts that silently dropped distinct findings.
 	dedupReviewer := &OpenAIDedupReviewer{
 		Pool:  pool,
 		Model: cfg.Model,
-		Log:   log,
-	}
-	// candidateDedup runs at the worker hot path: every report_finding_candidate
-	// classifies the incoming candidate against existing finding digests via
-	// the log model. Lighter than the verifier-side pair-wise reviewer above
-	// and shares the same pool — different model identifier per request.
-	candidateDedup := &OpenAIDedupReviewer{
-		Pool:  pool,
-		Model: cfg.LogModel,
 		Log:   log,
 	}
 	// summarizer runs the on-demand boundary-summarize callback for workers
@@ -550,7 +550,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 	// worker tool's dedup verdict is "merge". Bounded concurrency (cap=4) so
 	// a flurry of candidates can't saturate the shared pool. Run() waits on
 	// in-flight merges at shutdown so the user doesn't lose work mid-merge.
-	asyncMerger := newAsyncMerger(ctx, candidateDedup, writer, log, 4)
+	asyncMerger := newAsyncMerger(ctx, dedupReviewer, writer, log, 4)
 	defer asyncMerger.Wait()
 
 	// completed is the controller-side registry of retired workers — used
@@ -636,7 +636,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions)...)
 	verifier.SetTools(verifierTools)
 
-	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, candidateDedup, asyncMerger, cfg.AutonomousBudget)
+	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, dedupReviewer, asyncMerger, cfg.AutonomousBudget)
 
 	workers := make([]*WorkerState, 0, cfg.MaxWorkers)
 	defer func() {
@@ -776,10 +776,10 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		case "direction":
 			var out []NamedAgent
 			if oa, ok := decisionDirector.(*agent.OpenAIAgent); ok {
-				out = append(out, NamedAgent{Name: "director-decision", Agent: oa})
+				out = append(out, NamedAgent{Name: "director-review", Agent: oa})
 			}
 			if oa, ok := synthesisDirector.(*agent.OpenAIAgent); ok {
-				out = append(out, NamedAgent{Name: "director-synthesis", Agent: oa})
+				out = append(out, NamedAgent{Name: "director-plan", Agent: oa})
 			}
 			return out
 		}
@@ -901,17 +901,11 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 	// loop's wait-for-in-flight pattern works uniformly from iter 1.
 	installChronicle(w1, w1.LastInstruction)
 	inflight := map[int]func() []agent.TurnSummary{}
-	inflight[1] = fire(ctx, w1)
+	inflight[1] = fire(sd.WorkersCtx, w1)
 
 	var iteration int
 	for iteration = 1; iteration <= cfg.MaxIterations; iteration++ {
 		guardIteration = iteration
-		if err := ctx.Err(); err != nil {
-			if log != nil {
-				log.Log("controller", "cancelled", map[string]any{"iter": iteration, "err": err.Error()})
-			}
-			break
-		}
 
 		// Wait for in-flight worker iter runs (fired at end of iter-1 seed
 		// or end of prior iter's decision/synthesis phase). workerRuns is
@@ -920,6 +914,25 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		narrator.Tick()
 		workerRuns := harvestInflight(inflight)
 		inflight = map[int]func() []agent.TurnSummary{}
+
+		// Cancellation checks AFTER harvest so any in-flight workers from
+		// the previous iter are cleanly reaped first. Root-ctx cancellation
+		// (parent died) takes the existing fast path; shutdown stage ≥ 1
+		// breaks out so the post-loop block can run final verification.
+		if err := ctx.Err(); err != nil {
+			if log != nil {
+				log.Log("controller", "cancelled", map[string]any{"iter": iteration, "err": err.Error()})
+			}
+			break
+		}
+		if sd.Phase() >= ShutdownPhaseVerifyOnly {
+			if log != nil {
+				log.Log("controller", "shutdown — exiting iteration loop", map[string]any{
+					"iter": iteration, "phase": sd.Phase(),
+				})
+			}
+			break
+		}
 
 		alive := aliveWorkers(workers)
 		if len(alive) == 0 {
@@ -958,7 +971,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
 			// Re-fire still-alive workers' next-iter runs with their existing
 			// LastInstruction so the loop doesn't wedge on no-in-flight.
-			refireAlive(ctx, workers, fire, inflight, log)
+			refireAlive(sd.WorkersCtx, workers, fire, inflight, log)
 			narrator.TriggerNow()
 			continue
 		}
@@ -981,7 +994,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		}
 		phaseTransition("autonomous", "verification")
 		verificationSummary := RunVerificationPhase(
-			ctx, verifier, decisions, candidates, writer, dedupReviewer, log,
+			sd.VerifierCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
 		)
 		if verifierOverflowed && !decisions.HasVerificationDone && len(candidates.Pending()) > 0 {
 			AutoDismissOnContextOverflow(candidates, decisions, log)
@@ -1051,11 +1064,11 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 			LatchStallWarnings(workers, cfg.StallWarnAfter)
 
 			synthesisDirector.SetTools(nil)
-			RunIter1ReconReviewCall(ctx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
+			RunIter1ReconReviewCall(sd.WorkersCtx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
 
 			synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
 				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
-			RunIter1ReconPlanCall(ctx, synthesisDirector, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
+			RunIter1ReconPlanCall(sd.WorkersCtx, synthesisDirector, dirChat, decisions, iterStatus, iteration, cfg.MaxWorkers, log)
 
 			if decisions.HasEndRun {
 				if log != nil {
@@ -1081,7 +1094,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 					})
 				}
 			}
-			applyPlanAndFire(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
+			applyPlanAndFire(sd.WorkersCtx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
 			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
 			narrator.TriggerNow()
 			continue
@@ -1094,7 +1107,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		// worker history that's already in its rendered view.
 		decisionDirector.SetTools(append(slices.Clone(decisionDirectorSectoolDefs),
 			DecisionToolDefs(decisions, takenIDsFn)...))
-		decRes := RunDecisionPhase(ctx, DecisionPhaseInput{
+		decRes := RunDecisionPhase(sd.WorkersCtx, DecisionPhaseInput{
 			Director: decisionDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, WorkerRuns: workerRuns,
 			IterationStatus: iterStatus, Iter: iteration, MaxWorkers: cfg.MaxWorkers,
@@ -1110,7 +1123,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		// Synthesis call.
 		synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
 			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
-		RunSynthesisPhase(ctx, SynthesisPhaseInput{
+		RunSynthesisPhase(sd.WorkersCtx, SynthesisPhaseInput{
 			Director: synthesisDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, Completed: completed,
 			VerifierSummary: verificationSummary, FindingsSummary: writer.SummaryForOrchestrator(),
@@ -1137,7 +1150,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 		// iter+1 runs for the affected workers. Merge their joins into
 		// inflight alongside the per-worker decision-fired runs.
 		if decisions.HasPlan {
-			applyPlanAndFire(ctx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
+			applyPlanAndFire(sd.WorkersCtx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
 		}
 
 		appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
@@ -1149,6 +1162,38 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger) error {
 	for _, j := range inflight {
 		_ = j()
 	}
+
+	// Multi-stage shutdown finalization. Runs only when the operator
+	// requested a graceful shutdown via *Shutdown (Ctrl+C path). Stage 1
+	// runs the verifier once on every still-pending candidate; stage 2
+	// (or stage 1 followed by an in-flight 2nd Ctrl+C) dumps whatever's
+	// still pending under the UNVALIDATED banner.
+	if sd.Phase() >= ShutdownPhaseVerifyOnly {
+		if sd.Phase() == ShutdownPhaseVerifyOnly && len(candidates.Pending()) > 0 {
+			verifierOverflowed = false
+			finalDirective := BuildVerifierPrompt(
+				workers, map[int][]agent.TurnSummary{}, candidates.Pending(),
+				writer.SummaryForOrchestrator(), factory.ReconSummary,
+				iteration, cfg.MaxIterations, writer.RunCount,
+			)
+			verifier.ReplaceHistory(ComposeVerifier(finalDirective))
+			if log != nil {
+				log.Log("shutdown", "final-verification start", map[string]any{
+					"pending": len(candidates.Pending()),
+				})
+			}
+			RunVerificationPhase(
+				sd.VerifierCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
+			)
+			if verifierOverflowed && len(candidates.Pending()) > 0 {
+				AutoDismissOnContextOverflow(candidates, decisions, log)
+			}
+		}
+		if sd.Phase() >= ShutdownPhaseDumpUnvalidated {
+			DumpUnvalidatedCandidates(candidates.Pending(), writer, log)
+		}
+	}
+
 	// Drain any retire summaries still pending so logs are complete.
 	retireQueue.Wait()
 	applyRetiredSummaries()

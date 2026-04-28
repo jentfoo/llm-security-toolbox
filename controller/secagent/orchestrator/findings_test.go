@@ -465,3 +465,86 @@ func TestMatchPendingCandidatesTiered(t *testing.T) {
 		assert.Equal(t, MatchNone, tier)
 	})
 }
+
+func TestFindingWriterWriteUnvalidated(t *testing.T) {
+	t.Parallel()
+
+	t.Run("writes_with_unvalidated_prefix_and_banner", func(t *testing.T) {
+		dir := t.TempDir()
+		w := NewFindingWriter(dir)
+
+		path, err := w.WriteUnvalidated(FindingCandidate{
+			CandidateID:      "c001",
+			WorkerID:         3,
+			Title:            "Reflected XSS in search",
+			Severity:         "high",
+			Endpoint:         "GET /search",
+			FlowIDs:          []string{"f-abc", "f-def"},
+			Summary:          "user input echoed unencoded",
+			EvidenceNotes:    "<script>alert(1)</script> reflected verbatim",
+			ReproductionHint: "send q=<script>",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "unvalidated-01-reflected-xss-in-search.md", filepath.Base(path))
+		assert.Equal(t, 1, w.UnvalidatedCount)
+		assert.Equal(t, 0, w.Count, "writing an unvalidated must not bump the verified count")
+		assert.Equal(t, 0, w.RunCount, "writing an unvalidated must not bump RunCount")
+
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		body := string(raw)
+		assert.Contains(t, body, "# UNVALIDATED — Reflected XSS in search")
+		assert.Contains(t, body, "**THIS FINDING IS UNVALIDATED.**")
+		assert.Contains(t, body, "**Severity (claimed)**: high")
+		assert.Contains(t, body, "**Affected Endpoint (claimed)**: GET /search")
+		assert.Contains(t, body, "**Originating Worker**: 3")
+		assert.Contains(t, body, "**Candidate ID**: c001")
+		assert.Contains(t, body, "user input echoed unencoded")
+		assert.Contains(t, body, "- f-abc")
+		assert.Contains(t, body, "- f-def")
+	})
+
+	t.Run("seeds_unvalidated_count_from_existing_files", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, name := range []string{
+			"unvalidated-02-old.md", "unvalidated-05-other.md",
+			"finding-01-real.md", "unrelated.md",
+		} {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
+		}
+		w := NewFindingWriter(dir)
+		assert.Equal(t, 5, w.UnvalidatedCount)
+		assert.Equal(t, 1, w.Count, "finding-01-real.md still bumps Count via filename")
+
+		path, err := w.WriteUnvalidated(FindingCandidate{
+			CandidateID: "c042",
+			Title:       "Next One",
+			Severity:    "low",
+			Endpoint:    "GET /x",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "unvalidated-06-next-one.md", filepath.Base(path))
+	})
+
+	t.Run("untitled_fallback", func(t *testing.T) {
+		dir := t.TempDir()
+		w := NewFindingWriter(dir)
+
+		path, err := w.WriteUnvalidated(FindingCandidate{CandidateID: "c001"})
+		require.NoError(t, err)
+		assert.Equal(t, "unvalidated-01-untitled.md", filepath.Base(path))
+	})
+
+	t.Run("does_not_pollute_finding_index", func(t *testing.T) {
+		dir := t.TempDir()
+		w := NewFindingWriter(dir)
+		_, err := w.WriteUnvalidated(FindingCandidate{Title: "tip"})
+		require.NoError(t, err)
+
+		// A fresh writer over the same dir must NOT see the unvalidated file
+		// as a real finding (would otherwise inflate Count and confuse dedup).
+		w2 := NewFindingWriter(dir)
+		assert.Equal(t, 0, w2.Count)
+		assert.Equal(t, 1, w2.UnvalidatedCount)
+	})
+}

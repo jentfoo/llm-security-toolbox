@@ -87,6 +87,25 @@ func TestRunDecisionPhase(t *testing.T) {
 		assert.Equal(t, "stale", w1.LastInstruction)
 	})
 
+	t.Run("bounded_drain_falls_back_to_continue", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		// Director "drains" but never adds a decision — simulates the
+		// stuck-on-rejection case (e.g. repeatedly wrong worker_id).
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "stuck loop"}}}
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: "stale"}
+		dirChat := NewDirectorChat()
+		fire, _ := scriptedFireFn(t, nil)
+		RunDecisionPhase(t.Context(), DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: []*WorkerState{w1}, Fire: fire,
+		}, nil)
+		require.Len(t, director.MaxRoundsSeen, 1)
+		assert.Equal(t, decisionDrainMaxRounds, director.MaxRoundsSeen[0])
+		require.Len(t, decisions.WorkerDecisions, 1)
+		assert.Equal(t, "continue", decisions.WorkerDecisions[0].Kind)
+		assert.Equal(t, "stale", w1.LastInstruction)
+	})
+
 	t.Run("stop_invokes_retire", func(t *testing.T) {
 		decisions := NewDecisionQueue()
 		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "decide"}}}
