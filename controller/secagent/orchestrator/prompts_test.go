@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -97,6 +98,46 @@ func TestFormatAutonomousRun(t *testing.T) {
 		assert.Contains(t, out, "flow_get, replay_send")
 		assert.Contains(t, out, "abc12345")
 		assert.Contains(t, out, "looking into it")
+	})
+}
+
+func TestFormatCompletedRoster(t *testing.T) {
+	t.Parallel()
+
+	build := func(n, startID int) []CompletedWorker {
+		out := make([]CompletedWorker, n)
+		for i := range out {
+			out[i] = CompletedWorker{
+				ID:        startID + i,
+				StoppedAt: i + 1,
+				Reason:    "done",
+				Summary:   fmt.Sprintf("worker %d summary", startID+i),
+			}
+		}
+		return out
+	}
+
+	t.Run("at_cap_renders_all_no_omission_line", func(t *testing.T) {
+		out := formatCompletedRoster(build(completedWorkersRenderCap, 1))
+		assert.NotContains(t, out, "omitted")
+		for i := 1; i <= completedWorkersRenderCap; i++ {
+			assert.Contains(t, out, fmt.Sprintf("Worker %d", i))
+		}
+	})
+
+	t.Run("over_cap_truncates_with_omission_count", func(t *testing.T) {
+		extra := 3
+		out := formatCompletedRoster(build(completedWorkersRenderCap+extra, 1))
+		assert.Contains(t, out, fmt.Sprintf("(%d earlier completed worker(s) omitted)", extra))
+		// First `extra` entries dropped, last completedWorkersRenderCap kept.
+		for i := 1; i <= extra; i++ {
+			assert.NotContains(t, out, fmt.Sprintf("Worker %d ", i),
+				"earliest workers must be truncated")
+		}
+		for i := extra + 1; i <= extra+completedWorkersRenderCap; i++ {
+			assert.Containsf(t, out, fmt.Sprintf("Worker %d ", i),
+				"recent worker %d must be rendered", i)
+		}
 	})
 }
 

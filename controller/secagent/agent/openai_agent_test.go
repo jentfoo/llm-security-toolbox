@@ -1032,6 +1032,36 @@ func TestOpenAIAgent_MaybeCompactBoundaryCallbackOncePerIter(t *testing.T) {
 	assert.Equal(t, 1, summarizeCalls)
 }
 
+func TestOpenAIAgent_RunBoundarySummarize_EmptyReplacement(t *testing.T) {
+	t.Parallel()
+	// Empty replacement still latches iterationSummarized so the callback
+	// isn't re-invoked over the same pre-boundary slice.
+	var calls int
+	a := NewOpenAIAgent(OpenAIAgentConfig{
+		Model: "m", SystemPrompt: "sys",
+		Pool: newPoolWith(&fakeChatClient{}),
+		OnSummarizeBoundary: func(_ context.Context, _ []Message) ([]Message, error) {
+			calls++
+			return nil, nil
+		},
+	})
+	for i := range 3 {
+		a.Query("pre " + strconv.Itoa(i))
+		a.History().Append(Message{Role: roleAssistant, Content: "ack " + strconv.Itoa(i)})
+	}
+	a.MarkIterationBoundary()
+	a.Query("iter directive")
+
+	preLen := a.history.Len()
+	require.NoError(t, a.runBoundarySummarize(t.Context()))
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, preLen, a.history.Len(), "history must be unchanged on empty replacement")
+	assert.True(t, a.iterationSummarized, "latch must fire so a second call no-ops via maybeCompact")
+
+	require.NoError(t, a.maybeCompact(t.Context()))
+	assert.Equal(t, 1, calls, "maybeCompact must not re-invoke when latch is set")
+}
+
 func TestOpenAIAgent_MaybeCompactTieredFlow(t *testing.T) {
 	t.Parallel()
 

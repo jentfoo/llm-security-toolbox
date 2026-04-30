@@ -76,6 +76,52 @@ func TestTitlesSimilar(t *testing.T) {
 	}
 }
 
+func TestParseFindingMarkdown(t *testing.T) {
+	t.Parallel()
+
+	full := FindingFiled{
+		Title:             "Reflected XSS in /search",
+		Severity:          "high",
+		Endpoint:          "GET /search",
+		Description:       "User input from `q` is echoed unencoded.",
+		ReproductionSteps: "1. GET /search?q=<script>\n2. Observe reflected payload",
+		Evidence:          "Response body contains `<script>` verbatim.",
+		Impact:            "Attacker-controlled JS in victim browser.",
+		VerificationNotes: "Verifier reproduced via curl.",
+	}
+
+	t.Run("round_trips_all_fields", func(t *testing.T) {
+		got, ok := parseFindingMarkdown(renderFinding(full))
+		require.True(t, ok)
+		assert.Equal(t, full, got)
+	})
+
+	t.Run("na_endpoint_normalized_to_empty", func(t *testing.T) {
+		// "N/A" on disk must round-trip back to "" so dedup keys match.
+		blank := full
+		blank.Endpoint = ""
+		got, ok := parseFindingMarkdown(renderFinding(blank))
+		require.True(t, ok)
+		assert.Empty(t, got.Endpoint)
+	})
+
+	t.Run("missing_title_header_returns_false", func(t *testing.T) {
+		_, ok := parseFindingMarkdown("not a finding\n\nsome content")
+		assert.False(t, ok)
+	})
+
+	t.Run("disk_round_trip_seeds_dedup_index", func(t *testing.T) {
+		// Guards against silent dedup loss across process restart.
+		dir := t.TempDir()
+		w := NewFindingWriter(dir)
+		_, err := w.Write(full)
+		require.NoError(t, err)
+
+		w2 := NewFindingWriter(dir)
+		assert.True(t, w2.IsDuplicate(full))
+	})
+}
+
 func TestFindingWriterIsDuplicate(t *testing.T) {
 	t.Parallel()
 	finding := FindingFiled{

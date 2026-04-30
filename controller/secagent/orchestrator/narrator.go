@@ -43,7 +43,7 @@ type NarratorConfig struct {
 	Interval   time.Duration // minimum time between fires; 0 disables.
 	Model      string        // log model ID.
 	Pool       *agent.ClientPool
-	CallBudget time.Duration         // per-summary call timeout; 0 defaults to 5m.
+	CallBudget time.Duration          // per-summary call timeout; 0 defaults to 5m.
 	Summarizer agent.ReasoningHandler // nil defaults to the inline handler.
 	// Parent context for in-flight summary calls; nil defaults to Background.
 	Parent context.Context

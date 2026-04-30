@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/go-appsec/secagent/agent"
 )
 
 // seedCandidate adds a candidate for workerID and returns its id.
@@ -159,6 +161,58 @@ func TestDeriveIterationOutcome(t *testing.T) {
 			assert.Equal(t, tc.expectedKind, out)
 		})
 	}
+}
+
+func TestAppendIterationHistory(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips_workers_not_alive_at_start", func(t *testing.T) {
+		w1 := &WorkerState{ID: 1, Alive: true}
+		w2 := &WorkerState{ID: 2, Alive: true}
+		w3 := &WorkerState{ID: 3, Alive: true}
+		alive := map[int]bool{1: true, 3: true}
+		runs := map[int][]agent.TurnSummary{
+			1: {{ToolCalls: []agent.ToolCallRecord{{Name: "a"}}}},
+			2: {{ToolCalls: []agent.ToolCallRecord{{Name: "b"}}}},
+			3: {{ToolCalls: []agent.ToolCallRecord{{Name: "c"}}}},
+		}
+
+		appendIterationHistory(
+			[]*WorkerState{w1, w2, w3}, alive, nil, runs,
+			NewDecisionQueue(), NewCandidatePool(), 0, 7,
+		)
+
+		assert.Equal(t, 1, w1.HistoryLen)
+		assert.Equal(t, 0, w2.HistoryLen, "worker 2 was not in aliveAtStart")
+		assert.Equal(t, 1, w3.HistoryLen)
+		assert.Equal(t, 7, w1.RecentHistory()[0].Iteration)
+	})
+
+	t.Run("tool_call_and_flow_counts_summed", func(t *testing.T) {
+		w := &WorkerState{ID: 1, Alive: true, EscalationReason: "silent"}
+		runs := map[int][]agent.TurnSummary{
+			1: {
+				{
+					ToolCalls: []agent.ToolCallRecord{{Name: "a"}, {Name: "b"}},
+					FlowIDs:   []string{"f1", "f2"},
+				},
+				{
+					ToolCalls: []agent.ToolCallRecord{{Name: "c"}},
+					FlowIDs:   []string{"f3"},
+				},
+			},
+		}
+
+		appendIterationHistory(
+			[]*WorkerState{w}, map[int]bool{1: true}, nil, runs,
+			NewDecisionQueue(), NewCandidatePool(), 0, 1,
+		)
+
+		require.Equal(t, 1, w.HistoryLen)
+		entry := w.RecentHistory()[0]
+		assert.Equal(t, 3, entry.ToolCalls)
+		assert.Equal(t, 3, entry.FlowsTouched)
+	})
 }
 
 func TestTruncateAngle(t *testing.T) {
