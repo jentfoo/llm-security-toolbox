@@ -23,6 +23,13 @@ const (
 	toolMsgTimeout = "timeout"
 )
 
+// Log-event tag values shared across allowlists, narrator filters, and
+// emit sites. Centralizing avoids string-literal drift.
+const (
+	tagDecision = "decision"
+	tagFinding  = "finding"
+)
+
 // Logger emits structured JSON lines to a log file and human-readable
 // lines to stderr. When a Narrator is attached, every Log call also feeds
 // the narrator's event buffer so operator-facing summaries can be generated
@@ -90,7 +97,7 @@ func (l *Logger) Log(tag, msg string, fields map[string]any) {
 // shouldNarrate reports whether an event is signal-grade for the narrator.
 func shouldNarrate(tag, msg string) bool {
 	switch tag {
-	case "controller", "decision", "finding", "plan", "verify", "worker":
+	case "controller", tagDecision, tagFinding, "plan", "verify", "worker":
 		return true
 	case "tool":
 		return msg == "start" || msg == toolMsgDone || msg == toolMsgTimeout || msg == toolMsgSlow
@@ -104,7 +111,7 @@ func shouldNarrate(tag, msg string) bool {
 // The JSON file always gets every event; stderr gets only the signal.
 func shouldMirror(tag, msg string, fields map[string]any) bool {
 	switch tag {
-	case "server", "controller", "decision", "finding", "summary", "plan", "verify", "recon", "retire":
+	case "server", "controller", tagDecision, tagFinding, "summary", "plan", "verify", "recon", "retire":
 		return true
 	case "narrate":
 		// "empty" fires every tick when a reasoning model burns its whole

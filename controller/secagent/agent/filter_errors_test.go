@@ -99,6 +99,44 @@ func TestFilterErrorMessages(t *testing.T) {
 	})
 }
 
+func TestHasSubstantiveMessages(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   []Message
+		want bool
+	}{
+		{"empty", nil, false},
+		{"system_only", []Message{
+			{Role: roleSystem, Content: "sys"},
+		}, false},
+		{"system_and_user_only", []Message{
+			{Role: roleSystem, Content: "sys"},
+			{Role: roleUser, Content: "u"},
+		}, false},
+		{"assistant_with_text", []Message{
+			{Role: roleSystem, Content: "sys"},
+			{Role: roleUser, Content: "u"},
+			{Role: roleAssistant, Content: "did a thing"},
+		}, true},
+		{"assistant_with_tool_calls", []Message{
+			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
+		}, true},
+		{"assistant_with_only_whitespace_content", []Message{
+			{Role: roleAssistant, Content: "   \n\t"},
+		}, false},
+		{"tool_result_present", []Message{
+			{Role: roleTool, ToolCallID: "t1", Content: "result"},
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, HasSubstantiveMessages(c.in))
+		})
+	}
+}
+
 func TestCollapseSameToolErrorStreaks(t *testing.T) {
 	t.Parallel()
 

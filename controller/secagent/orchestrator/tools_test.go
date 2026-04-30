@@ -363,7 +363,7 @@ func TestDecisionToolDefs(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
 		dq.BeginPerWorkerDecision(2)
-		dw := findTool(DecisionToolDefs(dq, noTaken), "decide_worker")
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
 		require.NotNil(t, dw)
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 2, "action": "continue", "instruction": "keep going",
@@ -379,18 +379,28 @@ func TestDecisionToolDefs(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
 		dq.BeginPerWorkerDecision(5)
-		dw := findTool(DecisionToolDefs(dq, noTaken), "decide_worker")
+		log, path := newTestLogger(t)
+		dw := findTool(DecisionToolDefs(dq, noTaken, log), "decide_worker")
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 7, "action": "continue", "instruction": "x",
 		}))
-		assert.True(t, res.IsError)
-		assert.Contains(t, res.Text, "asked about worker 5")
+		require.True(t, res.IsError)
+		assert.Contains(t, res.Text, "Rejected: this prompt asked about worker 5")
+		assert.Contains(t, res.Text, "worker_id=7")
+		assert.Contains(t, res.Text, "Re-issue with worker_id=5")
+		assert.Empty(t, dq.WorkerDecisions)
+		require.NoError(t, log.Close())
+		content := mustReadFile(t, path)
+		assert.Contains(t, content, `"tag":"decision"`)
+		assert.Contains(t, content, `"msg":"worker-id-mismatch"`)
+		assert.Contains(t, content, `"asked":5`)
+		assert.Contains(t, content, `"received":7`)
 	})
 
 	t.Run("expand_requires_instruction", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		dw := findTool(DecisionToolDefs(dq, noTaken), "decide_worker")
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 1, "action": "expand", "instruction": "  ",
 		}))
@@ -401,7 +411,7 @@ func TestDecisionToolDefs(t *testing.T) {
 	t.Run("stop_requires_reason", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		dw := findTool(DecisionToolDefs(dq, noTaken), "decide_worker")
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 1, "action": "stop",
 		}))
@@ -413,7 +423,7 @@ func TestDecisionToolDefs(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
 		taken := func() map[int]bool { return map[int]bool{1: true, 2: true, 9: true} }
-		dw := findTool(DecisionToolDefs(dq, taken), "decide_worker")
+		dw := findTool(DecisionToolDefs(dq, taken, nil), "decide_worker")
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 1, "action": "expand", "instruction": "pivot",
 			"fork": map[string]any{"new_worker_id": 9, "instruction": "child"},
@@ -426,7 +436,7 @@ func TestDecisionToolDefs(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
 		taken := func() map[int]bool { return map[int]bool{1: true} }
-		dw := findTool(DecisionToolDefs(dq, taken), "decide_worker")
+		dw := findTool(DecisionToolDefs(dq, taken, nil), "decide_worker")
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 1, "action": "expand", "instruction": "pivot",
 			"fork": map[string]any{"new_worker_id": 5, "instruction": "child probes /admin"},
@@ -440,7 +450,7 @@ func TestDecisionToolDefs(t *testing.T) {
 	t.Run("fork_rejects_parent_id", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		dw := findTool(DecisionToolDefs(dq, noTaken), "decide_worker")
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 3, "action": "expand", "instruction": "pivot",
 			"fork": map[string]any{"new_worker_id": 3, "instruction": "child"},
@@ -450,7 +460,7 @@ func TestDecisionToolDefs(t *testing.T) {
 
 	t.Run("phase_mismatch_rejects", func(t *testing.T) {
 		dq := NewDecisionQueue()
-		dw := findTool(DecisionToolDefs(dq, noTaken), "decide_worker")
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 1, "action": "continue", "instruction": "x",
 		}))
@@ -460,7 +470,7 @@ func TestDecisionToolDefs(t *testing.T) {
 	t.Run("unknown_action_rejected", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)
-		dw := findTool(DecisionToolDefs(dq, noTaken), "decide_worker")
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
 		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
 			"worker_id": 1, "action": "destroy",
 		}))

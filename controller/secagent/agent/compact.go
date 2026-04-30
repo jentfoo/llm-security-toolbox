@@ -14,7 +14,14 @@ type CompactionOptions struct {
 	// drops turns down to a 2-turn window. When false, returns the overflow
 	// error (for tests and fail-closed callers).
 	HardTruncateOnOverflow bool
+	// RecoveryThreshold is the fraction of EffectiveMaxContext that one
+	// compaction step must free to skip later, more expensive ones. 0 falls
+	// back to defaultRecoveryThreshold.
+	RecoveryThreshold float64
 }
+
+// TODO: tune defaultRecoveryThreshold once OnCompact telemetry is available.
+const defaultRecoveryThreshold = 0.25
 
 // CompactionReport describes what Compact did in one pass.
 type CompactionReport struct {
@@ -25,19 +32,15 @@ type CompactionReport struct {
 	DroppedTurns     int
 	Truncated        int
 	ThinkStripped    int
-	RepairsProtected int // tool-result repair errors skipped in pass 2
-	CollapsedErrors  int // pass 0: redundant same-tool errors dropped
+	RepairsProtected int // tool-result repair errors skipped from stubbing
+	CollapsedErrors  int // redundant same-tool errors dropped
+	SelfPrunedCalls  int // tool calls dropped by the self-prune callback
+	DistilledResults int // tool results replaced with distilled prose
 }
 
 // StripAssistantThink removes inline `<think>...</think>` blocks from an
 // assistant message's Content. Returns true when Content changed.
-// Idempotent. Non-assistant messages are left untouched and return false.
-// ReasoningContent is intentionally not cleared: it is neither counted by
-// the token estimator nor sent on the wire (structuredHandler.Replay
-// blanks it on every send), so clearing it would not free any budget.
-//
-// Exposed so orchestrator-level chronicle and director-chat compaction can
-// share the in-place mutation logic that Compact uses internally.
+// Idempotent; non-assistant messages return false.
 func StripAssistantThink(m *Message) bool {
 	if m.Role != roleAssistant {
 		return false
@@ -51,20 +54,27 @@ func StripAssistantThink(m *Message) bool {
 	return true
 }
 
-// stubPrefix is the literal start-of-content marker used by StubToolResult
-// to detect "this message has already been stubbed" and short-circuit.
-// Without this, re-stubbing recomputes the byte count from the existing
-// stub bytes — non-idempotent across compaction passes.
-const stubPrefix = "(compacted: "
+// Markers identifying tool-result content already replaced by a
+// compaction step. New replacement formats must be added to IsCompactionStub.
+const (
+	stubPrefix    = "(compacted: "
+	DistillPrefix = "(distilled batch "
+)
 
-// StubToolResult replaces a tool-result message's content with a compact stub.
-// Idempotent. Skips repair-error messages (they carry schema guidance the
-// model needs). Returns true when m.Content changed.
+// IsCompactionStub reports whether content carries any known compaction marker.
+func IsCompactionStub(content string) bool {
+	return strings.HasPrefix(content, stubPrefix) ||
+		strings.HasPrefix(content, DistillPrefix)
+}
+
+// StubToolResult replaces a tool-result message's content with a compact
+// stub. Idempotent. Skips repair-error messages and content already in a
+// compaction format. Returns true when m.Content changed.
 func StubToolResult(m *Message) bool {
 	if m.Role != roleTool || m.IsRepairError {
 		return false
 	}
-	if strings.HasPrefix(m.Content, stubPrefix) {
+	if IsCompactionStub(m.Content) {
 		return false
 	}
 	approxTokens := EstimateStringTokens(m.Content)
@@ -80,9 +90,8 @@ func StubToolResult(m *Message) bool {
 	return true
 }
 
-// Compact shrinks history in place until tokens <= LowWatermark * max.
-// Returns the report and an error if still over HighWatermark at the end.
-func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
+// applyCompactionDefaults fills zero-value fields with the standard defaults.
+func applyCompactionDefaults(opt *CompactionOptions) {
 	if opt.HighWatermark <= 0 {
 		opt.HighWatermark = 0.80
 	}
@@ -92,50 +101,69 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 	if opt.KeepTurns <= 0 {
 		opt.KeepTurns = 4
 	}
+	if opt.RecoveryThreshold <= 0 {
+		opt.RecoveryThreshold = defaultRecoveryThreshold
+	}
+}
 
+// Compact shrinks history in place until tokens <= LowWatermark * max.
+// Returns the merged report and an error if still over HighWatermark at the end.
+func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
+	applyCompactionDefaults(&opt)
+	r0 := CompactErrorsOnly(h, opt)
+	r1, err := CompactRemainder(h, opt)
+	merged := mergeReports(r0, r1)
+	merged.Before = r0.Before
+	merged.After = r1.After
+	if r1.After == 0 {
+		merged.After = r0.After
+	}
+	return merged, err
+}
+
+// CompactErrorsOnly collapses consecutive same-tool error streaks in
+// place, leaving only the most recent error in each streak. Repair errors
+// are NOT protected here — only the freshest carries the up-to-date schema
+// hint the worker needs.
+func CompactErrorsOnly(h *History, opt CompactionOptions) CompactionReport {
+	applyCompactionDefaults(&opt)
 	before := h.EstimateTokens()
-	report := CompactionReport{Before: before}
-	// Use EffectiveMaxContext so adaptive shrinkage from a prior
-	// context-rejected error actually tightens the watermarks. When no
-	// rejection has happened yet this equals MaxContext.
+	report := CompactionReport{Before: before, After: before}
+	maxCtx := h.EffectiveMaxContext()
+	target := int(float64(maxCtx) * opt.LowWatermark)
+	if before <= target {
+		return report
+	}
+	msgs := h.Snapshot()
+	if collapsed, dropped := collapseSameToolErrorStreaks(msgs); dropped > 0 {
+		report.CollapsedErrors = dropped
+		report.PassesApplied = append(report.PassesApplied, "error-collapse")
+		h.ReplaceAll(collapsed)
+	}
+	report.After = h.EstimateTokens()
+	return report
+}
+
+// CompactRemainder runs the mechanical fallback steps (think-strip,
+// tool-stub, text-trunc, turn-drop, hard-truncate) in place. Returns an
+// error if the final estimate is still over HighWatermark.
+func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, error) {
+	applyCompactionDefaults(&opt)
+	before := h.EstimateTokens()
+	report := CompactionReport{Before: before, After: before}
 	maxCtx := h.EffectiveMaxContext()
 	target := int(float64(maxCtx) * opt.LowWatermark)
 	high := int(float64(maxCtx) * opt.HighWatermark)
-
 	if before <= target {
-		report.After = before
 		return report, nil
 	}
 
 	msgs := h.Snapshot()
 	keep := opt.KeepTurns
 
-	// Pass 0: collapse same-tool consecutive error streaks. When a worker
-	// retried the same tool and got back-to-back errors (e.g. repeated
-	// malformed-arg failures against the same endpoint), only the most
-	// recent error in each streak carries information — the earlier ones
-	// are pure redundancy. Drops the older tool-result errors and strips
-	// their matching ToolCall entries from the preceding assistant
-	// messages. Cheapest pure-noise reduction so it runs first; subsequent
-	// passes operate on a smaller working set. The repair-error guarantee
-	// (pass 2 skips IsRepairError) does NOT apply here — repeated repair
-	// failures from the same tool are exactly the streak we want to
-	// collapse, since only the last carries the freshest schema guidance.
-	if collapsed, dropped := collapseSameToolErrorStreaks(msgs); dropped > 0 {
-		msgs = collapsed
-		report.CollapsedErrors = dropped
-		report.PassesApplied = append(report.PassesApplied, "error-collapse")
-		h.ReplaceAll(msgs)
-		if h.EstimateTokens() <= target {
-			report.After = h.EstimateTokens()
-			return report, nil
-		}
-	}
-
-	// Pass 1: strip inline `<think>` blocks from oldest assistant messages
-	// outside the keep*2 trailing window. Early-break the moment the
-	// estimate drops to target so recent chain-of-thought continuity is
-	// preserved when only a small overflow needed to be reclaimed.
+	// Strip inline `<think>` blocks from oldest assistant messages outside
+	// the keep*2 trailing window, breaking early when the estimate drops to
+	// target so recent chain-of-thought continuity stays intact.
 	thinkCount := 0
 	for i := 0; i < len(msgs)-keep*2; i++ {
 		if !StripAssistantThink(&msgs[i]) {
@@ -156,9 +184,8 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		return report, nil
 	}
 
-	// Pass 2: replace oldest tool results with stubs. Skip repair-error
-	// messages — they're small but carry the schema guidance the worker needs
-	// to stop repeating a malformed call.
+	// Replace oldest tool results with stubs. Repair errors are skipped —
+	// they carry schema guidance the worker needs.
 	stubbed := 0
 	repairsProtected := 0
 	for i := 0; i < len(msgs)-keep*2; i++ {
@@ -187,7 +214,7 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		return report, nil
 	}
 
-	// Pass 3: truncate older assistant content to first sentence.
+	// Truncate older assistant content to its first sentence.
 	truncCount := 0
 	for i := 0; i < len(msgs)-keep*2; i++ {
 		if msgs[i].Role != roleAssistant {
@@ -221,7 +248,7 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		return report, nil
 	}
 
-	// Pass 4: drop oldest full turn triples until under target or nothing left.
+	// Drop oldest full turn triples until under target or nothing left.
 	droppedTurns := 0
 	for h.EstimateTokens() > target {
 		newMsgs, dropped := dropOldestTurn(msgs, keep)
@@ -237,11 +264,10 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		report.DroppedTurns = droppedTurns
 	}
 
-	// Pass 5 (hard truncate): a single worker with one very large tool
-	// result can leave the history over HighWatermark even after pass 4,
-	// because pass 4 preserves keep*2 trailing messages. Shrink the keep
-	// window to the minimum (2 turns) and drop more. Still preserves
-	// tool-call/tool-result pairing via dropOldestTurn.
+	// Hard truncate: a single very large tool result can leave history
+	// over HighWatermark even after the turn-drop step preserved the
+	// keep*2 trailing window. Shrink the keep window to 2 and drop more,
+	// still preserving tool-call/tool-result pairing.
 	if opt.HardTruncateOnOverflow && h.EstimateTokens() > high {
 		hardDropped := 0
 		for h.EstimateTokens() > high {
@@ -268,6 +294,23 @@ func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
 		)
 	}
 	return report, nil
+}
+
+// mergeReports concatenates PassesApplied and sums counters across two
+// reports. Before/After are caller-managed.
+func mergeReports(a, b CompactionReport) CompactionReport {
+	out := CompactionReport{
+		PassesApplied:    append(append([]string{}, a.PassesApplied...), b.PassesApplied...),
+		StubbedResults:   a.StubbedResults + b.StubbedResults,
+		DroppedTurns:     a.DroppedTurns + b.DroppedTurns,
+		Truncated:        a.Truncated + b.Truncated,
+		ThinkStripped:    a.ThinkStripped + b.ThinkStripped,
+		RepairsProtected: a.RepairsProtected + b.RepairsProtected,
+		CollapsedErrors:  a.CollapsedErrors + b.CollapsedErrors,
+		SelfPrunedCalls:  a.SelfPrunedCalls + b.SelfPrunedCalls,
+		DistilledResults: a.DistilledResults + b.DistilledResults,
+	}
+	return out
 }
 
 // ForceHardTruncate unconditionally drops oldest turns from the history,

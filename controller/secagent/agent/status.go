@@ -74,7 +74,13 @@ func summarizeStatusVia(ctx context.Context, a *OpenAIAgent, client ChatClient, 
 	// as <think>...</think> so the summary model sees one consistent shape
 	// regardless of which format the underlying agent used.
 	normalized := a.cfg.Reasoning.ForSummary(a.history.Snapshot())
-	msgs := buildStatusMessages(normalized, statusTokenBudget, a.cfg.KeepThinkTurns)
+	// Strip tool-error noise; if nothing remains worth summarizing, skip
+	// the LLM call entirely rather than spend tokens on system+user only.
+	filtered := FilterErrorMessages(normalized)
+	if !HasSubstantiveMessages(filtered) {
+		return "", "", nil
+	}
+	msgs := buildStatusMessages(filtered, statusTokenBudget, a.cfg.KeepThinkTurns)
 	msgs = append(msgs, ChatMessage{Role: "user", Content: statusSummaryRequest})
 
 	resp, err := client.CreateChatCompletion(ctx, ChatRequest{

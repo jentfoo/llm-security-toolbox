@@ -138,7 +138,7 @@ func TestNarrator(t *testing.T) {
 		}, l)
 		require.NotNil(t, n)
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
@@ -147,6 +147,38 @@ func TestNarrator(t *testing.T) {
 		assert.Equal(t, int32(1), atomic.LoadInt32(&client.calls))
 		assert.Contains(t, buf.String(), "orchestrator: worker is scanning endpoints")
 		assert.Contains(t, mustReadFile(t, path), `"msg":"orchestrator: worker is scanning endpoints"`)
+	})
+
+	t.Run("skips_below_min_events", func(t *testing.T) {
+		client := &scriptedClient{response: "should not fire"}
+		l, _, buf := newCapturedLogger(t)
+		n := NewNarrator(NarratorConfig{
+			Interval:   time.Millisecond,
+			Model:      "m",
+			Pool:       poolOf(client),
+			CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+
+		recordSubstantiveEvents(n, narratorMinEvents-1)
+		n.TriggerNow()
+		// TriggerNow short-circuits synchronously when below threshold —
+		// no goroutine spawned, so the buf inspection is race-free.
+		n.mu.Lock()
+		bufLen := len(n.buf)
+		n.mu.Unlock()
+		assert.Equal(t, narratorMinEvents-1, bufLen)
+		assert.Equal(t, int32(0), atomic.LoadInt32(&client.calls))
+
+		// Crossing the threshold fires and carries the prior events with it.
+		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 4})
+		n.TriggerNow()
+		waitForCalls(t, &client.calls, 1)
+		n.Close()
+		_ = l.Close()
+
+		assert.Equal(t, int32(1), atomic.LoadInt32(&client.calls))
+		assert.Contains(t, buf.String(), "orchestrator: should not fire")
 	})
 
 	t.Run("coalesces_concurrent_fires", func(t *testing.T) {
@@ -158,13 +190,13 @@ func TestNarrator(t *testing.T) {
 		}, l)
 		require.NotNil(t, n)
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow() // firing #1 blocks on gate
 		require.Eventually(t, func() bool {
 			return atomic.LoadInt32(&client.calls) == 1
 		}, time.Second, time.Millisecond)
 
-		n.Record("finding", "written", map[string]any{"title": "x"})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		n.TriggerNow()
 		n.TriggerNow()
@@ -189,7 +221,7 @@ func TestNarrator(t *testing.T) {
 		}, l)
 		require.NotNil(t, n)
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
@@ -231,7 +263,7 @@ func TestNarrator(t *testing.T) {
 		}, l)
 		require.NotNil(t, n)
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		require.Eventually(t, func() bool {
 			return atomic.LoadInt32(&client.calls) >= 1
@@ -257,7 +289,7 @@ func TestNarrator(t *testing.T) {
 		}, l)
 		require.NotNil(t, n)
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.Tick() // inside interval, must NOT fire
 		assert.Equal(t, int32(0), atomic.LoadInt32(&client.calls))
 
@@ -311,7 +343,7 @@ func TestNarrator(t *testing.T) {
 		}, l)
 		require.NotNil(t, n)
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
@@ -337,7 +369,7 @@ func TestNarratorContent(t *testing.T) {
 		}, l)
 		require.NotNil(t, n)
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
@@ -357,7 +389,7 @@ func TestNarratorContent(t *testing.T) {
 		}, l)
 		require.NotNil(t, n)
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
@@ -429,7 +461,7 @@ func TestNarratorContent(t *testing.T) {
 				}, l)
 				require.NotNil(t, n)
 
-				n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+				recordSubstantiveEvents(n, narratorMinEvents)
 				n.TriggerNow()
 				waitForCalls(t, calls, 1)
 				n.Close()
@@ -450,15 +482,15 @@ func TestNarratorContent(t *testing.T) {
 func TestNarratorAgentDispatch(t *testing.T) {
 	t.Parallel()
 
-	t.Run("fires_per_active_agent", func(t *testing.T) {
+	t.Run("fires_per_active_agent_with_substantive_history", func(t *testing.T) {
 		client := &scriptedClient{response: "current focus"}
 		l, path, buf := newCapturedLogger(t)
 
 		pool := agent.NewClientPoolWithClients([]agent.ChatClient{client})
 		a1 := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool, SystemPrompt: "sys"})
-		a1.Query("worker-1 assignment")
 		a2 := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool, SystemPrompt: "sys"})
-		a2.Query("worker-2 assignment")
+		appendAssistantMessage(a1, "probing /admin endpoints")
+		appendAssistantMessage(a2, "checking auth headers")
 
 		n := NewNarrator(NarratorConfig{
 			Interval:   time.Millisecond,
@@ -472,15 +504,14 @@ func TestNarratorAgentDispatch(t *testing.T) {
 			{Name: "worker-2", Agent: a2},
 		})
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		waitForCalls(t, &client.calls, 3)
 		n.Close()
 		_ = l.Close()
 
-		assert.Equal(t, int32(3), atomic.LoadInt32(&client.calls), "orchestrator + 2 agent calls")
-		assert.Equal(t, int32(1), atomic.LoadInt32(&client.peak),
-			"fireMu + sequential dispatch must serialize — peak concurrent summary calls must not exceed 1")
+		assert.Equal(t, int32(3), atomic.LoadInt32(&client.calls))
+		assert.Equal(t, int32(1), atomic.LoadInt32(&client.peak))
 
 		content := buf.String()
 		assert.Contains(t, content, "orchestrator: current focus")
@@ -491,8 +522,36 @@ func TestNarratorAgentDispatch(t *testing.T) {
 		assert.Contains(t, jsonLog, `"msg":"worker-1:`)
 		assert.Contains(t, jsonLog, `"msg":"worker-2:`)
 		assert.Contains(t, jsonLog, `"context_usage":`)
-		assert.NotContains(t, jsonLog, `"role":`)
-		assert.NotContains(t, jsonLog, `"agent":`)
+	})
+
+	t.Run("skips_agent_with_empty_history", func(t *testing.T) {
+		client := &scriptedClient{response: "did stuff"}
+		l, _, buf := newCapturedLogger(t)
+
+		pool := agent.NewClientPoolWithClients([]agent.ChatClient{client})
+		a1 := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool, SystemPrompt: "sys"})
+		a2 := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool, SystemPrompt: "sys"})
+		appendAssistantMessage(a1, "investigating cookie scope")
+
+		n := NewNarrator(NarratorConfig{
+			Interval: time.Millisecond, Model: "m", Pool: pool, CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+		n.SetActiveAgents([]NamedAgent{
+			{Name: "worker-1", Agent: a1},
+			{Name: "worker-2", Agent: a2},
+		})
+
+		recordSubstantiveEvents(n, narratorMinEvents)
+		n.TriggerNow()
+		waitForCalls(t, &client.calls, 2)
+		n.Close()
+		_ = l.Close()
+
+		assert.Equal(t, int32(2), atomic.LoadInt32(&client.calls))
+		content := buf.String()
+		assert.Contains(t, content, "worker-1:")
+		assert.NotContains(t, content, "worker-2:")
 	})
 
 	t.Run("per_agent_uses_log_model", func(t *testing.T) {
@@ -505,6 +564,7 @@ func TestNarratorAgentDispatch(t *testing.T) {
 			Pool:  agentPool,
 		})
 		worker.Query("worker assignment")
+		appendAssistantMessage(worker, "starting reconnaissance")
 
 		n := NewNarrator(NarratorConfig{
 			Interval:   time.Millisecond,
@@ -515,7 +575,7 @@ func TestNarratorAgentDispatch(t *testing.T) {
 		require.NotNil(t, n)
 		n.SetActiveAgents([]NamedAgent{{Name: "worker-1", Agent: worker}})
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		waitForCalls(t, &client.calls, 2)
 		n.Close()
@@ -523,7 +583,7 @@ func TestNarratorAgentDispatch(t *testing.T) {
 
 		client.mu.Lock()
 		defer client.mu.Unlock()
-		require.Len(t, client.requests, 2, "orchestrator event summary + 1 per-agent summary")
+		require.Len(t, client.requests, 2)
 		perAgentReq := client.requests[1]
 		assert.Equal(t, "log-model", perAgentReq.Model)
 		assert.Equal(t, "none", perAgentReq.ReasoningEffort)
@@ -538,15 +598,177 @@ func TestNarratorAgentDispatch(t *testing.T) {
 		require.NotNil(t, n)
 		// No SetActiveAgents call.
 
-		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
+		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
 
-		assert.Equal(t, int32(1), atomic.LoadInt32(&client.calls), "no active agents → orchestrator-only")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&client.calls))
 		assert.Contains(t, buf.String(), "orchestrator: only orchestrator")
 	})
+}
+
+func TestBuildAgentNarrationPrompt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("includes_prior_summaries_and_transcript", func(t *testing.T) {
+		out := buildAgentNarrationPrompt(
+			[]string{"first prior", "older prior"},
+			"[0] ASSISTANT: probing /admin\n",
+			false,
+		)
+		assert.Contains(t, out, "Prior summaries")
+		assert.Contains(t, out, "1. first prior")
+		assert.Contains(t, out, "2. older prior")
+		assert.Contains(t, out, "Activity since the last summary:")
+		assert.Contains(t, out, "ASSISTANT: probing /admin")
+		assert.NotContains(t, out, "(earlier activity omitted)")
+	})
+
+	t.Run("omits_prior_section_when_empty", func(t *testing.T) {
+		out := buildAgentNarrationPrompt(nil, "[0] ASSISTANT: hi\n", false)
+		assert.NotContains(t, out, "Prior summaries")
+		assert.Contains(t, out, "Activity since the last summary:")
+	})
+
+	t.Run("flags_truncated_window", func(t *testing.T) {
+		out := buildAgentNarrationPrompt(nil, "[0] ASSISTANT: hi\n", true)
+		assert.Contains(t, out, "(earlier activity omitted)")
+	})
+}
+
+func TestNarratorAgentNarrationFlow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("includes_agent_history_in_prompt", func(t *testing.T) {
+		client := &scriptedClient{response: "ok"}
+		l, _, _ := newCapturedLogger(t)
+		pool := agent.NewClientPoolWithClients([]agent.ChatClient{client})
+		a := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool})
+		appendAssistantMessage(a, "investigating /admin endpoints")
+
+		n := NewNarrator(NarratorConfig{
+			Interval: time.Millisecond, Model: "m", Pool: pool, CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+		n.SetActiveAgents([]NamedAgent{{Name: "worker-1", Agent: a}})
+
+		recordSubstantiveEvents(n, narratorMinEvents)
+		n.TriggerNow()
+		waitForCalls(t, &client.calls, 2)
+		n.Close()
+		_ = l.Close()
+
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		require.Len(t, client.requests, 2)
+		perAgent := client.requests[1].Messages[1].Content
+		assert.Contains(t, perAgent, "Activity since the last summary:")
+		assert.Contains(t, perAgent, "investigating /admin endpoints")
+	})
+
+	t.Run("second_call_includes_first_summary_and_only_new_activity", func(t *testing.T) {
+		client := &scriptedClient{response: "first summary line"}
+		l, _, _ := newCapturedLogger(t)
+		pool := agent.NewClientPoolWithClients([]agent.ChatClient{client})
+		a := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool})
+		appendAssistantMessage(a, "earlier work")
+
+		n := NewNarrator(NarratorConfig{
+			Interval: time.Millisecond, Model: "m", Pool: pool, CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+		n.SetActiveAgents([]NamedAgent{{Name: "worker-1", Agent: a}})
+
+		recordSubstantiveEvents(n, narratorMinEvents)
+		n.TriggerNow()
+		waitForCalls(t, &client.calls, 2)
+
+		appendAssistantMessage(a, "newer probe of /api/v2")
+		recordSubstantiveEvents(n, narratorMinEvents)
+		n.TriggerNow()
+		waitForCalls(t, &client.calls, 4)
+		n.Close()
+		_ = l.Close()
+
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		require.GreaterOrEqual(t, len(client.requests), 4)
+		secondPerAgent := client.requests[3].Messages[1].Content
+		assert.Contains(t, secondPerAgent, "Prior summaries")
+		assert.Contains(t, secondPerAgent, "first summary line")
+		assert.Contains(t, secondPerAgent, "newer probe of /api/v2")
+		assert.NotContains(t, secondPerAgent, "earlier work")
+	})
+
+	t.Run("caps_prior_summaries_at_two", func(t *testing.T) {
+		client := &sequentialClient{responses: []string{
+			"orch one", "agent one", "orch two", "agent two",
+			"orch three", "agent three", "orch four", "agent four",
+		}}
+		l, _, _ := newCapturedLogger(t)
+		pool := agent.NewClientPoolWithClients([]agent.ChatClient{client})
+		a := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool})
+		n := NewNarrator(NarratorConfig{
+			Interval: time.Millisecond, Model: "m", Pool: pool, CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+		n.SetActiveAgents([]NamedAgent{{Name: "worker-1", Agent: a}})
+
+		for i := 0; i < 4; i++ {
+			appendAssistantMessage(a, "probe round")
+			recordSubstantiveEvents(n, narratorMinEvents)
+			n.TriggerNow()
+			waitForCalls(t, &client.calls, int32((i+1)*2))
+		}
+		n.Close()
+		_ = l.Close()
+
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		require.Len(t, client.requests, 8)
+		fourthPerAgent := client.requests[7].Messages[1].Content
+		assert.Contains(t, fourthPerAgent, "1. agent three")
+		assert.Contains(t, fourthPerAgent, "2. agent two")
+		assert.NotContains(t, fourthPerAgent, "agent one")
+	})
+}
+
+// appendAssistantMessage adds a substantive assistant message to a's
+// history so the narrator's HasSubstantiveMessages gate passes.
+func appendAssistantMessage(a *agent.OpenAIAgent, content string) {
+	a.History().Append(agent.Message{Role: "assistant", Content: content})
+}
+
+// recordSubstantiveEvents buffers count "worker turn" events so the
+// narrator's min-event gate passes and a TriggerNow/Tick will fire.
+func recordSubstantiveEvents(n *Narrator, count int) {
+	for i := 0; i < count; i++ {
+		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": i + 1})
+	}
+}
+
+// sequentialClient returns a different scripted response on each call so
+// tests can assert how a chain of summaries threads forward into prior
+// context. Mirrors scriptedClient's tracking fields.
+type sequentialClient struct {
+	mu        sync.Mutex
+	calls     int32
+	responses []string
+	requests  []agent.ChatRequest
+}
+
+func (c *sequentialClient) CreateChatCompletion(_ context.Context, req agent.ChatRequest) (agent.ChatResponse, error) {
+	idx := atomic.AddInt32(&c.calls, 1) - 1
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requests = append(c.requests, req)
+	resp := ""
+	if int(idx) < len(c.responses) {
+		resp = c.responses[idx]
+	}
+	return agent.ChatResponse{Content: resp}, nil
 }
 
 func TestFormatContextPercent(t *testing.T) {

@@ -47,6 +47,27 @@ func FilterErrorMessages(msgs []Message) []Message {
 	return out
 }
 
+// HasSubstantiveMessages reports whether msgs contains anything worth
+// summarizing: an assistant message with text or tool_calls, or any
+// tool-result message. A slice of only system+user (or empty) is not
+// substantive — there is nothing for a summarizer to recap.
+//
+// Pair with FilterErrorMessages: filter the noise first, then check
+// whether anything remains, and skip the LLM call if not.
+func HasSubstantiveMessages(msgs []Message) bool {
+	for _, m := range msgs {
+		switch m.Role {
+		case roleAssistant:
+			if strings.TrimSpace(m.Content) != "" || len(m.ToolCalls) > 0 {
+				return true
+			}
+		case roleTool:
+			return true
+		}
+	}
+	return false
+}
+
 func isErrorToolResult(m Message) bool {
 	if m.Role != roleTool {
 		return false

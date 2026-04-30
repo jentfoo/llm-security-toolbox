@@ -72,7 +72,10 @@ func TestSummarizeCompletedWorker(t *testing.T) {
 		client := &scriptedClient{err: errors.New("downstream timeout")}
 		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
 		_, err := s.SummarizeCompletedWorker(t.Context(),
-			[]agent.Message{{Role: "user", Content: "x"}}, "mission", "reason", 1)
+			[]agent.Message{
+				{Role: "user", Content: "x"},
+				{Role: "assistant", Content: "did work"},
+			}, "mission", "reason", 1)
 		require.Error(t, err)
 	})
 
@@ -80,5 +83,26 @@ func TestSummarizeCompletedWorker(t *testing.T) {
 		s := &Summarizer{Pool: poolOf(&scriptedClient{}), Model: "m", Timeout: time.Second}
 		_, err := s.SummarizeCompletedWorker(t.Context(), nil, "mission", "reason", 1)
 		require.Error(t, err)
+	})
+
+	t.Run("skips_noise_only_transcript", func(t *testing.T) {
+		// A chronicle whose only assistant turn called a tool that errored,
+		// after FilterErrorMessages, has no substance left. Verify we
+		// short-circuit (nil error, empty summary, no LLM call).
+		client := &scriptedClient{response: "should not be called"}
+		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		out, err := s.SummarizeCompletedWorker(t.Context(),
+			[]agent.Message{
+				{Role: "user", Content: "do thing"},
+				{Role: "assistant", ToolCalls: []agent.ToolCall{
+					{ID: "t1", Function: agent.ToolFunction{Name: "x"}},
+				}},
+				{Role: "tool", ToolCallID: "t1", Content: "ERROR: nope"},
+			},
+			"mission", "reason", 1,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, out)
+		assert.Empty(t, client.requests)
 	})
 }

@@ -399,13 +399,17 @@ type TakenIDsFunc func() map[int]bool
 
 // DecisionToolDefs builds the per-worker decision tool set. The director
 // gets ONLY decide_worker during the per-worker decision loop; one tool
-// call per call, expected exactly once. The handler validates that the
-// worker_id matches the worker the prompt asked about (rejecting clearly
-// when it doesn't, so the model can retry).
+// call per call, expected exactly once. The handler rejects a worker_id
+// mismatch with retry guidance — silently rewriting the ID risks
+// applying the model's action/instruction/reason text to the wrong
+// worker when the mismatch reflects genuine model confusion rather than
+// a typo.
 //
 // takenIDs (optional, may be nil) is used to validate fork.new_worker_id
-// against alive ∪ completed worker IDs.
-func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc) []agent.ToolDef {
+// against alive ∪ completed worker IDs. log (optional, may be nil)
+// receives a structured worker-id-mismatch event on the reject path so
+// operators can see how often the model misroutes.
+func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logger) []agent.ToolDef {
 	reject := func(name string) agent.ToolResult {
 		cur := decisions.Phase()
 		return agent.ToolResult{
@@ -467,6 +471,12 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc) []agent.T
 				}
 				asked := decisions.AskedWorkerID()
 				if asked > 0 && in.WorkerID != asked {
+					if log != nil {
+						log.Log(tagDecision, "worker-id-mismatch", map[string]any{
+							"asked":    asked,
+							"received": in.WorkerID,
+						})
+					}
 					return agent.ToolResult{
 						Text: fmt.Sprintf(
 							"Rejected: this prompt asked about worker %d but decide_worker received worker_id=%d. Re-issue with worker_id=%d.",

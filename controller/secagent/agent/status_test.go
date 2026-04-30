@@ -17,6 +17,7 @@ func TestSummarizeStatus_StripsThinkAndReturnsFirstLine(t *testing.T) {
 	}}
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
 	a.Query("earlier user turn")
+	a.history.Append(Message{Role: roleAssistant, Content: "did some recon"})
 	before := a.history.Len()
 
 	line, err := SummarizeStatus(t.Context(), a, 40)
@@ -37,6 +38,8 @@ func TestSummarizeStatus_ErrorPropagates(t *testing.T) {
 		errors:    []error{errors.New("boom")},
 	}
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+	a.Query("user")
+	a.history.Append(Message{Role: roleAssistant, Content: "did work"})
 	_, err := SummarizeStatus(t.Context(), a, 0)
 	require.Error(t, err)
 }
@@ -65,6 +68,8 @@ func TestSummarizeStatus_ViaBypassesAgentPool(t *testing.T) {
 
 	override := &fakeChatClient{responses: []ChatResponse{{Content: "summary via override"}}}
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "agent-model", Pool: pool})
+	a.Query("user turn")
+	a.history.Append(Message{Role: roleAssistant, Content: "did some work"})
 	// Empty model param → fall back to the agent's own model.
 	line, tail, err := SummarizeStatusVia(t.Context(), a, override, "", 0)
 	require.NoError(t, err)
@@ -81,6 +86,8 @@ func TestSummarizeStatus_ViaModelOverride(t *testing.T) {
 	t.Parallel()
 	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "worker-model-abliterated", Pool: newPoolWith(client)})
+	a.Query("user")
+	a.history.Append(Message{Role: roleAssistant, Content: "did work"})
 	_, _, err := SummarizeStatusVia(t.Context(), a, client, "summary-model", 0)
 	require.NoError(t, err)
 	require.Len(t, client.calls, 1)
@@ -94,6 +101,8 @@ func TestSummarizeStatus_ViaReturnsThinkTailOnTruncatedResponse(t *testing.T) {
 		Content: "<think>I was planning to test the OAuth redirect next",
 	}}}
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+	a.Query("user")
+	a.history.Append(Message{Role: roleAssistant, Content: "did some work"})
 	line, tail, err := SummarizeStatusVia(t.Context(), a, nil, "", 0)
 	require.NoError(t, err)
 	assert.Empty(t, line)
@@ -106,11 +115,25 @@ func TestSummarizeStatus_RequestOmitsTools(t *testing.T) {
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
 	a.SetTools([]ToolDef{{Name: "pretend", Description: "x", Schema: map[string]any{"type": "object"}}})
 	a.Query("user turn")
+	a.history.Append(Message{Role: roleAssistant, Content: "did work"})
 
 	_, err := SummarizeStatus(t.Context(), a, 0)
 	require.NoError(t, err)
 	require.Len(t, client.calls, 1)
 	assert.Empty(t, client.calls[0].Tools, "status request must not pass tools to the model")
+}
+
+func TestSummarizeStatus_SkipsWhenNoSubstance(t *testing.T) {
+	t.Parallel()
+	// Filtered transcript collapses to system+user only — no LLM call.
+	client := &fakeChatClient{responses: []ChatResponse{{Content: "should not be called"}}}
+	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client), SystemPrompt: "sys"})
+	a.Query("user turn")
+
+	line, err := SummarizeStatus(t.Context(), a, 0)
+	require.NoError(t, err)
+	assert.Empty(t, line)
+	assert.Empty(t, client.calls)
 }
 
 func TestBuildStatusMessages_DropsToolResultsAndKeepsThink(t *testing.T) {

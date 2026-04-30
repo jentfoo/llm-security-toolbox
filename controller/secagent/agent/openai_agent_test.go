@@ -112,6 +112,77 @@ func TestOpenAIAgent_ToolDispatchLoop(t *testing.T) {
 	assert.True(t, sawTool)
 }
 
+func TestOpenAIAgent_FuzzyToolNameFallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("collapses_underscores_to_resolve_match", func(t *testing.T) {
+		client := &fakeChatClient{
+			responses: []ChatResponse{
+				{ToolCalls: []ToolCall{{
+					ID: "c1", Type: "function",
+					Function: ToolFunction{Name: "mcp_sectool__proxy_poll", Arguments: `{}`},
+				}}},
+				{Content: "done"},
+			},
+		}
+		var fuzzyReceived, fuzzyResolved string
+		var handlerCalls int
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", Pool: newPoolWith(client),
+			OnFuzzyToolMatch: func(received, resolved string) {
+				fuzzyReceived, fuzzyResolved = received, resolved
+			},
+		})
+		a.SetTools([]ToolDef{{
+			Name:   "mcp__sectool__proxy_poll",
+			Schema: map[string]any{"type": "object"},
+			Handler: func(_ context.Context, _ json.RawMessage) ToolResult {
+				handlerCalls++
+				return ToolResult{Text: "ok"}
+			},
+		}})
+		a.Query("go")
+		sum, err := a.Drain(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 1, handlerCalls)
+		require.Len(t, sum.ToolCalls, 1)
+		assert.False(t, sum.ToolCalls[0].IsError)
+		assert.Equal(t, "mcp_sectool__proxy_poll", fuzzyReceived)
+		assert.Equal(t, "mcp__sectool__proxy_poll", fuzzyResolved)
+	})
+
+	t.Run("unknown_with_no_canonical_still_errors", func(t *testing.T) {
+		client := &fakeChatClient{
+			responses: []ChatResponse{
+				{ToolCalls: []ToolCall{{
+					ID: "c1", Type: "function",
+					Function: ToolFunction{Name: "totally_unrelated", Arguments: `{}`},
+				}}},
+				{Content: "done"},
+			},
+		}
+		var fuzzyFired bool
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", Pool: newPoolWith(client),
+			OnFuzzyToolMatch: func(_, _ string) { fuzzyFired = true },
+		})
+		a.SetTools([]ToolDef{{
+			Name:   "echo",
+			Schema: map[string]any{"type": "object"},
+			Handler: func(_ context.Context, _ json.RawMessage) ToolResult {
+				return ToolResult{Text: "ok"}
+			},
+		}})
+		a.Query("go")
+		sum, err := a.Drain(t.Context())
+		require.NoError(t, err)
+		require.Len(t, sum.ToolCalls, 1)
+		assert.True(t, sum.ToolCalls[0].IsError)
+		assert.Contains(t, sum.ToolCalls[0].ResultSummary, "unknown tool")
+		assert.False(t, fuzzyFired)
+	})
+}
+
 func TestOpenAIAgent_MalformedArgsReportsSchemaAndCapsRepairs(t *testing.T) {
 	t.Parallel()
 	bad := []ToolCall{
@@ -865,6 +936,74 @@ func TestOpenAIAgent_EffectiveContextUsage(t *testing.T) {
 	assert.Equal(t, 4096, max, "effective max should track shrink")
 }
 
+func TestOpenAIAgent_LastHistoryID(t *testing.T) {
+	t.Parallel()
+	t.Run("system_only_returns_zero", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool: newPoolWith(&fakeChatClient{}),
+		})
+		assert.Equal(t, uint64(0), a.LastHistoryID())
+	})
+	t.Run("returns_tail_id_after_query", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool: newPoolWith(&fakeChatClient{}),
+		})
+		a.Query("hi")
+		id := a.LastHistoryID()
+		require.NotEqual(t, uint64(0), id)
+		assert.Equal(t, a.Snapshot()[1].HistoryID, id)
+	})
+}
+
+func TestOpenAIAgent_SnapshotSinceID(t *testing.T) {
+	t.Parallel()
+	t.Run("zero_returns_post_system", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool: newPoolWith(&fakeChatClient{}),
+		})
+		a.Query("hello")
+		a.History().Append(Message{Role: "assistant", Content: "world"})
+		got := a.SnapshotSinceID(0)
+		require.Len(t, got, 2)
+		assert.Equal(t, "user", got[0].Role)
+		assert.Equal(t, "assistant", got[1].Role)
+	})
+	t.Run("cursor_returns_only_after", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool: newPoolWith(&fakeChatClient{}),
+		})
+		a.Query("first")
+		firstID := a.LastHistoryID()
+		a.History().Append(Message{Role: "assistant", Content: "second"})
+		a.History().Append(Message{Role: "assistant", Content: "third"})
+		got := a.SnapshotSinceID(firstID)
+		require.Len(t, got, 2)
+		assert.Equal(t, "second", got[0].Content)
+		assert.Equal(t, "third", got[1].Content)
+	})
+	t.Run("compacted_cursor_returns_all_post_system", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool: newPoolWith(&fakeChatClient{}),
+		})
+		a.Query("kept")
+		got := a.SnapshotSinceID(99999)
+		require.Len(t, got, 1)
+		assert.Equal(t, "kept", got[0].Content)
+	})
+	t.Run("system_only_returns_nil", func(t *testing.T) {
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool: newPoolWith(&fakeChatClient{}),
+		})
+		assert.Nil(t, a.SnapshotSinceID(0))
+	})
+}
+
 func TestOpenAIAgent_MarkIterationBoundary(t *testing.T) {
 	t.Parallel()
 	a := NewOpenAIAgent(OpenAIAgentConfig{
@@ -948,6 +1087,188 @@ func TestOpenAIAgent_MaybeCompactBoundaryCallbackOncePerIter(t *testing.T) {
 	require.NoError(t, a.maybeCompact(t.Context()))
 	assert.Equal(t, 1, summarizeCalls,
 		"boundary callback must fire at most once per iteration")
+}
+
+func TestOpenAIAgent_MaybeCompactTieredFlow(t *testing.T) {
+	t.Parallel()
+
+	// buildBigHistory seeds history past the 80% high watermark so
+	// maybeCompact engages. No same-tool error streaks unless requested,
+	// so pass 0 (error-collapse) is a no-op by default.
+	buildBigHistory := func(maxCtx int, withErrorStreak bool) *History {
+		h := NewHistory(maxCtx)
+		h.Append(Message{Role: "system", Content: "sys"})
+		big := strings.Repeat("y", 800)
+		if withErrorStreak {
+			calls := []ToolCall{
+				{ID: "e1", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
+				{ID: "e2", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
+				{ID: "e3", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
+				{ID: "e4", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
+			}
+			h.Append(Message{Role: roleAssistant, Content: "fan out", ToolCalls: calls})
+			for i, id := range []string{"e1", "e2", "e3", "e4"} {
+				_ = i
+				h.Append(Message{
+					Role:       roleTool,
+					ToolCallID: id,
+					ToolName:   "flaky",
+					Content:    "ERROR: same failure " + strings.Repeat("z", 600),
+				})
+			}
+		}
+		for i := 0; i < 4; i++ {
+			h.Append(Message{
+				Role: roleAssistant, Content: big,
+				ToolCalls: []ToolCall{{ID: "t" + strconv.Itoa(i), Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: roleTool, ToolCallID: "t" + strconv.Itoa(i), ToolName: "t",
+				Content: big, Summary120: "s",
+			})
+		}
+		return h
+	}
+
+	t.Run("pass_0_sufficient_skips_B_and_C", func(t *testing.T) {
+		var bCalls, cCalls int
+		// RecoveryThreshold tiny → pass 0 alone clears it on a history
+		// with a large error streak.
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+			MaxContext: 4096,
+			Compaction: CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				RecoveryThreshold:      0.01, // any drop above 41 tokens skips B
+				HardTruncateOnOverflow: true,
+			},
+			OnSelfPruneCandidates: func(_ context.Context, _ []Message) ([]string, error) {
+				bCalls++
+				return nil, nil
+			},
+			OnDistillResults: func(_ context.Context, _ []Message) ([]Message, error) {
+				cCalls++
+				return nil, nil
+			},
+		})
+		// Replace the auto-system-prompt with the seeded history that has
+		// the error streak.
+		a.history.ReplaceAll(buildBigHistory(4096, true).Snapshot())
+		require.NoError(t, a.maybeCompact(t.Context()))
+		assert.Equal(t, 0, bCalls, "Pass B must not fire when Pass 0 cleared the threshold")
+		assert.Equal(t, 0, cCalls, "Pass C must not fire when Pass 0 cleared the threshold")
+	})
+
+	t.Run("pass_0_insufficient_runs_B", func(t *testing.T) {
+		var bCalls, cCalls int
+		var bSnapshotLen int
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+			MaxContext: 4096,
+			Compaction: CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				// Threshold larger than what the absent error streak could
+				// possibly free → Pass 0 always falls short.
+				RecoveryThreshold:      0.99,
+				HardTruncateOnOverflow: true,
+			},
+			OnSelfPruneCandidates: func(_ context.Context, snap []Message) ([]string, error) {
+				bCalls++
+				bSnapshotLen = len(snap)
+				// Return drop set that frees significant space (drop tool ids).
+				return []string{"t0", "t1", "t2", "t3"}, nil
+			},
+			OnDistillResults: func(_ context.Context, _ []Message) ([]Message, error) {
+				cCalls++
+				return nil, nil
+			},
+		})
+		a.history.ReplaceAll(buildBigHistory(4096, false).Snapshot())
+		// maybeCompact may return an error if mechanical passes can't fully
+		// clear the watermark after B's drops; that's OK for this test —
+		// we only verify B fires when Pass 0 fell short of the threshold.
+		_ = a.maybeCompact(t.Context())
+		assert.Equal(t, 1, bCalls, "Pass B must fire when Pass 0 fell short")
+		assert.Positive(t, bSnapshotLen, "snapshot passed to B is non-empty")
+	})
+
+	t.Run("B_returns_empty_falls_through_to_C", func(t *testing.T) {
+		var bCalls, cCalls int
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+			MaxContext: 4096,
+			Compaction: CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				RecoveryThreshold:      0.99,
+				HardTruncateOnOverflow: true,
+			},
+			OnSelfPruneCandidates: func(_ context.Context, _ []Message) ([]string, error) {
+				bCalls++
+				return nil, nil // B has nothing to prune
+			},
+			OnDistillResults: func(_ context.Context, snap []Message) ([]Message, error) {
+				cCalls++
+				// Return the snapshot with first eligible tool result rewritten.
+				out := make([]Message, len(snap))
+				copy(out, snap)
+				for i := range out {
+					if out[i].Role == roleTool {
+						out[i].Content = "(distilled batch 1: brief summary)"
+						break
+					}
+				}
+				return out, nil
+			},
+		})
+		a.history.ReplaceAll(buildBigHistory(4096, false).Snapshot())
+		require.NoError(t, a.maybeCompact(t.Context()))
+		assert.Equal(t, 1, bCalls, "Pass B fires once even when it returns empty")
+		assert.Equal(t, 1, cCalls, "Pass C fires when B couldn't free anything")
+	})
+
+	t.Run("nil_callbacks_falls_through_to_mechanical", func(t *testing.T) {
+		// Without B/C wired, maybeCompact must reduce to its prior behaviour
+		// (mechanical passes only).
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+			MaxContext: 4096,
+			Compaction: CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				HardTruncateOnOverflow: true,
+			},
+		})
+		a.history.ReplaceAll(buildBigHistory(4096, false).Snapshot())
+		require.NoError(t, a.maybeCompact(t.Context()))
+		// Just verify the call returned cleanly — the existing mechanical
+		// passes do their job; behaviour is byte-for-byte equivalent to
+		// pre-change Compact().
+	})
+
+	t.Run("B_callback_error_falls_through", func(t *testing.T) {
+		var summarizeErrs int
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
+			MaxContext: 4096,
+			Compaction: CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				RecoveryThreshold:      0.99,
+				HardTruncateOnOverflow: true,
+			},
+			OnSelfPruneCandidates: func(_ context.Context, _ []Message) ([]string, error) {
+				return nil, errors.New("boom")
+			},
+			OnSummarizeError: func(_ error) { summarizeErrs++ },
+		})
+		a.history.ReplaceAll(buildBigHistory(4096, false).Snapshot())
+		require.NoError(t, a.maybeCompact(t.Context()),
+			"B callback errors must not propagate; mechanical passes still run")
+		assert.Equal(t, 1, summarizeErrs, "OnSummarizeError logs the failure")
+	})
 }
 
 func TestOpenAIAgent_MaybeCompactFailOpenWhenCallbackErrors(t *testing.T) {

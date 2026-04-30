@@ -29,7 +29,7 @@ type Summarizer struct {
 
 const (
 	summarizeMaxTokens = 20000
-	summarizeTimeout   = 10 * time.Minute
+	summarizeTimeout   = 20 * time.Minute
 )
 
 // SummarizeReconMission converts a mission prompt into a recon-scoped goal,
@@ -82,6 +82,18 @@ func (s *Summarizer) SummarizeCompletedWorker(
 	// the worker LEARNED, not what it bumbled. Stripping them reclaims a
 	// large slice of context on noisy runs.
 	transcript = agent.FilterErrorMessages(transcript)
+	if !agent.HasSubstantiveMessages(transcript) {
+		// Filtered transcript is system/user only — nothing happened
+		// worth summarizing. Skip the LLM call rather than spend budget
+		// recapping noise. retire.go's empty-summary path keeps raw
+		// worker activity in dirChat as the existing fall-through.
+		if s.Log != nil {
+			s.Log.Log("summarize", "completed-worker skip-noise-only", map[string]any{
+				"worker_id": workerID,
+			})
+		}
+		return "", nil
+	}
 	user := buildCompletedWorkerPrompt(transcript, mission, reason, workerID)
 	out, err := s.oneShot(ctx, completedWorkerSystemPrompt, user)
 	if err != nil {
@@ -113,10 +125,13 @@ func (s *Summarizer) oneShot(ctx context.Context, system, user string) (string, 
 	return runOneShot(cctx, s.Pool, s.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
 }
 
-// summarizeMsgRoleTool is the message-role string for tool-result entries.
-// Extracted as a named constant so goconst doesn't flag the repeated
-// literal across summarize.go's switch arms.
-const summarizeMsgRoleTool = "tool"
+// summarizeMsgRoleTool / summarizeMsgRoleAssistant are message-role strings
+// for the matching entries. Extracted as named constants so goconst doesn't
+// flag the repeated literals across the orchestrator package.
+const (
+	summarizeMsgRoleTool      = "tool"
+	summarizeMsgRoleAssistant = "assistant"
+)
 
 // renderSnapshotForSummary serializes a chat-message slice into a readable
 // transcript for the summarizer. Tool results and tool calls are inlined

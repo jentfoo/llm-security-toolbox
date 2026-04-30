@@ -195,7 +195,7 @@ func (c *DirectorChat) RenderForSynthesis() []agent.Message {
 // content when accompanied by tool_calls.
 func NormalizeEmptyContent(msgs []agent.Message) {
 	for i := range msgs {
-		if msgs[i].Content != "" || msgs[i].Role == "assistant" {
+		if msgs[i].Content != "" || msgs[i].Role == summarizeMsgRoleAssistant {
 			continue
 		}
 		switch msgs[i].Role {

@@ -48,8 +48,13 @@ type Config struct {
 	// Logging
 	ProgressLogInterval int
 	NarrateInterval     time.Duration
-	NarrateTimeout      time.Duration
 	LogFile             string
+}
+
+// NarrateTimeout returns the per-summary narrator call timeout, floored
+// at 15 minutes so slow reasoning models don't time out routinely.
+func (c *Config) NarrateTimeout() time.Duration {
+	return max(2*c.NarrateInterval, 15*time.Minute)
 }
 
 // Bounds used for clamping.
@@ -87,7 +92,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.MaxWorkers, "max-workers", 4, "max parallel workers")
 	fs.IntVar(&c.AutonomousBudget, "autonomous-budget", DefaultAutoBudget, "turns per worker per iteration")
 	// Defaults sized generously for slow local models with long tool chains.
-	fs.DurationVar(&c.TurnTimeout, "turn-timeout", 15*time.Minute, "per-turn ctx timeout")
+	fs.DurationVar(&c.TurnTimeout, "turn-timeout", 20*time.Minute, "per-turn ctx timeout")
 	fs.DurationVar(&c.PerToolTimeout, "per-tool-timeout", 5*time.Minute, "per-tool-call ctx timeout")
 	fs.IntVar(&c.MaxParallelTools, "max-parallel-tools", 4, "max concurrent in-flight tool calls per assistant response")
 	fs.IntVar(&c.MaxTurnsPerAgent, "max-turns-per-agent", 100, "hard cap per Drain chain")
@@ -98,9 +103,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.StallStopAfter, "stall-stop-after", 4, "silent runs before force-stop")
 
 	fs.IntVar(&c.ProgressLogInterval, "progress-log-interval", 3, "turns per agent between status summaries (0 disables; deprecated — superseded by narrator)")
-	fs.DurationVar(&c.NarrateInterval, "narrate-interval", 2*time.Minute, "min interval between async narrator summaries (0 disables)")
-	// Narrator shares the worker/orchestrator pool; align with TurnTimeout.
-	fs.DurationVar(&c.NarrateTimeout, "narrate-timeout", 15*time.Minute, "per-summary narrator call timeout")
+	fs.DurationVar(&c.NarrateInterval, "narrate-interval", 5*time.Minute, "min interval between async narrator summaries (0 disables)")
 	fs.StringVar(&c.LogFile, "log-file", "secagent.log", "structured log destination")
 
 	if err := fs.Parse(args); err != nil {

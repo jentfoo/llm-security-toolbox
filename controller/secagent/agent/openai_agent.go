@@ -54,6 +54,16 @@ type OpenAIAgentConfig struct {
 	// The agent fails open (proceeds to the next compaction pass) regardless;
 	// this callback exists so the orchestrator can log the failure.
 	OnSummarizeError func(err error)
+	// OnSelfPruneCandidates receives a history snapshot and returns the set
+	// of ToolCallIDs to drop. The agent then drops the matching tool-result
+	// message and strips the matching ToolCall from the preceding assistant.
+	// Optional; nil disables this step.
+	OnSelfPruneCandidates func(ctx context.Context, snapshot []Message) ([]string, error)
+	// OnDistillResults receives a history snapshot and returns a rewritten
+	// snapshot where eligible tool-result Content is replaced with distilled
+	// prose. Callers must preserve message order and pairing — only Content
+	// should change. Optional; nil disables this step.
+	OnDistillResults func(ctx context.Context, snapshot []Message) ([]Message, error)
 	// OnToolStart fires before a tool handler runs (optional).
 	OnToolStart func(name string, args json.RawMessage)
 	// OnToolEnd fires after a tool handler returns (optional). timedOut is true
@@ -62,6 +72,10 @@ type OpenAIAgentConfig struct {
 	OnToolEnd func(name string, args json.RawMessage, elapsed time.Duration, isError, timedOut bool, errText string)
 	// OnMalformedCall is called when tool arg repair fails (optional).
 	OnMalformedCall func(name string, err error)
+	// OnFuzzyToolMatch fires when a tool name lookup miss was recovered via
+	// canonicalToolName (case + underscore-run normalization). received is
+	// the model-emitted name; resolved is the registered name actually run.
+	OnFuzzyToolMatch func(received, resolved string)
 	// OnRequestStart fires before each chat-completion HTTP call (optional).
 	OnRequestStart func(attempt int)
 	// OnRequestEnd fires after each chat-completion HTTP call (optional).
@@ -83,13 +97,18 @@ type OpenAIAgentConfig struct {
 
 // OpenAIAgent implements Agent over an OpenAI-compatible endpoint.
 type OpenAIAgent struct {
-	cfg       OpenAIAgentConfig
-	history   *History
-	toolDefs  []ToolDef
-	tools     []ChatTool
-	handlers  map[string]ToolHandler
-	mu        sync.Mutex
-	cancelCtx func()
+	cfg      OpenAIAgentConfig
+	history  *History
+	toolDefs []ToolDef
+	tools    []ChatTool
+	handlers map[string]ToolHandler
+	// canonHandlers/canonNames provide fallback lookup when a model emits a
+	// near-miss tool name (e.g. `mcp_sectool__proxy_poll` instead of
+	// `mcp__sectool__proxy_poll`). Keyed by canonicalToolName.
+	canonHandlers map[string]ToolHandler
+	canonNames    map[string]string
+	mu            sync.Mutex
+	cancelCtx     func()
 	// iterationStartIdx marks where the current iteration's content begins.
 	iterationStartIdx int
 	// iterationSummarized prevents the boundary-summarize callback from firing
@@ -144,6 +163,8 @@ func (a *OpenAIAgent) SetTools(defs []ToolDef) {
 	a.toolDefs = append(a.toolDefs[:0], defs...)
 	a.tools = make([]ChatTool, 0, len(defs))
 	a.handlers = make(map[string]ToolHandler, len(defs))
+	a.canonHandlers = make(map[string]ToolHandler, len(defs))
+	a.canonNames = make(map[string]string, len(defs))
 	for _, d := range defs {
 		a.tools = append(a.tools, ChatTool{
 			Type: "function",
@@ -155,6 +176,14 @@ func (a *OpenAIAgent) SetTools(defs []ToolDef) {
 		})
 		if d.Handler != nil {
 			a.handlers[d.Name] = d.Handler
+			c := canonicalToolName(d.Name)
+			// First-write wins on canonical collisions — if two registered
+			// names canonicalize the same way, only the first is reachable
+			// via fuzzy fallback. Exact lookups still distinguish them.
+			if _, exists := a.canonHandlers[c]; !exists {
+				a.canonHandlers[c] = d.Handler
+				a.canonNames[c] = d.Name
+			}
 		}
 	}
 }
@@ -197,6 +226,47 @@ func (a *OpenAIAgent) History() *History { return a.history }
 // callers that need to inspect the conversation (e.g. an external
 // summarizer) without holding the agent's internal lock.
 func (a *OpenAIAgent) Snapshot() []Message { return a.history.Snapshot() }
+
+// LastHistoryID returns the HistoryID of the last non-system message,
+// or 0 when only the system message (or nothing) is present.
+func (a *OpenAIAgent) LastHistoryID() uint64 {
+	snap := a.history.Snapshot()
+	if len(snap) == 0 {
+		return 0
+	}
+	last := snap[len(snap)-1]
+	if last.Role == roleSystem {
+		return 0
+	}
+	return last.HistoryID
+}
+
+// SnapshotSinceID returns the post-system messages following the message
+// with HistoryID == id, normalized via Reasoning.ForSummary. When id is
+// 0 or has been compacted away, returns all post-system messages.
+func (a *OpenAIAgent) SnapshotSinceID(id uint64) []Message {
+	snap := a.history.Snapshot()
+	if len(snap) == 0 {
+		return nil
+	}
+	start := 0
+	if snap[0].Role == roleSystem {
+		start = 1
+	}
+	if id != 0 {
+		for i := start; i < len(snap); i++ {
+			if snap[i].HistoryID == id {
+				start = i + 1
+				break
+			}
+		}
+	}
+	if start >= len(snap) {
+		return nil
+	}
+	tail := snap[start:]
+	return a.cfg.Reasoning.ForSummary(tail)
+}
 
 // ReplaceHistory replaces the agent's working memory with msgs. The leading
 // system prompt is preserved: if msgs[0] is not a system message and the
@@ -256,6 +326,22 @@ func (a *OpenAIAgent) SetOnSummarizeBoundary(f func(ctx context.Context, snapsho
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cfg.OnSummarizeBoundary = f
+}
+
+// SetOnSelfPruneCandidates swaps in a new self-prune callback. Same wiring
+// pattern as SetOnSummarizeBoundary — the orchestrator can install a closure
+// that captures per-worker state post-construction.
+func (a *OpenAIAgent) SetOnSelfPruneCandidates(f func(ctx context.Context, snapshot []Message) ([]string, error)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cfg.OnSelfPruneCandidates = f
+}
+
+// SetOnDistillResults swaps in a new distill callback.
+func (a *OpenAIAgent) SetOnDistillResults(f func(ctx context.Context, snapshot []Message) ([]Message, error)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cfg.OnDistillResults = f
 }
 
 // Drain runs the dispatch loop and returns one TurnSummary.
@@ -485,6 +571,21 @@ func (a *OpenAIAgent) runSingleTool(
 	}
 
 	handler, known := a.handlers[tc.Function.Name]
+	if !known {
+		// Fuzzy-fallback: lower + collapse runs of '_' so the most common
+		// model typos (single-vs-double underscore in MCP-prefixed names,
+		// stray casing) still route to the real handler. We do NOT rewrite
+		// tc.Function.Name in history — the assistant message records what
+		// the model emitted, so re-render passes are stable.
+		c := canonicalToolName(tc.Function.Name)
+		if h, ok := a.canonHandlers[c]; ok {
+			handler = h
+			known = true
+			if a.cfg.OnFuzzyToolMatch != nil {
+				a.cfg.OnFuzzyToolMatch(tc.Function.Name, a.canonNames[c])
+			}
+		}
+	}
 	var result ToolResult
 	var timedOut bool
 	start := time.Now()
@@ -592,11 +693,54 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	if a.cfg.RetireOnPressure {
 		return errRetireOnPressure
 	}
-	// Pass 1: existing compaction (think-strip, stub tool results, drop oldest
-	// turn triples). Cheapest option; runs first.
-	report, err := a.compactPreservingBoundary()
+
+	opt := a.cfg.Compaction
+	threshold := opt.RecoveryThreshold
+	if threshold <= 0 {
+		threshold = defaultRecoveryThreshold
+	}
+	recoveryGoal := int(float64(maxCtx) * threshold)
+	startTokens := a.history.EstimateTokens()
+
+	// Cheap, deterministic same-tool error-streak collapse first.
+	r0 := a.compactErrorsOnlyPreservingBoundary()
 	if a.cfg.OnCompact != nil {
-		a.cfg.OnCompact(report)
+		a.cfg.OnCompact(r0)
+	}
+	if a.history.EstimateTokens() < high {
+		return nil
+	}
+
+	// Model-driven self-prune of low-signal tool-call/result pairs. Only
+	// fires when the previous step fell short of the recovery threshold
+	// and a callback is wired.
+	if startTokens-a.history.EstimateTokens() < recoveryGoal && a.cfg.OnSelfPruneCandidates != nil {
+		rB := a.runSelfPrunePreservingBoundary(ctx)
+		if a.cfg.OnCompact != nil {
+			a.cfg.OnCompact(rB)
+		}
+		if a.history.EstimateTokens() < high {
+			return nil
+		}
+	}
+
+	// Model-driven distillation: replace old tool-result content with
+	// prose summaries so load-bearing facts survive byte-count stubbing.
+	if startTokens-a.history.EstimateTokens() < recoveryGoal && a.cfg.OnDistillResults != nil {
+		rC := a.runDistillPreservingBoundary(ctx)
+		if a.cfg.OnCompact != nil {
+			a.cfg.OnCompact(rC)
+		}
+		if a.history.EstimateTokens() < high {
+			return nil
+		}
+	}
+
+	// Mechanical fallback (think-strip, tool-stub, text-trunc, turn-drop,
+	// hard-truncate). Always runs if we still need headroom.
+	r1, err := a.compactRemainderPreservingBoundary()
+	if a.cfg.OnCompact != nil {
+		a.cfg.OnCompact(r1)
 	}
 	if err != nil {
 		return err
@@ -604,28 +748,164 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	if a.history.EstimateTokens() < high {
 		return nil
 	}
-	// Pass 2: boundary-summarize callback. Eligible only when an iteration
-	// boundary has been marked (iterationStartIdx > 1 — must be past the
-	// system message), the callback is wired, and we haven't already done
-	// this in the current iteration.
+
+	// Boundary-summarize callback when an iteration boundary has been
+	// marked, the callback is wired, and we haven't summarized yet this iteration.
 	if a.cfg.OnSummarizeBoundary != nil && !a.iterationSummarized && a.iterationStartIdx > 1 {
 		if err := a.runBoundarySummarize(ctx); err != nil && a.cfg.OnSummarizeError != nil {
-			// Fail open — fall through to pass 3 below. The orchestrator
-			// observes the failure via OnSummarizeError.
+			// Fail open and fall through to the final remainder.
 			a.cfg.OnSummarizeError(err)
 		}
 		if a.history.EstimateTokens() < high {
 			return nil
 		}
 	}
-	// Pass 3: existing compaction again, now potentially biting into in-iter
-	// content. Last line of defense before sendChat hits its own overflow
-	// path.
-	report, err = a.compactPreservingBoundary()
+
+	// Last-resort mechanical remainder, potentially biting into in-iter content.
+	r2, err := a.compactRemainderPreservingBoundary()
 	if a.cfg.OnCompact != nil {
-		a.cfg.OnCompact(report)
+		a.cfg.OnCompact(r2)
 	}
 	return err
+}
+
+// compactErrorsOnlyPreservingBoundary wraps CompactErrorsOnly and rebases
+// the iteration-boundary marker afterwards.
+func (a *OpenAIAgent) compactErrorsOnlyPreservingBoundary() CompactionReport {
+	markerID, hasMarker := a.iterationBoundaryMarker()
+	report := CompactErrorsOnly(a.history, a.cfg.Compaction)
+	a.rebaseIterationBoundary(markerID, hasMarker)
+	return report
+}
+
+// compactRemainderPreservingBoundary wraps CompactRemainder and rebases
+// the iteration-boundary marker afterwards.
+func (a *OpenAIAgent) compactRemainderPreservingBoundary() (CompactionReport, error) {
+	markerID, hasMarker := a.iterationBoundaryMarker()
+	report, err := CompactRemainder(a.history, a.cfg.Compaction)
+	a.rebaseIterationBoundary(markerID, hasMarker)
+	return report, err
+}
+
+// runSelfPrunePreservingBoundary invokes OnSelfPruneCandidates and applies
+// the returned ToolCallID drop set in place. Failures are reported via
+// OnSummarizeError and fall through with an empty report.
+func (a *OpenAIAgent) runSelfPrunePreservingBoundary(ctx context.Context) CompactionReport {
+	before := a.history.EstimateTokens()
+	report := CompactionReport{Before: before, After: before}
+	snap := a.history.Snapshot()
+	dropIDs, err := a.cfg.OnSelfPruneCandidates(ctx, snap)
+	if err != nil {
+		if a.cfg.OnSummarizeError != nil {
+			a.cfg.OnSummarizeError(err)
+		}
+		return report
+	}
+	if len(dropIDs) == 0 {
+		return report
+	}
+	dropSet := make(map[string]bool, len(dropIDs))
+	for _, id := range dropIDs {
+		if id != "" {
+			dropSet[id] = true
+		}
+	}
+	if len(dropSet) == 0 {
+		return report
+	}
+	markerID, hasMarker := a.iterationBoundaryMarker()
+	pruned, dropped := applySelfPrune(snap, dropSet)
+	if dropped == 0 {
+		return report
+	}
+	a.history.ReplaceAll(pruned)
+	a.rebaseIterationBoundary(markerID, hasMarker)
+	report.SelfPrunedCalls = dropped
+	report.PassesApplied = append(report.PassesApplied, "self-prune")
+	report.After = a.history.EstimateTokens()
+	return report
+}
+
+// runDistillPreservingBoundary invokes OnDistillResults and installs the
+// returned snapshot. The callback must preserve message order and pairing;
+// the agent only counts tool-result Content changes.
+func (a *OpenAIAgent) runDistillPreservingBoundary(ctx context.Context) CompactionReport {
+	before := a.history.EstimateTokens()
+	report := CompactionReport{Before: before, After: before}
+	snap := a.history.Snapshot()
+	replacement, err := a.cfg.OnDistillResults(ctx, snap)
+	if err != nil {
+		if a.cfg.OnSummarizeError != nil {
+			a.cfg.OnSummarizeError(err)
+		}
+		return report
+	}
+	if len(replacement) == 0 {
+		return report
+	}
+	distilled := countDistilledChanges(snap, replacement)
+	if distilled == 0 {
+		return report
+	}
+	markerID, hasMarker := a.iterationBoundaryMarker()
+	a.history.ReplaceAll(replacement)
+	a.rebaseIterationBoundary(markerID, hasMarker)
+	report.DistilledResults = distilled
+	report.PassesApplied = append(report.PassesApplied, "distill")
+	report.After = a.history.EstimateTokens()
+	return report
+}
+
+// applySelfPrune drops every tool-result whose ToolCallID is in dropSet,
+// strips the matching ToolCall entries from preceding assistants, and
+// drops assistants left with no tool_calls and no content. Returns the
+// new slice and the count of tool-result messages dropped.
+func applySelfPrune(msgs []Message, dropSet map[string]bool) ([]Message, int) {
+	out := make([]Message, 0, len(msgs))
+	dropped := 0
+	for _, m := range msgs {
+		switch m.Role {
+		case roleTool:
+			if dropSet[m.ToolCallID] {
+				dropped++
+				continue
+			}
+			out = append(out, m)
+		case roleAssistant:
+			if len(m.ToolCalls) == 0 {
+				out = append(out, m)
+				continue
+			}
+			kept := m
+			kept.ToolCalls = filterToolCalls(m.ToolCalls, dropSet)
+			if len(kept.ToolCalls) == 0 && strings.TrimSpace(kept.Content) == "" {
+				continue
+			}
+			out = append(out, kept)
+		default:
+			out = append(out, m)
+		}
+	}
+	return out, dropped
+}
+
+// countDistilledChanges counts tool-result messages whose Content differs
+// between before and after, pairing by index.
+func countDistilledChanges(before, after []Message) int {
+	n := len(before)
+	if len(after) < n {
+		n = len(after)
+	}
+	changed := 0
+	for i := 0; i < n; i++ {
+		if before[i].Role != roleTool || after[i].Role != roleTool {
+			continue
+		}
+		if before[i].Content != after[i].Content {
+			changed++
+		}
+	}
+	return changed
 }
 
 // compactPreservingBoundary wraps Compact so iterationStartIdx stays

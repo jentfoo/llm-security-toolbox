@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -281,4 +283,195 @@ func TestCompact_HardTruncateOnOverflow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, report.PassesApplied, "hard-truncate")
 	assertToolPairing(t, h.Snapshot())
+}
+
+// buildErrorStreakHistory seeds n consecutive same-tool error tool-results
+// after a single assistant tool_calls message. Drives CompactErrorsOnly's
+// streak-collapse path.
+func buildErrorStreakHistory(maxCtx int, n int) *History {
+	h := NewHistory(maxCtx)
+	h.Append(Message{Role: "system", Content: "sys"})
+	calls := make([]ToolCall, n)
+	for i := range calls {
+		calls[i] = ToolCall{
+			ID:       fmt.Sprintf("err%d", i),
+			Function: ToolFunction{Name: "flaky", Arguments: "{}"},
+		}
+	}
+	h.Append(Message{
+		Role:      "assistant",
+		Content:   "calling flaky " + strconv.Itoa(n) + " times",
+		ToolCalls: calls,
+	})
+	for i := 0; i < n; i++ {
+		h.Append(Message{
+			Role:       "tool",
+			ToolCallID: fmt.Sprintf("err%d", i),
+			ToolName:   "flaky",
+			Content:    "ERROR: same failure mode " + strconv.Itoa(i) + " " + strings.Repeat("x", 1000),
+			Summary120: "ERROR: same failure mode",
+		})
+	}
+	h.Append(Message{Role: "user", Content: "continue"})
+	h.Append(Message{Role: "assistant", Content: "ok"})
+	return h
+}
+
+func TestCompactErrorsOnly(t *testing.T) {
+	t.Parallel()
+	t.Run("collapses_same_tool_streak", func(t *testing.T) {
+		h := buildErrorStreakHistory(4096, 5)
+		report := CompactErrorsOnly(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		assert.Contains(t, report.PassesApplied, "error-collapse")
+		assert.Positive(t, report.CollapsedErrors)
+		assert.Less(t, report.After, report.Before)
+		// Should NOT run any pass other than error-collapse.
+		assert.NotContains(t, report.PassesApplied, "tool-stub")
+		assert.NotContains(t, report.PassesApplied, "think-strip")
+	})
+
+	t.Run("under_target_noop", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: "system", Content: "sys"})
+		h.Append(Message{Role: "user", Content: "hi"})
+		report := CompactErrorsOnly(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
+		})
+		assert.Empty(t, report.PassesApplied)
+		assert.Equal(t, report.Before, report.After)
+	})
+
+	t.Run("no_errors_to_collapse_no_op", func(t *testing.T) {
+		// Big history but no error streaks → nothing for pass 0 to do.
+		big := strings.Repeat("y", 3_000)
+		h := buildToolCallHistory(8192, big, 6)
+		report := CompactErrorsOnly(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		assert.Empty(t, report.PassesApplied)
+		assert.Equal(t, 0, report.CollapsedErrors)
+	})
+}
+
+func TestCompactRemainder(t *testing.T) {
+	t.Parallel()
+	t.Run("runs_mechanical_passes", func(t *testing.T) {
+		big := strings.Repeat("x", 6_000)
+		h := buildFattyHistory(8192, big)
+		before := h.EstimateTokens()
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		require.NoError(t, err)
+		// Should NOT run error-collapse; that's CompactErrorsOnly's job.
+		assert.NotContains(t, report.PassesApplied, "error-collapse")
+		assert.Less(t, h.EstimateTokens(), before)
+	})
+
+	t.Run("under_target_noop", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: "system", Content: "sys"})
+		h.Append(Message{Role: "user", Content: "hi"})
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, report.PassesApplied)
+	})
+}
+
+func TestCompact_WrapperRunsBothPhases(t *testing.T) {
+	t.Parallel()
+	// Compact() should still produce the same end result as before — the
+	// thin wrapper runs CompactErrorsOnly then CompactRemainder.
+	big := strings.Repeat("x", 3_000)
+	// Combine an error streak with a fat history so both phases apply.
+	h := NewHistory(8192)
+	h.Append(Message{Role: "system", Content: "sys"})
+	calls := []ToolCall{
+		{ID: "e1", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
+		{ID: "e2", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
+		{ID: "e3", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
+	}
+	h.Append(Message{Role: "assistant", Content: "fan out", ToolCalls: calls})
+	for i, id := range []string{"e1", "e2", "e3"} {
+		h.Append(Message{
+			Role: "tool", ToolCallID: id, ToolName: "flaky",
+			Content: "ERROR: same " + strconv.Itoa(i),
+		})
+	}
+	for i := 0; i < 4; i++ {
+		h.Append(Message{
+			Role: "assistant", Content: big,
+			ToolCalls: []ToolCall{{ID: "t" + strconv.Itoa(i), Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+		})
+		h.Append(Message{
+			Role: "tool", ToolCallID: "t" + strconv.Itoa(i), ToolName: "t",
+			Content: big, Summary120: "summary",
+		})
+	}
+	report, err := Compact(h, CompactionOptions{
+		HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+	})
+	require.NoError(t, err)
+	// Wrapper merges reports from both phases.
+	assert.Contains(t, report.PassesApplied, "error-collapse")
+	assert.Positive(t, report.CollapsedErrors)
+}
+
+func TestIsCompactionStub(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"empty", "", false},
+		{"plain_prose", "200 OK with body bytes", false},
+		{"compacted_stub", "(compacted: tool returned ~123 tokens — summary)", true},
+		{"distilled_batch", "(distilled batch 1: worker probed /admin and got 403)", true},
+		{"error_text", "ERROR: invalid argument", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsCompactionStub(tc.content))
+		})
+	}
+}
+
+func TestStubToolResult(t *testing.T) {
+	t.Parallel()
+	t.Run("preserves_distilled_content", func(t *testing.T) {
+		original := "(distilled batch 1: worker probed /admin, got 403)"
+		m := Message{
+			Role:       roleTool,
+			ToolCallID: "t1",
+			ToolName:   "proxy_poll",
+			Content:    original,
+		}
+		changed := StubToolResult(&m)
+		assert.False(t, changed)
+		assert.Equal(t, original, m.Content)
+	})
+
+	t.Run("preserves_existing_stub", func(t *testing.T) {
+		original := "(compacted: proxy_poll returned ~50 tokens — flow ABC)"
+		m := Message{Role: roleTool, ToolCallID: "t1", ToolName: "proxy_poll", Content: original}
+		changed := StubToolResult(&m)
+		assert.False(t, changed)
+		assert.Equal(t, original, m.Content)
+	})
+
+	t.Run("stubs_fresh_content", func(t *testing.T) {
+		m := Message{
+			Role: roleTool, ToolCallID: "t1", ToolName: "proxy_poll",
+			Content:    strings.Repeat("x", 500),
+			Summary120: "summary",
+		}
+		changed := StubToolResult(&m)
+		assert.True(t, changed)
+		assert.True(t, strings.HasPrefix(m.Content, stubPrefix))
+	})
 }

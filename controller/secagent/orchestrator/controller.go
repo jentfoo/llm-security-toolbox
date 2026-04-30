@@ -45,6 +45,10 @@ type OpenAIFactory struct {
 	// Reasoning is the reasoning handler detected at startup for cfg.Model.
 	// Nil falls back to inline.
 	Reasoning agent.ReasoningHandler
+	// Summarizer carries the shared pool, model, and logger used by the
+	// worker-only model-driven compaction callbacks (self-prune and
+	// distillation). Wired post-construction by Run; nil disables both.
+	Summarizer *Summarizer
 	// ReconSummary, when non-empty, is woven into every worker's system
 	// prompt as the canonical scope-mapping context produced by the
 	// iter-1 recon worker. Set by the controller after iter 1 completes
@@ -137,6 +141,22 @@ func (f *OpenAIFactory) toolCallbacks(role string) (func(string, json.RawMessage
 	return start, end
 }
 
+// fuzzyToolMatchCallback logs each canonical-form tool-name fallback so
+// operators can see model typos getting auto-corrected to the registered
+// name instead of failing as unknown-tool.
+func (f *OpenAIFactory) fuzzyToolMatchCallback(role string) func(received, resolved string) {
+	if f.Log == nil {
+		return nil
+	}
+	return func(received, resolved string) {
+		f.Log.Log("tool", "fuzzy-name-match", map[string]any{
+			"role":     role,
+			"received": received,
+			"resolved": resolved,
+		})
+	}
+}
+
 // summarizeErrorCallback returns a hook that logs failed boundary-summarize
 // attempts. The agent fails open regardless; this just records the failure
 // so operators can see it in the JSON log.
@@ -166,6 +186,10 @@ func (f *OpenAIFactory) summarizeErrorCallback(role string) func(error) {
 // EscalationReason="context_exhausted" so the caller can retire and
 // summarize the uncompacted chronicle. Currently set only by the recon
 // worker; everyone else gets normal compaction.
+//
+// wireCompactionAssist enables the model-driven self-prune and distill
+// callbacks. Workers only — verifier/director compaction stays mechanical.
+// Skipped when f.Summarizer is nil.
 func (f *OpenAIFactory) buildAgent(
 	role, model, systemPrompt string,
 	pool *agent.ClientPool,
@@ -174,6 +198,7 @@ func (f *OpenAIFactory) buildAgent(
 	setFlowExtractor bool,
 	onContextOverflow func(),
 	retireOnPressure bool,
+	wireCompactionAssist bool,
 ) agent.Agent {
 	onReqStart, onReqEnd := f.requestCallbacks(role)
 	onToolStart, onToolEnd := f.toolCallbacks(role)
@@ -199,12 +224,17 @@ func (f *OpenAIFactory) buildAgent(
 		OnRequestEnd:      onReqEnd,
 		OnToolStart:       onToolStart,
 		OnToolEnd:         onToolEnd,
+		OnFuzzyToolMatch:  f.fuzzyToolMatchCallback(role),
 		OnContextOverflow: onContextOverflow,
 		OnSummarizeError:  f.summarizeErrorCallback(role),
 		RetireOnPressure:  retireOnPressure,
 	}
 	if setFlowExtractor {
 		cfg.FlowIDExtractor = ExtractFlowIDs
+	}
+	if wireCompactionAssist && f.Summarizer != nil {
+		cfg.OnSelfPruneCandidates = SelfPruneCallback(f.Summarizer)
+		cfg.OnDistillResults = DistillCallback(f.Summarizer)
 	}
 	return agent.NewOpenAIAgent(cfg)
 }
@@ -248,6 +278,7 @@ func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 		true,
 		nil,
 		false,
+		true, // wire model-driven compaction assist (workers only)
 	), nil
 }
 
@@ -270,7 +301,8 @@ func (f *OpenAIFactory) NewReconWorker(reconMission string) (agent.Agent, error)
 		f.Reasoning,
 		true,
 		nil,
-		true,
+		true,  // RetireOnPressure: recon stops cleanly at high watermark
+		false, // RetireOnPressure short-circuits maybeCompact, so callbacks are unreachable; skip wiring
 	), nil
 }
 
@@ -288,6 +320,7 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 		true,
 		onContextOverflow,
 		false,
+		false, // verifier compaction stays mechanical
 	), nil
 }
 
@@ -305,6 +338,7 @@ func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 		false,
 		nil,
 		false,
+		false, // director compaction stays mechanical
 	), nil
 }
 
@@ -322,6 +356,7 @@ func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
 		false,
 		nil,
 		false,
+		false, // director compaction stays mechanical
 	), nil
 }
 
@@ -546,6 +581,9 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		Model: cfg.Model,
 		Log:   log,
 	}
+	// Wire the summarizer onto the factory so subsequent NewWorker calls
+	// install the model-driven self-prune and distill callbacks.
+	factory.Summarizer = summarizer
 	// asyncMerger schedules merge-into-existing-finding goroutines when the
 	// worker tool's dedup verdict is "merge". Bounded concurrency (cap=4) so
 	// a flurry of candidates can't saturate the shared pool. Run() waits on
@@ -793,7 +831,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		Interval:   cfg.NarrateInterval,
 		Model:      cfg.LogModel,
 		Pool:       pool,
-		CallBudget: cfg.NarrateTimeout,
+		CallBudget: cfg.NarrateTimeout(),
 		Summarizer: logReasoning,
 		// Parent ctx — ctrl+c propagates to in-flight narration HTTP calls
 		// so shutdown doesn't wait on narration that the operator doesn't
@@ -813,7 +851,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		} else {
 			fields["enabled"] = true
 			fields["interval"] = cfg.NarrateInterval.String()
-			fields["timeout"] = cfg.NarrateTimeout.String()
+			fields["timeout"] = cfg.NarrateTimeout().String()
 			fields["pool_size"] = pool.Size()
 		}
 		log.Log("server", "narrator", fields)
@@ -1106,7 +1144,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		// a verification worker or hallucinating tool calls from the
 		// worker history that's already in its rendered view.
 		decisionDirector.SetTools(append(slices.Clone(decisionDirectorSectoolDefs),
-			DecisionToolDefs(decisions, takenIDsFn)...))
+			DecisionToolDefs(decisions, takenIDsFn, log)...))
 		decRes := RunDecisionPhase(sd.WorkersCtx, DecisionPhaseInput{
 			Director: decisionDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, WorkerRuns: workerRuns,
