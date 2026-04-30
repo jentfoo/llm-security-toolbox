@@ -17,8 +17,10 @@ const statusTokenBudget = 2000
 // of the history and rarely informative for a one-sentence status.
 const toolResultPlaceholder = "(tool result omitted for summary)"
 
-// SummarizeStatus returns line-or-tail from SummarizeStatusVia routed
-// through the agent's own pool and model. Back-compat wrapper.
+// SummarizeStatus returns a one-sentence status summary for a, using the
+// agent's own pool and model. Falls back to a truncated reasoning tail
+// when the model produced no usable prose. Returns "" when the history
+// has nothing substantive to summarize.
 func SummarizeStatus(ctx context.Context, a *OpenAIAgent, maxTokens int) (string, error) {
 	line, tail, err := SummarizeStatusVia(ctx, a, nil, "", maxTokens)
 	if err != nil {
@@ -30,19 +32,11 @@ func SummarizeStatus(ctx context.Context, a *OpenAIAgent, maxTokens int) (string
 	return tail, nil
 }
 
-// SummarizeStatusVia asks the summary model for one sentence describing
-// what the agent is currently investigating. A nil client routes through
-// the agent's own pool; an empty model falls back to the agent's configured
-// model (narrator callers pass a specific summary model so all summary
-// traffic targets one endpoint). Returns the extracted prose line and,
-// separately, a truncated-think-tail fallback for responses that were cut
-// off mid-reasoning.
-//
-// The agent's history is filtered before sending: the system prompt plus
-// the first user turn are kept as anchor, tool results are replaced with a
-// placeholder, and the remainder is tail-truncated to statusTokenBudget.
-// Tools are not attached — the model should produce prose, not dispatch
-// calls. The agent's history is never mutated. OpenAIAgent-only.
+// SummarizeStatusVia asks client (or the agent's pool when nil) to produce
+// a one-sentence status summary for a. An empty model falls back to the
+// agent's configured model. Returns the extracted prose line and a
+// truncated-think-tail fallback when no confident line was produced. The
+// agent's history is not mutated.
 func SummarizeStatusVia(ctx context.Context, a *OpenAIAgent, client ChatClient, model string, maxTokens int) (line, thinkTail string, err error) {
 	if client == nil {
 		client, err = a.cfg.Pool.Acquire(ctx)
@@ -108,9 +102,9 @@ func summarizeStatusVia(ctx context.Context, a *OpenAIAgent, client ChatClient, 
 	return line, thinkTail, nil
 }
 
-// buildStatusMessages prepares history for a status-summary prompt. Preserves
-// the system message and first non-system turn as anchors, stubs tool-result
-// content, and keeps think blocks on the last keepThinkTurns assistant messages.
+// buildStatusMessages returns the chat-message slice to send for a status
+// summary, anchored on the system message and first non-system turn and
+// tail-truncated to budget tokens.
 func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessage {
 	if len(hist) == 0 {
 		return nil
@@ -160,9 +154,8 @@ func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessa
 	return out
 }
 
-// pickTail walks msgs from the end, accumulating estimated tokens until
-// budget is reached, then drops any leading role=tool messages that lost
-// their assistant parent to the cut.
+// pickTail returns the trailing slice of msgs whose estimated token sum
+// fits within budget. Leading orphaned tool-result messages are dropped.
 func pickTail(msgs []Message, budget int) []Message {
 	if budget <= 0 || len(msgs) == 0 {
 		return nil

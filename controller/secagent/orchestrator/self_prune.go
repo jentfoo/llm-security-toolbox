@@ -11,19 +11,14 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// selfPruneMaxTokens caps the model's response on the selection call.
-// Output is a small JSON array of integers; we leave generous headroom for
-// reasoning models that emit a thinking pass before the final list.
+// selfPruneMaxTokens caps the selection-call response.
 const selfPruneMaxTokens = 8000
 
-// selfPruneSystemPrompt instructs the model to behave as an editor of its
-// own past tool calls, returning structured JSON.
 const selfPruneSystemPrompt = `You are reviewing a security-testing agent's history of tool calls and helping it free context space without losing load-bearing evidence. Respond with JSON only — no prose, no markdown fences.`
 
-// SelfPruneCallback returns a closure suitable for
-// OpenAIAgentConfig.OnSelfPruneCandidates that asks the summary model to
-// pick redundant tool-call/result pairs for removal. Returns no IDs and
-// no error when s is nil or unconfigured.
+// SelfPruneCallback returns an OnSelfPruneCandidates callback that picks
+// redundant tool-call IDs for removal. Returns nil when s is nil or
+// unconfigured.
 func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.Message) ([]string, error) {
 	return func(ctx context.Context, snapshot []agent.Message) ([]string, error) {
 		if s == nil || s.Pool == nil || s.Model == "" {
@@ -77,23 +72,21 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent
 	}
 }
 
-// selfPruneMinEvents is the minimum event count that justifies a self-prune
-// LLM call. Below this the call costs more than it could recover.
+// selfPruneMinEvents is the minimum event count for a self-prune call.
 const selfPruneMinEvents = 6
 
-// toolEvent is one tool-call/tool-result pair captured for prompt rendering.
+// toolEvent is one tool-call/tool-result pair rendered in the prompt.
 type toolEvent struct {
-	Index      int    // 0-based position in the events slice
-	ToolCallID string // pairs with Message.ToolCallID
+	Index      int
+	ToolCallID string
 	ToolName   string
-	ArgsPrev   string // truncated input args
-	ResultPrev string // truncated tool-result content
+	ArgsPrev   string
+	ResultPrev string
 	IsError    bool
 }
 
-// buildToolEvents emits one toolEvent per assistant tool_call paired with
-// its matching tool-result message; calls without a paired result still
-// emit an event with an empty ResultPrev.
+// buildToolEvents returns one toolEvent per assistant tool_call paired
+// with its matching tool-result message.
 func buildToolEvents(msgs []agent.Message) []toolEvent {
 	resultByID := map[string]agent.Message{}
 	for _, m := range msgs {
@@ -123,7 +116,7 @@ func buildToolEvents(msgs []agent.Message) []toolEvent {
 	return events
 }
 
-// renderToolEventListing renders events as a 1-based numbered list for the prompt.
+// renderToolEventListing returns events as a 1-based numbered list.
 func renderToolEventListing(events []toolEvent) string {
 	var b strings.Builder
 	for _, ev := range events {
@@ -153,8 +146,8 @@ func fallbackArgs(s string) string {
 	return s
 }
 
-// buildSelfPruneSelectionPrompt returns the user-message prompt asking the
-// model to pick removal-eligible event indices from listing.
+// buildSelfPruneSelectionPrompt returns the user message asking the model
+// to pick removal-eligible event indices.
 func buildSelfPruneSelectionPrompt(listing string) string {
 	var b strings.Builder
 	b.WriteString("Below is the ordered list of tool events the agent has executed so far. Each entry shows the tool name, a truncated argument preview, and a truncated result preview.\n\n")
@@ -173,8 +166,8 @@ The "remove" array lists the 1-based event indices to drop from history. Empty a
 	return b.String()
 }
 
-// parseEventIndexList parses {"remove":[...]} from raw model output and
-// returns the deduped, sorted 0-based indices in [0, total).
+// parseEventIndexList parses {"remove":[...]} from raw and returns the
+// deduped sorted 0-based indices in [0, total).
 func parseEventIndexList(raw string, total int) ([]int, error) {
 	body := extractJSONObject(raw)
 	if body == "" {

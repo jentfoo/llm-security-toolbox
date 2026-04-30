@@ -14,15 +14,16 @@ func TestStripThinkBlocks(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"empty", "", ""},
-		{"no_think", "hello", "hello"},
-		{"think_lower", "a<think>hidden</think>b", "ab"},
-		{"think_upper", "a<THINK>hidden</THINK>b", "ab"},
-		{"multiline", "a<think>line1\nline2</think>b", "ab"},
-		{"thinking_tag", "a<thinking>x</thinking>b", "ab"},
-		{"reasoning_tag", "a<reasoning>x</reasoning>b", "ab"},
-		{"pipe_tag", "a<|thinking|>x<|/thinking|>b", "ab"},
-		{"two_blocks", "a<think>x</think>b<think>y</think>c", "abc"},
+		{name: "empty", in: "", want: ""},
+		{name: "no_think", in: "hello", want: "hello"},
+		{name: "think_lower", in: "a<think>hidden</think>b", want: "ab"},
+		{name: "think_upper", in: "a<THINK>hidden</THINK>b", want: "ab"},
+		{name: "multiline", in: "a<think>line1\nline2</think>b", want: "ab"},
+		{name: "thinking_tag", in: "a<thinking>x</thinking>b", want: "ab"},
+		{name: "reasoning_tag", in: "a<reasoning>x</reasoning>b", want: "ab"},
+		{name: "pipe_tag", in: "a<|thinking|>x<|/thinking|>b", want: "ab"},
+		{name: "two_blocks", in: "a<think>x</think>b<think>y</think>c", want: "abc"},
+		{name: "unclosed_left_intact", in: "a<think>truncated", want: "a<think>truncated"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,17 +39,18 @@ func TestStripCodeFences(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"empty", "", ""},
-		{"no_fence", "hello world", "hello world"},
-		{"bare_fence_pair", "```\nhello\n```", "hello"},
-		{"language_tag", "```json\n{\"foo\":\"bar\"}\n```", `{"foo":"bar"}`},
-		{"leading_blanks_and_fence", "\n\n```\nline one\nline two\n```\n", "line one\nline two"},
-		{"leading_only", "```md\nprose", "prose"},
-		{"trailing_only", "prose\n```", "prose"},
-		{"fence_only", "```", ""},
-		{"two_fences_only", "```\n```", ""},
-		{"inline_backticks_untouched", "the `foo` bar", "the `foo` bar"},
-		{"trailing_fence_exact_only", "prose\n```json", "prose\n```json"}, // opener-style trailer not stripped
+		{name: "empty", in: "", want: ""},
+		{name: "no_fence", in: "hello world", want: "hello world"},
+		{name: "bare_fence_pair", in: "```\nhello\n```", want: "hello"},
+		{name: "language_tag", in: "```json\n{\"foo\":\"bar\"}\n```", want: `{"foo":"bar"}`},
+		{name: "leading_blanks_fence", in: "\n\n```\nline one\nline two\n```\n", want: "line one\nline two"},
+		{name: "leading_only", in: "```md\nprose", want: "prose"},
+		{name: "trailing_only", in: "prose\n```", want: "prose"},
+		{name: "fence_only", in: "```", want: ""},
+		{name: "two_fences_only", in: "```\n```", want: ""},
+		{name: "inline_backticks_untouched", in: "the `foo` bar", want: "the `foo` bar"},
+		{name: "opener_trailer_not_stripped", in: "prose\n```json", want: "prose\n```json"},
+		{name: "fence_in_body_preserved", in: "intro\n```\ncode\n```\noutro", want: "intro\n```\ncode\n```\noutro"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,87 +72,87 @@ func TestFilterThinkBlocks(t *testing.T) {
 		}
 	}
 
-	t.Run("keep_all_when_n_exceeds", func(t *testing.T) {
-		msgs := FilterThinkBlocks(build(), 10)
-		for _, m := range msgs {
-			if m.Role == roleAssistant {
-				assert.Contains(t, m.Content, "<think>", "n=10 covers all 3 assistants")
+	cases := []struct {
+		name           string
+		keepLastN      int
+		wantAssistants []string
+	}{
+		{name: "keep_all", keepLastN: 10, wantAssistants: []string{
+			"<think>turn1</think>done1",
+			"<think>turn2</think>done2",
+			"<think>turn3</think>done3",
+		}},
+		{name: "keep_two", keepLastN: 2, wantAssistants: []string{
+			"done1",
+			"<think>turn2</think>done2",
+			"<think>turn3</think>done3",
+		}},
+		{name: "keep_zero", keepLastN: 0, wantAssistants: []string{
+			"done1", "done2", "done3",
+		}},
+		{name: "negative_keeps_none", keepLastN: -3, wantAssistants: []string{
+			"done1", "done2", "done3",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msgs := FilterThinkBlocks(build(), tc.keepLastN)
+			var assistants []string
+			for _, m := range msgs {
+				if m.Role == roleAssistant {
+					assistants = append(assistants, m.Content)
+				}
 			}
-		}
-	})
+			assert.Equal(t, tc.wantAssistants, assistants)
+			// Non-assistant roles must pass through untouched
+			assert.Equal(t, "sys", msgs[0].Content)
+			assert.Equal(t, "assignment", msgs[1].Content)
+			assert.Equal(t, "<think>not-stripped-in-tools</think>payload", msgs[3].Content)
+		})
+	}
 
-	t.Run("keep_two_preserves_last_two", func(t *testing.T) {
-		msgs := FilterThinkBlocks(build(), 2)
-		assert.NotContains(t, msgs[2].Content, "<think>", "oldest assistant should be stripped")
-		assert.Equal(t, "done1", msgs[2].Content)
-		assert.Contains(t, msgs[4].Content, "<think>turn2</think>")
-		assert.Contains(t, msgs[5].Content, "<think>turn3</think>")
-	})
-
-	t.Run("keep_zero_strips_all_assistants", func(t *testing.T) {
-		msgs := FilterThinkBlocks(build(), 0)
-		for i, m := range msgs {
-			if m.Role == roleAssistant {
-				assert.NotContainsf(t, m.Content, "<think>", "assistant at %d should have think stripped", i)
-			}
-		}
-	})
-
-	t.Run("non_assistant_roles_untouched", func(t *testing.T) {
-		msgs := FilterThinkBlocks(build(), 0)
-		assert.Equal(t, "sys", msgs[0].Content)
-		assert.Equal(t, "assignment", msgs[1].Content)
-		// Tool content is left alone — it's not part of the think-retention
-		// bargain and shouldn't be modified here.
-		assert.Contains(t, msgs[3].Content, "<think>not-stripped-in-tools</think>payload")
-	})
-
-	t.Run("nil_and_empty_safe", func(t *testing.T) {
+	t.Run("nil_safe", func(t *testing.T) {
 		assert.Nil(t, FilterThinkBlocks(nil, 2))
+	})
+
+	t.Run("empty_safe", func(t *testing.T) {
 		assert.Empty(t, FilterThinkBlocks([]Message{}, 2))
 	})
 
-	t.Run("returns_copy_not_mutation", func(t *testing.T) {
+	t.Run("returns_copy", func(t *testing.T) {
 		orig := build()
 		_ = FilterThinkBlocks(orig, 0)
-		assert.Contains(t, orig[2].Content, "<think>turn1</think>")
+		assert.Equal(t, "<think>turn1</think>done1", orig[2].Content)
 	})
 }
 
 func TestTruncatedThinkTail(t *testing.T) {
 	t.Parallel()
+	long := strings.Repeat("word ", 200)
+	prefixA := strings.Repeat("a ", 200)
 
-	t.Run("closed_block_returns_empty", func(t *testing.T) {
-		assert.Empty(t, TruncatedThinkTail("<think>planning</think>done"))
-	})
+	cases := []struct {
+		name string
+		in   string
+		want string // exact value, or empty to use checks
+	}{
+		{name: "closed_block_empty", in: "<think>planning</think>done", want: ""},
+		{name: "no_tag_empty", in: "just a normal response", want: ""},
+		{name: "empty_input_empty", in: "", want: ""},
+		{name: "unclosed_think", in: "<think>I am investigating the login flow", want: "I am investigating the login flow"},
+		{name: "unclosed_thinking", in: "<thinking>checking JWT kid confusion", want: "checking JWT kid confusion"},
+		{name: "case_insensitive_tag", in: "<THINK>reviewing endpoints", want: "reviewing endpoints"},
+		{name: "later_unclosed_wins", in: "<think>first closed thought</think>some text<think>second unclosed thought", want: "second unclosed thought"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, TruncatedThinkTail(tc.in))
+		})
+	}
 
-	t.Run("no_think_tag_returns_empty", func(t *testing.T) {
-		assert.Empty(t, TruncatedThinkTail("just a normal response"))
-	})
-
-	t.Run("empty_returns_empty", func(t *testing.T) {
-		assert.Empty(t, TruncatedThinkTail(""))
-	})
-
-	t.Run("unclosed_think_returns_content", func(t *testing.T) {
-		got := TruncatedThinkTail("<think>I am investigating the login flow")
-		assert.Equal(t, "I am investigating the login flow", got)
-	})
-
-	t.Run("unclosed_thinking_variant", func(t *testing.T) {
-		got := TruncatedThinkTail("<thinking>checking JWT kid confusion")
-		assert.Equal(t, "checking JWT kid confusion", got)
-	})
-
-	t.Run("case_insensitive_open_tag", func(t *testing.T) {
-		got := TruncatedThinkTail("<THINK>reviewing endpoints")
-		assert.Equal(t, "reviewing endpoints", got)
-	})
-
-	t.Run("long_tail_truncated_with_ellipsis", func(t *testing.T) {
-		long := strings.Repeat("word ", 200)
+	t.Run("long_tail_ellipsis_prefix", func(t *testing.T) {
 		got := TruncatedThinkTail("<think>" + long)
-		assert.Truef(t, strings.HasPrefix(got, "…"), "long tail should be prefixed with ellipsis, got %q", got)
+		assert.True(t, strings.HasPrefix(got, "…"))
 		assert.Less(t, len(got), len(long))
 	})
 
@@ -161,17 +163,54 @@ func TestTruncatedThinkTail(t *testing.T) {
 		assert.Contains(t, got, "line three")
 	})
 
-	t.Run("prefers_later_sentence_start", func(t *testing.T) {
-		// Build a tail where the middle contains a sentence boundary; result
-		// should start on a clean sentence rather than mid-word.
-		prefix := strings.Repeat("a ", 200)
-		got := TruncatedThinkTail("<think>" + prefix + "An earlier sentence. The latest thought is about OAuth.")
+	t.Run("prefers_sentence_start", func(t *testing.T) {
+		got := TruncatedThinkTail("<think>" + prefixA + "An earlier sentence. The latest thought is about OAuth.")
 		assert.Contains(t, got, "The latest thought is about OAuth.")
 	})
+}
 
-	t.Run("multiple_opens_only_last_counts", func(t *testing.T) {
-		// Earlier closed block + later unclosed block → use the later tail.
-		got := TruncatedThinkTail("<think>first closed thought</think>some text<think>second unclosed thought")
-		assert.Equal(t, "second unclosed thought", got)
-	})
+func TestHasLeadingThinkOpen(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "think_lower", in: "<think>x", want: true},
+		{name: "think_upper", in: "<THINK>x", want: true},
+		{name: "thinking", in: "<thinking>x", want: true},
+		{name: "pipe_thinking", in: "<|thinking|>x", want: true},
+		{name: "reasoning", in: "<reasoning>x", want: true},
+		{name: "leading_whitespace", in: "  \n<think>x", want: true},
+		{name: "no_tag", in: "plain text", want: false},
+		{name: "empty", in: "", want: false},
+		{name: "tag_in_middle", in: "prefix <think>x", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, HasLeadingThinkOpen(tc.in))
+		})
+	}
+}
+
+func TestHasInlineThink(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "balanced_think", in: "a<think>x</think>b", want: true},
+		{name: "balanced_thinking", in: "<thinking>x</thinking>", want: true},
+		{name: "balanced_pipe", in: "<|thinking|>x<|/thinking|>", want: true},
+		{name: "balanced_reasoning", in: "<reasoning>x</reasoning>", want: true},
+		{name: "unclosed", in: "<think>truncated", want: false},
+		{name: "stray_brackets", in: "1 < 2 and 3 > 0", want: false},
+		{name: "empty", in: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, HasInlineThink(tc.in))
+		})
+	}
 }

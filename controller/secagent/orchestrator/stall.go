@@ -17,16 +17,9 @@ const (
 	EscalationCandidate = "candidate"
 )
 
-// UpdateStallStreaks walks every worker and adjusts ProgressNoneStreak
-// based on the outcome of the last autonomous run. Both "silent"
-// (timeout or model chose not to escalate) and "error" (HTTP error, crashed
-// mid-drain) increment the streak so both failure modes feed the existing
-// StallStopAfter threshold. A worker stuck issuing the same tool error
-// repeatedly (RecentToolErrors) is also treated as silent. "candidate" or
-// any turn that produced flows resets the streak.
-//
-// When the repeated-error path fires for a signature we haven't coached on
-// yet, a one-shot coaching message is queued to the worker via Agent.Query.
+// UpdateStallStreaks adjusts each alive worker's ProgressNoneStreak from
+// its last run outcome. Silent/error/repeated-error increment; candidate
+// or new flows reset. Repeated-error workers also get a coaching nudge.
 func UpdateStallStreaks(workers []*WorkerState) {
 	for _, w := range workers {
 		if !w.Alive {
@@ -58,8 +51,8 @@ func UpdateStallStreaks(workers []*WorkerState) {
 	}
 }
 
-// repeatedErrorSignature returns (signature, true) when the window contains
-// at least RepeatedErrorThreshold identical entries.
+// repeatedErrorSignature returns (signature, true) when sigs contains at
+// least RepeatedErrorThreshold identical entries.
 func repeatedErrorSignature(sigs []string) (string, bool) {
 	if len(sigs) < RepeatedErrorThreshold {
 		return "", false
@@ -74,8 +67,8 @@ func repeatedErrorSignature(sigs []string) (string, bool) {
 	return "", false
 }
 
-// buildRepeatedErrorCoaching renders the one-shot nudge queued to workers
-// stuck on the same tool error repeatedly.
+// buildRepeatedErrorCoaching returns the coaching nudge for a worker
+// stuck on the error signature sig.
 func buildRepeatedErrorCoaching(sig string) string {
 	return fmt.Sprintf(
 		"Your last several tool calls returned the same error: %q. Try a different tool or approach. If you're stuck, report what you've learned via report_finding_candidate and describe the blocker.",
@@ -83,12 +76,8 @@ func buildRepeatedErrorCoaching(sig string) string {
 	)
 }
 
-// hasProductiveTurn returns true when any turn in the slice made real
-// progress — tool calls issued or flow IDs touched. Prompt tokens alone
-// don't count: any successful round-trip (including the model saying "I'll
-// keep looking" with no tool calls) consumes them. Used by applyPlanAndFire
-// so the director's retarget cannot reset the stall counter when the
-// worker was dead this iteration.
+// hasProductiveTurn reports whether any turn issued a tool call or
+// touched a flow ID.
 func hasProductiveTurn(turns []agent.TurnSummary) bool {
 	for _, t := range turns {
 		if len(t.ToolCalls) > 0 || len(t.FlowIDs) > 0 {
@@ -98,8 +87,8 @@ func hasProductiveTurn(turns []agent.TurnSummary) bool {
 	return false
 }
 
-// FormatStallWarnings returns a block for the director prompt, or "" when
-// no worker is currently at/above warnAfter with an un-latched warning.
+// FormatStallWarnings returns the stall-warnings block for the director
+// prompt, or "" when no worker has an un-latched warning at/above warnAfter.
 func FormatStallWarnings(workers []*WorkerState, warnAfter int) string {
 	ids := make([]int, 0, len(workers))
 	for _, w := range workers {
@@ -129,8 +118,8 @@ func FormatStallWarnings(workers []*WorkerState, warnAfter int) string {
 	return "**Stall warnings:**\n" + strings.Join(warnings, "\n")
 }
 
-// LatchStallWarnings sets StallWarned for any worker at/above the warn
-// threshold. Called after the director prompt has been rendered.
+// LatchStallWarnings sets StallWarned on any alive worker whose
+// ProgressNoneStreak is at/above warnAfter.
 func LatchStallWarnings(workers []*WorkerState, warnAfter int) {
 	for _, w := range workers {
 		if w.Alive && w.ProgressNoneStreak >= warnAfter {

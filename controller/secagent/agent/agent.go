@@ -43,9 +43,7 @@ func (p Phase) String() string {
 	}
 }
 
-// ToolHandler runs an in-process tool call. Returning IsError=true signals
-// the orchestrator that the tool rejected the call; the text still goes
-// back to the model as a tool result.
+// ToolHandler runs an in-process tool call and returns its result.
 type ToolHandler func(ctx context.Context, args json.RawMessage) ToolResult
 
 // ToolResult is an in-process tool's response.
@@ -88,25 +86,19 @@ type TurnSummary struct {
 type Agent interface {
 	Query(content string)
 	Drain(ctx context.Context) (TurnSummary, error)
-	// DrainBounded is like Drain but caps the number of tool-dispatch rounds
-	// in this single Drain call. Used for the director self-review substep
-	// where the spec allows only 2 more rounds.
+	// DrainBounded is like Drain but caps tool-dispatch rounds at maxRounds
+	// for this single call.
 	DrainBounded(ctx context.Context, maxRounds int) (TurnSummary, error)
 	Interrupt()
 	SetTools(defs []ToolDef)
 	ContextUsage() (tokens, max int)
 	// ReplaceHistory installs msgs as the agent's working memory. The system
 	// prompt is preserved (re-prepended if msgs[0] is not a system message).
-	// Cancels any in-flight Drain so the next call starts cleanly. Also
-	// resets any iteration-boundary state set by MarkIterationBoundary.
+	// Cancels any in-flight Drain and resets iteration-boundary state.
 	ReplaceHistory(msgs []Message)
 	// MarkIterationBoundary records the current history length as the start
-	// of the current iteration's content. Used by the v4 boundary-summarize
-	// path: when the watermark fires mid-drain, everything BEFORE this index
-	// is eligible for one-shot summarization (preserving the in-flight iter
-	// content verbatim). Calling this twice in the same iteration is fine —
-	// the second call just updates the index and clears the
-	// already-summarized flag.
+	// of the active iteration's content. Safe to call multiple times per
+	// iteration; each call updates the index.
 	MarkIterationBoundary()
 	Close() error
 }

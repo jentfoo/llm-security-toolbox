@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
@@ -11,10 +12,7 @@ import (
 
 // Dedup verdict actions. Pair-wise (DedupVerdict) uses unique / duplicate /
 // partial; multi-existing (CandidateDedupVerdict) uses unique / duplicate /
-// merge. The "merge" action is only emitted by the candidate classifier
-// because the per-pair classifier was originally designed to compare two
-// finished findings, not a candidate-to-finding match where the candidate
-// is naturally less complete.
+// merge.
 const (
 	dedupActionUnique    = "unique"
 	dedupActionDuplicate = "duplicate"
@@ -22,27 +20,21 @@ const (
 	dedupActionMerge     = "merge"
 )
 
-// DedupVerdict classifies the relationship between two candidate-duplicate
-// findings. MoreComplete is populated for "duplicate" and "partial" to tell
-// the writer which side to preserve; it's ignored for "unique".
+// DedupVerdict classifies the relationship between two findings.
+// MoreComplete is "existing" or "new" for "duplicate" and "partial".
 type DedupVerdict struct {
 	Action       string // "unique" | "duplicate" | "partial"
 	MoreComplete string // "existing" | "new"
 }
 
-// DedupReviewer arbitrates ambiguous dedup cases that TitlesSimilar flagged.
-// Classify decides the relationship; Merge combines two findings when the
-// verdict is "partial" (or when "duplicate" but the caller still wants a
-// coalesced version).
+// DedupReviewer classifies and merges pair-wise findings.
 type DedupReviewer interface {
 	Classify(ctx context.Context, existing, incoming FindingFiled) (DedupVerdict, error)
 	Merge(ctx context.Context, primary, secondary FindingFiled) (FindingFiled, error)
 }
 
-// OpenAIDedupReviewer calls an OpenAI-compatible chat-completion endpoint
-// to classify and merge candidate-duplicate findings. Uses a pooled client
-// (shared with the verifier/director) for one-shot completions — no agent
-// state, no tools, structured JSON in/out.
+// OpenAIDedupReviewer classifies and merges findings via one-shot
+// OpenAI-compatible chat completions.
 type OpenAIDedupReviewer struct {
 	Pool      *agent.ClientPool
 	Model     string
@@ -50,7 +42,7 @@ type OpenAIDedupReviewer struct {
 	Log       *Logger
 }
 
-// Classify asks the model for a verdict on the two findings.
+// Classify returns the model's verdict comparing existing to incoming.
 func (r *OpenAIDedupReviewer) Classify(ctx context.Context, existing, incoming FindingFiled) (DedupVerdict, error) {
 	prompt := classifyPrompt(existing, incoming)
 	raw, err := r.oneShot(ctx, dedupSystemPrompt, prompt)
@@ -60,28 +52,21 @@ func (r *OpenAIDedupReviewer) Classify(ctx context.Context, existing, incoming F
 	return parseVerdict(raw)
 }
 
-// CandidateDedupVerdict is the multi-existing classifier's response: the
-// disposition for the incoming candidate and (for non-unique outcomes) the
-// filename of the existing finding that matched.
+// CandidateDedupVerdict is the disposition of one incoming candidate.
+// MatchedFilename and Reason are populated for "duplicate" and "merge".
 type CandidateDedupVerdict struct {
 	Action          string // "unique" | "duplicate" | "merge"
-	MatchedFilename string // populated for "duplicate" and "merge"
-	Reason          string // optional one-liner from the classifier
+	MatchedFilename string
+	Reason          string
 }
 
-// CandidateDedupReviewer classifies a worker-reported candidate against the
-// set of existing finding digests. Returns a single verdict identifying
-// which existing finding (if any) covers it. Implemented by
-// OpenAIDedupReviewer; tests can substitute a fake.
+// CandidateDedupReviewer classifies one candidate against existing digests.
 type CandidateDedupReviewer interface {
 	ClassifyCandidate(ctx context.Context, incoming AddInput, digests []FindingDigest) (CandidateDedupVerdict, error)
 }
 
-// ClassifyCandidate runs a single LLM call comparing one incoming worker
-// candidate against every existing finding digest. Cheaper than the
-// pair-wise per-similar Classify path because it folds the whole comparison
-// into one prompt; suited to the worker hot path where latency on every
-// report_finding_candidate matters.
+// ClassifyCandidate returns the verdict for incoming compared to digests.
+// An empty digests slice yields a unique verdict without calling the model.
 func (r *OpenAIDedupReviewer) ClassifyCandidate(ctx context.Context, incoming AddInput, digests []FindingDigest) (CandidateDedupVerdict, error) {
 	if len(digests) == 0 {
 		return CandidateDedupVerdict{Action: dedupActionUnique}, nil
@@ -94,9 +79,8 @@ func (r *OpenAIDedupReviewer) ClassifyCandidate(ctx context.Context, incoming Ad
 	return parseCandidateVerdict(raw, digests)
 }
 
-// Merge asks the model to coalesce primary and secondary into one finding.
-// Primary is the more-complete side; its structure leads and secondary's
-// unique details get folded in.
+// Merge returns one finding coalescing primary (the more-complete side)
+// with unique details from secondary.
 func (r *OpenAIDedupReviewer) Merge(ctx context.Context, primary, secondary FindingFiled) (FindingFiled, error) {
 	prompt := mergePrompt(primary, secondary)
 	raw, err := r.oneShot(ctx, dedupSystemPrompt, prompt)
@@ -106,11 +90,8 @@ func (r *OpenAIDedupReviewer) Merge(ctx context.Context, primary, secondary Find
 	return parseMerge(raw, primary)
 }
 
-// oneShot runs a single classify/merge completion at low reasoning effort.
-// Dedup verdicts and merges are short structured outputs (a few-field JSON
-// verdict, or a merged finding); full reasoning burns tokens that don't
-// improve verdict quality at the margin. MaxTokens still defaults high so a
-// thinking model has room to reason before emitting the verdict JSON.
+// oneShot runs one classify/merge chat completion and returns the trimmed
+// response.
 func (r *OpenAIDedupReviewer) oneShot(ctx context.Context, system, user string) (string, error) {
 	maxTokens := r.MaxTokens
 	if maxTokens <= 0 {
@@ -119,13 +100,9 @@ func (r *OpenAIDedupReviewer) oneShot(ctx context.Context, system, user string) 
 	return runOneShot(ctx, r.Pool, r.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
 }
 
-// runOneShot executes a single non-streaming chat completion against a
-// pooled client and returns the trimmed response content. Shared by
-// OpenAIDedupReviewer and HistoryCompressor — both perform stateless
-// system+user → text completions with no tool dispatch and no agent state.
-//
-// reasoningEffort is forwarded as ChatRequest.ReasoningEffort; pass "" to
-// inherit the model's default and let the backend ignore the field.
+// runOneShot runs one non-streaming system+user chat completion via a
+// pooled client and returns the trimmed response content. Pass "" for
+// reasoningEffort to inherit the model's default.
 func runOneShot(
 	ctx context.Context,
 	pool *agent.ClientPool,
@@ -211,9 +188,7 @@ Return only the JSON object. No explanation.
 	return b.String()
 }
 
-// candidateClassifyPrompt renders the multi-existing classify request.
-// Existing findings are presented as compact digests; the model picks one
-// of three actions and (for duplicate/merge) names the existing filename.
+// candidateClassifyPrompt renders the candidate-vs-digests classify request.
 func candidateClassifyPrompt(incoming AddInput, digests []FindingDigest) string {
 	var b strings.Builder
 	b.WriteString("A worker reported a candidate security finding. Decide whether it is genuinely new or already covered by an existing finding.\n\n")
@@ -271,13 +246,9 @@ func parseCandidateVerdict(raw string, digests []FindingDigest) (CandidateDedupV
 		if v.MatchedFilename == "" {
 			return CandidateDedupVerdict{}, fmt.Errorf("verdict %q missing matched_filename (raw: %q)", v.Action, raw)
 		}
-		known := false
-		for _, d := range digests {
-			if d.Filename == v.MatchedFilename {
-				known = true
-				break
-			}
-		}
+		known := slices.ContainsFunc(digests, func(d FindingDigest) bool {
+			return d.Filename == v.MatchedFilename
+		})
 		if !known {
 			return CandidateDedupVerdict{}, fmt.Errorf("verdict references unknown filename %q (raw: %q)", v.MatchedFilename, raw)
 		}
@@ -367,9 +338,8 @@ func parseMerge(raw string, fallback FindingFiled) (FindingFiled, error) {
 	return out, nil
 }
 
-// extractJSONObject scrapes the first {..} block from raw. Models sometimes
-// wrap JSON in ```json fences or add a leading sentence despite instructions;
-// this tolerates both.
+// extractJSONObject returns the first {..} block from raw, tolerating
+// markdown code fences and leading prose.
 func extractJSONObject(raw string) string {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimPrefix(s, "```json")
@@ -384,10 +354,9 @@ func extractJSONObject(raw string) string {
 	return s[start : end+1]
 }
 
-// ReviewAndWrite persists a filed finding after dedup: exact-duplicate check,
-// similarity review, and optional merge. Returns (wrote, path, err) where
-// wrote is true when a new file was persisted; path is "" only when incoming
-// was an exact duplicate.
+// ReviewAndWrite persists incoming after dedup. Returns (wrote, path, err)
+// where wrote is true when a new file was persisted, and path is "" only
+// when incoming is an exact duplicate.
 func ReviewAndWrite(
 	ctx context.Context,
 	reviewer DedupReviewer,
@@ -425,11 +394,9 @@ func ReviewAndWrite(
 	return err == nil, path, err
 }
 
-// ApplyDedupVerdict routes a verdict to the appropriate writer action.
-// Returns (wrote, resolvedPath, err). "wrote" is true when a new finding was
-// persisted (unique branch, or a merge that produced a new tail file). When
-// false the existing finding remained (possibly overwritten in place) and
-// the new filing was absorbed.
+// ApplyDedupVerdict routes verdict to the matching writer action. Returns
+// (wrote, resolvedPath, err); wrote is true only when a new finding file
+// was persisted.
 func ApplyDedupVerdict(
 	ctx context.Context,
 	reviewer DedupReviewer,

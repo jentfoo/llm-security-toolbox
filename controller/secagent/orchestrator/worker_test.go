@@ -10,7 +10,6 @@ func TestWorkerStateAppendHistory(t *testing.T) {
 	t.Parallel()
 
 	t.Run("before_wrap", func(t *testing.T) {
-		t.Parallel()
 		var w WorkerState
 		for i := 1; i <= 3; i++ {
 			w.AppendHistory(IterationEntry{Iteration: i})
@@ -22,7 +21,6 @@ func TestWorkerStateAppendHistory(t *testing.T) {
 	})
 
 	t.Run("wraps_around", func(t *testing.T) {
-		t.Parallel()
 		var w WorkerState
 		// Append 8 entries; ring capacity is 6; iterations 1 and 2 must drop.
 		for i := 1; i <= 8; i++ {
@@ -43,7 +41,6 @@ func TestWorkerStateAppendHistory(t *testing.T) {
 	})
 
 	t.Run("empty_returns_nil", func(t *testing.T) {
-		t.Parallel()
 		var w WorkerState
 		assert.Nil(t, w.RecentHistory())
 	})

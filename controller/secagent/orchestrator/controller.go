@@ -19,14 +19,8 @@ import (
 	"github.com/go-appsec/secagent/prompts"
 )
 
-// AgentFactory builds a new Agent for a given role. It's parameterized so
-// tests can inject FakeAgent.
-//
-// NewReconWorker is the iter-1 recon variant: it anchors only the
-// recon-mission summary (NOT cfg.Prompt) into the worker's system
-// prompt so the recon worker has no motivation to test. The
-// recon-only spawn path also omits report_finding_candidate from the
-// registered tool set so the worker physically cannot file findings.
+// AgentFactory builds Agent instances per role. NewReconWorker omits
+// report_finding_candidate so recon cannot file findings.
 type AgentFactory interface {
 	NewWorker(id, numWorkers int) (agent.Agent, error)
 	NewReconWorker(reconMission string) (agent.Agent, error)
@@ -42,24 +36,16 @@ type OpenAIFactory struct {
 	Pool      *agent.ClientPool
 	Malformed *MalformedCounter
 	Log       *Logger
-	// Reasoning is the reasoning handler detected at startup for cfg.Model.
-	// Nil falls back to inline.
+	// Reasoning handler for cfg.Model; nil falls back to inline.
 	Reasoning agent.ReasoningHandler
-	// Summarizer carries the shared pool, model, and logger used by the
-	// worker-only model-driven compaction callbacks (self-prune and
-	// distillation). Wired post-construction by Run; nil disables both.
+	// Summarizer drives worker model-driven compaction callbacks; nil disables.
 	Summarizer *Summarizer
-	// ReconSummary, when non-empty, is woven into every worker's system
-	// prompt as the canonical scope-mapping context produced by the
-	// iter-1 recon worker. Set by the controller after iter 1 completes
-	// and worker 1 retires; read on every NewWorker call afterwards.
-	// Mutated only on the main controller goroutine before sequential
-	// spawn calls — no race in practice.
+	// ReconSummary is anchored into every subsequent worker's system prompt.
 	ReconSummary string
 }
 
-// slowToolThreshold is the elapsed time at which [tool] done is mirrored
-// to stderr; below it, tool lifecycle stays in the JSON file only.
+// slowToolThreshold is the elapsed time at which a successful tool call
+// is mirrored to stderr instead of staying in the JSON log.
 const slowToolThreshold = 5 * time.Second
 
 func (f *OpenAIFactory) malformedCallback(model string) func(name string, err error) {
@@ -69,9 +55,8 @@ func (f *OpenAIFactory) malformedCallback(model string) func(name string, err er
 	return func(name string, err error) { f.Malformed.Observe(model, name, err) }
 }
 
-// requestCallbacks returns start/end hooks that record each chat-completion
-// HTTP call. Model is dropped from per-call fields — it is logged once at
-// startup — but role stays so operators can tell calls apart in the JSON log.
+// requestCallbacks returns start/end hooks that log each chat-completion
+// call tagged with role. Returns (nil, nil) when f.Log is nil.
 func (f *OpenAIFactory) requestCallbacks(role string) (func(int), func(int, time.Duration, int, int, error)) {
 	if f.Log == nil {
 		return nil, nil
@@ -110,8 +95,8 @@ func (f *OpenAIFactory) requestCallbacks(role string) (func(int), func(int, time
 	return start, end
 }
 
-// toolCallbacks returns start/end hooks for individual tool dispatches. Only
-// slow/error/timeout outcomes mirror to stderr; the rest stay in the JSON log.
+// toolCallbacks returns start/end hooks for tool dispatches tagged with
+// role. Returns (nil, nil) when f.Log is nil.
 func (f *OpenAIFactory) toolCallbacks(role string) (func(string, json.RawMessage), func(string, json.RawMessage, time.Duration, bool, bool, string)) {
 	if f.Log == nil {
 		return nil, nil
@@ -141,9 +126,8 @@ func (f *OpenAIFactory) toolCallbacks(role string) (func(string, json.RawMessage
 	return start, end
 }
 
-// fuzzyToolMatchCallback logs each canonical-form tool-name fallback so
-// operators can see model typos getting auto-corrected to the registered
-// name instead of failing as unknown-tool.
+// fuzzyToolMatchCallback returns a hook that logs each fuzzy tool-name
+// match. Returns nil when f.Log is nil.
 func (f *OpenAIFactory) fuzzyToolMatchCallback(role string) func(received, resolved string) {
 	if f.Log == nil {
 		return nil
@@ -158,8 +142,7 @@ func (f *OpenAIFactory) fuzzyToolMatchCallback(role string) func(received, resol
 }
 
 // summarizeErrorCallback returns a hook that logs failed boundary-summarize
-// attempts. The agent fails open regardless; this just records the failure
-// so operators can see it in the JSON log.
+// attempts. Returns nil when f.Log is nil.
 func (f *OpenAIFactory) summarizeErrorCallback(role string) func(error) {
 	if f.Log == nil {
 		return nil
@@ -172,24 +155,13 @@ func (f *OpenAIFactory) summarizeErrorCallback(role string) func(error) {
 	}
 }
 
-// buildAgent assembles an OpenAIAgent for a role. Workers and verifiers set
-// a FlowIDExtractor so their turn summaries can link reported flow IDs;
-// directors don't dispatch sectool tools, so their extractor stays nil.
+// buildAgent assembles an OpenAIAgent for a role.
 //
-// onContextOverflow, when non-nil, fires once per chat-completion call that
-// the model rejected as over-context. The verifier wires this to a captured
-// bool so the controller can auto-dismiss in-flight candidates after a
-// freshly composed phase still overflows.
-//
-// retireOnPressure flips compaction off entirely — when usage crosses the
-// high watermark, the next Drain returns immediately with
-// EscalationReason="context_exhausted" so the caller can retire and
-// summarize the uncompacted chronicle. Currently set only by the recon
-// worker; everyone else gets normal compaction.
-//
-// wireCompactionAssist enables the model-driven self-prune and distill
-// callbacks. Workers only — verifier/director compaction stays mechanical.
-// Skipped when f.Summarizer is nil.
+// setFlowExtractor wires ExtractFlowIDs onto the agent's turn summaries.
+// onContextOverflow fires once per chat-completion call rejected as
+// over-context. retireOnPressure stops compaction so the agent retires at
+// the high watermark instead. wireCompactionAssist installs the
+// model-driven self-prune and distill callbacks (workers only).
 func (f *OpenAIFactory) buildAgent(
 	role, model, systemPrompt string,
 	pool *agent.ClientPool,
@@ -239,8 +211,8 @@ func (f *OpenAIFactory) buildAgent(
 	return agent.NewOpenAIAgent(cfg)
 }
 
-// withMission anchors the mission and recon summary into a role's system
-// prompt so they survive every ReplaceHistory and compaction pass.
+// withMission appends cfg.Prompt and ReconSummary (when non-empty) to
+// systemPrompt as anchored sections.
 func (f *OpenAIFactory) withMission(systemPrompt string) string {
 	mission := strings.TrimSpace(f.Cfg.Prompt)
 	out := systemPrompt
@@ -254,10 +226,8 @@ func (f *OpenAIFactory) withMission(systemPrompt string) string {
 	return out
 }
 
-// withRecon anchors only the recon-mission summary on a system prompt.
-// Used exclusively for the iter-1 recon worker — cfg.Prompt is NOT
-// surfaced so the worker has no testing motivation. Empty reconMission
-// renders nothing.
+// withRecon appends reconMission to systemPrompt as an anchored section.
+// Empty reconMission returns systemPrompt unchanged.
 func (f *OpenAIFactory) withRecon(systemPrompt, reconMission string) string {
 	out := systemPrompt
 	if recon := strings.TrimSpace(reconMission); recon != "" {
@@ -266,7 +236,7 @@ func (f *OpenAIFactory) withRecon(systemPrompt, reconMission string) string {
 	return out
 }
 
-// NewWorker builds a worker agent with the given role-sizing.
+// NewWorker returns a worker agent with the given id out of numWorkers.
 func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 	return f.buildAgent(
 		fmt.Sprintf("worker-%d", id),
@@ -282,15 +252,9 @@ func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 	), nil
 }
 
-// NewReconWorker builds the iter-1 recon worker agent. Its system
-// prompt anchors the recon-mission summary (NOT cfg.Prompt) so the
-// worker has no testing motivation. The recon role-sizing is hardcoded
-// to (id=1, numWorkers=1) — recon is always solo and always worker 1.
-//
-// RetireOnPressure is set so the agent stops cleanly at the high
-// watermark instead of compacting. Recon's only durable output is the
-// retire summary built from its chronicle; compaction-time stubbing
-// would destroy the raw observations the summary should be drawn from.
+// NewReconWorker returns the iter-1 recon worker agent anchored to
+// reconMission. The agent retires at the high watermark instead of
+// compacting (preserving the chronicle for the retire summary).
 func (f *OpenAIFactory) NewReconWorker(reconMission string) (agent.Agent, error) {
 	return f.buildAgent(
 		"worker-1-recon",
@@ -306,9 +270,8 @@ func (f *OpenAIFactory) NewReconWorker(reconMission string) (agent.Agent, error)
 	), nil
 }
 
-// NewVerifier builds a verifier agent. onContextOverflow is wired through
-// to OpenAIAgentConfig so the controller can detect a budget-stuck verifier
-// after a fresh compose and auto-dismiss its in-flight candidates.
+// NewVerifier returns a verifier agent. onContextOverflow fires when a
+// chat-completion call is rejected as over-context.
 func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, error) {
 	return f.buildAgent(
 		"verifier",
@@ -324,9 +287,7 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 	), nil
 }
 
-// NewDecisionDirector builds the per-worker decision director. Its system
-// prompt only describes decide_worker — synthesis tools are deliberately
-// absent so the model does not hallucinate calls to them mid-decision.
+// NewDecisionDirector returns the per-worker decision director agent.
 func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 	return f.buildAgent(
 		"director-review",
@@ -342,9 +303,7 @@ func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 	), nil
 }
 
-// NewSynthesisDirector builds the iteration-end synthesis director. Its
-// system prompt describes plan_workers / direction_done / end_run only;
-// per-worker decisions land in a separate pass before this agent runs.
+// NewSynthesisDirector returns the iteration-end synthesis director agent.
 func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
 	return f.buildAgent(
 		"director-plan",
@@ -360,15 +319,12 @@ func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
 	), nil
 }
 
-// Close is a no-op (pools outlive the factory in typical use).
+// Close is a no-op.
 func (f *OpenAIFactory) Close() error { return nil }
 
-// buildClientPool constructs n distinct ChatClient instances against baseURL
-// and wraps them in a bounded-concurrency ClientPool. httpTimeout is a
-// belt-and-suspenders outer bound for wedged keep-alives; 0 disables it
-// (context deadlines still apply per call). Pass TurnTimeout + a small
-// headroom so context cancellation, not the HTTP deadline, is the normal
-// termination path.
+// buildClientPool returns a bounded-concurrency ClientPool of n distinct
+// ChatClient instances against baseURL. httpTimeout caps each HTTP call;
+// 0 disables it.
 func buildClientPool(baseURL, apiKey string, n int, httpTimeout time.Duration) *agent.ClientPool {
 	if n < 1 {
 		n = 1
@@ -380,9 +336,8 @@ func buildClientPool(baseURL, apiKey string, n int, httpTimeout time.Duration) *
 	return agent.NewClientPoolWithClients(clients)
 }
 
-// resolveFormat probes (baseURL, model) via pool-acquired client through the
-// shared cache and emits a [server] reasoning-format log entry on the real
-// detection path (cache hits are silent). Returns the resolved format.
+// resolveFormat returns the reasoning format for (baseURL, model) via cache,
+// probing through a pool-acquired client on cache miss.
 func resolveFormat(
 	ctx context.Context,
 	cache *agent.ReasoningFormatCache,
@@ -420,21 +375,12 @@ func resolveFormat(
 	)
 }
 
-// workerSpawnFunc produces a ready-to-run worker (MCP client connected,
-// tools registered, assignment recorded as LastInstruction). Injected
-// into applyPlanAndFire and the per-worker fork path so tests can stub
-// provisioning without touching the real MCP server.
+// workerSpawnFunc returns a ready-to-run worker provisioned with id,
+// numWorkers and the assignment as its initial LastInstruction.
 type workerSpawnFunc func(ctx context.Context, id, numWorkers int, assignment string) (*WorkerState, error)
 
 // newWorkerSpawner returns a workerSpawnFunc that provisions workers
-// against a live MCP endpoint. Each call opens a fresh mcp.Client so each
-// worker has its own transport state per spec §6.
-//
-// Workers do NOT install an OnSummarizeBoundary callback — the per-iter
-// install in installChronicle already produces a fresh summary from the
-// canonical raw chronicle, so any in-iter boundary summarize would be
-// summary-of-summary. In-iter context pressure is bounded by the iter's
-// tool calls; the existing Compact passes handle that.
+// against the MCP endpoint at mcpURL.
 func newWorkerSpawner(
 	mcpURL string,
 	toolResultMaxBytes int,
@@ -474,11 +420,9 @@ func newWorkerSpawner(
 	}
 }
 
-// spawnReconWorker provisions the iter-1 recon worker against a live
-// MCP endpoint. The recon worker is always solo and always worker 1;
-// only sectool tools are registered (no in-process WorkerToolDefs) so
-// the worker has no way to file finding candidates — the only
-// structural restriction we enforce on the recon role.
+// spawnReconWorker returns the iter-1 recon worker (id=1) provisioned
+// against mcpURL. report_finding_candidate is not registered, so the
+// worker cannot file findings.
 func spawnReconWorker(
 	ctx context.Context,
 	mcpURL string,
@@ -512,8 +456,9 @@ func spawnReconWorker(
 	}, nil
 }
 
-// Run starts sectool, connects agents, and runs the iteration loop until
-// max-iterations or a director `done`.
+// Run starts sectool and drives the iteration loop until cfg.MaxIterations
+// is reached or the director ends the run. A nil sd is replaced with a
+// fresh Shutdown derived from ctx.
 func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) error {
 	if sd == nil {
 		sd = NewShutdown(ctx, log)
@@ -1253,10 +1198,8 @@ func aliveWorkers(ws []*WorkerState) []*WorkerState {
 	return bulk.SliceFilter(func(w *WorkerState) bool { return w.Alive }, ws)
 }
 
-// isDeadIteration reports whether the autonomous phase produced nothing
-// actionable — no tool calls across any worker and no new candidates filed.
-// These iterations shouldn't feed verification/direction; doing so lets the
-// director hallucinate plans over workers that silently failed LLM-side.
+// isDeadIteration reports whether the autonomous phase produced no tool
+// calls across any worker and no new candidates.
 func isDeadIteration(workerRuns map[int][]agent.TurnSummary, candidatesBefore, candidatesAfter int) bool {
 	if candidatesAfter != candidatesBefore {
 		return false
@@ -1272,13 +1215,9 @@ func isDeadIteration(workerRuns map[int][]agent.TurnSummary, candidatesBefore, c
 }
 
 // applyPlanAndFire applies a plan_workers list (spawn fresh / retarget
-// alive) AND fires each affected worker's iter+1 run as a goroutine,
-// recording the join in inflight. The fire callback is the controller's
-// shared fire(ctx, w) closure.
-//
-// Retargeting an alive worker resets its stall counters when productive
-// (matches the prior plan-apply behavior). Spawn collisions / max-worker
-// cap are skipped with explicit log entries.
+// alive) and fires each affected worker's iter+1 run via fire, recording
+// the join in inflight. Entries that exceed maxWorkers or collide with
+// retired IDs are skipped with a log entry.
 func applyPlanAndFire(
 	ctx context.Context,
 	plan []PlanEntry,
@@ -1374,9 +1313,8 @@ func stopInflightWorkerRun(w *WorkerState, inflight map[int]func() []agent.TurnS
 	}
 }
 
-// refireAlive starts an iter+1 run for every still-alive worker that
-// doesn't already have a fired run in inflight. Used on dead-iteration
-// short-circuit so the loop has something to wait on next iter.
+// refireAlive fires an iter+1 run for every alive worker that doesn't
+// already have a join in inflight.
 func refireAlive(
 	ctx context.Context,
 	workers []*WorkerState,
@@ -1399,8 +1337,8 @@ func refireAlive(
 	}
 }
 
-// harvestInflight blocks on every join function in inflight and returns
-// the per-worker turn-summary map. Idempotent / safe for empty inflight.
+// harvestInflight blocks on every join in inflight and returns the
+// per-worker turn-summary map.
 func harvestInflight(inflight map[int]func() []agent.TurnSummary) map[int][]agent.TurnSummary {
 	out := map[int][]agent.TurnSummary{}
 	for id, j := range inflight {
@@ -1409,10 +1347,8 @@ func harvestInflight(inflight map[int]func() []agent.TurnSummary) map[int][]agen
 	return out
 }
 
-// probeReasoningHandlers detects reasoning-format support for the main and
-// log models. When both names match, a single resolveFormat call covers
-// both; otherwise the two probes run concurrently and share a cache so
-// identical (baseURL, model) pairs only fire one detection call.
+// probeReasoningHandlers returns reasoning handlers for cfg.Model and
+// cfg.LogModel.
 func probeReasoningHandlers(
 	ctx context.Context, cfg *config.Config, pool *agent.ClientPool, log *Logger,
 ) (mainR, logR agent.ReasoningHandler) {
@@ -1436,9 +1372,8 @@ func probeReasoningHandlers(
 	return agent.NewReasoningHandler(mainFmt), agent.NewReasoningHandler(logFmt)
 }
 
-// snapshotIterationStart records each worker's current angle before the
-// autonomous phase mutates LastInstruction. Returns the angle map and an
-// alive-set used by appendIterationHistory.
+// snapshotIterationStart returns each alive worker's current LastInstruction
+// (angleAt) and an alive-set keyed by worker ID.
 func snapshotIterationStart(alive []*WorkerState) (angleAt map[int]string, aliveAtStart map[int]bool) {
 	angleAt = map[int]string{}
 	aliveAtStart = map[int]bool{}
@@ -1449,12 +1384,8 @@ func snapshotIterationStart(alive []*WorkerState) (angleAt map[int]string, alive
 	return
 }
 
-// extractWorkerChroniclesAtIterEnd reads each alive worker's iteration
-// boundary onward off its agent, appends to the worker's chronicle
-// (tagged with the iteration number), and runs in-place compaction so
-// older iters' think blocks and tool results fold into compact stubs.
-// Called after the autonomous phase so the next iter's installChronicle
-// sees a bounded, mostly-compacted chronicle with this iter's turns raw.
+// extractWorkerChroniclesAtIterEnd appends each alive worker's iter
+// content to its chronicle and runs in-place compaction.
 func extractWorkerChroniclesAtIterEnd(alive []*WorkerState, iteration int, log *Logger) {
 	for _, w := range alive {
 		extractAndAppend(w, iteration)
@@ -1471,11 +1402,8 @@ func extractWorkerChroniclesAtIterEnd(alive []*WorkerState, iteration int, log *
 	}
 }
 
-// enforceStallStopsAsync retires every still-alive worker whose
-// ProgressNoneStreak has reached stopAfter. Runs before verification so
-// the stalled worker's run still feeds the verifier (spec §7.3). The
-// retire callback enqueues async summarization via RetireQueue; the
-// worker is Alive=false immediately so subsequent phases skip it.
+// enforceStallStopsAsync calls retire for every alive worker whose
+// ProgressNoneStreak has reached stopAfter.
 func enforceStallStopsAsync(workers []*WorkerState, stopAfter int, retire func(*WorkerState, string, int), iter int, log *Logger) {
 	for _, w := range workers {
 		if w.Alive && w.ProgressNoneStreak >= stopAfter {

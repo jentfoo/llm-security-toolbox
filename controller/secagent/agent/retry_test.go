@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
 	"testing"
@@ -21,93 +22,107 @@ func TestClassify(t *testing.T) {
 		wantCat ErrCategory
 		wantRA  time.Duration
 	}{
-		{"nil", nil, ErrOther, 0},
-		{"canceled", context.Canceled, ErrDeadline, 0},
-		{"deadline_exceeded", context.DeadlineExceeded, ErrDeadline, 0},
-		{"context_overflow_local", errors.New("Context size has been exceeded"), ErrContextOverflow, 0},
-		{"context_overflow_openai_code", errors.New("context_length_exceeded"), ErrContextOverflow, 0},
-		{"rate_limit_from_api_error", &openai.APIError{HTTPStatusCode: 429, Message: "rate limited"}, ErrRateLimit, 0},
-		{"rate_limit_with_retry_after_seconds",
-			&openai.APIError{HTTPStatusCode: 429, Message: "slow down; retry after 7 seconds"},
-			ErrRateLimit, 7 * time.Second},
-		{"rate_limit_with_retry_after_ms",
-			&openai.APIError{HTTPStatusCode: 429, Message: "retry-after: 250ms"},
-			ErrRateLimit, 250 * time.Millisecond},
-		{"server_5xx", &openai.APIError{HTTPStatusCode: 503, Message: "upstream"}, ErrTransientNet, 0},
-		{"model_error_4xx", &openai.APIError{HTTPStatusCode: 400, Message: "bad request"}, ErrModelError, 0},
-		{"auth_error_4xx", &openai.APIError{HTTPStatusCode: 401, Message: "unauthorized"}, ErrModelError, 0},
-		{"connection_reset", errors.New("read tcp: connection reset by peer"), ErrTransientNet, 0},
-		{"connection_refused", errors.New("dial tcp: connection refused"), ErrTransientNet, 0},
-		{"eof", errors.New("unexpected EOF"), ErrTransientNet, 0},
-		{"broken_pipe", errors.New("write: broken pipe"), ErrTransientNet, 0},
-		{"net_timeout", &fakeNetErr{timeout: true}, ErrTransientNet, 0},
-		{"unknown_error", errors.New("something surprising"), ErrOther, 0},
+		{name: "nil", wantCat: ErrOther},
+		{name: "canceled", err: context.Canceled, wantCat: ErrDeadline},
+		{name: "deadline_exceeded", err: context.DeadlineExceeded, wantCat: ErrDeadline},
+		{name: "wrapped_canceled", err: fmt.Errorf("op: %w", context.Canceled), wantCat: ErrDeadline},
+		{name: "context_overflow_local", err: errors.New("Context size has been exceeded"), wantCat: ErrContextOverflow},
+		{name: "context_overflow_openai", err: errors.New("context_length_exceeded"), wantCat: ErrContextOverflow},
+		{name: "rate_limit_apierr", err: &openai.APIError{HTTPStatusCode: 429, Message: "rate limited"}, wantCat: ErrRateLimit},
+		{name: "rate_limit_retry_seconds", err: &openai.APIError{HTTPStatusCode: 429, Message: "slow down; retry after 7 seconds"}, wantCat: ErrRateLimit, wantRA: 7 * time.Second},
+		{name: "rate_limit_retry_ms", err: &openai.APIError{HTTPStatusCode: 429, Message: "retry-after: 250ms"}, wantCat: ErrRateLimit, wantRA: 250 * time.Millisecond},
+		{name: "request_err_wrapped", err: &openai.RequestError{HTTPStatusCode: 503, Err: errors.New("upstream")}, wantCat: ErrTransientNet},
+		{name: "wrapped_apierror", err: fmt.Errorf("call: %w", &openai.APIError{HTTPStatusCode: 429, Message: ""}), wantCat: ErrRateLimit},
+		{name: "server_5xx", err: &openai.APIError{HTTPStatusCode: 503, Message: "upstream"}, wantCat: ErrTransientNet},
+		{name: "server_500_exact", err: &openai.APIError{HTTPStatusCode: 500, Message: ""}, wantCat: ErrTransientNet},
+		{name: "model_error_400", err: &openai.APIError{HTTPStatusCode: 400, Message: "bad request"}, wantCat: ErrModelError},
+		{name: "auth_error_401", err: &openai.APIError{HTTPStatusCode: 401, Message: "unauthorized"}, wantCat: ErrModelError},
+		{name: "connection_reset", err: errors.New("read tcp: connection reset by peer"), wantCat: ErrTransientNet},
+		{name: "connection_refused", err: errors.New("dial tcp: connection refused"), wantCat: ErrTransientNet},
+		{name: "eof", err: errors.New("unexpected EOF"), wantCat: ErrTransientNet},
+		{name: "broken_pipe", err: errors.New("write: broken pipe"), wantCat: ErrTransientNet},
+		{name: "net_timeout", err: &fakeNetErr{timeout: true}, wantCat: ErrTransientNet},
+		{name: "unknown_error", err: errors.New("something surprising"), wantCat: ErrOther},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			gotCat, gotRA := Classify(c.err)
-			assert.Equal(t, c.wantCat, gotCat)
-			assert.Equal(t, c.wantRA, gotRA)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCat, gotRA := Classify(tc.err)
+			assert.Equal(t, tc.wantCat, gotCat)
+			assert.Equal(t, tc.wantRA, gotRA)
 		})
 	}
 }
 
-func TestBackoffFor(t *testing.T) {
+func TestParseRetryAfter(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name       string
-		cat        ErrCategory
-		attempt    int
-		retryAfter time.Duration
-		base       time.Duration
-		wantMin    time.Duration // inclusive
-		wantMax    time.Duration // exclusive
+		name string
+		msg  string
+		want time.Duration
 	}{
-		{
-			name:       "rate_limit_honors_retry_after",
-			cat:        ErrRateLimit,
-			retryAfter: 500 * time.Millisecond,
-			base:       time.Second,
-			wantMin:    500 * time.Millisecond,
-			wantMax:    500*time.Millisecond + 1,
-		},
-		{
-			// attempt 2: base * 2^2 = 400ms before jitter; jitter ±20% → [320ms, 480ms).
-			name:    "rate_limit_falls_back_to_exponential",
-			cat:     ErrRateLimit,
-			attempt: 2,
-			base:    100 * time.Millisecond,
-			wantMin: 320 * time.Millisecond,
-			wantMax: 480 * time.Millisecond,
-		},
-		{
-			// attempt 0: base * 2^0 = 200ms before jitter → [160ms, 240ms).
-			name:    "transient_net_jittered_exponential",
-			cat:     ErrTransientNet,
-			base:    200 * time.Millisecond,
-			wantMin: 160 * time.Millisecond,
-			wantMax: 240 * time.Millisecond,
-		},
-		{
-			// attempt 20: exponential would be enormous; capped at 30s then jittered.
-			name:    "transient_net_capped_at_30s",
-			cat:     ErrTransientNet,
-			attempt: 20,
-			base:    time.Second,
-			wantMin: 24 * time.Second,
-			wantMax: 37 * time.Second,
-		},
-		{name: "non_retryable_other", cat: ErrOther, base: time.Second, wantMax: 1},
-		{name: "non_retryable_deadline", cat: ErrDeadline, base: time.Second, wantMax: 1},
-		{name: "non_retryable_context_overflow", cat: ErrContextOverflow, base: time.Second, wantMax: 1},
-		{name: "non_retryable_model_error", cat: ErrModelError, base: time.Second, wantMax: 1},
+		{name: "seconds_word", msg: "retry after 5 seconds", want: 5 * time.Second},
+		{name: "second_singular", msg: "retry-after 1 second", want: 1 * time.Second},
+		{name: "bare_s", msg: "retry-after: 3s", want: 3 * time.Second},
+		{name: "no_unit_seconds", msg: "retry-after 12", want: 12 * time.Second},
+		{name: "ms_unit", msg: "retry-after: 250ms", want: 250 * time.Millisecond},
+		{name: "millis_alias", msg: "retry-after 500 millis", want: 500 * time.Millisecond},
+		{name: "milliseconds_alias", msg: "retry-after 750 milliseconds", want: 750 * time.Millisecond},
+		{name: "decimal_seconds", msg: "retry-after 1.5 seconds", want: 1500 * time.Millisecond},
+		{name: "no_match", msg: "no hint here", want: 0},
+		{name: "zero_ignored", msg: "retry-after 0", want: 0},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rng := rand.New(rand.NewSource(1))
-			got := BackoffFor(tc.cat, tc.attempt, tc.retryAfter, tc.base, rng)
+			assert.Equal(t, tc.want, parseRetryAfter(tc.msg))
+		})
+	}
+}
+
+func TestBackoffFor_RateLimitRetryAfter(t *testing.T) {
+	t.Parallel()
+	got := BackoffFor(ErrRateLimit, 0, 500*time.Millisecond, time.Second, rand.New(rand.NewSource(1)))
+	assert.Equal(t, 500*time.Millisecond, got)
+}
+
+func TestBackoffFor_NonRetryable(t *testing.T) {
+	t.Parallel()
+	cats := []ErrCategory{ErrOther, ErrDeadline, ErrContextOverflow, ErrModelError}
+	for _, cat := range cats {
+		t.Run(fmt.Sprintf("category_%d", cat), func(t *testing.T) {
+			got := BackoffFor(cat, 0, 0, time.Second, rand.New(rand.NewSource(1)))
+			assert.Zero(t, got)
+		})
+	}
+}
+
+func TestBackoffFor_JitteredExponential(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		cat     ErrCategory
+		attempt int
+		base    time.Duration
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		// attempt 2: base * 2^2 = 400ms before jitter; jitter ±20% → [320ms, 480ms)
+		{name: "rate_limit_no_hint", cat: ErrRateLimit, attempt: 2, base: 100 * time.Millisecond,
+			wantMin: 320 * time.Millisecond, wantMax: 480 * time.Millisecond},
+		// attempt 0: base * 2^0 = 200ms before jitter → [160ms, 240ms)
+		{name: "transient_attempt_zero", cat: ErrTransientNet, base: 200 * time.Millisecond,
+			wantMin: 160 * time.Millisecond, wantMax: 240 * time.Millisecond},
+		// attempt 20: exponential capped at 30s, then jittered ±20% → [24s, 36s)
+		{name: "transient_capped", cat: ErrTransientNet, attempt: 20, base: time.Second,
+			wantMin: 24 * time.Second, wantMax: 36 * time.Second},
+		// rate-limit cap is 60s; attempt 20 saturates and jitters → [48s, 72s)
+		{name: "rate_limit_capped", cat: ErrRateLimit, attempt: 20, base: time.Second,
+			wantMin: 48 * time.Second, wantMax: 72 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BackoffFor(tc.cat, tc.attempt, 0, tc.base, rand.New(rand.NewSource(1)))
 			assert.GreaterOrEqual(t, got, tc.wantMin)
 			assert.Less(t, got, tc.wantMax)
 		})

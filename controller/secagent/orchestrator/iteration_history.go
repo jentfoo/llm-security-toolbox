@@ -3,12 +3,12 @@ package orchestrator
 import (
 	"strings"
 
+	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/secagent/agent"
 )
 
-// appendIterationHistory derives and appends one IterationEntry per worker
-// that was alive at iteration start. Called at end-of-iteration once
-// decisions/candidates have settled so outcome classification is accurate.
+// appendIterationHistory appends one IterationEntry to each worker that
+// was alive at iteration start.
 func appendIterationHistory(
 	workers []*WorkerState,
 	aliveAtStart map[int]bool,
@@ -39,8 +39,8 @@ func appendIterationHistory(
 // angleMaxLen caps the Angle field so the rendered history stays compact.
 const angleMaxLen = 100
 
-// truncateAngle normalizes whitespace and truncates the result so the
-// output is no more than angleMaxLen bytes (including the trailing ellipsis).
+// truncateAngle returns s with whitespace normalized, truncated to at
+// most angleMaxLen bytes (including the trailing ellipsis).
 func truncateAngle(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) <= angleMaxLen {
@@ -50,7 +50,8 @@ func truncateAngle(s string) string {
 	return s[:angleMaxLen-len(ellipsis)] + ellipsis
 }
 
-// countToolCallsAndFlows sums across a worker's turns for the iteration.
+// countToolCallsAndFlows returns the total tool call and flow ID counts
+// across runs.
 func countToolCallsAndFlows(runs []agent.TurnSummary) (toolCalls, flows int) {
 	for _, t := range runs {
 		toolCalls += len(t.ToolCalls)
@@ -59,24 +60,10 @@ func countToolCallsAndFlows(runs []agent.TurnSummary) (toolCalls, flows int) {
 	return
 }
 
-// DeriveIterationOutcome classifies this iteration's result for the given
-// worker. Precedence (first match wins):
-//
-//  1. Stopped — worker was stopped this iteration (no longer alive).
-//  2. Finding — the verifier explicitly linked a filed finding to one of
-//     this worker's candidates via SupersedesCandidateIDs.
-//  3. PossibleFinding — a filed finding heuristically matched one of this
-//     worker's candidates (title+endpoint tier match) but the verifier did
-//     not explicitly link it. Signals to the director that the candidate
-//     may have been covered, but the relationship is uncertain and warrants
-//     follow-up. A finding outcome should be explicit; tier matches are a
-//     hint, not a confirmation.
-//  4. Dismissed — a candidate this worker reported was dismissed.
-//  5. Candidate — reported a candidate that's still pending at iter end.
-//  6. Fall-through to escalation reason: error / budget / silent.
-//
-// workerCandidates is the slice of candidate IDs this worker reported in
-// this iteration (typically from candidates.IDsSinceForWorker).
+// DeriveIterationOutcome classifies this iteration's outcome for w.
+// Precedence: stopped, finding (explicit link), possible-finding (tier
+// match), dismissed, candidate, then escalation reason. workerCandidates
+// is the candidate IDs reported by this worker in this iteration.
 func DeriveIterationOutcome(
 	w *WorkerState,
 	runs []agent.TurnSummary,
@@ -90,10 +77,7 @@ func DeriveIterationOutcome(
 	}
 
 	// Build a lookup for this worker's candidate IDs for O(1) membership.
-	mine := make(map[string]bool, len(workerCandidates))
-	for _, id := range workerCandidates {
-		mine[id] = true
-	}
+	mine := bulk.SliceToSet(workerCandidates)
 
 	// Snapshot this worker's candidates once for tier matching below.
 	var mineSnapshots []FindingCandidate
@@ -108,7 +92,7 @@ func DeriveIterationOutcome(
 	var tierMatched bool
 	for _, f := range decisions.Findings {
 		for _, cid := range f.SupersedesCandidateIDs {
-			if mine[cid] {
+			if _, ok := mine[cid]; ok {
 				return OutcomeFinding
 			}
 		}
@@ -125,7 +109,7 @@ func DeriveIterationOutcome(
 
 	// (4) Dismissed: did the verifier dismiss any of this worker's candidates?
 	for _, d := range decisions.Dismissals {
-		if mine[d.CandidateID] {
+		if _, ok := mine[d.CandidateID]; ok {
 			return OutcomeDismissed
 		}
 	}

@@ -28,38 +28,15 @@ var severities = map[string]bool{
 	"informational": true,
 }
 
-// MergeSubmitter schedules an asynchronous merge of a worker-reported
-// candidate into an already-filed finding. The implementation owns goroutine
-// lifetime and bounded concurrency; the worker tool just calls Submit and
-// continues. Pass nil to disable async merge (the dedup verdict "merge"
-// degrades to "duplicate" in that case).
+// MergeSubmitter schedules a background merge of a worker-reported
+// candidate into matchedFilename. Pass nil to disable async merge.
 type MergeSubmitter interface {
 	Submit(matchedFilename string, incoming AddInput)
 }
 
-// The recon worker uses the full sectool surface (same as testing
-// workers) — the only structural restriction is that
-// report_finding_candidate is NOT registered, so recon physically
-// cannot file findings. This narrows the contract to its essential
-// form: "you can use any tool to map the surface, you just can't
-// declare a vulnerability". Active probes (replay_send, request_send)
-// remain available because recon often needs to send shaped requests
-// to learn how endpoints behave under auth, error conditions, etc.
-//
-// The recon-only spawn path in controller.go skips WorkerToolDefs and
-// passes only the sectool defs to SetTools. No allowlist filter on the
-// sectool side is needed.
-
-// WorkerToolDefs builds the per-worker tool set: report_finding_candidate.
-//
-// dedupReviewer (optional) classifies each incoming candidate against
-// already-filed findings via the summary model. When nil, the deterministic
-// writer.MatchesFiled fallback runs instead.
-//
-// merger (optional) is invoked when the dedup verdict is "merge" — the
-// candidate is acknowledged synchronously and the merge proceeds in a
-// background goroutine owned by the submitter. When nil, "merge" verdicts
-// degrade to "duplicate" rejections.
+// WorkerToolDefs returns the per-worker tool set (report_finding_candidate).
+// dedupReviewer (optional) classifies candidates against filed findings;
+// merger (optional) handles "merge" verdicts.
 func WorkerToolDefs(
 	candidates *CandidatePool,
 	writer *FindingWriter,
@@ -147,14 +124,8 @@ Returns a candidate_id confirmation.`,
 	}
 }
 
-// dedupRejectOrMerge consults the dedup pipeline and returns (result, true)
-// when the candidate should NOT be added to the pool — either because it
-// duplicates an existing finding or because it was queued for async merge.
-// Returns (_, false) when the candidate is unique and should proceed to
-// CandidatePool.Add.
-//
-// When dedupReviewer is nil, falls back to writer.MatchesFiled (deterministic
-// slug + endpoint match), preserving the prior behaviour.
+// dedupRejectOrMerge returns (result, true) when in is a duplicate or
+// has been queued for merge, or (_, false) when it should be added.
 func dedupRejectOrMerge(
 	ctx context.Context,
 	dedupReviewer CandidateDedupReviewer,
@@ -215,8 +186,8 @@ func dedupRejectOrMerge(
 	return agent.ToolResult{}, false
 }
 
-// VerifierToolDefs builds the in-process tool set for the verifier.
-// sectool tools are added separately from the MCP server.
+// VerifierToolDefs returns the in-process verifier tool set
+// (file_finding, dismiss_candidate, verification_done).
 func VerifierToolDefs(decisions *DecisionQueue) []agent.ToolDef {
 	reject := func(name string) agent.ToolResult {
 		cur := decisions.Phase()
@@ -392,23 +363,12 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 	}
 }
 
-// TakenIDsFunc returns the set of worker IDs that are not eligible for
-// reuse — currently alive workers ∪ already-completed workers. Used by
-// decide_worker.fork and plan_workers to validate new IDs.
+// TakenIDsFunc returns worker IDs that are not eligible for reuse
+// (alive ∪ completed).
 type TakenIDsFunc func() map[int]bool
 
-// DecisionToolDefs builds the per-worker decision tool set. The director
-// gets ONLY decide_worker during the per-worker decision loop; one tool
-// call per call, expected exactly once. The handler rejects a worker_id
-// mismatch with retry guidance — silently rewriting the ID risks
-// applying the model's action/instruction/reason text to the wrong
-// worker when the mismatch reflects genuine model confusion rather than
-// a typo.
-//
-// takenIDs (optional, may be nil) is used to validate fork.new_worker_id
-// against alive ∪ completed worker IDs. log (optional, may be nil)
-// receives a structured worker-id-mismatch event on the reject path so
-// operators can see how often the model misroutes.
+// DecisionToolDefs returns the per-worker decision tool set (decide_worker).
+// takenIDs validates fork.new_worker_id; both takenIDs and log may be nil.
 func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logger) []agent.ToolDef {
 	reject := func(name string) agent.ToolResult {
 		cur := decisions.Phase()
@@ -574,22 +534,9 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 	}
 }
 
-// SynthesisToolDefs builds the synthesis tool set used after the
-// per-worker decision loop completes. plan_workers spawns/retargets fresh
-// workers; direction_done closes the iter; end_run closes the entire run
-// (gated by guardState and by the alive-worker stop check).
-//
-// guardState returns (iteration, findingsThisRun) for the end_run iteration
-// floor (rejects premature calls when zero findings filed). Must be non-nil.
-//
-// takenIDs (optional) validates each plan_workers entry's worker_id —
-// retarget is allowed (alive ID stays alive); but a completed ID is
-// rejected with the list of taken IDs so the model can pick a fresh one.
-//
-// aliveWorkerIDs (optional) returns the IDs of currently-alive workers.
-// Used by end_run to enforce that the director cannot abandon live work:
-// every alive worker must have a decide_worker(action=stop) in this iter
-// before end_run is accepted. Pass nil to skip the check (tests).
+// SynthesisToolDefs returns the synthesis tool set (plan_workers,
+// direction_done, end_run). guardState (required) gates end_run; takenIDs,
+// completedIDs, and aliveWorkerIDs are optional plan/end_run validators.
 func SynthesisToolDefs(
 	decisions *DecisionQueue,
 	guardState func() (iter, runFindings int),
@@ -785,11 +732,9 @@ func SynthesisToolDefs(
 	}
 }
 
-// checkAliveWorkersStopped returns a rejection message describing any
-// alive worker whose decision this iter was not "stop", or "" when
-// end_run is structurally allowed (every alive worker stopped, or the
-// alive list is empty). Decisions map is "WorkerID → Kind" produced by
-// DecisionQueue.DecisionsByWorker.
+// checkAliveWorkersStopped returns a rejection message naming alive
+// workers whose decision this iter is not "stop", or "" when every
+// alive worker has been stopped.
 func checkAliveWorkersStopped(alive []int, decisions map[int]string) string {
 	var notStopped []int
 	var noDecision []int
@@ -821,9 +766,8 @@ func checkAliveWorkersStopped(alive []int, decisions map[int]string) string {
 		"and let the workers continue next iter."
 }
 
-// formatTakenIDs renders a sorted list of taken IDs for inclusion in a
-// rejection message. Caps at 20 entries to keep the response small even
-// when many workers have come and gone.
+// formatTakenIDs renders a sorted, comma-separated list of taken IDs,
+// capped at 20.
 func formatTakenIDs(taken map[int]bool) string {
 	if len(taken) == 0 {
 		return "(none)"

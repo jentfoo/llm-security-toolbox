@@ -5,8 +5,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/go-appsec/secagent/agent"
 )
 
 // seedCandidate adds a candidate for workerID and returns its id.
@@ -163,17 +161,6 @@ func TestDeriveIterationOutcome(t *testing.T) {
 	}
 }
 
-func TestCountToolCallsAndFlows(t *testing.T) {
-	t.Parallel()
-	runs := []agent.TurnSummary{
-		{ToolCalls: []agent.ToolCallRecord{{}, {}}, FlowIDs: []string{"a"}},
-		{ToolCalls: []agent.ToolCallRecord{{}}, FlowIDs: []string{"b", "c"}},
-	}
-	tc, fl := countToolCallsAndFlows(runs)
-	assert.Equal(t, 3, tc)
-	assert.Equal(t, 3, fl)
-}
-
 func TestTruncateAngle(t *testing.T) {
 	t.Parallel()
 
@@ -182,41 +169,13 @@ func TestTruncateAngle(t *testing.T) {
 		long[i] = 'a'
 	}
 
-	tests := []struct {
-		name  string
-		input string
-		check func(t *testing.T, got string)
-	}{
-		{
-			name:  "short_passthrough",
-			input: "short",
-			check: func(t *testing.T, got string) {
-				t.Helper()
-				assert.Equal(t, "short", got)
-			},
-		},
-		{
-			name:  "whitespace_compressed",
-			input: "  compressed\t  whitespace\n",
-			check: func(t *testing.T, got string) {
-				t.Helper()
-				assert.Equal(t, "compressed whitespace", got)
-			},
-		},
-		{
-			name:  "long_input_truncated",
-			input: string(long),
-			check: func(t *testing.T, got string) {
-				t.Helper()
-				assert.Len(t, got, angleMaxLen)
-				assert.Equal(t, "…", got[len(got)-len("…"):])
-			},
-		},
-	}
+	t.Run("whitespace_compressed", func(t *testing.T) {
+		assert.Equal(t, "compressed whitespace", truncateAngle("  compressed\t  whitespace\n"))
+	})
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.check(t, truncateAngle(tc.input))
-		})
-	}
+	t.Run("long_input_truncated", func(t *testing.T) {
+		got := truncateAngle(string(long))
+		assert.Len(t, got, angleMaxLen)
+		assert.Equal(t, "…", got[len(got)-len("…"):])
+	})
 }

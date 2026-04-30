@@ -40,37 +40,22 @@ const narratorMaxTokens = 20000
 
 // NarratorConfig tunes when and how the Narrator fires.
 type NarratorConfig struct {
-	Interval time.Duration // 0 disables; else min time between fires.
-	Model    string        // log model ID.
-	// Pool is the shared ClientPool narration calls route through — the same
-	// pool every other role uses. Narration doesn't need a dedicated pool
-	// because fireMu enforces "one summary firing in flight at a time" at
-	// the narrator level. Pool size affects throughput for the other
-	// consumers (compression, dedup, async merge), not narration's
-	// serialization guarantee.
+	Interval   time.Duration // minimum time between fires; 0 disables.
+	Model      string        // log model ID.
 	Pool       *agent.ClientPool
-	CallBudget time.Duration // per-summary call timeout; 0 defaults to 5m.
-	// Summarizer handles reasoning-format specifics for the summary model
-	// itself (e.g. pulling a think-tail on truncated structured output).
-	// Nil defaults to the inline handler.
-	Summarizer agent.ReasoningHandler
-	// Parent is the context whose cancellation aborts every in-flight
-	// summary HTTP call. When the controller's Run ctx is passed here,
-	// ctrl+c propagates immediately to the narrator — no waiting on
-	// CallBudget. Nil defaults to context.Background() (fires complete
-	// naturally; Close still aborts via its own cancel).
+	CallBudget time.Duration         // per-summary call timeout; 0 defaults to 5m.
+	Summarizer agent.ReasoningHandler // nil defaults to the inline handler.
+	// Parent context for in-flight summary calls; nil defaults to Background.
 	Parent context.Context
 }
 
-// NamedAgent pairs an agent with the label used in its emitted narration
-// line (e.g. "worker-3", "verifier", "director").
+// NamedAgent pairs an agent with its narration label.
 type NamedAgent struct {
 	Name  string
 	Agent *agent.OpenAIAgent
 }
 
 // Narrator buffers events and periodically dispatches summaries to a model.
-// Firings are serialized so output order matches wall-clock.
 type Narrator struct {
 	cfg NarratorConfig
 	log *Logger
@@ -78,36 +63,23 @@ type Narrator struct {
 	mu           sync.Mutex
 	buf          []narratorEvent
 	lastFireAt   time.Time
-	activeAgents []NamedAgent // snapshot published by the controller; read under mu
+	activeAgents []NamedAgent
 	// lastSummaries holds up to agentSummaryHistoryCap prior per-agent
 	// summary lines, most recent first.
 	lastSummaries map[string][]string
-	// lastNarrationHistoryID is the per-agent cursor pointing at the last
-	// message included in a successful narration. SnapshotSinceID returns
-	// the slice strictly after this. 0 means "no successful narration yet".
+	// lastNarrationHistoryID is the per-agent cursor at the last message
+	// included in a successful narration; 0 means none yet.
 	lastNarrationHistoryID map[string]uint64
 
-	// fireMu is held for the whole async firing (buffer snapshot + every
-	// HTTP dispatch inside runSummary). Dispatches happen sequentially in
-	// a for-loop so no intra-firing serialization is needed beyond this lock.
 	fireMu sync.Mutex
-	wg     sync.WaitGroup // so Close can wait on the last in-flight firing.
-
-	// armed gates firing until at least one substantive event has been
-	// observed (worker turn, tool done, finding, decision). Phase
-	// transitions and iteration-start events at run startup buffer normally
-	// but do NOT trigger narration — the first narrator call would block on
-	// a pool slot before any real work has happened, delaying the agent's
-	// first turn. Sticky once set: armed never resets.
+	wg     sync.WaitGroup
+	// armed gates firing until a substantive event arrives (sticky).
 	armed bool
 
-	// shutdownCtx is the parent context for every in-flight summary HTTP
-	// call. Cancelled by Close so ctrl+c aborts summaries immediately
-	// instead of waiting up to CallBudget per queued call.
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 
-	tickerStop chan struct{} // closed by Close to stop the background ticker.
+	tickerStop chan struct{}
 	closed     bool
 }
 
@@ -118,9 +90,8 @@ type narratorEvent struct {
 	fields map[string]any
 }
 
-// NewNarrator returns a Narrator or nil if cfg.Interval <= 0 (disabled).
-// A background ticker goroutine is started that calls Tick() every Interval
-// so periodic narration fires without requiring external trigger calls.
+// NewNarrator returns a Narrator running a background ticker, or nil
+// when cfg.Interval <= 0 / cfg.Pool nil / cfg.Model "".
 func NewNarrator(cfg NarratorConfig, log *Logger) *Narrator {
 	if cfg.Interval <= 0 || cfg.Pool == nil || cfg.Model == "" {
 		return nil
@@ -150,7 +121,7 @@ func NewNarrator(cfg NarratorConfig, log *Logger) *Narrator {
 	return n
 }
 
-// runSummaryCall acquires a pool client so narration respects the concurrency budget.
+// runSummaryCall invokes fn with a pool-acquired ChatClient.
 func (n *Narrator) runSummaryCall(ctx context.Context, fn func(agent.ChatClient) error) error {
 	client, err := n.cfg.Pool.Acquire(ctx)
 	if err != nil {
@@ -174,8 +145,7 @@ func (n *Narrator) runTicker() {
 	}
 }
 
-// isUsableNarration filters out summary outputs that aren't a natural-language
-// sentence (single tokens, XML-ish tags). Minimum bar is "contains whitespace".
+// isUsableNarration reports whether s looks like a natural-language sentence.
 func isUsableNarration(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -185,7 +155,6 @@ func isUsableNarration(s string) bool {
 }
 
 // SetActiveAgents publishes the agents the next firing should summarize.
-// The narrator takes its own copy.
 func (n *Narrator) SetActiveAgents(agents []NamedAgent) {
 	if n == nil {
 		return
@@ -195,10 +164,8 @@ func (n *Narrator) SetActiveAgents(agents []NamedAgent) {
 	n.mu.Unlock()
 }
 
-// Record buffers one event. Lightweight and safe to call from hot paths.
-// Also toggles the armed gate once a substantive event arrives so startup
-// phase-transitions and seeded-worker events don't force a no-context
-// summary before any real work has happened.
+// Record buffers one event. A substantive (tag, msg) also arms the
+// narrator so future Ticks may fire.
 func (n *Narrator) Record(tag, msg string, fields map[string]any) {
 	if n == nil {
 		return
@@ -217,10 +184,8 @@ func (n *Narrator) Record(tag, msg string, fields map[string]any) {
 	n.mu.Unlock()
 }
 
-// isSubstantiveNarrationEvent identifies events that indicate real agent
-// activity worth narrating. Anything else — phase transitions, iteration
-// boundaries, initial worker spawning, server lifecycle — may have been
-// buffered already but is not sufficient reason to fire a summary.
+// isSubstantiveNarrationEvent reports whether the (tag, msg) pair
+// represents real agent activity worth narrating.
 func isSubstantiveNarrationEvent(tag, msg string) bool {
 	switch tag {
 	case "worker":
@@ -235,10 +200,8 @@ func isSubstantiveNarrationEvent(tag, msg string) bool {
 	return false
 }
 
-// Tick is called by the main loop to give the narrator a chance to fire
-// based on cadence. Safe to call every iteration — it no-ops if nothing
-// has changed since the last fire or if no substantive event has armed
-// the narrator yet.
+// Tick fires a summary when armed, the buffer has narratorMinEvents,
+// and Interval has elapsed since the last fire. Otherwise no-op.
 func (n *Narrator) Tick() {
 	if n == nil {
 		return
@@ -252,12 +215,8 @@ func (n *Narrator) Tick() {
 	}
 }
 
-// TriggerNow forces a firing regardless of cadence. Use at phase transitions,
-// finding writes, and decision applications so narration stays in sync with
-// human-meaningful events. No-op until the narrator has been armed by a
-// substantive event, so startup phase transitions don't force a pre-work
-// summary that would block the first worker turn on a pool slot. Also a no-op
-// when fewer than narratorMinEvents are buffered.
+// TriggerNow forces a firing regardless of cadence. No-op when not yet
+// armed or when fewer than narratorMinEvents are buffered.
 func (n *Narrator) TriggerNow() {
 	if n == nil {
 		return
@@ -271,11 +230,8 @@ func (n *Narrator) TriggerNow() {
 	n.fireAsync()
 }
 
-// fireAsync spawns a single serialised firing. Buffer is snapshotted INSIDE
-// the firing goroutine (under fireMu + mu) so coalesced triggers always grab
-// the latest events rather than stale ones. We intentionally do NOT short-
-// circuit on n.closed here: a firing that was scheduled before shutdown must
-// still emit its events, otherwise Close() loses in-flight narrations.
+// fireAsync spawns one serialized firing in a goroutine; concurrent
+// callers queue on fireMu.
 func (n *Narrator) fireAsync() {
 	n.wg.Add(1)
 	go func() {
@@ -297,14 +253,8 @@ func (n *Narrator) fireAsync() {
 	}()
 }
 
-// runSummary dispatches one orchestrator-level event summary plus one
-// per-active-agent status summary sequentially, under a single shared
-// timeout. Serial execution pins narration to at most one pool slot at
-// any moment, so the configured concurrency budget stays intact while
-// agents keep using the remaining slots. Every outcome — success, empty
-// response, or error — is logged so silent drops don't happen; previously
-// an empty line from a reasoning model that burned its whole MaxTokens on
-// a <think> block left no trace at all.
+// runSummary sequentially dispatches one orchestrator-level summary and
+// one per-active-agent summary under a shared timeout.
 func (n *Narrator) runSummary(events []narratorEvent) {
 	// Parent derived from shutdownCtx — Close cancels it so ctrl+c aborts
 	// any in-flight summary HTTP call instead of waiting up to CallBudget.
@@ -385,10 +335,8 @@ func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narrator
 	}
 }
 
-// runAgentSummary dispatches one per-agent narration call. Reads the
-// agent's history slice since the last successful narration, skips when
-// nothing substantive happened, and on a usable line advances the
-// per-agent cursor so the next firing only sees fresh activity.
+// runAgentSummary dispatches one per-agent narration call and advances
+// the per-agent cursor on success.
 func (n *Narrator) runAgentSummary(ctx context.Context, na NamedAgent) {
 	n.mu.Lock()
 	since := n.lastNarrationHistoryID[na.Name]
@@ -464,7 +412,7 @@ func (n *Narrator) runAgentSummary(ctx context.Context, na NamedAgent) {
 	}
 }
 
-// advanceNarrationCursor records the last-included HistoryID for name.
+// advanceNarrationCursor records id as the last-narrated HistoryID for name.
 func (n *Narrator) advanceNarrationCursor(name string, id uint64) {
 	if id == 0 {
 		return
@@ -475,9 +423,7 @@ func (n *Narrator) advanceNarrationCursor(name string, id uint64) {
 }
 
 // recordAgentSummary prepends line to the agent's prior-summary ring,
-// capping at agentSummaryHistoryCap. Only confidently-extracted lines
-// are recorded; truncated-think tails and empty responses do not
-// pollute future continuity context.
+// capped at agentSummaryHistoryCap.
 func (n *Narrator) recordAgentSummary(name, line string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -490,8 +436,8 @@ func (n *Narrator) recordAgentSummary(name, line string) {
 	n.lastSummaries[name] = next
 }
 
-// buildAgentNarrationPrompt assembles the user message for a per-agent
-// narration call from prior summary lines and a rendered transcript.
+// buildAgentNarrationPrompt returns the user message for a per-agent
+// narration call.
 func buildAgentNarrationPrompt(prevSummaries []string, transcript string, truncated bool) string {
 	var b strings.Builder
 	if len(prevSummaries) > 0 {
@@ -509,9 +455,8 @@ func buildAgentNarrationPrompt(prevSummaries []string, transcript string, trunca
 	return b.String()
 }
 
-// renderAgentTranscript serializes msgs via renderSnapshotForSummary and
-// tail-truncates by message until the rendered string fits budget tokens.
-// truncated is true when at least one leading message was dropped.
+// renderAgentTranscript returns msgs rendered as a transcript fitting
+// budget tokens, head-truncating message-by-message as needed.
 func renderAgentTranscript(msgs []agent.Message, budget int) (rendered string, truncated bool) {
 	rendered = renderSnapshotForSummary(msgs)
 	if agent.EstimateStringTokens(rendered) <= budget {
@@ -529,8 +474,8 @@ func renderAgentTranscript(msgs []agent.Message, budget int) (rendered string, t
 	return renderSnapshotForSummary(msgs[len(msgs)-1:]), true
 }
 
-// formatContextPercent renders tokens/max as a "23%" string. Returns "?"
-// when max is non-positive (effective max not yet established).
+// formatContextPercent returns tokens/max as "NN%", capped at 99%, or "?"
+// when max is non-positive.
 func formatContextPercent(tokens, max int) string {
 	if max <= 0 {
 		return "?"
@@ -549,12 +494,7 @@ func formatContextPercent(tokens, max int) string {
 }
 
 // Close stops the ticker, cancels in-flight summaries, and waits for
-// pending firings to return. Does not flush — shutdown is terminal.
-//
-// Cancel order matters: shutdownCancel must fire BEFORE wg.Wait so
-// in-flight summary HTTP calls see context cancellation and return
-// promptly. Otherwise wg.Wait could block for up to CallBudget
-// after run completion.
+// pending firings to return.
 func (n *Narrator) Close() {
 	if n == nil {
 		return
@@ -570,9 +510,8 @@ func (n *Narrator) Close() {
 	n.wg.Wait()
 }
 
-// buildNarratorPrompt renders events as a compact plaintext log the summary
-// model can read. Fields are emitted in a stable order (role, worker_id
-// first, then alphabetic) to keep the prompt deterministic.
+// buildNarratorPrompt returns the user message rendering events for the
+// orchestrator narration call.
 func buildNarratorPrompt(events []narratorEvent) string {
 	var b strings.Builder
 	b.WriteString("Events since last narration:\n")
@@ -580,9 +519,8 @@ func buildNarratorPrompt(events []narratorEvent) string {
 	return b.String()
 }
 
-// writeEventsBlock writes one line per event into b, preserving the
-// stable field ordering (role, worker_id, then alphabetic). Shared by
-// the orchestrator-level prompt and the per-agent prompt.
+// writeEventsBlock writes one line per event into b with stable field
+// order (role, worker_id, then alphabetic).
 func writeEventsBlock(b *strings.Builder, events []narratorEvent) {
 	for _, e := range events {
 		b.WriteString(e.ts.Format("15:04:05"))

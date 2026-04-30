@@ -33,48 +33,38 @@ type OpenAIAgentConfig struct {
 	// KeepThinkTurns is the count of recent assistant messages that retain
 	// <think> blocks on replay. 0 strips all. Inline handler only.
 	KeepThinkTurns int
-	// Reasoning encapsulates format-specific ingest/replay/summary behaviour.
-	// Nil defaults to the inline handler.
+	// Reasoning is the format-specific reasoning handler. Nil defaults to
+	// the inline handler.
 	Reasoning ReasoningHandler
 	// OnCompact is called with each compaction report (optional).
 	OnCompact func(CompactionReport)
 	// OnContextOverflow fires once per sendWithRetry call when the model
-	// rejected the request as over-context. Mirrors OnCompact / OnMalformedCall
-	// shape. The orchestrator uses this signal to drive the verifier's
-	// auto-dismiss-on-budget-exhaust path: if a freshly composed verifier still
-	// overflows, in-flight candidates can't be reproduced under the current
-	// budget and are dismissed rather than carried forward.
+	// rejected the request as over-context (optional).
 	OnContextOverflow func()
-	// OnSummarizeBoundary, when non-nil, is called by maybeCompact when normal
-	// compaction can't free enough space. It receives messages eligible for
-	// summarization and returns a replacement slice or error. On success the
-	// agent replaces messages[1:iterationStartIdx] with the result.
+	// OnSummarizeBoundary receives messages eligible for summarization and
+	// returns a replacement slice or error. Optional; nil disables this step.
 	OnSummarizeBoundary func(ctx context.Context, snapshot []Message) ([]Message, error)
-	// OnSummarizeError fires when OnSummarizeBoundary returned an error.
-	// The agent fails open (proceeds to the next compaction pass) regardless;
-	// this callback exists so the orchestrator can log the failure.
+	// OnSummarizeError fires when OnSummarizeBoundary returned an error
+	// (optional).
 	OnSummarizeError func(err error)
 	// OnSelfPruneCandidates receives a history snapshot and returns the set
-	// of ToolCallIDs to drop. The agent then drops the matching tool-result
-	// message and strips the matching ToolCall from the preceding assistant.
-	// Optional; nil disables this step.
+	// of ToolCallIDs to drop. Optional; nil disables this step.
 	OnSelfPruneCandidates func(ctx context.Context, snapshot []Message) ([]string, error)
 	// OnDistillResults receives a history snapshot and returns a rewritten
-	// snapshot where eligible tool-result Content is replaced with distilled
-	// prose. Callers must preserve message order and pairing — only Content
-	// should change. Optional; nil disables this step.
+	// snapshot where eligible tool-result Content is replaced. Callers must
+	// preserve message order and pairing. Optional; nil disables this step.
 	OnDistillResults func(ctx context.Context, snapshot []Message) ([]Message, error)
 	// OnToolStart fires before a tool handler runs (optional).
 	OnToolStart func(name string, args json.RawMessage)
-	// OnToolEnd fires after a tool handler returns (optional). timedOut is true
-	// when PerToolTimeout fired. errText is truncated result text when isError
-	// is true, else empty.
+	// OnToolEnd fires after a tool handler returns (optional). timedOut is
+	// true when PerToolTimeout fired. errText is truncated result text when
+	// isError is true, else empty.
 	OnToolEnd func(name string, args json.RawMessage, elapsed time.Duration, isError, timedOut bool, errText string)
 	// OnMalformedCall is called when tool arg repair fails (optional).
 	OnMalformedCall func(name string, err error)
-	// OnFuzzyToolMatch fires when a tool name lookup miss was recovered via
-	// canonicalToolName (case + underscore-run normalization). received is
-	// the model-emitted name; resolved is the registered name actually run.
+	// OnFuzzyToolMatch fires when a tool-name lookup miss was recovered via
+	// fuzzy fallback. received is the model-emitted name; resolved is the
+	// registered name that ran.
 	OnFuzzyToolMatch func(received, resolved string)
 	// OnRequestStart fires before each chat-completion HTTP call (optional).
 	OnRequestStart func(attempt int)
@@ -83,15 +73,11 @@ type OpenAIAgentConfig struct {
 	// FlowIDExtractor (optional) extracts flow IDs from inputs/results/text.
 	FlowIDExtractor func(sources ...any) []string
 	// Rand is the randomness source used by retry backoff jitter. nil → the
-	// package default. Tests inject a seeded *rand.Rand for determinism.
+	// package default.
 	Rand *rand.Rand
-	// RetireOnPressure flips compaction off entirely. When usage crosses
-	// the high watermark, instead of compacting, the next Drain round
-	// returns immediately with EscalationReason="context_exhausted" and
-	// no tool dispatch — the controller's retire path then summarizes the
-	// full uncompacted chronicle. Used by the recon worker, where every
-	// observation matters and compaction-time stubbing would destroy the
-	// raw data the recon summary should be drawn from.
+	// RetireOnPressure disables compaction. When usage crosses the high
+	// watermark the next Drain round returns immediately with
+	// EscalationReason="context_exhausted".
 	RetireOnPressure bool
 }
 
@@ -211,24 +197,19 @@ func (a *OpenAIAgent) ContextUsage() (int, int) {
 }
 
 // EffectiveContextUsage is like ContextUsage but reports the post-shrink
-// ceiling. After a context-overflow rejection the effective max stays below
-// the configured one for the rest of the run; this method exposes the value
-// the agent will actually be measured against on the next send.
+// ceiling that the agent will be measured against on the next send.
 func (a *OpenAIAgent) EffectiveContextUsage() (tokens, max int) {
 	return a.history.EstimateTokens(), a.history.EffectiveMaxContext()
 }
 
-// History exposes the agent's history for orchestrator-level diagnostics
-// and compaction tests.
+// History returns the agent's underlying history.
 func (a *OpenAIAgent) History() *History { return a.history }
 
-// Snapshot returns a shallow copy of the agent's message history. Safe for
-// callers that need to inspect the conversation (e.g. an external
-// summarizer) without holding the agent's internal lock.
+// Snapshot returns a shallow copy of the agent's message history.
 func (a *OpenAIAgent) Snapshot() []Message { return a.history.Snapshot() }
 
-// LastHistoryID returns the HistoryID of the last non-system message,
-// or 0 when only the system message (or nothing) is present.
+// LastHistoryID returns the HistoryID of the last non-system message, or 0
+// when only the system message (or nothing) is present.
 func (a *OpenAIAgent) LastHistoryID() uint64 {
 	snap := a.history.Snapshot()
 	if len(snap) == 0 {
@@ -241,9 +222,9 @@ func (a *OpenAIAgent) LastHistoryID() uint64 {
 	return last.HistoryID
 }
 
-// SnapshotSinceID returns the post-system messages following the message
-// with HistoryID == id, normalized via Reasoning.ForSummary. When id is
-// 0 or has been compacted away, returns all post-system messages.
+// SnapshotSinceID returns post-system messages following the message with
+// HistoryID == id, normalized via Reasoning.ForSummary. When id is 0 or has
+// been compacted away, returns all post-system messages.
 func (a *OpenAIAgent) SnapshotSinceID(id uint64) []Message {
 	snap := a.history.Snapshot()
 	if len(snap) == 0 {
@@ -268,17 +249,10 @@ func (a *OpenAIAgent) SnapshotSinceID(id uint64) []Message {
 	return a.cfg.Reasoning.ForSummary(tail)
 }
 
-// ReplaceHistory replaces the agent's working memory with msgs. The leading
-// system prompt is preserved: if msgs[0] is not a system message and the
-// agent was constructed with a SystemPrompt, the system message is
-// re-prepended automatically. Cancels any in-flight Drain so the next call
-// starts cleanly. Resets iteration-boundary state — the caller must call
-// MarkIterationBoundary again after the install + any subsequent Query
-// chain has settled.
-//
-// Intended for orchestrator-level chronicle install / compression: snapshot
-// the agent, produce a recap slice, hand it back here. Tools and handlers
-// are untouched.
+// ReplaceHistory replaces the agent's working memory with msgs. If msgs[0]
+// is not a system message and the agent was constructed with a SystemPrompt,
+// the system message is re-prepended. Cancels any in-flight Drain and resets
+// iteration-boundary state. Tools and handlers are untouched.
 func (a *OpenAIAgent) ReplaceHistory(msgs []Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -297,10 +271,7 @@ func (a *OpenAIAgent) ReplaceHistory(msgs []Message) {
 }
 
 // MarkIterationBoundary records the current history length as the start of
-// the active iteration's content. The boundary-summarize path in
-// maybeCompact summarizes messages BEFORE this index when the watermark
-// fires mid-drain, leaving the iteration's in-flight tool calls and
-// assistant responses verbatim.
+// the active iteration's content.
 func (a *OpenAIAgent) MarkIterationBoundary() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -309,8 +280,6 @@ func (a *OpenAIAgent) MarkIterationBoundary() {
 }
 
 // IterationBoundary returns the current iteration-boundary index.
-// Orchestrator-side chronicle extraction reads this AFTER a worker drain to
-// slice off the iteration's new content for chronicle append.
 func (a *OpenAIAgent) IterationBoundary() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -318,19 +287,13 @@ func (a *OpenAIAgent) IterationBoundary() int {
 }
 
 // SetOnSummarizeBoundary swaps in a new boundary-summarize callback.
-// Lets the orchestrator wire a closure that captures live state
-// (per-worker mission/directive) post-construction, since the closure
-// often needs to reference the WorkerState pointer that doesn't exist
-// at agent-build time.
 func (a *OpenAIAgent) SetOnSummarizeBoundary(f func(ctx context.Context, snapshot []Message) ([]Message, error)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cfg.OnSummarizeBoundary = f
 }
 
-// SetOnSelfPruneCandidates swaps in a new self-prune callback. Same wiring
-// pattern as SetOnSummarizeBoundary — the orchestrator can install a closure
-// that captures per-worker state post-construction.
+// SetOnSelfPruneCandidates swaps in a new self-prune callback.
 func (a *OpenAIAgent) SetOnSelfPruneCandidates(f func(ctx context.Context, snapshot []Message) ([]string, error)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -349,8 +312,8 @@ func (a *OpenAIAgent) Drain(ctx context.Context) (TurnSummary, error) {
 	return a.DrainBounded(ctx, a.cfg.MaxTurnsPerAgent)
 }
 
-// DrainBounded runs the dispatch loop with a caller-supplied round cap.
-// A value <=0 falls back to the configured MaxTurnsPerAgent.
+// DrainBounded runs the dispatch loop, capping tool-dispatch rounds at
+// maxRounds. A value <= 0 falls back to the configured MaxTurnsPerAgent.
 func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSummary, error) {
 	if maxRounds <= 0 {
 		maxRounds = a.cfg.MaxTurnsPerAgent
@@ -465,10 +428,8 @@ type toolOutcome struct {
 	skip    bool // true for repair-failure path that consumed a repair slot
 }
 
-// dispatchToolCalls executes handlers concurrently (bounded by
-// MaxParallelTools) and then, serially, folds each outcome into history +
-// summary in the original order. Tool-call / tool-result messages must stay
-// paired in sequence for OpenAI providers.
+// dispatchToolCalls runs handlers for calls and folds each outcome into
+// history and summary in original order.
 func (a *OpenAIAgent) dispatchToolCalls(
 	inner context.Context,
 	calls []ToolCall,
@@ -552,10 +513,8 @@ func (a *OpenAIAgent) dispatchToolCalls(
 	}
 }
 
-// runSingleTool wraps one handler invocation with the per-tool timeout and
-// start/end callbacks. Must be safe for concurrent use with other invocations
-// targeting the same agent — it mutates nothing on `a` other than via the
-// callback hooks and returns a self-contained outcome.
+// runSingleTool invokes one handler with the per-tool timeout and start/end
+// callbacks, returning a self-contained outcome. Safe for concurrent use.
 func (a *OpenAIAgent) runSingleTool(
 	inner context.Context,
 	tc ToolCall,
@@ -643,8 +602,7 @@ func (a *OpenAIAgent) runSingleTool(
 }
 
 // formatRepairError renders the error the model sees when its tool_call
-// arguments do not parse. When the tool schema is known it is embedded so
-// the model can self-correct without re-discovering the shape.
+// arguments do not parse. The tool schema is embedded when known.
 const maxRepairSchemaBytes = 500
 
 func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string {
@@ -672,11 +630,8 @@ func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string
 	)
 }
 
-// errRetireOnPressure is returned by maybeCompact when RetireOnPressure
-// is set and the high watermark has been crossed. The Drain loop catches
-// this sentinel and ends the turn cleanly with EscalationReason set to
-// context_exhausted; the controller's retire path then summarizes the
-// uncompacted chronicle.
+// errRetireOnPressure is returned by maybeCompact when RetireOnPressure is
+// set and the high watermark has been crossed.
 var errRetireOnPressure = errors.New("retire on context pressure")
 
 func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
@@ -788,8 +743,8 @@ func (a *OpenAIAgent) compactRemainderPreservingBoundary() (CompactionReport, er
 }
 
 // runSelfPrunePreservingBoundary invokes OnSelfPruneCandidates and applies
-// the returned ToolCallID drop set in place. Failures are reported via
-// OnSummarizeError and fall through with an empty report.
+// the returned ToolCallID drop set in place. Failures fall through with an
+// empty report.
 func (a *OpenAIAgent) runSelfPrunePreservingBoundary(ctx context.Context) CompactionReport {
 	before := a.history.EstimateTokens()
 	report := CompactionReport{Before: before, After: before}
@@ -827,8 +782,7 @@ func (a *OpenAIAgent) runSelfPrunePreservingBoundary(ctx context.Context) Compac
 }
 
 // runDistillPreservingBoundary invokes OnDistillResults and installs the
-// returned snapshot. The callback must preserve message order and pairing;
-// the agent only counts tool-result Content changes.
+// returned snapshot. Counts only tool-result Content changes.
 func (a *OpenAIAgent) runDistillPreservingBoundary(ctx context.Context) CompactionReport {
 	before := a.history.EstimateTokens()
 	report := CompactionReport{Before: before, After: before}
@@ -856,10 +810,9 @@ func (a *OpenAIAgent) runDistillPreservingBoundary(ctx context.Context) Compacti
 	return report
 }
 
-// applySelfPrune drops every tool-result whose ToolCallID is in dropSet,
-// strips the matching ToolCall entries from preceding assistants, and
-// drops assistants left with no tool_calls and no content. Returns the
-// new slice and the count of tool-result messages dropped.
+// applySelfPrune drops every tool-result whose ToolCallID is in dropSet and
+// strips matching ToolCall entries from preceding assistant messages.
+// Returns the new slice and the count of tool-result messages dropped.
 func applySelfPrune(msgs []Message, dropSet map[string]bool) ([]Message, int) {
 	out := make([]Message, 0, len(msgs))
 	dropped := 0
@@ -889,8 +842,8 @@ func applySelfPrune(msgs []Message, dropSet map[string]bool) ([]Message, int) {
 	return out, dropped
 }
 
-// countDistilledChanges counts tool-result messages whose Content differs
-// between before and after, pairing by index.
+// countDistilledChanges returns the number of tool-result messages whose
+// Content differs between before and after, paired by index.
 func countDistilledChanges(before, after []Message) int {
 	n := len(before)
 	if len(after) < n {
@@ -908,19 +861,9 @@ func countDistilledChanges(before, after []Message) int {
 	return changed
 }
 
-// compactPreservingBoundary wraps Compact so iterationStartIdx stays
-// pinned to the message it originally pointed to even when Compact drops
-// or modifies messages. The boundary is the controller's contract for
-// where in-iter content begins — extractAndAppend reads from there into
-// the worker chronicle, and runBoundarySummarize summarizes everything
-// before there. A stale boundary silently loses iter content (read past
-// the new history end) or summarizes the wrong slice.
-//
-// Strategy: snapshot the internal HistoryID of the iter-head message (for
-// workers, the directive Query'd after MarkIterationBoundary) before
-// Compact, then relocate that exact message afterwards. If the marker
-// disappeared (the iter itself was dropped by dropOldestTurn), the boundary
-// clamps to history end so extractAndAppend fails open with no append.
+// compactPreservingBoundary wraps Compact and rebases iterationStartIdx
+// onto the same message it originally pointed to. Clamps the boundary to
+// history end if the marker message was dropped.
 func (a *OpenAIAgent) compactPreservingBoundary() (CompactionReport, error) {
 	markerID, hasMarker := a.iterationBoundaryMarker()
 	report, err := Compact(a.history, a.cfg.Compaction)
@@ -961,10 +904,9 @@ func (a *OpenAIAgent) rebaseIterationBoundary(markerID uint64, hasMarker bool) {
 	a.iterationStartIdx = len(snap)
 }
 
-// runBoundarySummarize takes a snapshot of messages[1:iterationStartIdx],
-// hands it to OnSummarizeBoundary, and splices the returned slice back into
-// history in place of the snapshot. Updates iterationStartIdx so that the
-// in-flight iteration content stays correctly delimited.
+// runBoundarySummarize hands messages[1:iterationStartIdx] to
+// OnSummarizeBoundary and splices the returned slice back into history in
+// place of the snapshot.
 func (a *OpenAIAgent) runBoundarySummarize(ctx context.Context) error {
 	full := a.history.Snapshot()
 	// Defensive bounds check — iterationStartIdx may be stale if history
@@ -999,18 +941,9 @@ func (a *OpenAIAgent) runBoundarySummarize(ctx context.Context) error {
 }
 
 // sendWithRetry dispatches one chat-completion request, applying a typed
-// retry policy driven by Classify. Categories:
-//
-//   - ErrDeadline / ErrOther / ErrModelError: propagate immediately.
-//   - ErrContextOverflow: hard-truncate the history in-place and retry
-//     without consuming a retry attempt. Fires at most once per call so a
-//     persistent mismatch still surfaces instead of silently looping.
-//   - ErrRateLimit: sleep for the hinted Retry-After (or fall back to
-//     exponential backoff with jitter) then retry.
-//   - ErrTransientNet: sleep for exponential backoff with jitter, then retry.
-//
-// The retry budget (DrainRetryMax) applies only to the retryable categories;
-// the context-overflow fast-path does not debit it.
+// retry policy. ErrRateLimit and ErrTransientNet retry up to DrainRetryMax;
+// ErrContextOverflow triggers a single in-place hard-truncate retry; other
+// categories propagate immediately.
 func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	a.mu.Lock()
 	tools := a.tools
@@ -1067,8 +1000,8 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	}
 }
 
-// sleepCtx sleeps for d, returning ctx.Err() if the context cancels first.
-// d <= 0 is a no-op.
+// sleepCtx sleeps for d, returning ctx.Err() if ctx cancels first. d <= 0
+// is a no-op.
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
@@ -1083,10 +1016,8 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// isContextRejectedError reports whether the error came from the upstream
-// model rejecting the request as too large. Matches both the OpenAI-style
-// `context_length_exceeded` code and local-model phrasing like "Context
-// size has been exceeded" seen in the live-run 400 bodies.
+// isContextRejectedError reports whether err came from the upstream model
+// rejecting the request as too large.
 func isContextRejectedError(err error) bool {
 	if err == nil {
 		return false
@@ -1099,7 +1030,7 @@ func isContextRejectedError(err error) bool {
 }
 
 // dispatchChatRequest acquires a pooled client, runs one request with
-// start/end callbacks, and releases (via defer for panic safety).
+// start/end callbacks, and releases the client.
 func (a *OpenAIAgent) dispatchChatRequest(
 	ctx context.Context, attempt int, msgs []ChatMessage, tools []ChatTool,
 ) (ChatResponse, error) {
@@ -1124,12 +1055,8 @@ func (a *OpenAIAgent) dispatchChatRequest(
 	return resp, err
 }
 
-// buildChatMessages returns history filtered to OpenAI-compatible shape.
-// The reasoning handler decides format-specific replay semantics: inline
-// preserves `<think>` on the last KeepThinkTurns assistant messages;
-// structured blanks ReasoningContent so it's never sent back (deepseek
-// convention); none passes through. History storage remains raw — only
-// the outbound view is filtered.
+// buildChatMessages returns history filtered to OpenAI-compatible shape via
+// the agent's reasoning handler. History storage is not mutated.
 func (a *OpenAIAgent) buildChatMessages() []ChatMessage {
 	snap := a.cfg.Reasoning.Replay(a.history.Snapshot(), a.cfg.KeepThinkTurns)
 	out := make([]ChatMessage, 0, len(snap))
@@ -1145,8 +1072,8 @@ func (a *OpenAIAgent) buildChatMessages() []ChatMessage {
 	return out
 }
 
-// synthesizePendingToolStubs fills in tool result messages for any
-// assistant.tool_calls whose pair is missing at the tail of history.
+// synthesizePendingToolStubs appends placeholder tool-result messages for
+// any assistant.tool_calls missing a paired result at the tail of history.
 func (a *OpenAIAgent) synthesizePendingToolStubs() {
 	msgs := a.history.Snapshot()
 	if len(msgs) == 0 {

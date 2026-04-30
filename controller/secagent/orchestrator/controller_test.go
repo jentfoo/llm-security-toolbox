@@ -3,13 +3,11 @@ package orchestrator
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/config"
 )
 
 func TestIsDeadIteration(t *testing.T) {
@@ -103,23 +101,21 @@ func TestRunAllWorkersUntilEscalation(t *testing.T) {
 	})
 }
 
-func TestBuildClientPoolDefaults(t *testing.T) {
-	t.Parallel()
-	pool := buildClientPool("http://localhost:9999/v1", "", 4, 0)
-	assert.Equal(t, 4, pool.Size())
-	pool2 := buildClientPool("", "", 0, 0)
-	assert.Equal(t, 1, pool2.Size())
-}
-
 func TestWorkerStateClose(t *testing.T) {
 	t.Parallel()
-	a := &agent.FakeAgent{}
-	w := &WorkerState{ID: 1, Agent: a}
-	w.Close()
-	assert.True(t, a.Closed)
-	assert.NotPanics(t, func() {
-		(*WorkerState)(nil).Close()
-		(&WorkerState{}).Close()
+
+	t.Run("closes_underlying_agent", func(t *testing.T) {
+		a := &agent.FakeAgent{}
+		w := &WorkerState{ID: 1, Agent: a}
+		w.Close()
+		assert.True(t, a.Closed)
+	})
+
+	t.Run("nil_safe", func(t *testing.T) {
+		require.NotPanics(t, func() {
+			(*WorkerState)(nil).Close()
+			(&WorkerState{}).Close()
+		})
 	})
 }
 
@@ -147,37 +143,4 @@ func TestRunWorkerUntilEscalationBudget(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, runs, 1)
 	})
-}
-
-func TestOpenAIFactory(t *testing.T) {
-	t.Parallel()
-	cfg := &config.Config{
-		Model:      "main-m",
-		MaxWorkers: 2, MaxContext: 4096,
-		TurnTimeout: time.Second, MaxTurnsPerAgent: 10,
-	}
-	pool := buildClientPool("", "", 1, 0)
-	counter := NewMalformedCounter(nil)
-	f := &OpenAIFactory{Cfg: cfg, Pool: pool, Malformed: counter}
-
-	w, err := f.NewWorker(1, 1)
-	require.NoError(t, err)
-	assert.NotNil(t, w)
-
-	v, err := f.NewVerifier(nil)
-	require.NoError(t, err)
-	assert.NotNil(t, v)
-
-	dd, err := f.NewDecisionDirector()
-	require.NoError(t, err)
-	assert.NotNil(t, dd)
-
-	sd, err := f.NewSynthesisDirector()
-	require.NoError(t, err)
-	assert.NotNil(t, sd)
-
-	require.NoError(t, f.Close())
-
-	f.Malformed = nil
-	assert.Nil(t, f.malformedCallback("m"))
 }

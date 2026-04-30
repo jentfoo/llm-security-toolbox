@@ -5,26 +5,17 @@ import (
 	"errors"
 )
 
-// PhaseRecover describes the one-shot recovery path for a stalled phase.
-// Compact runs between the failed initial attempt and the retry; it
-// typically interrupts the agent and re-queues the last instruction / last
-// prompt so the retry starts from a clean state. OnExhausted runs when the
-// retry also fails and performs the phase-specific graceful degrade
-// (auto-dismiss in-flight candidates, force direction_done, etc). Both are
-// optional; a nil hook is a no-op.
+// PhaseRecover holds optional hooks for one-shot phase recovery.
+// Compact runs between the failed first attempt and the retry; OnExhausted
+// runs when the retry also fails. Both are optional.
 type PhaseRecover struct {
 	Compact     func()
 	OnExhausted func(err error)
 }
 
-// RunPhaseAttempt runs attempt once. On a non-Deadline error it invokes
-// policy.Compact, runs attempt a second time, and on further failure
-// invokes policy.OnExhausted with the final error. Context errors
-// propagate immediately — they are not retried.
-//
-// The helper is generic so verify/direct (single TurnSummary) and
-// autonomous (a slice of turn summaries) share one retry shape. Each
-// phase's caller owns its own graceful-degrade semantics via OnExhausted.
+// RunPhaseAttempt runs attempt once; on non-context error it invokes
+// policy.Compact, retries once, and on further failure invokes
+// policy.OnExhausted. Context errors propagate immediately.
 func RunPhaseAttempt[T any](
 	ctx context.Context,
 	attempt func(context.Context) (T, error),

@@ -18,8 +18,8 @@ var flowIDKeyNames = map[string]bool{
 	"source_flow_id": true,
 }
 
-// ExtractFlowIDs walks a mix of strings, maps, and slices and returns
-// order-preserving, deduplicated sectool flow IDs.
+// ExtractFlowIDs returns sectool flow IDs found in sources (strings,
+// maps, and slices), preserving order and deduplicating.
 func ExtractFlowIDs(sources ...any) []string {
 	seen := map[string]struct{}{}
 	var out []string

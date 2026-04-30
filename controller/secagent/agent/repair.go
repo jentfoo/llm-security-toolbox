@@ -8,9 +8,9 @@ import (
 
 var fencedJSON = regexp.MustCompile("(?s)^\\s*```(?:json)?\\s*(.*?)\\s*```\\s*$")
 
-// RepairToolArgs takes a raw arguments string (per OpenAI spec it should be
-// a JSON object as text) and returns a RawMessage suitable for handing to a
-// tool. Falls back with a nil return and descriptive error if we cannot.
+// RepairToolArgs returns raw normalized to a JSON object suitable for
+// handing to a tool. Returns a *RepairError when the input cannot be
+// recovered.
 func RepairToolArgs(raw string) (json.RawMessage, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -72,10 +72,11 @@ func (e *RepairError) Error() string {
 }
 
 func truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s
 	}
-	if n <= 1 {
+	if n < 1 {
 		return "…"
 	}
 	return s[:n-1] + "…"

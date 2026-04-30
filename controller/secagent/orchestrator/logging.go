@@ -14,26 +14,21 @@ import (
 	"github.com/go-analyze/bulk"
 )
 
-// Tool-lifecycle event messages. Shared by the factory that emits them
-// (controller.go toolCallbacks), the narrator allowlists, and the arming
-// check so the vocabulary stays consistent in one place.
+// Tool-lifecycle event messages.
 const (
 	toolMsgDone    = "done"
 	toolMsgSlow    = "slow"
 	toolMsgTimeout = "timeout"
 )
 
-// Log-event tag values shared across allowlists, narrator filters, and
-// emit sites. Centralizing avoids string-literal drift.
+// Log-event tag values.
 const (
 	tagDecision = "decision"
 	tagFinding  = "finding"
 )
 
-// Logger emits structured JSON lines to a log file and human-readable
-// lines to stderr. When a Narrator is attached, every Log call also feeds
-// the narrator's event buffer so operator-facing summaries can be generated
-// without re-plumbing every call site.
+// Logger emits structured JSON to a log file plus pretty lines to stderr,
+// optionally feeding events to an attached Narrator.
 type Logger struct {
 	mu       sync.Mutex
 	file     io.WriteCloser
@@ -41,8 +36,8 @@ type Logger struct {
 	narrator *Narrator
 }
 
-// AttachNarrator wires a narrator so every Log call is recorded to its
-// event buffer. Pass nil to detach.
+// AttachNarrator sets the narrator that receives every Log call. Pass
+// nil to detach.
 func (l *Logger) AttachNarrator(n *Narrator) {
 	if l == nil {
 		return
@@ -52,8 +47,8 @@ func (l *Logger) AttachNarrator(n *Narrator) {
 	l.mu.Unlock()
 }
 
-// NewLogger opens path for append-writing JSON records; stderr receives
-// a human-readable mirror.
+// NewLogger returns a Logger appending JSON records to path; stderr
+// receives the human-readable mirror.
 func NewLogger(path string) (*Logger, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -70,9 +65,9 @@ func (l *Logger) Close() error {
 	return l.file.Close()
 }
 
-// Log writes a JSON record to the log file, and — when the tag/msg is
-// operator-relevant — a pretty line to the stderr mirror. When a narrator
-// is attached, the event is also recorded to its buffer.
+// Log writes a JSON record to the log file, mirrors operator-relevant
+// events to stderr, and records narrate-eligible events to the attached
+// narrator.
 func (l *Logger) Log(tag, msg string, fields map[string]any) {
 	if l == nil {
 		return
@@ -94,7 +89,7 @@ func (l *Logger) Log(tag, msg string, fields map[string]any) {
 	}
 }
 
-// shouldNarrate reports whether an event is signal-grade for the narrator.
+// shouldNarrate reports whether (tag, msg) is signal-grade for the narrator.
 func shouldNarrate(tag, msg string) bool {
 	switch tag {
 	case "controller", tagDecision, tagFinding, "plan", "verify", "worker":
@@ -107,8 +102,8 @@ func shouldNarrate(tag, msg string) bool {
 	return false
 }
 
-// shouldMirror decides whether an event is noteworthy enough for stderr.
-// The JSON file always gets every event; stderr gets only the signal.
+// shouldMirror reports whether (tag, msg) is noteworthy enough to mirror
+// to stderr.
 func shouldMirror(tag, msg string, fields map[string]any) bool {
 	switch tag {
 	case "server", "controller", tagDecision, tagFinding, "summary", "plan", "verify", "recon", "retire":
@@ -141,7 +136,7 @@ func shouldMirror(tag, msg string, fields map[string]any) bool {
 	return false
 }
 
-// Logf is a convenience for simple messages.
+// Logf is a Log convenience that formats msg via fmt.Sprintf.
 func (l *Logger) Logf(tag, format string, args ...any) {
 	l.Log(tag, fmt.Sprintf(format, args...), nil)
 }
@@ -186,9 +181,8 @@ func buildPrettyLine(now time.Time, tag, msg string, fields map[string]any) []by
 	return []byte(b.String())
 }
 
-// writeNarrateMsg colors the speaker prefix ("orchestrator:", "worker-N:",
-// "director-review:", etc.) in narrator output. Any single-token prefix
-// (no spaces) terminated by ':' is treated as the speaker.
+// writeNarrateMsg writes msg to b, coloring any single-token "speaker:"
+// prefix.
 func writeNarrateMsg(b *strings.Builder, msg string) {
 	if colon := strings.IndexByte(msg, ':'); colon > 0 && !strings.ContainsAny(msg[:colon], " \t") {
 		styleAppend(b, ansiMedGreen, msg[:colon+1])
@@ -235,21 +229,19 @@ func quoteIfNeeded(s string) string {
 	return s
 }
 
-// MalformedCounter tracks malformed tool-args occurrences per model so the
-// operator can identify which backend needs schema tuning.
+// MalformedCounter counts malformed tool-args events per model.
 type MalformedCounter struct {
 	mu    sync.Mutex
 	byKey map[string]int
 	log   *Logger
 }
 
-// NewMalformedCounter returns a counter that logs each increment and
-// emits a by-model summary via Flush.
+// NewMalformedCounter returns a MalformedCounter wired to log.
 func NewMalformedCounter(log *Logger) *MalformedCounter {
 	return &MalformedCounter{byKey: map[string]int{}, log: log}
 }
 
-// Observe records one malformed-args event for the given model and tool.
+// Observe records one malformed-args event for model/tool and logs it.
 func (c *MalformedCounter) Observe(model, tool string, err error) {
 	if c == nil {
 		return
@@ -265,8 +257,8 @@ func (c *MalformedCounter) Observe(model, tool string, err error) {
 	}
 }
 
-// Flush emits a single "malformed-summary" entry keyed by model. Call at
-// shutdown; no-op if no events were recorded.
+// Flush emits one "malformed-summary" entry keyed by model. No-op if no
+// events were recorded.
 func (c *MalformedCounter) Flush() {
 	if c == nil || c.log == nil {
 		return

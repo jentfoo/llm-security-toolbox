@@ -32,9 +32,7 @@ type Message struct {
 	IsRepairError bool
 }
 
-// History is a goroutine-safe message log for one agent. The token
-// calibration EMA lives in the package-level estimator (tokens.go); every
-// History feeds the same calibration via SetPromptTokens.
+// History is a goroutine-safe message log for one agent.
 type History struct {
 	mu       sync.Mutex
 	messages []Message
@@ -60,7 +58,7 @@ const (
 	rejectionShrinkRatio = 0.80
 )
 
-// NewHistory builds an empty History with a context ceiling.
+// NewHistory returns an empty History with the given context ceiling.
 func NewHistory(maxContext int) *History {
 	if maxContext <= 0 {
 		maxContext = 32768
@@ -68,8 +66,8 @@ func NewHistory(maxContext int) *History {
 	return &History{maxContext: maxContext}
 }
 
-// Append adds one message. For tool messages the caller should pre-populate
-// ToolName and Summary120.
+// Append adds m to history. Callers should pre-populate ToolName and
+// Summary120 on tool messages.
 func (h *History) Append(m Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -82,13 +80,9 @@ func (h *History) Append(m Message) {
 	h.messages = append(h.messages, m)
 }
 
-// SetPromptTokens records the most recent server-reported prompt token count
-// along with the message-count baseline that count was measured against, so
-// EstimateTokens can add growth since. Also feeds the real count into the
-// package-level calibration EMA — a model whose tokenizer emits more tokens
-// per char than English prose (JSON-heavy, non-ASCII) will push calibration
-// above 1.0 so future compaction triggers trip at the right watermark
-// instead of 30-50% below it.
+// SetPromptTokens records the server-reported prompt token count n. Used
+// by EstimateTokens as the baseline for future growth and feeds the
+// package-level calibration EMA.
 func (h *History) SetPromptTokens(n int) {
 	h.mu.Lock()
 	raw := h.rawEstimateRangeLocked(0, len(h.messages))
@@ -98,14 +92,14 @@ func (h *History) SetPromptTokens(n int) {
 	ObservePromptTokens(n, raw)
 }
 
-// MaxContext returns the configured ceiling (never adjusted).
+// MaxContext returns the configured ceiling.
 func (h *History) MaxContext() int {
 	return h.maxContext
 }
 
 // EffectiveMaxContext returns the smaller of the configured ceiling and any
-// shrinkage learned from context-rejected errors. Use this (not MaxContext)
-// for all watermark math so adaptive shrinkage actually takes effect.
+// shrinkage learned from context-rejected errors. Use this for watermark
+// math so adaptive shrinkage takes effect.
 func (h *History) EffectiveMaxContext() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -115,12 +109,9 @@ func (h *History) EffectiveMaxContext() int {
 	return h.maxContext
 }
 
-// ShrinkEffectiveMaxOnRejection records that the upstream refused a request
-// the estimator said was under-ceiling. Uses the estimate at the time of
-// rejection as an upper bound on the true ceiling; scales down further so
-// the next attempt lands comfortably below the refused size. Sticky: only
-// shrinks, never grows. Floors at effectiveMaxFloor so a misleading
-// rejection can't cripple the agent outright.
+// ShrinkEffectiveMaxOnRejection lowers the effective context ceiling based
+// on estimateAtRejection (the token estimate when upstream refused).
+// Sticky: only shrinks, never grows. Floors at effectiveMaxFloor.
 func (h *History) ShrinkEffectiveMaxOnRejection(estimateAtRejection int) {
 	if estimateAtRejection <= 0 {
 		return
@@ -139,17 +130,14 @@ func (h *History) ShrinkEffectiveMaxOnRejection(estimateAtRejection int) {
 	}
 }
 
-// Calibration returns the current learned multiplier. Exposed for tests and
-// diagnostics; delegates to the package-level estimator.
+// Calibration returns the current learned multiplier.
 func (h *History) Calibration() float64 {
 	return Calibration()
 }
 
-// EstimateTokens returns the server-reported prompt count plus a char/4
-// estimate of anything appended since that count was recorded. This keeps
-// the compaction trigger honest mid-dispatch when large tool results get
-// appended between sends. Falls back to a full-history estimate when no
-// server count has been seen yet.
+// EstimateTokens returns the estimated total prompt token count for the
+// current history. Uses the last server-reported count as a baseline and
+// adds an estimate for messages appended since.
 func (h *History) EstimateTokens() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -163,18 +151,14 @@ func (h *History) EstimateTokens() int {
 	return h.lastPromptTokens + growth
 }
 
-// estimateRangeLocked returns the calibrated token estimate for the given
-// message range. The raw char/N heuristic under-counts on JSON-heavy and
-// non-ASCII payloads; calibration corrects that based on observed real
-// counts. Use rawEstimateRangeLocked when computing the calibration ratio
-// itself, otherwise the EMA feedback loop self-cancels.
+// estimateRangeLocked returns the calibrated token estimate for messages
+// in [start, end).
 func (h *History) estimateRangeLocked(start, end int) int {
 	return int(float64(h.rawEstimateRangeLocked(start, end)) * Calibration())
 }
 
-// rawEstimateRangeLocked is the uncalibrated char/N estimate. Sums
-// rawMessageTokens over the range so the calibration update path sees
-// the same shape that EstimateMessageTokens calibrates against.
+// rawEstimateRangeLocked returns the uncalibrated token estimate for
+// messages in [start, end).
 func (h *History) rawEstimateRangeLocked(start, end int) int {
 	if start < 0 {
 		start = 0
@@ -196,9 +180,8 @@ func (h *History) Snapshot() []Message {
 	return slices.Clone(h.messages)
 }
 
-// ReplaceAll swaps the entire message slice under lock. Resets the token
-// baseline so EstimateTokens re-measures against the new shape on the next
-// send rather than adding growth against a now-invalid prior count.
+// ReplaceAll replaces the message slice with msgs and resets the token
+// baseline.
 func (h *History) ReplaceAll(msgs []Message) {
 	h.mu.Lock()
 	h.nextID = 0
@@ -218,14 +201,15 @@ func (h *History) ReplaceAll(msgs []Message) {
 	h.mu.Unlock()
 }
 
-// Len returns message count.
+// Len returns the current message count.
 func (h *History) Len() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.messages)
 }
 
-// Summarize120 returns the first 120 chars of s with an ellipsis on overflow.
+// Summarize120 returns the first 120 chars of s, with an ellipsis on
+// overflow.
 func Summarize120(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= 120 {

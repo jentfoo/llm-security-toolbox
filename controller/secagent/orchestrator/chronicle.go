@@ -1,40 +1,32 @@
 package orchestrator
 
 // Worker chronicle: per-worker investigative history accumulated across
-// iterations. Stored at the controller and installed onto each worker at
-// iteration start. In-place compaction folds older iterations' think blocks
-// and tool-result bodies into stubs to bound message growth.
-//
-// See per-function godocs (installChronicle, extractAndAppend,
-// compactChronicle) for lifecycle details.
+// iterations. Installed onto each worker at iter start, with in-place
+// compaction for older iters.
 
 import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// ChronicleKeepRecentIters is the number of trailing iterations whose
-// chronicle messages stay raw. Older iters get compacted in place.
+// ChronicleKeepRecentIters is the trailing iteration window kept raw;
+// older iters are compacted in place.
 const ChronicleKeepRecentIters = 2
 
-// installChronicle installs the worker's chronicle and queues the iter's
-// directive. The three-step order (ReplaceHistory, MarkIterationBoundary,
-// Query) is load-bearing for boundary-based extraction next iter.
+// installChronicle installs w.Chronicle on the agent, marks the iteration
+// boundary, and queues directive.
 func installChronicle(w *WorkerState, directive string) {
 	w.Agent.ReplaceHistory(w.Chronicle)
 	w.Agent.MarkIterationBoundary()
 	w.Agent.Query(directive)
 }
 
-// snapshotter is the subset of *agent.OpenAIAgent we need to extract the
-// iteration's new content. Defined as an interface so chronicle extraction
-// works with FakeAgent as well as the real agent.
+// snapshotter is implemented by agents exposing the full message history.
 type snapshotter interface {
 	Snapshot() []agent.Message
 }
 
-// extractAndAppend appends the iter's new turns (everything past the
-// iteration boundary) onto w.Chronicle, tagging each with iter.
-// No-op when the agent doesn't expose Snapshot.
+// extractAndAppend appends the iter's new agent messages to w.Chronicle,
+// each tagged with iter. No-op when the agent has no boundary.
 func extractAndAppend(w *WorkerState, iter int) {
 	s, ok := w.Agent.(snapshotter)
 	if !ok {
@@ -52,16 +44,14 @@ func extractAndAppend(w *WorkerState, iter int) {
 	}
 }
 
-// boundaryReader is implemented by agents that expose their iteration
-// boundary index for chronicle extraction. *agent.OpenAIAgent satisfies
-// this; tests provide their own implementations as needed.
+// boundaryReader is implemented by agents exposing an iteration boundary
+// index.
 type boundaryReader interface {
 	IterationBoundary() int
 }
 
-// boundaryOf returns the agent's iteration boundary index, or -1 when the
-// agent doesn't expose one. Returning -1 causes extractAndAppend to skip
-// the append — a safe no-op for fakes that don't track a real boundary.
+// boundaryOf returns the agent's iteration boundary index, or -1 when
+// the agent doesn't expose one.
 func boundaryOf(a agent.Agent) int {
 	if br, ok := a.(boundaryReader); ok {
 		return br.IterationBoundary()
@@ -69,17 +59,9 @@ func boundaryOf(a agent.Agent) int {
 	return -1
 }
 
-// compactChronicle applies in-place compaction to chronicle messages
-// tagged with an iter older than (currentIter - keepRecentIters + 1):
-//   - assistant messages get their <think>...</think> blocks stripped.
-//   - tool-result messages (non-repair) get replaced with a compact stub
-//     ("(compacted: <tool> returned ~N tokens — ...)").
-//
-// Idempotent: re-running on an already-compacted message does nothing.
-// Returns counts of stripped/stubbed messages for logging.
-//
-// Length-preserving by design: we never drop messages, so the parallel
-// w.ChronicleIter stays in lockstep with w.Chronicle indexes.
+// compactChronicle applies in-place think-strip and tool-stub compaction
+// to chronicle messages older than the keepRecentIters window. Returns
+// counts of stripped and stubbed messages.
 func compactChronicle(w *WorkerState, currentIter, keepRecentIters int) (stripped, stubbed int) {
 	if len(w.Chronicle) == 0 || keepRecentIters < 1 {
 		return 0, 0

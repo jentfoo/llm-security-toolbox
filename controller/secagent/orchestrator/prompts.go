@@ -121,16 +121,8 @@ func statusLine(iteration, maxIter, findings int) string {
 	return fmt.Sprintf("**Status:** iteration %d/%d, findings filed: %d", iteration, maxIter, findings)
 }
 
-// BuildVerifierPrompt renders the initial verifier substep. Structure:
-// status → context (recon, findings, candidates, worker runs) → action.
-//
-// reconSummary, when non-empty, is the iter-1 recon worker's
-// investigation summary; included as a header so the verifier knows
-// the surface mapped during recon. Empty before iter 2.
-//
-// workers that were stall-stopped after the autonomous phase still render
-// here when they produced a run this iteration — the verifier needs their
-// evidence even though they won't receive more work.
+// BuildVerifierPrompt returns the initial verifier substep prompt.
+// reconSummary is included as a header when non-empty.
 func BuildVerifierPrompt(
 	workers []*WorkerState,
 	workerRuns map[int][]agent.TurnSummary,
@@ -155,10 +147,8 @@ func BuildVerifierPrompt(
 	return strings.Join(parts, "\n")
 }
 
-// BuildVerifierContinuePrompt renders substeps 2..N. The filed/dismissed
-// slices are what the verifier has processed in this phase so far; their
-// titles are surfaced so the verifier stops re-announcing the same
-// candidates each substep.
+// BuildVerifierContinuePrompt returns the substep 2..N prompt with
+// already-filed and dismissed entries surfaced for context.
 func BuildVerifierContinuePrompt(
 	pending []FindingCandidate,
 	filedThisPhase []FindingFiled,
@@ -185,11 +175,8 @@ func BuildVerifierContinuePrompt(
 	return strings.Join(parts, "\n")
 }
 
-// FormatFollowUpHints renders optional verifier follow-up hints for the
-// director's synthesis prompt. Returns "" when no hints are present.
-//
-// Per-worker decision prompts deliberately do NOT include hints — hints
-// are advisory for run-wide direction (spawn / end), not per-worker pivots.
+// FormatFollowUpHints returns the verifier follow-up hints block for
+// the synthesis prompt, or "" when no hints are present.
 func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissal) string {
 	var lines []string
 	for _, f := range findings {
@@ -212,15 +199,8 @@ func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissa
 	return "**Verifier follow-up hints (advisory — you decide whether to act):**\n" + strings.Join(lines, "\n")
 }
 
-// BuildPerWorkerDecisionPrompt renders the user message appended after the
-// director's selectively-compacted chat view for one per-worker decision
-// call. Structure: status → single-tool restriction (primacy effect) →
-// worker context → action lines.
-//
-// peerSummary is a one-line snapshot of every other alive worker's
-// current angle so the director can avoid duplicating efforts. takenIDs
-// is the set of worker IDs that must NOT be picked as fork.new_worker_id.
-// iterationStatus is the run-level "iter N/M, findings filed K" line.
+// BuildPerWorkerDecisionPrompt returns the user message for one
+// per-worker decide_worker decision call.
 func BuildPerWorkerDecisionPrompt(
 	workerID int,
 	w *WorkerState,
@@ -258,9 +238,8 @@ func BuildPerWorkerDecisionPrompt(
 	return strings.Join(parts, "\n")
 }
 
-// formatSingleWorkerHistory renders the per-worker iteration history
-// for one worker — the recent-iter outcome rows surfaced to the director.
-// Returns "" when no entries are recorded yet.
+// formatSingleWorkerHistory returns the recent-iter outcome rows for w,
+// or "" when none are recorded.
 func formatSingleWorkerHistory(w *WorkerState) string {
 	entries := w.RecentHistory()
 	if len(entries) == 0 {
@@ -280,10 +259,8 @@ func formatSingleWorkerHistory(w *WorkerState) string {
 	return strings.Join(lines, "\n")
 }
 
-// FormatPeerSummary renders one line per OTHER alive worker (excluding
-// the worker being asked about) so the director can avoid duplicating
-// angles. Excludes workers whose decision has already landed earlier in
-// the per-worker loop — they're still alive but already retargeted.
+// FormatPeerSummary returns one line per alive worker other than exceptID
+// summarizing their current angle.
 func FormatPeerSummary(workers []*WorkerState, exceptID int) string {
 	var lines []string
 	for _, w := range workers {
@@ -302,9 +279,7 @@ func FormatPeerSummary(workers []*WorkerState, exceptID int) string {
 	return strings.Join(lines, "\n")
 }
 
-// BuildSynthesisPrompt renders the user message for the synthesis call
-// after the per-worker decision loop completes. Structure:
-// status → tool restriction → run-wide context → action lines.
+// BuildSynthesisPrompt returns the user message for the synthesis call.
 func BuildSynthesisPrompt(
 	workers []*WorkerState,
 	completed []CompletedWorker,
@@ -349,9 +324,8 @@ func BuildSynthesisPrompt(
 	return strings.Join(parts, "\n")
 }
 
-// formatCompletedRoster renders the retired-workers reference block for
-// the synthesis prompt. At most completedWorkersRenderCap most-recent
-// entries are shown; older entries fold into a single "(N omitted)" line.
+// formatCompletedRoster returns the retired-workers reference block,
+// capped at completedWorkersRenderCap most-recent entries.
 func formatCompletedRoster(completed []CompletedWorker) string {
 	if len(completed) == 0 {
 		return ""
@@ -382,28 +356,15 @@ func formatCompletedRoster(completed []CompletedWorker) string {
 	return strings.Join(lines, "\n")
 }
 
-// completedSummaryRenderCap caps the rendered length of each per-worker
-// summary in the synthesis prompt. The summarizer is instructed to be
-// exhaustive on detail (length follows content), so this is a safety net
-// for an absurdly long output — not a primary compaction mechanism.
+// completedSummaryRenderCap caps each rendered per-worker summary length.
 const completedSummaryRenderCap = 8000
 
-// completedWorkersRenderCap is the maximum number of completed workers
-// rendered in any one synthesis prompt. Beyond that, the oldest are folded
-// into a single "(N earlier completed worker(s) omitted)" line.
+// completedWorkersRenderCap caps the number of completed workers rendered
+// per synthesis prompt.
 const completedWorkersRenderCap = 10
 
-// BuildIter1ReconReviewPrompt is the FIRST iter-1 synthesis prompt:
-// the director reads the recon summary above in dirChat and produces a
-// free-form text response describing scope understanding and proposed
-// iter-2 worker assignments. NO tools are registered for this call —
-// the response IS the deliverable, captured into dirChat for the
-// subsequent plan call.
-//
-// The split exists because constrained / local models often try to do
-// "review the recon AND plan_workers AND direction_done" in one shot
-// and drop one or more steps. Splitting the cognitive task into
-// "understand first, then formalize" is more reliable.
+// BuildIter1ReconReviewPrompt returns the iter-1 review user message
+// (free-form response, no tool calls).
 func BuildIter1ReconReviewPrompt(iterationStatus string, maxWorkers int) string {
 	parts := make([]string, 0, 8)
 	parts = append(parts, iterationStatus)
@@ -422,10 +383,8 @@ func BuildIter1ReconReviewPrompt(iterationStatus string, maxWorkers int) string 
 	return strings.Join(parts, "\n")
 }
 
-// BuildIter1ReconPlanPrompt is the SECOND iter-1 synthesis prompt:
-// the director now has its own review response in dirChat (appended by
-// RunIter1ReconReviewCall) and is asked to formalize the iter-2 roster
-// via plan_workers + direction_done.
+// BuildIter1ReconPlanPrompt returns the iter-1 plan user message
+// asking for plan_workers + direction_done.
 func BuildIter1ReconPlanPrompt(iterationStatus string, maxWorkers int) string {
 	parts := make([]string, 0, 8)
 	parts = append(parts, iterationStatus)
@@ -438,10 +397,8 @@ func BuildIter1ReconPlanPrompt(iterationStatus string, maxWorkers int) string {
 	return strings.Join(parts, "\n")
 }
 
-// BuildIter1ReconPlanRetryPrompt is the pointed retry message used
-// when the iter-1 plan call returned without plan_workers being
-// called. Without a worker roster the run cannot continue, so this is
-// a hard ask: call plan_workers now with at least 2 entries.
+// BuildIter1ReconPlanRetryPrompt returns the retry message when the
+// iter-1 plan call did not invoke plan_workers.
 func BuildIter1ReconPlanRetryPrompt() string {
 	return "**You did NOT call `plan_workers` in your last response.** A worker roster is required to continue. Call `plan_workers` now with **at least 2** `{worker_id, assignment}` entries on distinct angles (worker_ids starting from 2; each assignment names a specific endpoint or technique). Then call `direction_done(summary)` to close. This is your last chance — without a `plan_workers` call the run ends."
 }

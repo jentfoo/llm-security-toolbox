@@ -10,15 +10,8 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// Summarizer produces on-demand recaps. The single remaining variant —
-// SummarizeCompletedWorker — runs once per worker at retire time. Workers
-// no longer summarize themselves while alive (chronicle stays raw,
-// compacted in place), and the director chat is canonical at the
-// controller (no boundary-summarize callback).
-//
-// Routed through the shared pool with the main model — the recap drives
-// the only memory the director keeps of a retired worker, so it gets the
-// main model, not the cheap log model.
+// Summarizer produces on-demand recon and worker-retire recaps via the
+// shared pool.
 type Summarizer struct {
 	Pool      *agent.ClientPool
 	Model     string
@@ -32,9 +25,8 @@ const (
 	summarizeTimeout   = 20 * time.Minute
 )
 
-// SummarizeReconMission converts a mission prompt into a recon-scoped goal,
-// stripping testing/exploitation language so the recon worker focuses on
-// surface mapping.
+// SummarizeReconMission returns a recon-scoped goal derived from mission
+// (testing/exploitation language stripped).
 func (s *Summarizer) SummarizeReconMission(ctx context.Context, mission string) (string, error) {
 	if s == nil || s.Pool == nil || s.Model == "" {
 		return "", errors.New("summarizer: not configured")
@@ -62,9 +54,8 @@ const reconMissionSystemPrompt = `Convert a security-testing mission into a focu
 
 Strip any motivation-to-test language, any vulnerability classes named, any exploitation hints. Describe WHAT the target is and WHICH surface needs mapping in 2-4 plain sentences. Output prose only — no headings, no lists, no preamble.`
 
-// SummarizeCompletedWorker writes a third-person recap of a retired worker's
-// investigation. transcript is the worker's full chat history; mission and
-// reason are context for the summary.
+// SummarizeCompletedWorker returns a third-person recap of a retired
+// worker's investigation.
 func (s *Summarizer) SummarizeCompletedWorker(
 	ctx context.Context,
 	transcript []agent.Message,
@@ -125,18 +116,14 @@ func (s *Summarizer) oneShot(ctx context.Context, system, user string) (string, 
 	return runOneShot(cctx, s.Pool, s.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
 }
 
-// summarizeMsgRoleTool / summarizeMsgRoleAssistant are message-role strings
-// for the matching entries. Extracted as named constants so goconst doesn't
-// flag the repeated literals across the orchestrator package.
+// Message role string constants for the chat history.
 const (
 	summarizeMsgRoleTool      = "tool"
 	summarizeMsgRoleAssistant = "assistant"
 )
 
-// renderSnapshotForSummary serializes a chat-message slice into a readable
-// transcript for the summarizer. Tool results and tool calls are inlined
-// because they carry the byte-level texture (server responses, error
-// strings) that distinguishes a near-miss from a clean failure.
+// renderSnapshotForSummary returns snapshot rendered as a readable
+// transcript with inlined tool calls and results.
 func renderSnapshotForSummary(snapshot []agent.Message) string {
 	var b strings.Builder
 	for i, m := range snapshot {

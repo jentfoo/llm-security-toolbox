@@ -6,8 +6,6 @@ import (
 )
 
 // IterationOutcome classifies a worker's result for a single iteration.
-// Used by the director's iteration-history block to spot repetition without
-// progress ("same angle, 3 iters, nothing filed").
 type IterationOutcome string
 
 const (
@@ -24,7 +22,7 @@ const (
 // IterationEntry is one row of per-worker history surfaced to the director.
 type IterationEntry struct {
 	Iteration    int
-	Angle        string // short summary of the instruction the worker operated on
+	Angle        string // short summary of the worker's instruction
 	Outcome      IterationOutcome
 	ToolCalls    int
 	FlowsTouched int
@@ -45,48 +43,26 @@ type WorkerState struct {
 	AutonomousBudget   int
 	EscalationReason   string
 	AutonomousTurns    []agent.TurnSummary
-	// Chronicle is the canonical investigative record for this worker —
-	// the raw chat messages (directive, assistant turns with thinking,
-	// tool calls, tool results) accumulated across every iteration. The
-	// controller installs the chronicle on the worker agent at iter start
-	// (no LLM call) and at iter end appends the iter's new content via
-	// extractAndAppend.
-	//
-	// To bound growth, compactChronicle runs at iter end after extract: it
-	// applies StripAssistantThink + StubToolResult in place to messages
-	// older than the keep-recent window (parallel ChronicleIter tracks
-	// per-message iter so the window is iteration-based). Recent iters
-	// stay raw so the worker keeps short-term context intact; older iters
-	// remain present (preserving structural memory + flow IDs in tool-call
-	// args) but stripped of bulk so token growth stays sublinear.
-	//
-	// We never summarize a live worker's chronicle — only at retire time
-	// (SummarizeCompletedWorker) does it collapse into a single CompletedWorker.Summary entry that lives in the director chat.
+	// Chronicle is the worker's accumulated chat messages across iterations,
+	// installed onto the agent at each iter start.
 	Chronicle []agent.Message
 	// ChronicleIter is parallel to Chronicle: ChronicleIter[i] is the
-	// iteration number under which Chronicle[i] was appended. Used by
-	// compactChronicle to decide which messages are "old" enough to
-	// think-strip + tool-stub vs which are recent enough to keep raw.
+	// iteration in which Chronicle[i] was appended.
 	ChronicleIter []int
-	// RecentToolErrors is a rolling window of recent tool-error signatures
-	// (first 80 chars of error_text). Used to detect workers stuck on the
-	// same error across multiple turns.
+	// RecentToolErrors is a rolling window of recent tool-error signatures.
 	RecentToolErrors []string
-	// CoachedErrorSig tracks the last signature for which a coaching
-	// message was injected, preventing the same nudge from firing every
-	// iteration while the error persists.
+	// CoachedErrorSig is the last error signature for which coaching was
+	// injected; prevents repeating the same nudge.
 	CoachedErrorSig string
-	// History is a capped ring buffer of per-iteration outcomes surfaced to
-	// the director so it can detect angle repetition. Entries are appended
-	// at iteration tail (after decisions land). Never shrinks; overflows
-	// wrap via HistoryHead.
+	// History is a ring buffer of per-iteration outcomes surfaced to the
+	// director.
 	History     [WorkerHistoryRing]IterationEntry
 	HistoryLen  int // 0..WorkerHistoryRing
 	HistoryHead int // next write index (mod WorkerHistoryRing)
 }
 
-// AppendHistory records one iteration's result. Ring-buffer semantics:
-// once WorkerHistoryRing entries are stored, the oldest is overwritten.
+// AppendHistory records e in the ring buffer, overwriting the oldest entry
+// once WorkerHistoryRing entries are stored.
 func (w *WorkerState) AppendHistory(e IterationEntry) {
 	w.History[w.HistoryHead] = e
 	w.HistoryHead = (w.HistoryHead + 1) % WorkerHistoryRing
@@ -95,9 +71,8 @@ func (w *WorkerState) AppendHistory(e IterationEntry) {
 	}
 }
 
-// RecentHistory returns history entries oldest → newest. Suitable for
-// direct rendering in prompts without callers having to know about the ring
-// layout. Returns nil when no entries have been recorded.
+// RecentHistory returns history entries oldest to newest, or nil when
+// none have been recorded.
 func (w *WorkerState) RecentHistory() []IterationEntry {
 	if w.HistoryLen == 0 {
 		return nil
@@ -110,17 +85,17 @@ func (w *WorkerState) RecentHistory() []IterationEntry {
 	return out
 }
 
-// MaxRecentToolErrors caps the rolling error signature window on WorkerState.
+// MaxRecentToolErrors caps the rolling error signature window.
 const MaxRecentToolErrors = 5
 
-// RepeatedErrorThreshold is how many identical signatures in RecentToolErrors
-// trigger the silent-stall + coaching path.
+// RepeatedErrorThreshold is the count of identical signatures in
+// RecentToolErrors that triggers the silent-stall + coaching path.
 const RepeatedErrorThreshold = 3
 
-// ErrorSignatureMaxLen caps the prefix of error_text recorded on WorkerState.
+// ErrorSignatureMaxLen caps the recorded prefix of each error_text.
 const ErrorSignatureMaxLen = 80
 
-// Close releases agent and MCP resources held by the worker.
+// Close releases agent and MCP resources.
 func (w *WorkerState) Close() {
 	if w == nil {
 		return

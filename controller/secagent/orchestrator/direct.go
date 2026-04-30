@@ -1,29 +1,25 @@
 package orchestrator
 
 import (
+	"cmp"
 	"context"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
+	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/secagent/agent"
 )
 
-// FireWorkerFunc starts one worker's iter+1 autonomous run as a goroutine
-// and returns a join function the caller invokes at iter boundary to
-// collect the resulting TurnSummaries. Used by RunDecisionPhase to fire
-// the next-iter run the moment a decision lands, so workers run
-// concurrently with the remaining per-worker decisions.
+// FireWorkerFunc starts one worker's iter+1 autonomous run and returns a
+// join function that blocks for the resulting TurnSummaries.
 type FireWorkerFunc func(ctx context.Context, w *WorkerState) (joinFn func() []agent.TurnSummary)
 
-// SpawnChildFunc spawns a forked child worker by id with the steering
-// instruction. The parent's chronicle is copied into the child by the
-// caller (handled in controller.go); this fn just provisions the
-// agent + MCP client.
+// SpawnChildFunc returns a forked child worker provisioned with id and
+// the initial instruction.
 type SpawnChildFunc func(ctx context.Context, id int, instruction string) (*WorkerState, error)
 
-// DecisionPhaseInput bundles everything RunDecisionPhase needs.
+// DecisionPhaseInput bundles the inputs to RunDecisionPhase.
 type DecisionPhaseInput struct {
 	Director        agent.Agent
 	DirChat         *DirectorChat
@@ -39,16 +35,15 @@ type DecisionPhaseInput struct {
 	Retire          func(w *WorkerState, reason string, iter int)
 }
 
-// DecisionPhaseResult carries the join handles for fired worker runs.
-// Caller must invoke Wait() at iter boundary to collect iter+1
-// TurnSummaries (and merge them into the next iter's workerRuns map).
+// DecisionPhaseResult carries the join handles for worker runs fired
+// during RunDecisionPhase. Call Wait at iter boundary to collect them.
 type DecisionPhaseResult struct {
 	mu    sync.Mutex
 	joins map[int]func() []agent.TurnSummary
 }
 
-// Wait blocks on every fired worker run, returns the per-worker iter+1
-// turn-summary map. Safe to call once.
+// Wait blocks on every fired worker run and returns the per-worker
+// turn-summary map.
 func (r *DecisionPhaseResult) Wait() map[int][]agent.TurnSummary {
 	if r == nil {
 		return nil
@@ -63,28 +58,10 @@ func (r *DecisionPhaseResult) Wait() map[int][]agent.TurnSummary {
 	return out
 }
 
-// RunDecisionPhase makes one per-worker decision call per alive worker
-// (in deterministic ID order). For each worker:
-//
-//  1. Append the worker's iter activity (assistant turns + tool calls +
-//     tool results from this iter's autonomous run) to the canonical
-//     director chat, tagged with the worker's id.
-//  2. Render a selectively-compacted view of the director chat (current
-//     worker raw, other workers compacted, director-owned raw).
-//  3. Append a per-worker decision prompt asking for exactly one
-//     decide_worker tool call; install on the director agent and drain.
-//  4. Append the decision narration to director chat (tagged with the
-//     worker's id) so subsequent per-worker prompts see the peer state.
-//  5. Apply the decision: continue/expand sets LastInstruction and fires
-//     the worker's iter+1 run as a goroutine; stop enqueues async retire;
-//     fork (alongside) spawns a child + copies the chronicle + fires the
-//     child's first iter run.
-//
-// The per-worker calls are SEQUENTIAL (so each decision sees the prior
-// decisions' effect on the canonical chat — coordination context), but
-// the worker iter+1 runs they trigger are CONCURRENT with the remaining
-// decision calls. The returned DecisionPhaseResult.Wait() blocks on
-// every fired run.
+// RunDecisionPhase makes one decide_worker call per alive worker (in
+// deterministic ID order) and applies each decision to the worker. The
+// returned result holds join handles for the iter+1 runs fired by
+// continue/expand/fork decisions.
 func RunDecisionPhase(
 	ctx context.Context,
 	in DecisionPhaseInput,
@@ -94,13 +71,8 @@ func RunDecisionPhase(
 	res := &DecisionPhaseResult{joins: map[int]func() []agent.TurnSummary{}}
 
 	// Sort alive workers by ID for deterministic order.
-	alive := make([]*WorkerState, 0, len(in.Workers))
-	for _, w := range in.Workers {
-		if w.Alive {
-			alive = append(alive, w)
-		}
-	}
-	sort.Slice(alive, func(i, j int) bool { return alive[i].ID < alive[j].ID })
+	alive := bulk.SliceFilter(func(w *WorkerState) bool { return w.Alive }, in.Workers)
+	slices.SortFunc(alive, func(a, b *WorkerState) int { return cmp.Compare(a.ID, b.ID) })
 
 	for _, w := range alive {
 		// Append this worker's iter activity to the canonical chat.
@@ -141,13 +113,8 @@ func RunDecisionPhase(
 	return res
 }
 
-// askWorker installs the selectively-compacted view + per-worker prompt
-// onto the director agent, sets the asked-worker hint on the decision
-// queue, and drains (bounded by decisionDrainMaxRounds). The
-// decide_worker handler validates the worker_id match and appends one
-// WorkerDecision. If the bounded drain exits without a decision (e.g.
-// the model loops on rejected tool calls), RunDecisionPhase's
-// no-decision-defaulting-to-continue fallback takes over.
+// askWorker drives one per-worker decision call: installs the rendered
+// view + prompt on the director and runs a bounded drain.
 func askWorker(ctx context.Context, in DecisionPhaseInput, w *WorkerState, log *Logger) {
 	view := in.DirChat.RenderForWorker(w.ID)
 	peer := FormatPeerSummary(in.Workers, w.ID)
@@ -168,10 +135,9 @@ func askWorker(ctx context.Context, in DecisionPhaseInput, w *WorkerState, log *
 	}
 }
 
-// applyDecisionAndFire applies the decision to the worker (continue /
-// expand → set instruction + budget then fire next-iter run, stop →
-// enqueue retire, fork → spawn + fire child) and records a join handle
-// in res for any fired iter run.
+// applyDecisionAndFire applies d to w (continue/expand fires the next
+// run, stop enqueues retire, fork spawns + fires a child) and records
+// any fired-run joins on res.
 func applyDecisionAndFire(
 	ctx context.Context,
 	in DecisionPhaseInput,
@@ -264,15 +230,9 @@ func applyDecisionAndFire(
 	}
 }
 
-// snapshotWorkerIterActivity reads the worker agent's history from the
-// iteration boundary onward — i.e. exactly the messages produced by the
-// iter's autonomous run. Returns nil for agents that don't expose
-// Snapshot/IterationBoundary (test fakes), in which case the director
-// chat just gets no activity for that worker this iter.
-//
-// Empty Content on user/system/tool messages is normalized before
-// return so the canonical director chat never holds a message that
-// would 400 on the wire (see NormalizeEmptyContent).
+// snapshotWorkerIterActivity returns the worker agent's history from the
+// iteration boundary onward, or nil when the agent doesn't expose a
+// boundary. Empty content on user/system/tool messages is normalized.
 func snapshotWorkerIterActivity(w *WorkerState) []agent.Message {
 	s, ok := w.Agent.(snapshotter)
 	if !ok {
@@ -288,16 +248,7 @@ func snapshotWorkerIterActivity(w *WorkerState) []agent.Message {
 	return out
 }
 
-// appendDecisionToChat mirrors a per-worker decision into the canonical
-// director chat as a single tagged user message. The decision's full
-// content (action, instruction/reason, fork) is preserved so subsequent
-// per-worker prompts (and the synthesis prompt) can read what the
-// director already decided this iter.
-//
-// We render as a user-role message rather than try to faithfully replay
-// the director's tool-call assistant message — the chat is a controller-
-// owned record, not a faithful agent transcript, and a clear synthetic
-// summary is more readable for the next decision call.
+// appendDecisionToChat appends a tagged user-role summary of d to c.
 func appendDecisionToChat(c *DirectorChat, workerID, iter int, d WorkerDecision) {
 	body := "[director decision recorded for worker " + intToStr(workerID) + ": " +
 		d.Kind
@@ -318,8 +269,7 @@ func appendDecisionToChat(c *DirectorChat, workerID, iter int, d WorkerDecision)
 	c.Append(agent.Message{Role: "user", Content: body}, workerID, iter)
 }
 
-// intToStr is a small helper to avoid importing strconv just for this
-// file — keeps imports tight.
+// intToStr renders i as decimal.
 func intToStr(i int) string {
 	if i == 0 {
 		return "0"
@@ -342,10 +292,8 @@ func intToStr(i int) string {
 	return string(buf[pos:])
 }
 
-// forkInheritanceHeader is the synthetic chronicle header inserted at the
-// front of a forked child's chronicle so the model sees a clear handoff
-// point ("you are worker N now, picking up the thread") when it reads
-// inherited parent turns later.
+// forkInheritanceHeader returns the chronicle handoff header prepended
+// to a forked child's inherited chronicle.
 func forkInheritanceHeader(parentID, iter, newID int) string {
 	return "[Inherited investigative history from worker " + intToStr(parentID) +
 		" at iter " + intToStr(iter) +
@@ -353,7 +301,7 @@ func forkInheritanceHeader(parentID, iter, newID int) string {
 		intToStr(newID) + ", picking up the thread under a new directive.]"
 }
 
-// SynthesisPhaseInput bundles inputs for the post-decision synthesis call.
+// SynthesisPhaseInput bundles the inputs to RunSynthesisPhase.
 type SynthesisPhaseInput struct {
 	Director        agent.Agent
 	DirChat         *DirectorChat
@@ -368,14 +316,10 @@ type SynthesisPhaseInput struct {
 	MaxWorkers      int
 }
 
-// RunSynthesisPhase is the post-decision synthesis call. Renders a
-// uniformly-compacted view (all worker activity stubbed; director-owned
-// raw) plus the synthesis prompt, drains, and lets the synthesis tools
-// (plan_workers / direction_done / end_run) populate the decision queue.
-//
-// Returns true when direction_done OR end_run landed; false if the
-// director failed to close the phase (controller treats as direction_done
-// for safety).
+// RunSynthesisPhase runs the post-decision synthesis call against
+// in.Director, populating in.Decisions via the synthesis tools. Returns
+// true; if the director didn't close the phase, direction_done is
+// auto-recorded.
 func RunSynthesisPhase(
 	ctx context.Context,
 	in SynthesisPhaseInput,
@@ -407,16 +351,9 @@ func RunSynthesisPhase(
 	return true
 }
 
-// RunIter1ReconReviewCall is the FIRST half of the iter-1 recon
-// synthesis. The director reads the recon summary in dirChat and
-// produces a free-form text response describing the scope understanding
-// and proposed iter-2 worker assignments. NO tools are registered for
-// this call so the model focuses on understanding the problem space
-// before planning. The text response is appended to dirChat as a
-// director-owned message so the subsequent plan call sees it.
-//
-// The caller is responsible for tool registration: SetTools(nil) before
-// this call, then SetTools(synthesisTools) before RunIter1ReconPlanCall.
+// RunIter1ReconReviewCall runs the iter-1 recon review (first of two
+// synthesis calls). The director's free-form response is appended to
+// dirChat. Caller must clear director tools before invoking.
 func RunIter1ReconReviewCall(
 	ctx context.Context,
 	director agent.Agent,
@@ -452,16 +389,10 @@ func RunIter1ReconReviewCall(
 	}
 }
 
-// RunIter1ReconPlanCall is the SECOND half of the iter-1 recon
-// synthesis. The director reads its own review response (now in dirChat)
-// and is asked to call plan_workers + direction_done to formalize the
-// iter-2 roster. If plan_workers wasn't called, this function re-prompts
-// the director ONCE with a pointed reminder. If the retry still produces
-// no plan, the function returns with HasPlan=false; the caller logs a
-// critical warning and the run terminates at iter 2's alive-check
-// because there are no workers to run.
-//
-// Caller is responsible for SetTools(synthesisTools) before this call.
+// RunIter1ReconPlanCall runs the iter-1 recon plan call (second of two
+// synthesis calls). Records plan_workers / direction_done into decisions,
+// retrying once if plan_workers was missing. Caller must register the
+// synthesis tools on director before invoking.
 func RunIter1ReconPlanCall(
 	ctx context.Context,
 	director agent.Agent,

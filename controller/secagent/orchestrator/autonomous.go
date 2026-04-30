@@ -10,14 +10,12 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// StatusSummaryInterval controls how often the orchestrator should ask
-// each agent for a one-sentence summary of its current focus. 0 disables.
-// This is a package-level variable so tests can tweak it; production reads
-// from config.ProgressLogInterval and sets it before Run.
+// StatusSummaryInterval is the turn count between periodic status summaries
+// per agent. 0 disables.
 var StatusSummaryInterval int = 0
 
-// emitStatusIfDue asks the agent for a one-line status summary when the
-// agent is an OpenAIAgent and its turn count mod interval == 0.
+// emitStatusIfDue logs a one-line status summary when turn is a non-zero
+// multiple of StatusSummaryInterval and a is an *agent.OpenAIAgent.
 func emitStatusIfDue(ctx context.Context, a agent.Agent, tag string, turn int, log *Logger) {
 	if StatusSummaryInterval <= 0 || turn == 0 || turn%StatusSummaryInterval != 0 {
 		return
@@ -38,10 +36,8 @@ func emitStatusIfDue(ctx context.Context, a agent.Agent, tag string, turn int, l
 	}
 }
 
-// drainOne runs a single agent Drain, classifies the resulting turn against
-// the candidate pool, records it on the worker, logs it, and emits the
-// periodic status summary if due. Shared by the normal loop and the
-// post-retry recovery path (spec §7.7).
+// drainOne runs one agent Drain, classifies the turn against candidates,
+// appends it to w.AutonomousTurns, and returns the summary.
 func drainOne(
 	ctx context.Context,
 	w *WorkerState,
@@ -80,10 +76,8 @@ func drainOne(
 	return summary, nil
 }
 
-// updateToolErrorSignatures records each error-producing tool call from a
-// turn as a rolling signature on WorkerState. A single successful tool call
-// in the same turn clears CoachedErrorSig so the next distinct failure can
-// be coached again.
+// updateToolErrorSignatures appends each error tool call's signature to
+// w.RecentToolErrors and clears w.CoachedErrorSig if any call succeeded.
 func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
 	sawSuccess := false
 	for _, tc := range summary.ToolCalls {
@@ -108,18 +102,14 @@ func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
 	}
 }
 
-// intraPhaseContinuePrompt is the bare resumption directive injected
-// between worker turns within a single autonomous phase. The cross-iteration
-// directive lives in the worker's freshly composed history at phase entry,
-// so this only needs to nudge the model into producing the next turn — the
-// full task context is already established.
+// intraPhaseContinuePrompt is queued between worker turns within a single
+// autonomous phase to nudge the model to its next turn.
 const intraPhaseContinuePrompt = "Continue your current testing plan. Take the next concrete step."
 
-// RunWorkerUntilEscalation drains up to w.AutonomousBudget turns or until
-// the worker escalates. Each escalation reason is set on the worker.
-// Note: first-turn Query is NOT injected here; the caller is responsible
-// for installing the worker's per-iteration composed history (which itself
-// ends with the directive) before invoking.
+// RunWorkerUntilEscalation drains up to w.AutonomousBudget turns (capped
+// at 20) or until the worker escalates, returning the turn summaries.
+// w.EscalationReason is set on return. The caller must install the
+// worker's per-iteration history before invoking.
 func RunWorkerUntilEscalation(
 	ctx context.Context,
 	w *WorkerState,
@@ -148,14 +138,9 @@ func RunWorkerUntilEscalation(
 	return runs, nil
 }
 
-// runOneWorker executes one alive worker for one iteration: drains until
-// escalation, makes one recovery attempt on mid-iter error (spec §7.7),
-// and returns the turn summaries. Resets EscalationReason and
-// AutonomousTurns on the worker so a fresh run starts cleanly.
-//
-// Used as the building block for both RunAllWorkersUntilEscalation
-// (parallel batch) and the per-worker async-fire path used by
-// RunDecisionPhase.
+// runOneWorker drains one alive worker for one iteration with one
+// recovery attempt on mid-iter error, returning the turn summaries.
+// w.EscalationReason and w.AutonomousTurns are reset before draining.
 func runOneWorker(
 	ctx context.Context,
 	w *WorkerState,
@@ -186,11 +171,8 @@ func runOneWorker(
 	return runs
 }
 
-// RunAllWorkersUntilEscalation runs every alive worker concurrently.
-// On mid-iteration drain error (after the agent's own retry budget) the
-// controller makes exactly one further recovery attempt: interrupt the
-// agent, re-queue LastInstruction, and run a single Drain before marking
-// the worker's iteration result errored (spec §7.7).
+// RunAllWorkersUntilEscalation runs every alive worker concurrently and
+// returns each one's turn summaries keyed by worker ID.
 func RunAllWorkersUntilEscalation(
 	ctx context.Context,
 	workers []*WorkerState,

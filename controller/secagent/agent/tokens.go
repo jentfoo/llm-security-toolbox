@@ -25,18 +25,16 @@ var (
 )
 
 // Calibration returns the current learned multiplier applied to char/N
-// estimates. Seeded at 1.0 until ObservePromptTokens supplies a real
-// measurement.
+// estimates.
 func Calibration() float64 {
 	calibrationMu.RLock()
 	defer calibrationMu.RUnlock()
 	return calibration
 }
 
-// ObservePromptTokens feeds one observation into the EMA: real is the
-// server-reported prompt token count, raw is the matching uncalibrated
-// estimate (sum of rawMessageTokens over the messages that produced it).
-// No-op when either is non-positive.
+// ObservePromptTokens feeds one observation into the calibration EMA: real
+// is the server-reported prompt token count, raw is the matching
+// uncalibrated estimate. No-op when either is non-positive.
 func ObservePromptTokens(real, raw int) {
 	if real <= 0 || raw <= 0 {
 		return
@@ -53,30 +51,22 @@ func ObservePromptTokens(real, raw int) {
 	calibrationMu.Unlock()
 }
 
-// resetCalibrationForTest restores the seed value of 1.0. Tests that read
-// or assert estimator output must call this and run non-parallel since the
-// calibration is process-wide.
+// resetCalibrationForTest restores the seed calibration value of 1.0.
 func resetCalibrationForTest() {
 	calibrationMu.Lock()
 	calibration = 1.0
 	calibrationMu.Unlock()
 }
 
-// EstimateStringTokens estimates the calibrated token cost of a raw string,
-// no per-message overhead. Use for text that will be embedded into another
-// prompt (system-prompt fragments, log annotations) rather than sent as a
-// standalone message.
+// EstimateStringTokens returns the calibrated token estimate for s, with
+// no per-message overhead.
 func EstimateStringTokens(s string) int {
 	return int(float64(len(s)) / charsPerToken * Calibration())
 }
 
-// rawMessageTokens returns the uncalibrated char/charsPerToken estimate
-// for one Message, including per-message overhead. Used by the calibration
-// update path so the EMA does not self-cancel against its own output.
-// ReasoningContent is intentionally NOT counted: structuredHandler.Replay
-// blanks it on every send (deepseek/qwen3 convention — servers don't accept
-// it on input), so it never reaches the wire. Inline `<think>` blocks
-// already live inside Content and are counted there.
+// rawMessageTokens returns the uncalibrated token estimate for m,
+// including per-message overhead. ReasoningContent is excluded since it
+// never reaches the wire.
 func rawMessageTokens(m Message) int {
 	total := len(m.Content) / charsPerToken
 	for _, tc := range m.ToolCalls {
@@ -85,8 +75,8 @@ func rawMessageTokens(m Message) int {
 	return total + perMessageOverhead
 }
 
-// EstimateMessageTokens returns the calibrated token estimate for one
-// Message, including per-message overhead.
+// EstimateMessageTokens returns the calibrated token estimate for m,
+// including per-message overhead.
 func EstimateMessageTokens(m Message) int {
 	return int(float64(rawMessageTokens(m)) * Calibration())
 }

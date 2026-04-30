@@ -15,13 +15,14 @@ func TestRepairToolArgs(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"empty", "", "{}", false},
-		{"simple_object", `{"a":1}`, `{"a":1}`, false},
-		{"fenced", "```json\n{\"a\":1}\n```", `{"a":1}`, false},
-		{"fenced_no_lang", "```\n{\"a\":1}\n```", `{"a":1}`, false},
-		{"double_encoded", `"{\"a\":1}"`, `{"a":1}`, false},
-		{"missing_brace", `{"a":1`, `{"a":1}`, false},
-		{"garbage", "not json", "", true},
+		{name: "empty", input: "", want: "{}"},
+		{name: "whitespace_only", input: "  \n\t  ", want: "{}"},
+		{name: "simple_object", input: `{"a":1}`, want: `{"a":1}`},
+		{name: "fenced", input: "```json\n{\"a\":1}\n```", want: `{"a":1}`},
+		{name: "fenced_no_lang", input: "```\n{\"a\":1}\n```", want: `{"a":1}`},
+		{name: "double_encoded", input: `"{\"a\":1}"`, want: `{"a":1}`},
+		{name: "missing_brace", input: `{"a":1`, want: `{"a":1}`},
+		{name: "garbage", input: "not json", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

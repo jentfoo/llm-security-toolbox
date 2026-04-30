@@ -7,10 +7,8 @@ import (
 	"strings"
 )
 
-// unmarshalToolArgs parses tool arguments into dest with best-effort, per-field
-// recovery for common LLM misformulations (string-quoted arrays/objects,
-// wrapped/unwrapped collections). dest must be a pointer to a struct. Returns
-// the original parse error if no recovery applies.
+// unmarshalToolArgs parses args into dest (a pointer to a struct) with
+// best-effort recovery for common LLM misformulations.
 func unmarshalToolArgs(args json.RawMessage, dest any) error {
 	origErr := json.Unmarshal(args, dest)
 	if origErr == nil {
@@ -56,8 +54,8 @@ func unmarshalToolArgs(args json.RawMessage, dest any) error {
 	return nil
 }
 
-// jsonFieldKey returns the JSON key the field is unmarshaled from, or ""
-// when the field should be skipped (unexported or json:"-").
+// jsonFieldKey returns the JSON key for f, or "" when f is unexported
+// or tagged json:"-".
 func jsonFieldKey(f reflect.StructField) string {
 	if !f.IsExported() {
 		return ""
@@ -73,10 +71,8 @@ func jsonFieldKey(f reflect.StructField) string {
 	return name
 }
 
-// repairToolArgValue inspects a raw JSON value against its target Go type
-// and patches it into a decodable shape. Returns (patched, true) on
-// success, (nil, false) when the raw value is already shaped correctly or
-// the misformulation isn't one we recognize.
+// repairToolArgValue patches raw into a decodable shape for target,
+// returning (patched, true) on a successful repair or (nil, false) otherwise.
 func repairToolArgValue(raw json.RawMessage, target reflect.Type) (json.RawMessage, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {

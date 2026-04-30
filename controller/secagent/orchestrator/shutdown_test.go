@@ -11,7 +11,6 @@ import (
 func TestShutdownPhaseTransitions(t *testing.T) {
 	t.Parallel()
 	t.Run("running_to_verify_only", func(t *testing.T) {
-		t.Parallel()
 		sd := NewShutdown(context.Background(), nil)
 		assert.Equal(t, ShutdownPhaseRunning, sd.Phase())
 		assert.NoError(t, sd.WorkersCtx.Err())
@@ -24,7 +23,6 @@ func TestShutdownPhaseTransitions(t *testing.T) {
 	})
 
 	t.Run("verify_then_dump", func(t *testing.T) {
-		t.Parallel()
 		sd := NewShutdown(context.Background(), nil)
 		sd.RequestVerifyOnly()
 		sd.RequestDumpUnvalidated()
@@ -34,7 +32,6 @@ func TestShutdownPhaseTransitions(t *testing.T) {
 	})
 
 	t.Run("dump_without_verify_first", func(t *testing.T) {
-		t.Parallel()
 		// Skipping straight to phase 2 still cancels both ctxs.
 		sd := NewShutdown(context.Background(), nil)
 		sd.RequestDumpUnvalidated()
@@ -44,7 +41,6 @@ func TestShutdownPhaseTransitions(t *testing.T) {
 	})
 
 	t.Run("kill_is_terminal", func(t *testing.T) {
-		t.Parallel()
 		sd := NewShutdown(context.Background(), nil)
 		sd.RequestKill()
 		assert.Equal(t, ShutdownPhaseKill, sd.Phase())
@@ -55,7 +51,6 @@ func TestShutdownPhaseTransitions(t *testing.T) {
 	})
 
 	t.Run("idempotent", func(t *testing.T) {
-		t.Parallel()
 		sd := NewShutdown(context.Background(), nil)
 		sd.RequestVerifyOnly()
 		sd.RequestVerifyOnly()

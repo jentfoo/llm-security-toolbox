@@ -26,10 +26,9 @@ var thinkTagPairs = []struct {
 	{"<reasoning>", "</reasoning>"},
 }
 
-// StripThinkBlocks removes any recognized thinking-block variants from s.
-// Only balanced pairs are stripped; an unclosed `<think>` (e.g. a reasoning
-// model truncated mid-thought) is left intact. Callers that need to treat
-// such output as "no summary" should also check HasLeadingThinkOpen.
+// StripThinkBlocks removes recognized thinking-block variants from s.
+// Unclosed blocks are left intact; pair with HasLeadingThinkOpen to
+// detect them.
 func StripThinkBlocks(s string) string {
 	out := s
 	for _, re := range thinkBlockPatterns {
@@ -39,14 +38,9 @@ func StripThinkBlocks(s string) string {
 }
 
 // FilterThinkBlocks returns a copy of msgs with `<think>` blocks preserved
-// on the last keepLastN assistant messages (by reverse walk) and stripped
-// from all older assistants. Reasoning models benefit from recent
-// chain-of-thought continuity across turns; keeping the full history
-// retained would blow context budget (think blocks run 1-4K tokens each).
-// keepLastN <= 0 strips think from every assistant message.
-// Non-assistant roles (system, user, tool) pass through untouched —
-// StripThinkBlocks on user-provided prompts is handled by compaction pass 1
-// when context pressure warrants it.
+// on the last keepLastN assistant messages and stripped from older
+// assistants. keepLastN <= 0 strips think from every assistant message.
+// Non-assistant messages pass through untouched.
 func FilterThinkBlocks(msgs []Message, keepLastN int) []Message {
 	if len(msgs) == 0 {
 		return msgs
@@ -66,10 +60,8 @@ func FilterThinkBlocks(msgs []Message, keepLastN int) []Message {
 	return out
 }
 
-// HasLeadingThinkOpen reports whether s (post-StripThinkBlocks) still begins
-// with an opening think tag — the signature of an unclosed block the
-// stripper could not remove. Such a "line" is noise to log; callers should
-// fall back to TruncatedThinkTail.
+// HasLeadingThinkOpen reports whether s begins with an opening think tag,
+// signalling an unclosed block.
 func HasLeadingThinkOpen(s string) bool {
 	lower := strings.ToLower(strings.TrimSpace(s))
 	for _, p := range thinkTagPairs {
@@ -81,8 +73,7 @@ func HasLeadingThinkOpen(s string) bool {
 }
 
 // HasInlineThink reports whether s contains a balanced `<think>...</think>`
-// pair. Used by reasoning-format detection to distinguish inline-think
-// responses from responses that just happen to have stray angle brackets.
+// pair.
 func HasInlineThink(s string) bool {
 	for _, re := range thinkBlockPatterns {
 		if re.MatchString(s) {
@@ -93,12 +84,8 @@ func HasInlineThink(s string) bool {
 }
 
 // StripCodeFences removes a leading and/or trailing markdown fenced-code
-// line so callers extracting a prose summary don't surface the fence marker
-// as the "first line". Handles both bare ``` and language-tagged variants
-// (```json, ```markdown, etc.) on the opener; the trailing fence must be
-// an exact ``` on its own line to avoid accidental stripping inside
-// legitimate prose. Only strips one fence at each end — nested blocks are
-// out of scope.
+// line from s. Strips one fence at each end; nested blocks are not
+// handled.
 func StripCodeFences(s string) string {
 	lines := strings.Split(s, "\n")
 	start := 0
@@ -119,12 +106,7 @@ func StripCodeFences(s string) string {
 }
 
 // TruncatedThinkTail returns a best-effort tail of the content inside an
-// unclosed think block. When a reasoning model hits the token cap mid-thought
-// StripThinkBlocks cannot strip the block (there is no close tag), so the
-// stripped output still leads with the opening tag and firstLine yields
-// nothing useful. Surfacing the model's most recent reasoning is more
-// informative for the operator than a silent "empty". Returns "" when no
-// unclosed think tag is found.
+// unclosed think block in s, or "" when no unclosed think tag is found.
 func TruncatedThinkTail(s string) string {
 	lower := strings.ToLower(s)
 	for _, p := range thinkTagPairs {
@@ -143,10 +125,8 @@ func TruncatedThinkTail(s string) string {
 	return ""
 }
 
-// compactThinkTail collapses whitespace and returns the final portion of s
-// up to maxChars, starting at the first word boundary after the cut and
-// skipping forward to the first sentence boundary when one is present —
-// so operators get a clean tail rather than a mid-word fragment.
+// compactThinkTail returns the final portion of s up to maxChars, with
+// whitespace collapsed and aligned to a word/sentence boundary.
 func compactThinkTail(s string, maxChars int) string {
 	collapsed := strings.Join(strings.Fields(s), " ")
 	if collapsed == "" {

@@ -21,8 +21,8 @@ var httpMethods = map[string]bool{
 	"DELETE": true, "HEAD": true, "OPTIONS": true,
 }
 
-// Slugify produces a URL-safe slug per spec §14. Underscores normalize to
-// spaces first so `client_secret` and `client-secret` yield the same slug.
+// Slugify produces a URL-safe slug from text. Underscores are normalized
+// to spaces, so `client_secret` and `client-secret` yield the same slug.
 func Slugify(text string) string {
 	t := strings.ToLower(strings.TrimSpace(text))
 	t = strings.ReplaceAll(t, "_", " ")
@@ -31,8 +31,8 @@ func Slugify(text string) string {
 	return strings.Trim(t, "-")
 }
 
-// CanonicalEndpoint lowercases, drops method prefix + query, collapses
-// numeric path segments to :id.
+// CanonicalEndpoint returns endpoint lowercased with method prefix and
+// query string stripped, and numeric path segments rewritten to :id.
 func CanonicalEndpoint(endpoint string) string {
 	if endpoint == "" {
 		return ""
@@ -57,7 +57,8 @@ func CanonicalEndpoint(endpoint string) string {
 	return strings.Join(parts, "/")
 }
 
-// TitlesSimilar returns true when titles pass the §14 similarity rule.
+// TitlesSimilar reports whether a and b's slugs match exactly, are
+// substrings of each other, or share more than half their slug words.
 func TitlesSimilar(a, b string) bool {
 	sa, sb := Slugify(a), Slugify(b)
 	if sa == "" || sb == "" {
@@ -119,25 +120,17 @@ func (t MatchTier) String() string {
 	return "none"
 }
 
-// MatchPendingCandidates returns pending candidate IDs whose title+endpoint
-// match filed. Kept for compatibility; prefer MatchPendingCandidatesTiered.
+// MatchPendingCandidates returns pending candidate IDs that match filed.
+// Prefer MatchPendingCandidatesTiered when the matching tier is needed.
 func MatchPendingCandidates(filed FindingFiled, pending []FindingCandidate) []string {
 	ids, _ := MatchPendingCandidatesTiered(filed, pending)
 	return ids
 }
 
-// MatchPendingCandidatesTiered resolves pending candidates against a filed
-// finding using progressively looser rules, returning the first non-empty
-// match along with the tier that matched. Order:
-//  1. title similar AND endpoint equal (strictest — no change in semantics
-//     for findings that cite both).
-//  2. endpoint equal only (the filed title rephrased the candidate's title,
-//     e.g. "Admin API Requires JWT Bearer Auth" vs "Standard User Cookie
-//     Reuse on Admin API" — same behavior, different wording).
-//  3. title similar only (the endpoint was omitted or reworded but the
-//     claim is recognizable).
-//
-// Returns (nil, MatchNone) when no pending candidate matches any tier.
+// MatchPendingCandidatesTiered returns the first non-empty match of pending
+// candidates to filed using progressively looser rules: title+endpoint,
+// endpoint-only, then title-only. Returns (nil, MatchNone) when no tier
+// matches.
 func MatchPendingCandidatesTiered(filed FindingFiled, pending []FindingCandidate) ([]string, MatchTier) {
 	if filed.Title == "" && filed.Endpoint == "" {
 		return nil, MatchNone
@@ -213,23 +206,18 @@ const markdownTemplate = `# %s
 type FindingWriter struct {
 	mu          sync.Mutex
 	findingsDir string
-	// Count is the highest finding index on disk (seeded from prior runs) and
-	// drives the finding-NN-*.md filename numbering.
+	// Count is the highest finding-NN-*.md sequence on disk.
 	Count int
-	// UnvalidatedCount is the highest unvalidated index on disk, seeded from
-	// prior runs so unvalidated-NN-*.md files don't collide across runs.
+	// UnvalidatedCount is the highest unvalidated-NN-*.md sequence on disk.
 	UnvalidatedCount int
-	// RunCount counts findings filed in this process only; used by the
-	// premature-done guard so stale findings left on disk from earlier runs
-	// can't bypass it.
+	// RunCount counts findings filed in this process only.
 	RunCount int
 	Paths    []string
 	index    []findingIndexEntry
 }
 
-// findingIndexEntry records what a single in-process Write produced. Holds
-// the full FindingFiled snapshot so dedup review can compare contents
-// without re-reading disk. titleSlug is cached for fast IsDuplicate checks.
+// findingIndexEntry records one written finding. titleSlug and endpoint
+// are cached for fast dedup matching.
 type findingIndexEntry struct {
 	filed     FindingFiled
 	titleSlug string
@@ -237,16 +225,15 @@ type findingIndexEntry struct {
 	path      string
 }
 
-// SimilarFinding is a snapshot of a previously written finding whose title
-// matches closely enough to warrant agent review against a new filing.
+// SimilarFinding is a previously written finding whose title is similar
+// enough to a new filing to warrant LLM dedup review.
 type SimilarFinding struct {
 	Filed FindingFiled
 	Path  string
 }
 
-// NewFindingWriter constructs a FindingWriter for the given output directory.
-// Seeds Count from the highest existing finding-NN-*.md file so new findings
-// get unique indexes across process restarts.
+// NewFindingWriter returns a FindingWriter for findingsDir. Count and
+// UnvalidatedCount are seeded from existing files in the directory.
 func NewFindingWriter(findingsDir string) *FindingWriter {
 	index, count := loadExistingFindingIndex(findingsDir)
 	unvalidated := loadExistingUnvalidatedMax(findingsDir)
@@ -258,8 +245,8 @@ func NewFindingWriter(findingsDir string) *FindingWriter {
 	}
 }
 
-// loadExistingUnvalidatedMax returns the highest unvalidated-NN-*.md sequence
-// found in findingsDir, or 0 if none / dir missing.
+// loadExistingUnvalidatedMax returns the highest unvalidated-NN-*.md
+// sequence in findingsDir, or 0 if none.
 func loadExistingUnvalidatedMax(findingsDir string) int {
 	entries, err := os.ReadDir(findingsDir)
 	if err != nil {
@@ -390,11 +377,8 @@ func normalizeStoredEndpoint(endpoint string) string {
 	return endpoint
 }
 
-// IsDuplicate returns true when filed matches a previously written finding
-// on exact title-slug AND exact canonical-endpoint equality. Anything
-// fuzzier (slug match with endpoint divergence, similar title) falls
-// through to FindSimilarEntries so the LLM dedup reviewer can adjudicate
-// with both endpoints in view.
+// IsDuplicate reports whether filed matches a written finding on exact
+// title-slug AND canonical-endpoint equality.
 func (w *FindingWriter) IsDuplicate(filed FindingFiled) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -411,12 +395,9 @@ func (w *FindingWriter) IsDuplicate(filed FindingFiled) bool {
 	return false
 }
 
-// MatchesFiled reports whether (title, endpoint) matches an already-filed
-// finding on exact title-slug AND exact canonical-endpoint equality.
-// Returns the matched finding's title and path so the caller can cite it.
-// Intended for the worker hot path as the deterministic fallback when the
-// LLM CandidateDedupReviewer is not configured; anything fuzzier should go
-// through that reviewer rather than getting suppressed here.
+// MatchesFiled returns the title and path of a written finding whose
+// title-slug AND canonical-endpoint match the inputs exactly, or
+// ("", "", false) when none does.
 func (w *FindingWriter) MatchesFiled(title, endpoint string) (matchedTitle, path string, ok bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -433,13 +414,8 @@ func (w *FindingWriter) MatchesFiled(title, endpoint string) (matchedTitle, path
 	return "", "", false
 }
 
-// FindSimilarEntries returns previously written findings whose titles
-// match the filed entry closely enough to warrant LLM dedup review. Slug
-// matches with a divergent endpoint surface here (the LLM gets both
-// endpoints in its prompt and decides unique / duplicate / partial-merge);
-// title-similar (non-slug-equal) entries surface regardless of endpoint
-// for the same reason. Exact title-slug + canonical-endpoint matches are
-// already filtered upstream by IsDuplicate.
+// FindSimilarEntries returns written findings whose title-slug matches
+// or whose title is similar to filed.
 func (w *FindingWriter) FindSimilarEntries(filed FindingFiled) []SimilarFinding {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -476,9 +452,8 @@ func (w *FindingWriter) Write(filed FindingFiled) (string, error) {
 	return path, nil
 }
 
-// Replace overwrites an existing in-process finding with merged content,
-// preserving its sequence number. Renames the file if the new title's slug
-// differs. Returns the (possibly new) path.
+// Replace rewrites the finding at oldPath with filed, preserving the
+// sequence number and renaming if the slug differs. Returns the new path.
 func (w *FindingWriter) Replace(oldPath string, filed FindingFiled) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -568,10 +543,8 @@ func indexEntry(filed FindingFiled, path string) findingIndexEntry {
 	}
 }
 
-// LookupByFilename returns the in-memory FindingFiled snapshot and full
-// path for the finding whose file basename matches name, or ("",false) if
-// nothing matches. Used by the async merge path to fetch the existing
-// finding before reviewer.Merge.
+// LookupByFilename returns the FindingFiled and full path for the finding
+// whose file basename matches name, or (zero, "", false).
 func (w *FindingWriter) LookupByFilename(name string) (FindingFiled, string, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -583,23 +556,20 @@ func (w *FindingWriter) LookupByFilename(name string) (FindingFiled, string, boo
 	return FindingFiled{}, "", false
 }
 
-// FindingDigest is a compact, LLM-classifier-friendly summary of an
-// already-filed finding: filename + a few load-bearing fields. Built from
-// the in-memory FindingWriter index — no disk reads.
+// FindingDigest is a compact summary of a filed finding for LLM
+// dedup classification.
 type FindingDigest struct {
 	Filename   string
 	Title      string
 	Severity   string
 	Endpoint   string
-	FirstLines string // a few lines of description for context
+	FirstLines string // first lines of the description
 }
 
-// findingDigestDescriptionLines caps the description excerpt embedded in
-// each digest. Keeps the classifier prompt bounded as the index grows.
+// findingDigestDescriptionLines caps the description excerpt per digest.
 const findingDigestDescriptionLines = 6
 
-// Digests returns one FindingDigest per finding in the in-memory index.
-// Safe to call concurrently with Write/Replace.
+// Digests returns one FindingDigest per filed finding.
 func (w *FindingWriter) Digests() []FindingDigest {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -616,7 +586,7 @@ func (w *FindingWriter) Digests() []FindingDigest {
 	return out
 }
 
-// firstNLines returns the first n lines of s.
+// firstNLines returns the first n lines of s, joined with newlines.
 func firstNLines(s string, n int) string {
 	if s == "" || n <= 0 {
 		return ""
@@ -644,10 +614,8 @@ func (w *FindingWriter) SummaryForOrchestrator() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// SummaryForWorker renders a compact title + endpoint listing for workers so
-// they can skip re-investigating already-filed vulnerabilities. Deliberately
-// omits severity and verifier reasoning (workers shouldn't argue with the
-// verifier, only avoid duplicate work).
+// SummaryForWorker renders a compact title + endpoint listing for the
+// worker prompt. Returns "" when no findings are filed.
 func (w *FindingWriter) SummaryForWorker() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -669,9 +637,7 @@ func orDefault(s, def string) string {
 	return s
 }
 
-// unvalidatedTemplate renders a worker-reported candidate that the verifier
-// never confirmed. Operator must treat the contents as an investigative tip,
-// not a confirmed vulnerability.
+// unvalidatedTemplate renders an unvalidated candidate dumped at shutdown.
 const unvalidatedTemplate = `# UNVALIDATED — %s
 
 > ⚠ **THIS FINDING IS UNVALIDATED.** A worker reported it during the run, but
@@ -702,9 +668,8 @@ const unvalidatedTemplate = `# UNVALIDATED — %s
 %s
 `
 
-// WriteUnvalidated persists a still-pending candidate to disk under an
-// UNVALIDATED banner. Uses an `unvalidated-NN-slug.md` filename so the
-// regular findings index doesn't pick these up on the next run.
+// WriteUnvalidated persists c to disk as `unvalidated-NN-slug.md` and
+// returns the path.
 func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

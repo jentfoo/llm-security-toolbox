@@ -1,38 +1,18 @@
 package orchestrator
 
-// defaultAutonomousBudget is the per-iteration autonomous-run budget used
-// when a director decision or director tool call doesn't specify one.
-// Mirrors config.DefaultAutoBudget and spec §8 default.
+// defaultAutonomousBudget is the per-iteration autonomous-run budget when
+// no decision specifies one.
 const defaultAutonomousBudget = 8
 
-// decisionDrainMaxRounds caps the director's per-worker decide_worker
-// drain. The call is supposed to be a single tool invocation; this small
-// budget allows a few recovery rounds (schema repair, one wrong-worker
-// mistake) before the controller's no-decision-defaulting-to-continue
-// fallback in RunDecisionPhase takes over. Without it, a model that
-// keeps re-issuing rejected calls (e.g. wrong worker_id) runs to
-// MaxTurnsPerAgent and wastes ~20 minutes per stuck decision.
+// decisionDrainMaxRounds caps the per-worker decide_worker drain.
 const decisionDrainMaxRounds = 4
 
-// MinIterationsForDone is the earliest iteration at which the director's
-// `done(summary)` decision is accepted when zero findings have been filed.
-// Earlier calls are rejected as premature so local models that conflate
-// `done` with `direction_done` can't end the run prematurely.
+// MinIterationsForDone is the earliest iteration at which `end_run` is
+// accepted with zero findings filed.
 const MinIterationsForDone = 5
 
-// ReconDirective is the hard-coded scope-mapping prompt used as worker 1's
-// iter-1 directive. Pure observation — the worker maps the surface for
-// downstream testing workers and does not file findings. The
-// finding-reporting tool is structurally absent for this worker, so
-// the "no findings" contract is enforced both in prose and by the
-// registered tool list. Active sectool tools remain available because
-// recon often needs to send shaped probes to learn how the target
-// behaves under auth, error conditions, or with specific headers.
-//
-// The recon worker's chronicle is summarized at retirement (via
-// SummarizeCompletedWorker) and the result is held as
-// factory.ReconSummary — anchored into every subsequent worker spawn's
-// system prompt and the verifier's per-iter compose.
+// ReconDirective is the iter-1 recon worker's directive (pure observation,
+// no finding filing).
 const ReconDirective = `Map the target's surface area and scope so future testing workers have concrete targets. Your job is observation: do not file findings — that is the testing workers' job that follows yours.
 
 Capture: every endpoint you see, the authentication boundary on each, the technology stack and frameworks in use, the data flows between services, and any service-level configuration that's externally visible. Note dynamic elements (CSRF tokens, session cookies, JWT structures, OAST callbacks if any).

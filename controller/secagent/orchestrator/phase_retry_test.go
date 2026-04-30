@@ -13,7 +13,6 @@ func TestRunPhaseAttempt(t *testing.T) {
 	t.Parallel()
 
 	t.Run("success_first_try", func(t *testing.T) {
-		t.Parallel()
 		calls := 0
 		var compacted, exhausted bool
 		out, err := RunPhaseAttempt(t.Context(),
@@ -30,7 +29,6 @@ func TestRunPhaseAttempt(t *testing.T) {
 	})
 
 	t.Run("recovery_succeeds", func(t *testing.T) {
-		t.Parallel()
 		calls := 0
 		var compacted, exhausted bool
 		out, err := RunPhaseAttempt(t.Context(),
@@ -53,7 +51,6 @@ func TestRunPhaseAttempt(t *testing.T) {
 	})
 
 	t.Run("exhausted_invokes_degrade", func(t *testing.T) {
-		t.Parallel()
 		calls := 0
 		var gotErr error
 		_, err := RunPhaseAttempt(t.Context(),
@@ -71,7 +68,6 @@ func TestRunPhaseAttempt(t *testing.T) {
 	})
 
 	t.Run("ctx_error_propagates_no_retry", func(t *testing.T) {
-		t.Parallel()
 		calls := 0
 		var compacted, exhausted bool
 		ctx, cancel := context.WithCancel(t.Context())
@@ -92,7 +88,6 @@ func TestRunPhaseAttempt(t *testing.T) {
 	})
 
 	t.Run("nil_hooks_are_ok", func(t *testing.T) {
-		t.Parallel()
 		calls := 0
 		_, err := RunPhaseAttempt(t.Context(),
 			func(ctx context.Context) (int, error) {

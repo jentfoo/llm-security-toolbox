@@ -198,7 +198,6 @@ func TestMalformedCounterObserveAndFlush(t *testing.T) {
 	t.Parallel()
 
 	t.Run("observe_and_flush", func(t *testing.T) {
-		t.Parallel()
 		l, path := newTestLogger(t)
 		c := NewMalformedCounter(l)
 		c.Observe("m1", "tool_a", errors.New("bad"))
@@ -215,7 +214,6 @@ func TestMalformedCounterObserveAndFlush(t *testing.T) {
 	})
 
 	t.Run("flush_noop_when_empty", func(t *testing.T) {
-		t.Parallel()
 		l, path := newTestLogger(t)
 		c := NewMalformedCounter(l)
 		c.Flush()

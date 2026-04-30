@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 )
 
@@ -58,8 +59,8 @@ func (f *FakeAgent) Drain(ctx context.Context) (TurnSummary, error) {
 	return f.DrainBounded(ctx, 0)
 }
 
-// DrainBounded records the round cap and pops the next scripted turn.
-// MaxRoundsSeen is exposed for tests that assert a caller-imposed bound.
+// DrainBounded records maxRounds into MaxRoundsSeen and pops the next
+// scripted turn.
 func (f *FakeAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSummary, error) {
 	f.mu.Lock()
 	cb := f.OnDrain
@@ -94,9 +95,8 @@ func (f *FakeAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSummar
 	return t, err
 }
 
-// MarkIterationBoundary increments the call counter and records the
-// current "history length" (computed from QueriedInputs + LastReplacedHistory
-// for tests that want a meaningful boundary value).
+// MarkIterationBoundary records a boundary index derived from
+// LastReplacedHistory + QueriedInputs and increments BoundaryCalls.
 func (f *FakeAgent) MarkIterationBoundary() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -104,26 +104,20 @@ func (f *FakeAgent) MarkIterationBoundary() {
 	f.LastBoundaryIdx = len(f.LastReplacedHistory) + len(f.QueriedInputs)
 }
 
-// IterationBoundary returns the boundary index recorded by the most recent
-// MarkIterationBoundary call. Tests that exercise chronicle extraction can
-// override LastBoundaryIdx and then synthesize a snapshot to assert the
-// extraction logic.
+// IterationBoundary returns the recorded boundary index.
 func (f *FakeAgent) IterationBoundary() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.LastBoundaryIdx
 }
 
-// Snapshot returns a synthetic message slice for chronicle-extraction tests.
-// Tests can set SnapshotMessages explicitly; otherwise the default builds a
-// best-effort approximation from LastReplacedHistory and QueriedInputs.
+// Snapshot returns SnapshotMessages when set, otherwise a slice synthesized
+// from LastReplacedHistory and QueriedInputs.
 func (f *FakeAgent) Snapshot() []Message {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.SnapshotMessages != nil {
-		out := make([]Message, len(f.SnapshotMessages))
-		copy(out, f.SnapshotMessages)
-		return out
+		return slices.Clone(f.SnapshotMessages)
 	}
 	out := make([]Message, 0, len(f.LastReplacedHistory)+len(f.QueriedInputs))
 	out = append(out, f.LastReplacedHistory...)
@@ -133,15 +127,12 @@ func (f *FakeAgent) Snapshot() []Message {
 	return out
 }
 
-// ReplaceHistory records the installed history for test assertions.
-// Mirrors OpenAIAgent.ReplaceHistory but does not preserve a system
-// prompt — tests installing history pass exactly the slice they want
-// recorded.
+// ReplaceHistory records msgs into LastReplacedHistory and ReplacedHistories.
+// Does not preserve a system prompt.
 func (f *FakeAgent) ReplaceHistory(msgs []Message) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	cp := make([]Message, len(msgs))
-	copy(cp, msgs)
+	cp := slices.Clone(msgs)
 	f.LastReplacedHistory = cp
 	f.ReplacedHistories = append(f.ReplacedHistories, cp)
 }

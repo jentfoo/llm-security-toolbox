@@ -166,12 +166,9 @@ func RunVerificationPhase(
 	return autoSummary(appliedFindings, appliedDismissals, len(candidates.Pending()))
 }
 
-// AutoDismissOnContextOverflow dismisses every still-pending candidate with
-// a "context budget exhausted" reason. The controller calls this after a
-// verification phase whose verifier returned context-overflow at least once
-// even with a freshly composed history — the model can't reproduce these
-// candidates under the current budget, so carrying them forward would just
-// re-burn the same tokens next iteration.
+// AutoDismissOnContextOverflow marks every pending candidate as dismissed
+// with a "context budget exhausted" reason and records each dismissal on
+// the decision queue.
 func AutoDismissOnContextOverflow(
 	candidates *CandidatePool,
 	decisions *DecisionQueue,

@@ -35,8 +35,8 @@ const (
 	ErrModelError
 )
 
-// Classify inspects err and returns its retry category along with the
-// hinted Retry-After duration (0 when none is available).
+// Classify returns err's retry category and the hinted Retry-After
+// duration (0 when none is available).
 func Classify(err error) (ErrCategory, time.Duration) {
 	if err == nil {
 		return ErrOther, 0
@@ -91,9 +91,8 @@ func classifyHTTPStatus(status int, message string) (ErrCategory, time.Duration)
 
 var retryAfterRe = regexp.MustCompile(`(?i)retry[- ]after[^0-9]{0,10}(\d+(?:\.\d+)?)\s*(s|sec|second|seconds|ms|millis|milliseconds)?`)
 
-// parseRetryAfter scrapes a Retry-After hint from an error message body.
-// Honors integer or decimal seconds; also understands the "ms" suffix used
-// by some local OpenAI-compatible proxies. Returns 0 when nothing parses.
+// parseRetryAfter scrapes a Retry-After hint from message. Handles integer
+// or decimal seconds and the "ms" suffix. Returns 0 when nothing parses.
 func parseRetryAfter(message string) time.Duration {
 	m := retryAfterRe.FindStringSubmatch(message)
 	if len(m) < 2 {
@@ -110,9 +109,8 @@ func parseRetryAfter(message string) time.Duration {
 	return time.Duration(n * float64(time.Second))
 }
 
-// BackoffFor returns the wait time for a given retry category + attempt.
-// attempt is 0-indexed (first retry after the initial failure is attempt=0).
-// rng may be nil; default package-level randomness is used.
+// BackoffFor returns the wait time for retry category cat at the
+// 0-indexed attempt. rng may be nil to use package-level randomness.
 func BackoffFor(cat ErrCategory, attempt int, retryAfter, base time.Duration, rng *rand.Rand) time.Duration {
 	switch cat {
 	case ErrRateLimit:
@@ -138,7 +136,7 @@ func expBackoff(base time.Duration, attempt int, cap time.Duration) time.Duratio
 	return d
 }
 
-// jitter applies ±20% jitter. rng may be nil.
+// jitter returns d with ±20% jitter applied. rng may be nil.
 func jitter(d time.Duration, rng *rand.Rand) time.Duration {
 	if d <= 0 {
 		return d

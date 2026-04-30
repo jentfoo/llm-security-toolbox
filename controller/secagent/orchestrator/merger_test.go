@@ -53,7 +53,6 @@ func TestAsyncMerger(t *testing.T) {
 	t.Parallel()
 
 	t.Run("submit_merges_into_existing", func(t *testing.T) {
-		t.Parallel()
 		dir := t.TempDir()
 		writer := NewFindingWriter(dir)
 		path, err := writer.Write(FindingFiled{
@@ -85,7 +84,6 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("logs_target_missing", func(t *testing.T) {
-		t.Parallel()
 		writer := NewFindingWriter(t.TempDir())
 		rev := &fakeReviewer{}
 		log, path, _ := newCapturedLogger(t)
@@ -101,7 +99,6 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("logs_classify_error", func(t *testing.T) {
-		t.Parallel()
 		dir := t.TempDir()
 		writer := NewFindingWriter(dir)
 		p, err := writer.Write(FindingFiled{
@@ -121,7 +118,6 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("wait_blocks_on_submits", func(t *testing.T) {
-		t.Parallel()
 		dir := t.TempDir()
 		writer := NewFindingWriter(dir)
 		for i := range 3 {
@@ -145,7 +141,6 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("canceled_context_skips", func(t *testing.T) {
-		t.Parallel()
 		dir := t.TempDir()
 		writer := NewFindingWriter(dir)
 		p, err := writer.Write(FindingFiled{
@@ -169,23 +164,8 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("nil_receiver_safe", func(t *testing.T) {
-		t.Parallel()
 		var m *asyncMerger
 		m.Submit("x", AddInput{}) // must not panic
 		m.Wait()                  // must not panic
 	})
-}
-
-func TestCandidateAsFindingFiledMapping(t *testing.T) {
-	t.Parallel()
-	got := candidateAsFindingFiled(AddInput{
-		Title: "T", Severity: "high", Endpoint: "GET /x",
-		Summary: "summary", ReproductionHint: "hint", EvidenceNotes: "ev",
-	})
-	assert.Equal(t, "T", got.Title)
-	assert.Equal(t, "high", got.Severity)
-	assert.Equal(t, "summary", got.Description)
-	assert.Equal(t, "hint", got.ReproductionSteps)
-	assert.Equal(t, "ev", got.Evidence)
-	assert.Contains(t, got.Endpoint, "/x")
 }

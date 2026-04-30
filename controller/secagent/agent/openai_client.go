@@ -86,17 +86,14 @@ type OpenAIChatClient struct {
 	client *openai.Client
 }
 
-// NewOpenAIChatClient builds a client for baseURL with the given apiKey.
-// Pass empty apiKey for local endpoints. Use NewOpenAIChatClientWithTimeout
-// for an HTTP-level timeout safety net.
+// NewOpenAIChatClient returns a client for baseURL with the given apiKey.
+// Pass empty apiKey for local endpoints.
 func NewOpenAIChatClient(baseURL, apiKey string) *OpenAIChatClient {
 	return NewOpenAIChatClientWithTimeout(baseURL, apiKey, 0)
 }
 
-// NewOpenAIChatClientWithTimeout is like NewOpenAIChatClient but installs an
-// http.Client.Timeout. Callers should pass a value strictly greater than
-// TurnTimeout so context cancellation, not the HTTP deadline, is the normal
-// termination path. 0 disables the HTTP timeout entirely.
+// NewOpenAIChatClientWithTimeout is like NewOpenAIChatClient but applies an
+// HTTP client timeout. 0 disables the HTTP timeout.
 func NewOpenAIChatClientWithTimeout(baseURL, apiKey string, timeout time.Duration) *OpenAIChatClient {
 	cfg := openai.DefaultConfig(apiKey)
 	if baseURL != "" {
@@ -106,10 +103,8 @@ func NewOpenAIChatClientWithTimeout(baseURL, apiKey string, timeout time.Duratio
 	return &OpenAIChatClient{client: openai.NewClientWithConfig(cfg)}
 }
 
-// CreateChatCompletion sends one chat-completion request. Empty Content on
-// user/system/tool roles is forced to a space so it survives `content,omitempty`
-// (some endpoints reject missing content). Assistant messages with only
-// tool_calls keep empty content.
+// CreateChatCompletion sends one chat-completion request and returns the
+// response.
 func (c *OpenAIChatClient) CreateChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
 	msgs := make([]openai.ChatCompletionMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {

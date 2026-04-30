@@ -10,211 +10,219 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSummarizeStatus_StripsThinkAndReturnsFirstLine(t *testing.T) {
+func TestSummarizeStatus(t *testing.T) {
 	t.Parallel()
-	client := &fakeChatClient{responses: []ChatResponse{
-		{Content: "<think>plan</think>Investigating auth; will try replay_send next.\n(second line)"},
-	}}
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
-	a.Query("earlier user turn")
-	a.history.Append(Message{Role: roleAssistant, Content: "did some recon"})
-	before := a.history.Len()
 
-	line, err := SummarizeStatus(t.Context(), a, 40)
-	require.NoError(t, err)
-	assert.Equal(t, "Investigating auth; will try replay_send next.", line)
-	assert.Equal(t, before, a.history.Len(), "status summary must not persist in history")
+	t.Run("strips_think_first_line", func(t *testing.T) {
+		client := &fakeChatClient{responses: []ChatResponse{
+			{Content: "<think>plan</think>Investigating auth; will try replay_send next.\n(second line)"},
+		}}
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+		a.Query("earlier user turn")
+		a.history.Append(Message{Role: roleAssistant, Content: "did some recon"})
+		before := a.history.Len()
 
-	require.Len(t, client.calls, 1)
-	last := client.calls[0].Messages
-	assert.Equal(t, statusSummaryRequest, last[len(last)-1].Content)
-	assert.Equal(t, 40, client.calls[0].MaxTokens)
-}
+		line, err := SummarizeStatus(t.Context(), a, 40)
+		require.NoError(t, err)
+		assert.Equal(t, "Investigating auth; will try replay_send next.", line)
+		assert.Equal(t, before, a.history.Len())
+		require.Len(t, client.calls, 1)
+		last := client.calls[0].Messages
+		assert.Equal(t, statusSummaryRequest, last[len(last)-1].Content)
+		assert.Equal(t, 40, client.calls[0].MaxTokens)
+	})
 
-func TestSummarizeStatus_ErrorPropagates(t *testing.T) {
-	t.Parallel()
-	client := &fakeChatClient{
-		responses: []ChatResponse{{}},
-		errors:    []error{errors.New("boom")},
-	}
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
-	a.Query("user")
-	a.history.Append(Message{Role: roleAssistant, Content: "did work"})
-	_, err := SummarizeStatus(t.Context(), a, 0)
-	require.Error(t, err)
-}
-
-func TestSummarizeStatus_ContextCanceledDuringAcquire(t *testing.T) {
-	t.Parallel()
-	pool := NewClientPool(&fakeChatClient{}, 1)
-	held, err := pool.Acquire(t.Context())
-	require.NoError(t, err)
-	defer pool.Release(held)
-
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: pool})
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	_, err = SummarizeStatus(ctx, a, 0)
-	require.Error(t, err)
-}
-
-func TestSummarizeStatus_ViaBypassesAgentPool(t *testing.T) {
-	t.Parallel()
-	// drained agent pool → SummarizeStatusVia routes through the override client
-	pool := NewClientPool(&fakeChatClient{}, 1)
-	held, err := pool.Acquire(t.Context())
-	require.NoError(t, err)
-	defer pool.Release(held)
-
-	override := &fakeChatClient{responses: []ChatResponse{{Content: "summary via override"}}}
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "agent-model", Pool: pool})
-	a.Query("user turn")
-	a.history.Append(Message{Role: roleAssistant, Content: "did some work"})
-	// Empty model param → fall back to the agent's own model.
-	line, tail, err := SummarizeStatusVia(t.Context(), a, override, "", 0)
-	require.NoError(t, err)
-	assert.Equal(t, "summary via override", line)
-	assert.Empty(t, tail)
-	require.Len(t, override.calls, 1)
-	assert.Equal(t, 20000, override.calls[0].MaxTokens, "default maxTokens should match the reasoning-model budget")
-	assert.Empty(t, override.calls[0].Tools, "summary request must not pass tools")
-	assert.Equal(t, "none", override.calls[0].ReasoningEffort, "summary requests must disable reasoning")
-	assert.Equal(t, "agent-model", override.calls[0].Model, "empty model falls back to agent's own model")
-}
-
-func TestSummarizeStatus_ViaModelOverride(t *testing.T) {
-	t.Parallel()
-	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "worker-model-abliterated", Pool: newPoolWith(client)})
-	a.Query("user")
-	a.history.Append(Message{Role: roleAssistant, Content: "did work"})
-	_, _, err := SummarizeStatusVia(t.Context(), a, client, "summary-model", 0)
-	require.NoError(t, err)
-	require.Len(t, client.calls, 1)
-	assert.Equal(t, "summary-model", client.calls[0].Model)
-}
-
-func TestSummarizeStatus_ViaReturnsThinkTailOnTruncatedResponse(t *testing.T) {
-	t.Parallel()
-	// truncation mid-think: no close tag → empty line, tail carries the fragment
-	client := &fakeChatClient{responses: []ChatResponse{{
-		Content: "<think>I was planning to test the OAuth redirect next",
-	}}}
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
-	a.Query("user")
-	a.history.Append(Message{Role: roleAssistant, Content: "did some work"})
-	line, tail, err := SummarizeStatusVia(t.Context(), a, nil, "", 0)
-	require.NoError(t, err)
-	assert.Empty(t, line)
-	assert.Equal(t, "I was planning to test the OAuth redirect next", tail)
-}
-
-func TestSummarizeStatus_RequestOmitsTools(t *testing.T) {
-	t.Parallel()
-	client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
-	a.SetTools([]ToolDef{{Name: "pretend", Description: "x", Schema: map[string]any{"type": "object"}}})
-	a.Query("user turn")
-	a.history.Append(Message{Role: roleAssistant, Content: "did work"})
-
-	_, err := SummarizeStatus(t.Context(), a, 0)
-	require.NoError(t, err)
-	require.Len(t, client.calls, 1)
-	assert.Empty(t, client.calls[0].Tools, "status request must not pass tools to the model")
-}
-
-func TestSummarizeStatus_SkipsWhenNoSubstance(t *testing.T) {
-	t.Parallel()
-	// Filtered transcript collapses to system+user only — no LLM call.
-	client := &fakeChatClient{responses: []ChatResponse{{Content: "should not be called"}}}
-	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client), SystemPrompt: "sys"})
-	a.Query("user turn")
-
-	line, err := SummarizeStatus(t.Context(), a, 0)
-	require.NoError(t, err)
-	assert.Empty(t, line)
-	assert.Empty(t, client.calls)
-}
-
-func TestBuildStatusMessages_DropsToolResultsAndKeepsThink(t *testing.T) {
-	t.Parallel()
-	hist := []Message{
-		{Role: roleSystem, Content: "system prompt"},
-		{Role: roleUser, Content: "assignment"},
-		{Role: roleAssistant, Content: "<think>planning reproduction</think>running replay",
-			ToolCalls: []ToolCall{{ID: "c1", Type: "function", Function: ToolFunction{Name: "replay_send", Arguments: "{}"}}}},
-		{Role: roleTool, Content: "HTTP/1.1 200 OK\n..." + strings.Repeat("x", 4000), ToolCallID: "c1"},
-		{Role: roleAssistant, Content: "<think>next step</think>checking response"},
-	}
-	msgs := buildStatusMessages(hist, 2000, 2)
-	require.GreaterOrEqual(t, len(msgs), 4, "anchor + filtered tail")
-
-	var sawPlaceholder bool
-	var toolResultLeaked bool
-	var sawThink bool
-	for _, m := range msgs {
-		if m.Role == roleTool && m.Content == toolResultPlaceholder {
-			sawPlaceholder = true
+	t.Run("propagates_error", func(t *testing.T) {
+		client := &fakeChatClient{
+			responses: []ChatResponse{{}},
+			errors:    []error{errors.New("boom")},
 		}
-		if m.Role == roleTool && strings.Contains(m.Content, "HTTP/1.1 200 OK") {
-			toolResultLeaked = true
-		}
-		if m.Role == roleAssistant && strings.Contains(m.Content, "<think>") {
-			sawThink = true
-		}
-	}
-	assert.True(t, sawPlaceholder)
-	assert.False(t, toolResultLeaked)
-	assert.True(t, sawThink)
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+		a.Query("user")
+		a.history.Append(Message{Role: roleAssistant, Content: "did work"})
+		_, err := SummarizeStatus(t.Context(), a, 0)
+		require.ErrorContains(t, err, "boom")
+	})
 
-	var foundToolCalls bool
-	for _, m := range msgs {
-		if m.Role == roleAssistant && len(m.ToolCalls) > 0 && m.ToolCalls[0].Function.Name == "replay_send" {
-			foundToolCalls = true
+	t.Run("cancel_during_acquire", func(t *testing.T) {
+		// Pool is held empty — context cancel must abort Acquire deterministically.
+		pool := NewClientPool(&fakeChatClient{}, 1)
+		held, err := pool.Acquire(t.Context())
+		require.NoError(t, err)
+		defer pool.Release(held)
+
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: pool})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err = SummarizeStatus(ctx, a, 0)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("omits_tools", func(t *testing.T) {
+		client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+		a.SetTools([]ToolDef{{Name: "pretend", Description: "x", Schema: map[string]any{"type": "object"}}})
+		a.Query("user turn")
+		a.history.Append(Message{Role: roleAssistant, Content: "did work"})
+
+		_, err := SummarizeStatus(t.Context(), a, 0)
+		require.NoError(t, err)
+		require.Len(t, client.calls, 1)
+		assert.Empty(t, client.calls[0].Tools)
+	})
+
+	t.Run("skips_no_substance", func(t *testing.T) {
+		// Filtered transcript collapses to system+user only — must not call the LLM.
+		client := &fakeChatClient{
+			responses: []ChatResponse{{Content: "should not be called"}},
+			errors:    []error{errors.New("LLM should not fire")},
 		}
-	}
-	assert.True(t, foundToolCalls)
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client), SystemPrompt: "sys"})
+		a.Query("user turn")
+
+		line, err := SummarizeStatus(t.Context(), a, 0)
+		require.NoError(t, err)
+		assert.Empty(t, line)
+		assert.Empty(t, client.calls)
+	})
 }
 
-func TestBuildStatusMessages_TailTruncateRespectsBudget(t *testing.T) {
+func TestSummarizeStatusVia(t *testing.T) {
 	t.Parallel()
-	hist := []Message{{Role: roleSystem, Content: "sys"}, {Role: roleUser, Content: "do the thing"}}
-	// 50 × 500-char assistant messages ≈ 6250 tokens of non-anchor content.
-	for i := 0; i < 50; i++ {
-		hist = append(hist, Message{Role: roleAssistant, Content: strings.Repeat("x", 500)})
-	}
-	msgs := buildStatusMessages(hist, 2000, 0)
 
-	total := 0
-	for _, m := range msgs {
-		total += len(m.Content)/4 + 4
-	}
-	// Budget applies to the filtered content; a small slack for the anchor
-	// count is acceptable. Assert total stays within ~2x so we know
-	// truncation actually happened (unbounded would be 6400+).
-	assert.LessOrEqual(t, total, 2500, "should have tail-truncated to roughly 2k tokens")
+	t.Run("bypasses_agent_pool", func(t *testing.T) {
+		// Drained agent pool must not block when an override client is supplied.
+		pool := NewClientPool(&fakeChatClient{}, 1)
+		held, err := pool.Acquire(t.Context())
+		require.NoError(t, err)
+		defer pool.Release(held)
 
-	last := msgs[len(msgs)-1]
-	assert.Equal(t, roleAssistant, last.Role)
-	assert.Len(t, last.Content, 500)
+		override := &fakeChatClient{responses: []ChatResponse{{Content: "summary via override"}}}
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "agent-model", Pool: pool})
+		a.Query("user turn")
+		a.history.Append(Message{Role: roleAssistant, Content: "did some work"})
+
+		line, tail, err := SummarizeStatusVia(t.Context(), a, override, "", 0)
+		require.NoError(t, err)
+		assert.Equal(t, "summary via override", line)
+		assert.Empty(t, tail)
+		require.Len(t, override.calls, 1)
+		assert.Equal(t, 20000, override.calls[0].MaxTokens)
+		assert.Empty(t, override.calls[0].Tools)
+		assert.Equal(t, SummaryReasoningEffort, override.calls[0].ReasoningEffort)
+		assert.Equal(t, "agent-model", override.calls[0].Model)
+	})
+
+	t.Run("model_override", func(t *testing.T) {
+		client := &fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "worker-model-abliterated", Pool: newPoolWith(client)})
+		a.Query("user")
+		a.history.Append(Message{Role: roleAssistant, Content: "did work"})
+		_, _, err := SummarizeStatusVia(t.Context(), a, client, "summary-model", 0)
+		require.NoError(t, err)
+		require.Len(t, client.calls, 1)
+		assert.Equal(t, "summary-model", client.calls[0].Model)
+	})
+
+	t.Run("truncated_think_tail", func(t *testing.T) {
+		// Truncation mid-think: no close tag → empty line, tail carries the fragment.
+		client := &fakeChatClient{responses: []ChatResponse{{
+			Content: "<think>I was planning to test the OAuth redirect next",
+		}}}
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+		a.Query("user")
+		a.history.Append(Message{Role: roleAssistant, Content: "did some work"})
+		line, tail, err := SummarizeStatusVia(t.Context(), a, nil, "", 0)
+		require.NoError(t, err)
+		assert.Empty(t, line)
+		assert.Equal(t, "I was planning to test the OAuth redirect next", tail)
+	})
 }
 
-func TestBuildStatusMessages_DropsOrphanLeadingTool(t *testing.T) {
+func TestBuildStatusMessages(t *testing.T) {
 	t.Parallel()
-	// truncation would otherwise start on a tool with its assistant parent cut off
-	hist := []Message{
-		{Role: roleSystem, Content: "sys"},
-		{Role: roleUser, Content: "assignment"},
-		{Role: roleAssistant, Content: "", ToolCalls: []ToolCall{{ID: "c1", Function: ToolFunction{Name: "t", Arguments: "{}"}}}},
-		{Role: roleTool, Content: strings.Repeat("x", 4000), ToolCallID: "c1"},
-		{Role: roleAssistant, Content: strings.Repeat("y", 4000)},
-	}
-	msgs := buildStatusMessages(hist, 200, 0)
-	for i, m := range msgs {
-		if i == 0 || (i == 1 && m.Role == "user") {
-			continue
+
+	t.Run("drops_tool_results_keeps_think", func(t *testing.T) {
+		hist := []Message{
+			{Role: roleSystem, Content: "system prompt"},
+			{Role: roleUser, Content: "assignment"},
+			{Role: roleAssistant, Content: "<think>planning reproduction</think>running replay",
+				ToolCalls: []ToolCall{{ID: "c1", Type: "function", Function: ToolFunction{Name: "replay_send", Arguments: "{}"}}}},
+			{Role: roleTool, Content: "HTTP/1.1 200 OK\n..." + strings.Repeat("x", 4000), ToolCallID: "c1"},
+			{Role: roleAssistant, Content: "<think>next step</think>checking response"},
 		}
-		assert.NotEqual(t, "tool", m.Role, "post-anchor message %d should not be orphaned tool", i)
-		break
-	}
+		msgs := buildStatusMessages(hist, 2000, 2)
+		require.Len(t, msgs, 5)
+
+		assert.Equal(t, roleSystem, msgs[0].Role)
+		assert.Equal(t, roleUser, msgs[1].Role)
+		assert.Equal(t, "<think>planning reproduction</think>running replay", msgs[2].Content)
+		require.Len(t, msgs[2].ToolCalls, 1)
+		assert.Equal(t, "replay_send", msgs[2].ToolCalls[0].Function.Name)
+		assert.Equal(t, roleTool, msgs[3].Role)
+		assert.Equal(t, toolResultPlaceholder, msgs[3].Content)
+		assert.Equal(t, "<think>next step</think>checking response", msgs[4].Content)
+	})
+
+	t.Run("tail_truncate_budget", func(t *testing.T) {
+		hist := make([]Message, 0, 52)
+		hist = append(hist, Message{Role: roleSystem, Content: "sys"}, Message{Role: roleUser, Content: "do the thing"})
+		// 50 × 500-char assistant messages ≈ 6250 tokens of non-anchor content.
+		for range 50 {
+			hist = append(hist, Message{Role: roleAssistant, Content: strings.Repeat("x", 500)})
+		}
+		msgs := buildStatusMessages(hist, 2000, 0)
+
+		var total int
+		for _, m := range msgs {
+			total += len(m.Content)/4 + 4
+		}
+		assert.LessOrEqual(t, total, 2500)
+
+		last := msgs[len(msgs)-1]
+		assert.Equal(t, roleAssistant, last.Role)
+		assert.Len(t, last.Content, 500)
+	})
+
+	t.Run("drops_orphan_leading_tool", func(t *testing.T) {
+		// Truncation would otherwise start on a tool whose assistant parent was cut off.
+		hist := []Message{
+			{Role: roleSystem, Content: "sys"},
+			{Role: roleUser, Content: "assignment"},
+			{Role: roleAssistant, Content: "", ToolCalls: []ToolCall{{ID: "c1", Function: ToolFunction{Name: "t", Arguments: "{}"}}}},
+			{Role: roleTool, Content: strings.Repeat("x", 4000), ToolCallID: "c1"},
+			{Role: roleAssistant, Content: strings.Repeat("y", 4000)},
+		}
+		msgs := buildStatusMessages(hist, 200, 0)
+		// First post-anchor message must not be a tool with no parent assistant in scope.
+		require.GreaterOrEqual(t, len(msgs), 3)
+		assert.NotEqual(t, roleTool, msgs[2].Role)
+	})
+
+	t.Run("empty_history", func(t *testing.T) {
+		assert.Nil(t, buildStatusMessages(nil, 1000, 0))
+	})
+
+	t.Run("no_system_anchor", func(t *testing.T) {
+		hist := []Message{
+			{Role: roleUser, Content: "u"},
+			{Role: roleAssistant, Content: "a"},
+		}
+		msgs := buildStatusMessages(hist, 1000, 0)
+		require.GreaterOrEqual(t, len(msgs), 1)
+		assert.Equal(t, roleUser, msgs[0].Role)
+	})
+
+	t.Run("zero_budget", func(t *testing.T) {
+		hist := []Message{
+			{Role: roleSystem, Content: "sys"},
+			{Role: roleUser, Content: "u"},
+			{Role: roleAssistant, Content: "should be dropped"},
+		}
+		msgs := buildStatusMessages(hist, 0, 0)
+		// Only the anchor (system + first non-system) survives.
+		require.Len(t, msgs, 2)
+		assert.Equal(t, roleSystem, msgs[0].Role)
+		assert.Equal(t, roleUser, msgs[1].Role)
+	})
 }

@@ -14,11 +14,13 @@ func TestClassifyEscalation(t *testing.T) {
 		candidateFound bool
 		want           string
 	}{
-		{"timeout_silent_escalation", TurnSummary{TimedOut: true}, false, "silent"},
-		{"candidate_found", TurnSummary{ToolCalls: []ToolCallRecord{{Name: "x"}}}, true, "candidate"},
-		{"silent_no_tools_no_flows", TurnSummary{AssistantText: "done"}, false, "silent"},
-		{"productive_with_tools", TurnSummary{ToolCalls: []ToolCallRecord{{Name: "x"}}}, false, ""},
-		{"productive_with_flows", TurnSummary{FlowIDs: []string{"abc123"}}, false, ""},
+		{name: "timeout_silent", summary: TurnSummary{TimedOut: true}, want: escalationSilent},
+		{name: "candidate_found", summary: TurnSummary{ToolCalls: []ToolCallRecord{{Name: "x"}}}, candidateFound: true, want: escalationCandidate},
+		{name: "silent_no_activity", summary: TurnSummary{AssistantText: "done"}, want: escalationSilent},
+		{name: "productive_with_tools", summary: TurnSummary{ToolCalls: []ToolCallRecord{{Name: "x"}}}},
+		{name: "productive_with_flows", summary: TurnSummary{FlowIDs: []string{"abc123"}}},
+		{name: "context_exhausted_preserved", summary: TurnSummary{EscalationReason: escalationContextExhausted, TimedOut: true}, want: escalationContextExhausted},
+		{name: "timeout_beats_candidate", summary: TurnSummary{TimedOut: true}, candidateFound: true, want: escalationSilent},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

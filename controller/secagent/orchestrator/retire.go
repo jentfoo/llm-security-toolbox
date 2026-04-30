@@ -5,8 +5,8 @@ import (
 	"sync"
 )
 
-// retireResult holds one completed retirement summary.
-// Empty Summary indicates summarize failure; the retirement is still recorded.
+// retireResult holds one retirement result. Empty Summary indicates
+// summarize failure; retirement is still recorded.
 type retireResult struct {
 	WorkerID int
 	Iter     int
@@ -14,8 +14,8 @@ type retireResult struct {
 	Summary  string
 }
 
-// RetireQueue summarizes retired workers asynchronously under a bounded
-// semaphore. Results buffer on a channel for polling at iteration boundaries.
+// RetireQueue summarizes retired workers asynchronously and buffers
+// results for polled draining.
 type RetireQueue struct {
 	ctx     context.Context
 	sum     *Summarizer
@@ -26,11 +26,8 @@ type RetireQueue struct {
 	results chan retireResult
 }
 
-// newRetireQueue constructs a queue. capacity caps simultaneous summarize
-// calls so a wave of stalls can't saturate the shared LLM pool. results
-// is buffered up to 4×capacity so DrainCompleted has slack for bursts —
-// the main loop polls at every iter boundary so this should never block
-// in practice, but the buffer protects against a stall-then-burst pattern.
+// newRetireQueue returns a RetireQueue; capacity caps simultaneous
+// summarize calls.
 func newRetireQueue(ctx context.Context, sum *Summarizer, mission string, log *Logger, capacity int) *RetireQueue {
 	if capacity < 1 {
 		capacity = 1
@@ -45,9 +42,8 @@ func newRetireQueue(ctx context.Context, sum *Summarizer, mission string, log *L
 	}
 }
 
-// Submit closes the worker's agent and queues a background summarize call.
-// w.Alive flips to false before return. Caller must not submit the same
-// worker twice.
+// Submit closes w's agent, sets w.Alive=false, and queues a background
+// summarize call. The same worker must not be submitted twice.
 func (q *RetireQueue) Submit(w *WorkerState, reason string, iter int) {
 	if q == nil {
 		return
@@ -101,8 +97,8 @@ func (q *RetireQueue) Submit(w *WorkerState, reason string, iter int) {
 	}()
 }
 
-// DrainCompleted returns every retire result that has finished since the
-// last poll. Non-blocking. Returns nil when nothing is ready.
+// DrainCompleted returns every retire result available without blocking,
+// or nil when none are ready.
 func (q *RetireQueue) DrainCompleted() []retireResult {
 	if q == nil {
 		return nil
@@ -118,9 +114,8 @@ func (q *RetireQueue) DrainCompleted() []retireResult {
 	}
 }
 
-// WaitOne blocks until one retire result is available (or ctx is done),
-// then returns it. Used by the iter-1 recon path where we MUST have the
-// recon summary before iter 2 starts.
+// WaitOne blocks until one retire result is available (returning it and
+// true) or ctx is done (returning zero and false).
 func (q *RetireQueue) WaitOne(ctx context.Context) (retireResult, bool) {
 	if q == nil {
 		return retireResult{}, false
@@ -133,9 +128,8 @@ func (q *RetireQueue) WaitOne(ctx context.Context) (retireResult, bool) {
 	}
 }
 
-// Wait blocks until every submitted retire completes. Idempotent. Does
-// NOT drain results — call DrainCompleted afterwards if the caller wants
-// remaining summaries.
+// Wait blocks until every submitted retire completes. Does not drain
+// results.
 func (q *RetireQueue) Wait() {
 	if q == nil {
 		return

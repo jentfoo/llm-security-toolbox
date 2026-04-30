@@ -8,12 +8,9 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// distillMaxTokens caps each per-batch response, with headroom for
-// reasoning models that emit a thinking block before the prose.
+// distillMaxTokens caps each per-batch model response.
 const distillMaxTokens = 4000
 
-// distillSystemPrompt instructs the model to extract load-bearing facts
-// from a batch of tool results.
 const distillSystemPrompt = `You compress one or more tool-call results from a security-testing agent's history into 1-3 sentences of plain prose. Capture status codes, key fields, observed behavior, and cross-call patterns — anything the agent might need to reference later. Drop boilerplate, byte-level minutiae, and anything already obvious from the tool name. Return prose only — no preamble, no markdown headings or fences.`
 
 // TODO: tune distill batch sizing once OnCompact telemetry is available.
@@ -23,10 +20,9 @@ const (
 	distillMinBatchBytes  = 2048
 )
 
-// DistillCallback returns a closure suitable for
-// OpenAIAgentConfig.OnDistillResults that replaces eligible tool-result
-// content with model-generated prose summaries. Returns nil unchanged when
-// s is nil or unconfigured.
+// DistillCallback returns an OnDistillResults callback that replaces
+// eligible tool-result content with model-generated prose summaries.
+// Returns nil when s is nil or unconfigured.
 func DistillCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.Message) ([]agent.Message, error) {
 	return func(ctx context.Context, snapshot []agent.Message) ([]agent.Message, error) {
 		if s == nil || s.Pool == nil || s.Model == "" {
@@ -74,14 +70,13 @@ func DistillCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.M
 	}
 }
 
-// distillBatch groups the snapshot indices and rendered call records that
-// will be summarized together.
+// distillBatch groups snapshot indices and rendered calls summarized together.
 type distillBatch struct {
 	indices []int
 	calls   []distillCall
 }
 
-// distillCall is one tool-call/result pair captured for the prompt.
+// distillCall is one tool-call/result pair for the distill prompt.
 type distillCall struct {
 	Name    string
 	Args    string
@@ -89,8 +84,7 @@ type distillCall struct {
 	IsError bool
 }
 
-// buildDistillBatches groups eligible old tool-result messages into batches
-// for summarization, leaving the trailing keepWindow untouched.
+// buildDistillBatches groups eligible old tool-result messages into batches.
 func buildDistillBatches(snapshot []agent.Message) []distillBatch {
 	const keepWindow = 8 // mirrors KeepTurns*2 trailing window
 	cutoff := len(snapshot) - keepWindow
@@ -166,7 +160,7 @@ func batchByteLen(b distillBatch) int {
 	return total
 }
 
-// runDistillBatch sends one summarization call for batch b and returns the prose.
+// runDistillBatch returns the prose summary for one batch.
 func runDistillBatch(
 	ctx context.Context,
 	s *Summarizer,

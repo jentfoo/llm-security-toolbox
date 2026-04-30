@@ -5,14 +5,8 @@ import (
 	"sync"
 )
 
-// asyncMerger implements MergeSubmitter by spawning a bounded-concurrency
-// goroutine per submitted merge. Wait() blocks until every in-flight merge
-// completes; called at shutdown so the user doesn't lose work mid-merge.
-//
-// The merge itself: ask the dedup reviewer to coalesce the existing finding
-// (read from FindingWriter's in-memory index by filename) with a synthetic
-// FindingFiled built from the worker's AddInput, then writer.Replace the
-// existing file in place.
+// asyncMerger implements MergeSubmitter by running each merge in a
+// bounded-concurrency goroutine.
 type asyncMerger struct {
 	ctx      context.Context
 	reviewer DedupReviewer
@@ -22,8 +16,7 @@ type asyncMerger struct {
 	wg       sync.WaitGroup
 }
 
-// newAsyncMerger constructs an asyncMerger. capacity caps simultaneous
-// merges so a candidate burst can't overload the summary pool.
+// newAsyncMerger returns an asyncMerger; capacity caps simultaneous merges.
 func newAsyncMerger(ctx context.Context, reviewer DedupReviewer, writer *FindingWriter, log *Logger, capacity int) *asyncMerger {
 	if capacity < 1 {
 		capacity = 1
@@ -37,9 +30,8 @@ func newAsyncMerger(ctx context.Context, reviewer DedupReviewer, writer *Finding
 	}
 }
 
-// Submit queues a merge of incoming into the finding at matchedFilename.
-// Returns immediately; the work runs in the background. Cancellation of the
-// run-level ctx aborts in-flight merges.
+// Submit queues a merge of incoming into matchedFilename and returns
+// immediately. Cancellation of the run-level ctx aborts in-flight merges.
 func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 	if m == nil {
 		return
@@ -63,7 +55,7 @@ func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 	}()
 }
 
-// Wait blocks until every submitted merge completes. Idempotent.
+// Wait blocks until every submitted merge completes.
 func (m *asyncMerger) Wait() {
 	if m == nil {
 		return
@@ -110,9 +102,8 @@ func (m *asyncMerger) runOne(matchedFilename string, incoming AddInput) {
 	}
 }
 
-// candidateAsFindingFiled adapts a worker's AddInput shape to the
-// FindingFiled shape expected by reviewer.Merge. Worker-side fields map
-// onto the file format's fields most-similar-first.
+// candidateAsFindingFiled converts an AddInput to the FindingFiled shape
+// expected by reviewer.Merge.
 func candidateAsFindingFiled(in AddInput) FindingFiled {
 	return FindingFiled{
 		Title:             in.Title,

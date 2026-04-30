@@ -25,7 +25,7 @@ const (
 
 var useColor = false
 
-// IsTerminal reports whether f is attached to a character device.
+// IsTerminal reports whether f is a character device.
 func IsTerminal(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {
@@ -34,9 +34,7 @@ func IsTerminal(f *os.File) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// EnableColors opts the pretty logger into ANSI color output. Callers
-// should only invoke this when the destination is a terminal and the
-// user has not set NO_COLOR.
+// EnableColors opts the pretty logger into ANSI color output.
 func EnableColors() {
 	useColor = true
 }

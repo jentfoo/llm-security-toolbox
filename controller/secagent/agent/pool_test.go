@@ -11,18 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type stubClient struct{ id int }
+type stubClient struct{}
 
-func (s stubClient) CreateChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+func (stubClient) CreateChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
 	return ChatResponse{}, nil
 }
 
-func TestClientPool(t *testing.T) {
+func TestClientPool_Acquire(t *testing.T) {
 	t.Parallel()
-	t.Run("acquire_release", func(t *testing.T) {
-		c1 := stubClient{id: 1}
-		c2 := stubClient{id: 2}
-		pool := NewClientPoolWithClients([]ChatClient{c1, c2})
+
+	t.Run("acquire_blocks_when_empty", func(t *testing.T) {
+		pool := NewClientPoolWithClients([]ChatClient{stubClient{}, stubClient{}})
 		ctx := t.Context()
 
 		a1, err := pool.Acquire(ctx)
@@ -31,15 +30,11 @@ func TestClientPool(t *testing.T) {
 		require.NoError(t, err)
 
 		var got ChatClient
-		started := make(chan struct{})
 		done := make(chan struct{})
 		go func() {
-			close(started)
 			got, _ = pool.Acquire(ctx)
 			close(done)
 		}()
-		<-started
-		// Once the goroutine is runnable, Acquire must be blocked on the empty pool.
 		require.Never(t, func() bool {
 			select {
 			case <-done:
@@ -56,25 +51,30 @@ func TestClientPool(t *testing.T) {
 	})
 
 	t.Run("context_cancel", func(t *testing.T) {
-		pool := NewClientPool(stubClient{id: 1}, 1)
+		pool := NewClientPool(stubClient{}, 1)
 		first, err := pool.Acquire(t.Context())
 		require.NoError(t, err)
 
-		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
-		defer cancel()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
 		_, err = pool.Acquire(ctx)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorIs(t, err, context.Canceled)
 		pool.Release(first)
 	})
 
+	t.Run("nil_pool_errors", func(t *testing.T) {
+		var pool *ClientPool
+		_, err := pool.Acquire(t.Context())
+		require.Error(t, err)
+	})
+
 	t.Run("concurrent_acquire_cap", func(t *testing.T) {
-		pool := NewClientPool(stubClient{id: 1}, 2)
-		var peak int32
-		var current int32
+		pool := NewClientPool(stubClient{}, 2)
+		var peak, current int32
 		var wg sync.WaitGroup
 		release := make(chan struct{})
 		ctx := t.Context()
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -94,12 +94,43 @@ func TestClientPool(t *testing.T) {
 				pool.Release(c)
 			}()
 		}
-		// Wait until pool is saturated so peak reflects the cap.
 		require.Eventually(t, func() bool {
 			return atomic.LoadInt32(&current) == 2
 		}, time.Second, time.Millisecond)
 		close(release)
 		wg.Wait()
 		assert.LessOrEqual(t, peak, int32(2))
+	})
+}
+
+func TestClientPool_NewClampsSize(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero_clamped_to_one", func(t *testing.T) {
+		pool := NewClientPool(stubClient{}, 0)
+		assert.Equal(t, 1, pool.Size())
+		c, err := pool.Acquire(t.Context())
+		require.NoError(t, err)
+		require.NotNil(t, c)
+		pool.Release(c)
+	})
+
+	t.Run("negative_clamped_to_one", func(t *testing.T) {
+		pool := NewClientPool(stubClient{}, -3)
+		assert.Equal(t, 1, pool.Size())
+	})
+}
+
+func TestClientPool_Release(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil_pool_noop", func(t *testing.T) {
+		var pool *ClientPool
+		assert.NotPanics(t, func() { pool.Release(stubClient{}) })
+	})
+
+	t.Run("nil_client_noop", func(t *testing.T) {
+		pool := NewClientPool(stubClient{}, 1)
+		assert.NotPanics(t, func() { pool.Release(nil) })
 	})
 }

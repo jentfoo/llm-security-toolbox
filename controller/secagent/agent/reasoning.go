@@ -37,31 +37,34 @@ func (f ReasoningFormat) String() string {
 	}
 }
 
-// ReasoningHandler encapsulates per-model reasoning behaviour. Each
-// OpenAIAgent gets exactly one after startup detection; the rest of the
-// code stays format-agnostic and routes through the handler.
+// ReasoningHandler encapsulates per-model reasoning behaviour.
 type ReasoningHandler interface {
-	// Format returns the detected format.
+	// Format returns the detected reasoning format.
 	Format() ReasoningFormat
 
-	// Ingest normalizes response fields for history storage.
+	// Ingest splits resp into content and reasoning suitable for history
+	// storage.
 	Ingest(resp ChatResponse) (content, reasoning string)
 
-	// Replay prepares history for the next send, filtering by format and keepLastN.
+	// Replay returns msgs filtered for the next send, retaining reasoning
+	// on the last keepLastN messages where applicable.
 	Replay(msgs []Message, keepLastN int) []Message
 
-	// ForSummary converts history to inline-think shape for summary prompts.
+	// ForSummary returns msgs converted to inline-think shape for summary
+	// prompts.
 	ForSummary(msgs []Message) []Message
 
-	// Extract returns a confident single-line summary from resp, or "" to fall back to Tail.
+	// Extract returns a confident single-line summary from resp, or "" to
+	// fall back to Tail.
 	Extract(resp ChatResponse) string
 
-	// Tail returns a best-effort reasoning fragment when Extract produced nothing.
+	// Tail returns a best-effort reasoning fragment from resp when Extract
+	// produced nothing.
 	Tail(resp ChatResponse) string
 }
 
-// NewReasoningHandler returns the handler matching the given format.
-// ReasoningFormatUnknown maps to the inline handler.
+// NewReasoningHandler returns the handler for f. ReasoningFormatUnknown
+// maps to the inline handler.
 func NewReasoningHandler(f ReasoningFormat) ReasoningHandler {
 	switch f {
 	case ReasoningFormatNone:
@@ -211,9 +214,8 @@ const CompressionReasoningEffort = "low"
 // reasoningProbeTimeout bounds probe latency.
 const reasoningProbeTimeout = 5 * time.Minute
 
-// DetectReasoningFormat sends a single probe query and classifies the
-// response. Errors (network, timeout) return ReasoningFormatUnknown so the
-// caller can fall back to the inline handler without crashing startup.
+// DetectReasoningFormat probes model via client and returns its detected
+// reasoning format. Errors return ReasoningFormatUnknown.
 func DetectReasoningFormat(ctx context.Context, client ChatClient, model string) (ReasoningFormat, error) {
 	ctx, cancel := context.WithTimeout(ctx, reasoningProbeTimeout)
 	defer cancel()
@@ -236,10 +238,8 @@ func DetectReasoningFormat(ctx context.Context, client ChatClient, model string)
 	return ReasoningFormatNone, nil
 }
 
-// ReasoningFormatCache memoizes detection results keyed by (baseURL, model)
-// so identical backend targets are probed only once per run. Callers that
-// share a cache across roles (worker/orchestrator/summary) automatically
-// benefit from dedup when URLs and models coincide.
+// ReasoningFormatCache memoizes detection results keyed by (baseURL,
+// model).
 type ReasoningFormatCache struct {
 	mu    sync.Mutex
 	byKey map[string]ReasoningFormat
@@ -250,10 +250,10 @@ func NewReasoningFormatCache() *ReasoningFormatCache {
 	return &ReasoningFormatCache{byKey: map[string]ReasoningFormat{}}
 }
 
-// Resolve returns a cached format for (baseURL, model) or runs detection
-// once and caches the result. Detection errors cache ReasoningFormatUnknown
-// so a bad endpoint doesn't retry on every role. onDetect fires after each
-// real probe with elapsed time; useful for operator logging. Pass nil to skip.
+// Resolve returns the cached format for (baseURL, model) or runs detection
+// once and caches the result. Detection errors cache
+// ReasoningFormatUnknown. onDetect fires after each real probe; pass nil
+// to skip.
 func (c *ReasoningFormatCache) Resolve(
 	ctx context.Context, client ChatClient,
 	baseURL, model string,

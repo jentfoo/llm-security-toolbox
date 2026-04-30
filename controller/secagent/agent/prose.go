@@ -29,9 +29,8 @@ var jsonSummaryFields = []string{
 	"text", "content", "response", "output", "answer",
 }
 
-// ExtractProse returns a best-effort single-line prose summary from s. Strips
-// think blocks, peels code fences, probes JSON fields, looks for output
-// markers, and skips structural lines. Returns "" when nothing usable remains.
+// ExtractProse returns a best-effort single-line prose summary from s, or
+// "" when nothing usable remains.
 func ExtractProse(s string) string {
 	s = StripCodeFences(StripThinkBlocks(s))
 	s = strings.TrimSpace(s)
@@ -57,14 +56,9 @@ func ExtractProse(s string) string {
 	return firstMeaningfulLine(s)
 }
 
-// ExtractMarkedOutput scans s for the last occurrence of any output marker
-// (case-insensitive) and returns the prose immediately following it, capped
-// at the first newline or sentence-ending punctuation. Returns "" when no
-// marker is found.
-//
-// Intended to salvage the real response from reasoning models that wrap
-// their output in meta-narration ("…Output matches.✅ Final: The agent
-// just dispatched a test request.")
+// ExtractMarkedOutput returns the first sentence of prose following the
+// last output-marker (e.g. "Final:", "Output:") in s, or "" when no marker
+// is found.
 func ExtractMarkedOutput(s string) string {
 	lower := strings.ToLower(s)
 	bestIdx := -1
@@ -83,12 +77,10 @@ func ExtractMarkedOutput(s string) string {
 	return firstSentenceOrLine(after)
 }
 
-// extractFromJSON tries to parse s as a JSON object and returns the first
-// non-empty string value from a known summary-field name, falling back to
-// any string value if no known field matches. The second return value
-// signals "parsed as valid JSON"; callers use it to commit to the JSON
-// path versus falling through to other extraction (so `{}` returns (""
-// ,true) and doesn't get recovered as structural-noise prose).
+// extractFromJSON parses s as a JSON object and returns the first
+// non-empty string value from a known summary-field name (or any string
+// value as fallback). The second return reports whether s parsed as valid
+// JSON.
 func extractFromJSON(s string) (string, bool) {
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(s), &obj); err != nil {
@@ -114,8 +106,8 @@ func extractFromJSON(s string) (string, bool) {
 }
 
 // firstSentenceOrLine returns s up to the first newline or sentence-ending
-// punctuation (.!?), whichever comes first. Trims whitespace. When neither
-// boundary exists, returns the whole trimmed string.
+// punctuation (.!?), trimmed. Returns the whole trimmed string when
+// neither boundary exists.
 func firstSentenceOrLine(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -143,9 +135,8 @@ var structuralOnlyLines = map[string]bool{
 	"```": true,
 }
 
-// firstMeaningfulLine walks s line by line and returns the first line whose
-// trimmed content is not empty and not a single structural character.
-// Returns "" when every line is empty or structural.
+// firstMeaningfulLine returns the first non-empty, non-structural line of
+// s, trimmed. Returns "" when every line is empty or structural.
 func firstMeaningfulLine(s string) string {
 	for s != "" {
 		var line string

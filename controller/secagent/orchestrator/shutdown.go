@@ -14,40 +14,28 @@ const (
 )
 
 // Shutdown coordinates a graceful, multi-stage termination of a Run.
-//
-// Stage 1 (verify-only): non-validation goroutines (workers + directors)
-// are cancelled via WorkersCtx; the controller exits its iteration loop and
-// runs the verifier once on every still-pending candidate.
-//
-// Stage 2 (dump unvalidated): the verifier is cancelled via VerifierCtx;
-// the controller writes every still-pending candidate to disk under an
-// UNVALIDATED banner.
-//
-// Stage 3 (kill): the signal handler is responsible for terminating the
-// process; this type only records the request so peers can short-circuit.
+// Stage 1 cancels WorkersCtx (verify-only); stage 2 also cancels
+// VerifierCtx (dump unvalidated); stage 3 records a kill request.
 type Shutdown struct {
 	phase atomic.Int32
 
-	// WorkersCtx is the context handed to workers, decision/synthesis
-	// directors, and any other "non-validation" work. Cancelled at stage 1.
+	// WorkersCtx is cancelled at stage 1; handed to workers and directors.
 	WorkersCtx    context.Context
 	workersCancel context.CancelFunc
 
-	// VerifierCtx is the context handed to the verifier loop. Cancelled at
-	// stage 2 so a verifier mid-Drain bails out before continuing.
+	// VerifierCtx is cancelled at stage 2; handed to the verifier loop.
 	VerifierCtx    context.Context
 	verifierCancel context.CancelFunc
 
-	// RootCtx is the parent context — used for teardown work that should
-	// outlive both the worker- and verifier-level cancellations (sectool
-	// subprocess termination, log close, etc.).
+	// RootCtx is the parent context for teardown work outliving both
+	// worker- and verifier-level cancellations.
 	RootCtx context.Context
 
 	log *Logger
 }
 
-// NewShutdown derives Workers and Verifier child contexts from parent and
-// returns a Shutdown in the running state.
+// NewShutdown returns a Shutdown in the running state with WorkersCtx
+// and VerifierCtx derived from parent.
 func NewShutdown(parent context.Context, log *Logger) *Shutdown {
 	wctx, wcancel := context.WithCancel(parent)
 	vctx, vcancel := context.WithCancel(parent)
@@ -69,8 +57,8 @@ func (s *Shutdown) Phase() int32 {
 	return s.phase.Load()
 }
 
-// RequestVerifyOnly transitions to phase 1 and cancels WorkersCtx. Idempotent.
-// Calling this when already in phase 2 or 3 is a no-op (those are stricter).
+// RequestVerifyOnly transitions to phase 1 and cancels WorkersCtx.
+// No-op when already at phase 2 or 3.
 func (s *Shutdown) RequestVerifyOnly() {
 	if s == nil {
 		return
@@ -83,8 +71,8 @@ func (s *Shutdown) RequestVerifyOnly() {
 	}
 }
 
-// RequestDumpUnvalidated transitions to phase 2 and cancels VerifierCtx.
-// Also cancels WorkersCtx if we somehow skipped phase 1. Idempotent.
+// RequestDumpUnvalidated transitions to phase 2 and cancels both
+// VerifierCtx and WorkersCtx. No-op when already at phase 2 or 3.
 func (s *Shutdown) RequestDumpUnvalidated() {
 	if s == nil {
 		return
@@ -105,10 +93,8 @@ func (s *Shutdown) RequestDumpUnvalidated() {
 	}
 }
 
-// DumpUnvalidatedCandidates writes every pending candidate to disk under the
-// UNVALIDATED banner via writer.WriteUnvalidated. Returns the number of
-// successfully written files. Errors are logged and skipped so a single
-// failed write doesn't drop the rest.
+// DumpUnvalidatedCandidates writes each pending candidate via
+// writer.WriteUnvalidated and returns the number of successful writes.
 func DumpUnvalidatedCandidates(pending []FindingCandidate, writer *FindingWriter, log *Logger) int {
 	written := 0
 	for _, c := range pending {
@@ -136,9 +122,8 @@ func DumpUnvalidatedCandidates(pending []FindingCandidate, writer *FindingWriter
 	return written
 }
 
-// RequestKill transitions to phase 3. The caller is responsible for
-// terminating the process; this method only updates state and cancels
-// any still-live child contexts so peers unblock.
+// RequestKill transitions to phase 3 and cancels both child contexts.
+// The caller is responsible for terminating the process.
 func (s *Shutdown) RequestKill() {
 	if s == nil {
 		return

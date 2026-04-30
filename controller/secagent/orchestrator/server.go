@@ -11,25 +11,20 @@ import (
 	"time"
 )
 
-// SectoolServer represents the sectool MCP endpoint secagent talks to.
-// When secagent attached to an already-running server, Cmd is nil and
-// Terminate is a no-op.
+// SectoolServer represents the sectool MCP endpoint. Cmd is nil when
+// secagent attached to an already-running server.
 type SectoolServer struct {
 	Cmd     *exec.Cmd
 	LogFile *os.File
 	URL     string
 }
 
-// readinessProbeTimeout caps each MCP readiness probe so a hung
-// connection can't stall startup.
+// readinessProbeTimeout caps each MCP readiness probe.
 const readinessProbeTimeout = 500 * time.Millisecond
 
-// StartSectool returns a SectoolServer for the configured MCP port. If a
-// server is already responding on that port it attaches without starting
-// a child process; otherwise it launches `sectool mcp` and waits for HTTP
-// readiness. The binary is resolved by checking for a co-located `sectool`
-// next to the running secagent executable first, then falling back to
-// $PATH.
+// StartSectool returns a SectoolServer at mcpPort, attaching to an
+// already-running endpoint or otherwise launching `sectool mcp` and
+// waiting for readiness.
 func StartSectool(proxyPort, mcpPort int, log *Logger) (*SectoolServer, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort)
 
@@ -99,9 +94,8 @@ func StartSectool(proxyPort, mcpPort int, log *Logger) (*SectoolServer, error) {
 	return nil, errors.New("sectool MCP server did not become ready within 10s")
 }
 
-// resolveSectoolBinary finds the sectool executable, preferring a binary
-// co-located with the running secagent (handy for `bin/secagent` +
-// `bin/sectool` repo layouts) and falling back to $PATH.
+// resolveSectoolBinary returns the sectool path, preferring a binary
+// co-located with the running secagent and falling back to $PATH.
 func resolveSectoolBinary() (string, error) {
 	if exe, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
@@ -119,8 +113,8 @@ func resolveSectoolBinary() (string, error) {
 	return binary, nil
 }
 
-// mcpReachable reports whether the MCP endpoint accepts an HTTP request
-// within readinessProbeTimeout.
+// mcpReachable reports whether url responds to an HTTP GET within
+// readinessProbeTimeout.
 func mcpReachable(url string) bool {
 	client := &http.Client{Timeout: readinessProbeTimeout}
 	resp, err := client.Get(url)
@@ -131,8 +125,8 @@ func mcpReachable(url string) bool {
 	return true
 }
 
-// Terminate tears down the child server. No-op when attached to a server
-// secagent didn't start.
+// Terminate tears down the child sectool process. No-op when attached
+// to a server secagent didn't start.
 func (s *SectoolServer) Terminate() {
 	if s == nil || s.Cmd == nil || s.Cmd.Process == nil {
 		return

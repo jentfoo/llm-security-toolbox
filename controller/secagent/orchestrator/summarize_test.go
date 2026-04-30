@@ -42,6 +42,50 @@ func TestRenderSnapshotForSummary(t *testing.T) {
 	})
 }
 
+func TestSummarizeReconMission(t *testing.T) {
+	t.Parallel()
+
+	t.Run("strips_think_blocks_and_trims", func(t *testing.T) {
+		client := &scriptedClient{response: "<think>plan</think>\nMap the SaaS app's surface.\n"}
+		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		out, err := s.SummarizeReconMission(t.Context(), "Test the auth flows for IDOR")
+		require.NoError(t, err)
+		assert.Equal(t, "Map the SaaS app's surface.", out)
+		require.Len(t, client.requests, 1)
+		assert.Contains(t, client.requests[0].Messages[1].Content, "Test the auth flows for IDOR")
+	})
+
+	t.Run("rejects_empty_mission", func(t *testing.T) {
+		s := &Summarizer{Pool: poolOf(&scriptedClient{}), Model: "m"}
+		_, err := s.SummarizeReconMission(t.Context(), "   ")
+		require.Error(t, err)
+	})
+
+	t.Run("rejects_unconfigured_summarizer", func(t *testing.T) {
+		var s *Summarizer
+		_, err := s.SummarizeReconMission(t.Context(), "mission")
+		require.Error(t, err)
+
+		s = &Summarizer{Model: "m"}
+		_, err = s.SummarizeReconMission(t.Context(), "mission")
+		require.Error(t, err)
+	})
+
+	t.Run("rejects_empty_llm_output", func(t *testing.T) {
+		client := &scriptedClient{response: "<think>only thinking</think>"}
+		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		_, err := s.SummarizeReconMission(t.Context(), "mission text")
+		require.Error(t, err)
+	})
+
+	t.Run("propagates_chat_client_error", func(t *testing.T) {
+		client := &scriptedClient{err: errors.New("downstream timeout")}
+		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		_, err := s.SummarizeReconMission(t.Context(), "mission")
+		require.Error(t, err)
+	})
+}
+
 func TestSummarizeCompletedWorker(t *testing.T) {
 	t.Parallel()
 
