@@ -35,7 +35,7 @@ func RepairToolArgs(raw string) (json.RawMessage, error) {
 	}
 
 	// Balance trailing braces.
-	open, close := 0, 0
+	var open, close int
 	for _, r := range raw {
 		switch r {
 		case '{':

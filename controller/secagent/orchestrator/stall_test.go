@@ -107,7 +107,7 @@ func TestUpdateStallStreaks(t *testing.T) {
 		for range 3 {
 			UpdateStallStreaks([]*WorkerState{w})
 		}
-		coachings := 0
+		var coachings int
 		for _, q := range fa.QueriedInputs {
 			if strings.Contains(q, "same err") {
 				coachings++
@@ -128,7 +128,7 @@ func TestUpdateStallStreaks(t *testing.T) {
 		UpdateStallStreaks([]*WorkerState{w})
 		w.RecentToolErrors = []string{"sig B", "sig B", "sig B"}
 		UpdateStallStreaks([]*WorkerState{w})
-		coachings := 0
+		var coachings int
 		for _, q := range fa.QueriedInputs {
 			if strings.Contains(q, "sig ") {
 				coachings++

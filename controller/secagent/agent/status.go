@@ -111,12 +111,12 @@ func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessa
 	}
 	hist = FilterThinkBlocks(hist, keepThinkTurns)
 	var anchor []Message
-	tailStart := 0
-	if hist[0].Role == roleSystem {
+	var tailStart int
+	if hist[0].Role == RoleSystem {
 		anchor = append(anchor, hist[0])
 		tailStart = 1
 	}
-	if tailStart < len(hist) && hist[tailStart].Role != roleTool {
+	if tailStart < len(hist) && hist[tailStart].Role != RoleTool {
 		anchor = append(anchor, hist[tailStart])
 		tailStart++
 	}
@@ -124,13 +124,13 @@ func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessa
 	filtered := make([]Message, 0, len(hist)-tailStart)
 	for i := tailStart; i < len(hist); i++ {
 		m := hist[i]
-		if m.Role == roleTool {
+		if m.Role == RoleTool {
 			m.Content = toolResultPlaceholder
 		}
 		filtered = append(filtered, m)
 	}
 
-	anchorCost := 0
+	var anchorCost int
 	for _, m := range anchor {
 		anchorCost += EstimateMessageTokens(m)
 	}
@@ -160,7 +160,7 @@ func pickTail(msgs []Message, budget int) []Message {
 	if budget <= 0 || len(msgs) == 0 {
 		return nil
 	}
-	cost := 0
+	var cost int
 	start := len(msgs)
 	for i := len(msgs) - 1; i >= 0; i-- {
 		c := EstimateMessageTokens(msgs[i])
@@ -170,7 +170,7 @@ func pickTail(msgs []Message, budget int) []Message {
 		cost += c
 		start = i
 	}
-	for start < len(msgs) && msgs[start].Role == roleTool {
+	for start < len(msgs) && msgs[start].Role == RoleTool {
 		start++
 	}
 	return msgs[start:]

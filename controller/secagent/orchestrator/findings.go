@@ -81,7 +81,7 @@ func TitlesSimilar(a, b string) bool {
 	if len(wa) == 0 || len(wb) == 0 {
 		return false
 	}
-	overlap := 0
+	var overlap int
 	for w := range wa {
 		if wb[w] {
 			overlap++
@@ -252,7 +252,7 @@ func loadExistingUnvalidatedMax(findingsDir string) int {
 	if err != nil {
 		return 0
 	}
-	max := 0
+	var max int
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -282,7 +282,7 @@ func loadExistingFindingIndex(findingsDir string) ([]findingIndexEntry, int) {
 		entry findingIndexEntry
 	}
 
-	max := 0
+	var max int
 	var loaded []diskFinding
 	for _, e := range entries {
 		if e.IsDir() {

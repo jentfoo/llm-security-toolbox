@@ -13,38 +13,38 @@ import (
 // buildFattyHistory seeds a history whose token estimate crosses the watermark.
 func buildFattyHistory(maxCtx int, big string) *History {
 	h := NewHistory(maxCtx)
-	h.Append(Message{Role: roleSystem, Content: "sys prompt"})
+	h.Append(Message{Role: RoleSystem, Content: "sys prompt"})
 	for range 5 {
 		h.Append(Message{
-			Role:      roleAssistant,
+			Role:      RoleAssistant,
 			Content:   "<think>internal deliberation goes here</think>summary line.\n" + big,
 			ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "tool", Arguments: "{}"}}},
 		})
 		h.Append(Message{
-			Role:       roleTool,
+			Role:       RoleTool,
 			ToolCallID: "t1",
 			ToolName:   "tool",
 			Content:    big,
 			Summary120: Summarize120(big),
 		})
 	}
-	h.Append(Message{Role: roleUser, Content: "continue"})
-	h.Append(Message{Role: roleAssistant, Content: "ok"})
+	h.Append(Message{Role: RoleUser, Content: "continue"})
+	h.Append(Message{Role: RoleAssistant, Content: "ok"})
 	return h
 }
 
 // buildToolCallHistory seeds n assistant/tool turns of identical bulk payload.
 func buildToolCallHistory(maxCtx int, big string, n int) *History {
 	h := NewHistory(maxCtx)
-	h.Append(Message{Role: roleSystem, Content: "sys"})
+	h.Append(Message{Role: RoleSystem, Content: "sys"})
 	for range n {
 		h.Append(Message{
-			Role:      roleAssistant,
+			Role:      RoleAssistant,
 			Content:   big,
 			ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
 		})
 		h.Append(Message{
-			Role: roleTool, ToolCallID: "t", ToolName: "t",
+			Role: RoleTool, ToolCallID: "t", ToolName: "t",
 			Content: big, Summary120: "summary",
 		})
 	}
@@ -55,16 +55,16 @@ func buildToolCallHistory(maxCtx int, big string, n int) *History {
 func assertToolPairing(t *testing.T, snap []Message) {
 	t.Helper()
 	for i, m := range snap {
-		if m.Role != roleTool {
+		if m.Role != RoleTool {
 			continue
 		}
 		require.Positive(t, i)
 		j := i - 1
-		for j >= 0 && snap[j].Role == roleTool {
+		for j >= 0 && snap[j].Role == RoleTool {
 			j--
 		}
 		require.GreaterOrEqual(t, j, 0)
-		assert.Equal(t, roleAssistant, snap[j].Role)
+		assert.Equal(t, RoleAssistant, snap[j].Role)
 		assert.NotEmpty(t, snap[j].ToolCalls)
 	}
 }
@@ -88,15 +88,15 @@ func TestCompact(t *testing.T) {
 	t.Run("drop_turn_fallback", func(t *testing.T) {
 		big := strings.Repeat("y", 20_000)
 		h := NewHistory(2048)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
 		for range 6 {
 			h.Append(Message{
-				Role:      roleAssistant,
+				Role:      RoleAssistant,
 				Content:   big,
 				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
 			})
 			h.Append(Message{
-				Role: roleTool, ToolCallID: "t", ToolName: "t",
+				Role: RoleTool, ToolCallID: "t", ToolName: "t",
 				Content: big, Summary120: "summary",
 			})
 		}
@@ -110,10 +110,10 @@ func TestCompact(t *testing.T) {
 	t.Run("fail_fast_no_truncate", func(t *testing.T) {
 		big := strings.Repeat("z", 8_000)
 		h := NewHistory(1024)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
 		for range 3 {
-			h.Append(Message{Role: roleAssistant, Content: big})
-			h.Append(Message{Role: roleUser, Content: big})
+			h.Append(Message{Role: RoleAssistant, Content: big})
+			h.Append(Message{Role: RoleUser, Content: big})
 		}
 		_, err := Compact(h, CompactionOptions{
 			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 8,
@@ -124,8 +124,8 @@ func TestCompact(t *testing.T) {
 
 	t.Run("under_target_noop", func(t *testing.T) {
 		h := NewHistory(8192)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
-		h.Append(Message{Role: roleUser, Content: "hi"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: "hi"})
 		report, err := Compact(h, CompactionOptions{
 			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
 		})
@@ -138,29 +138,29 @@ func TestCompact(t *testing.T) {
 		// Regression: repair schema hint was stubbed; Pass 2 must preserve IsRepairError.
 		big := strings.Repeat("x", 6_000)
 		h := NewHistory(8192)
-		h.Append(Message{Role: roleSystem, Content: "sys prompt"})
+		h.Append(Message{Role: RoleSystem, Content: "sys prompt"})
 		repairText := `ERROR: arguments did not parse. schema: {"scope":"request_headers|request_body|response_headers|response_body|all"}`
 		for i := range 5 {
 			h.Append(Message{
-				Role:      roleAssistant,
+				Role:      RoleAssistant,
 				Content:   "try tool",
 				ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "flow_get", Arguments: "{}"}}},
 			})
 			if i%2 == 0 {
 				h.Append(Message{
-					Role: roleTool, ToolCallID: "t1", ToolName: "flow_get",
+					Role: RoleTool, ToolCallID: "t1", ToolName: "flow_get",
 					Content: big, Summary120: Summarize120(big),
 				})
 			} else {
 				h.Append(Message{
-					Role: roleTool, ToolCallID: "t1", ToolName: "flow_get",
+					Role: RoleTool, ToolCallID: "t1", ToolName: "flow_get",
 					Content: repairText, Summary120: Summarize120(repairText),
 					IsRepairError: true,
 				})
 			}
 		}
-		h.Append(Message{Role: roleUser, Content: "continue"})
-		h.Append(Message{Role: roleAssistant, Content: "ok"})
+		h.Append(Message{Role: RoleUser, Content: "continue"})
+		h.Append(Message{Role: RoleAssistant, Content: "ok"})
 
 		report, err := Compact(h, CompactionOptions{
 			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
@@ -174,7 +174,7 @@ func TestCompact(t *testing.T) {
 			if m.IsRepairError && strings.Contains(m.Content, "schema:") {
 				repairs++
 			}
-			if m.Role == roleTool && !m.IsRepairError && strings.Contains(m.Content, strings.Repeat("x", 200)) {
+			if m.Role == RoleTool && !m.IsRepairError && strings.Contains(m.Content, strings.Repeat("x", 200)) {
 				stubbedNonRepairs++
 			}
 		}
@@ -186,14 +186,14 @@ func TestCompact(t *testing.T) {
 		// Small overflow: Pass 1 should stop stripping as soon as estimate hits target.
 		think := "<think>" + strings.Repeat("r", 2_000) + "</think>"
 		h := NewHistory(4096)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
 		for range 6 {
 			h.Append(Message{
-				Role: roleAssistant, Content: think + "answer",
+				Role: RoleAssistant, Content: think + "answer",
 				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
 			})
 			h.Append(Message{
-				Role: roleTool, ToolCallID: "t", ToolName: "t",
+				Role: RoleTool, ToolCallID: "t", ToolName: "t",
 				Content: "ok", Summary120: "ok",
 			})
 		}
@@ -211,15 +211,15 @@ func TestCompact(t *testing.T) {
 		// Watermark math must follow EffectiveMaxContext after a rejection shrink.
 		big := strings.Repeat("y", 3_000)
 		h := NewHistory(200_000)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
 		for range 6 {
 			h.Append(Message{
-				Role:      roleAssistant,
+				Role:      RoleAssistant,
 				Content:   big,
 				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
 			})
 			h.Append(Message{
-				Role: roleTool, ToolCallID: "t", ToolName: "t",
+				Role: RoleTool, ToolCallID: "t", ToolName: "t",
 				Content: big, Summary120: "summary",
 			})
 		}
@@ -256,26 +256,26 @@ func TestCompact(t *testing.T) {
 	t.Run("wrapper_runs_both_phases", func(t *testing.T) {
 		big := strings.Repeat("x", 3_000)
 		h := NewHistory(8192)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
 		calls := []ToolCall{
 			{ID: "e1", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
 			{ID: "e2", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
 			{ID: "e3", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
 		}
-		h.Append(Message{Role: roleAssistant, Content: "fan out", ToolCalls: calls})
+		h.Append(Message{Role: RoleAssistant, Content: "fan out", ToolCalls: calls})
 		for i, id := range []string{"e1", "e2", "e3"} {
 			h.Append(Message{
-				Role: roleTool, ToolCallID: id, ToolName: "flaky",
+				Role: RoleTool, ToolCallID: id, ToolName: "flaky",
 				Content: "ERROR: same " + strconv.Itoa(i),
 			})
 		}
 		for i := range 4 {
 			h.Append(Message{
-				Role: roleAssistant, Content: big,
+				Role: RoleAssistant, Content: big,
 				ToolCalls: []ToolCall{{ID: "t" + strconv.Itoa(i), Function: ToolFunction{Name: "t", Arguments: "{}"}}},
 			})
 			h.Append(Message{
-				Role: roleTool, ToolCallID: "t" + strconv.Itoa(i), ToolName: "t",
+				Role: RoleTool, ToolCallID: "t" + strconv.Itoa(i), ToolName: "t",
 				Content: big, Summary120: "summary",
 			})
 		}
@@ -305,8 +305,8 @@ func TestForceHardTruncate(t *testing.T) {
 
 	t.Run("under_target_noop", func(t *testing.T) {
 		h := NewHistory(8192)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
-		h.Append(Message{Role: roleUser, Content: "hi"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: "hi"})
 		report := ForceHardTruncate(h, 10_000, 2)
 		assert.Zero(t, report.DroppedTurns)
 		assert.Empty(t, report.PassesApplied)
@@ -318,7 +318,7 @@ func TestForceHardTruncate(t *testing.T) {
 // streak-collapse path.
 func buildErrorStreakHistory(maxCtx int, n int) *History {
 	h := NewHistory(maxCtx)
-	h.Append(Message{Role: roleSystem, Content: "sys"})
+	h.Append(Message{Role: RoleSystem, Content: "sys"})
 	calls := make([]ToolCall, n)
 	for i := range calls {
 		calls[i] = ToolCall{
@@ -327,21 +327,21 @@ func buildErrorStreakHistory(maxCtx int, n int) *History {
 		}
 	}
 	h.Append(Message{
-		Role:      roleAssistant,
+		Role:      RoleAssistant,
 		Content:   "calling flaky " + strconv.Itoa(n) + " times",
 		ToolCalls: calls,
 	})
 	for i := range n {
 		h.Append(Message{
-			Role:       roleTool,
+			Role:       RoleTool,
 			ToolCallID: fmt.Sprintf("err%d", i),
 			ToolName:   "flaky",
 			Content:    "ERROR: same failure mode " + strconv.Itoa(i) + " " + strings.Repeat("x", 1000),
 			Summary120: "ERROR: same failure mode",
 		})
 	}
-	h.Append(Message{Role: roleUser, Content: "continue"})
-	h.Append(Message{Role: roleAssistant, Content: "ok"})
+	h.Append(Message{Role: RoleUser, Content: "continue"})
+	h.Append(Message{Role: RoleAssistant, Content: "ok"})
 	return h
 }
 
@@ -415,7 +415,7 @@ func TestStubToolResult(t *testing.T) {
 	t.Run("preserves_distilled", func(t *testing.T) {
 		original := "(distilled batch 1: worker probed /admin, got 403)"
 		m := Message{
-			Role:       roleTool,
+			Role:       RoleTool,
 			ToolCallID: "t1",
 			ToolName:   "proxy_poll",
 			Content:    original,
@@ -427,7 +427,7 @@ func TestStubToolResult(t *testing.T) {
 
 	t.Run("preserves_existing_stub", func(t *testing.T) {
 		original := "(compacted: proxy_poll returned ~50 tokens — flow ABC)"
-		m := Message{Role: roleTool, ToolCallID: "t1", ToolName: "proxy_poll", Content: original}
+		m := Message{Role: RoleTool, ToolCallID: "t1", ToolName: "proxy_poll", Content: original}
 		changed := StubToolResult(&m)
 		assert.False(t, changed)
 		assert.Equal(t, original, m.Content)
@@ -435,7 +435,7 @@ func TestStubToolResult(t *testing.T) {
 
 	t.Run("stubs_fresh_content", func(t *testing.T) {
 		m := Message{
-			Role: roleTool, ToolCallID: "t1", ToolName: "proxy_poll",
+			Role: RoleTool, ToolCallID: "t1", ToolName: "proxy_poll",
 			Content:    strings.Repeat("x", 500),
 			Summary120: "summary",
 		}

@@ -4,6 +4,9 @@ package orchestrator
 // no decision specifies one.
 const defaultAutonomousBudget = 8
 
+// noneSentinel is the placeholder rendered where a list has no items.
+const noneSentinel = "(none)"
+
 // decisionDrainMaxRounds caps the per-worker decide_worker drain.
 const decisionDrainMaxRounds = 4
 

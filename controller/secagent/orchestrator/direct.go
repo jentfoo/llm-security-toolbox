@@ -4,11 +4,13 @@ import (
 	"cmp"
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/orchestrator/history"
 )
 
 // FireWorkerFunc starts one worker's iter+1 autonomous run and returns a
@@ -190,7 +192,7 @@ func applyDecisionAndFire(
 		// onto the worker agent; the join captures the result for caller
 		// wait at iter end.
 		if in.Fire != nil {
-			installChronicle(w, w.LastInstruction)
+			w.Chronicle.Install(w.Agent, w.LastInstruction)
 			join := in.Fire(ctx, w)
 			res.mu.Lock()
 			res.joins[w.ID] = join
@@ -216,24 +218,18 @@ func applyDecisionAndFire(
 			}
 			return
 		}
-		// Inherit parent's chronicle: deep-copy slices, prepend an
-		// inheritance header so the next install reads cleanly.
-		nw.Chronicle = make([]agent.Message, 0, 1+len(w.Chronicle))
-		nw.Chronicle = append(nw.Chronicle, agent.Message{
-			Role:    "user",
-			Content: forkInheritanceHeader(w.ID, in.Iter, nw.ID),
-		})
-		nw.Chronicle = append(nw.Chronicle, w.Chronicle...)
-		nw.ChronicleIter = make([]int, 0, 1+len(w.ChronicleIter))
-		nw.ChronicleIter = append(nw.ChronicleIter, in.Iter)
-		nw.ChronicleIter = append(nw.ChronicleIter, w.ChronicleIter...)
+		// Inherit parent's chronicle: clone with an inheritance header
+		// prepended so the next install reads cleanly.
+		nw.Chronicle = w.Chronicle.CloneWithDirective(
+			forkInheritanceHeader(w.ID, in.Iter, nw.ID), in.Iter,
+		)
 		// Append child to the workers slice via the shared callback so
 		// the controller can see it. We don't mutate Workers here
 		// directly because the slice is owned by the controller. Instead,
 		// rely on the spawn callback to do the append.
 		// Fire the child's iter run.
 		if in.Fire != nil {
-			installChronicle(nw, nw.LastInstruction)
+			nw.Chronicle.Install(nw.Agent, nw.LastInstruction)
 			join := in.Fire(ctx, nw)
 			res.mu.Lock()
 			res.joins[nw.ID] = join
@@ -242,7 +238,7 @@ func applyDecisionAndFire(
 		if log != nil {
 			log.Log("fork", "spawn", map[string]any{
 				"parent": w.ID, "new": nw.ID,
-				"inherited_msgs": len(nw.Chronicle),
+				"inherited_msgs": nw.Chronicle.Len(),
 			})
 		}
 	}
@@ -252,71 +248,42 @@ func applyDecisionAndFire(
 // iteration boundary onward, or nil when the agent doesn't expose a
 // boundary. Empty content on user/system/tool messages is normalized.
 func snapshotWorkerIterActivity(w *WorkerState) []agent.Message {
-	s, ok := w.Agent.(snapshotter)
-	if !ok {
+	out := history.SnapshotSinceBoundary(w.Agent)
+	if out == nil {
 		return nil
 	}
-	full := s.Snapshot()
-	boundary := boundaryOf(w.Agent)
-	if boundary < 0 || boundary >= len(full) {
-		return nil
-	}
-	out := slices.Clone(full[boundary:])
 	NormalizeEmptyContent(out)
 	return out
 }
 
 // appendDecisionToChat appends a tagged user-role summary of d to c.
 func appendDecisionToChat(c *DirectorChat, workerID, iter int, d WorkerDecision) {
-	body := "[director decision recorded for worker " + intToStr(workerID) + ": " +
+	body := "[director decision recorded for worker " + strconv.Itoa(workerID) + ": " +
 		d.Kind
 	switch d.Kind {
 	case "continue", "expand":
-		body += " — " + short(d.Instruction, 400)
+		body += " — " + history.Short(d.Instruction, 400)
 		if d.AutonomousBudget > 0 {
-			body += " (budget=" + intToStr(d.AutonomousBudget) + ")"
+			body += " (budget=" + strconv.Itoa(d.AutonomousBudget) + ")"
 		}
 	case "stop":
-		body += " — " + short(d.Reason, 400)
+		body += " — " + history.Short(d.Reason, 400)
 	}
 	if d.Fork != nil {
-		body += " | fork worker " + intToStr(d.Fork.NewWorkerID) + ": " +
-			short(d.Fork.Instruction, 400)
+		body += " | fork worker " + strconv.Itoa(d.Fork.NewWorkerID) + ": " +
+			history.Short(d.Fork.Instruction, 400)
 	}
 	body += "]"
 	c.Append(agent.Message{Role: "user", Content: body}, workerID, iter)
 }
 
-// intToStr renders i as decimal.
-func intToStr(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
-}
-
 // forkInheritanceHeader returns the chronicle handoff header prepended
 // to a forked child's inherited chronicle.
 func forkInheritanceHeader(parentID, iter, newID int) string {
-	return "[Inherited investigative history from worker " + intToStr(parentID) +
-		" at iter " + intToStr(iter) +
+	return "[Inherited investigative history from worker " + strconv.Itoa(parentID) +
+		" at iter " + strconv.Itoa(iter) +
 		". The remainder of this chronicle records that worker's prior turns; you are now worker " +
-		intToStr(newID) + ", picking up the thread under a new directive.]"
+		strconv.Itoa(newID) + ", picking up the thread under a new directive.]"
 }
 
 // SynthesisPhaseInput bundles the inputs to RunSynthesisPhase.
@@ -411,7 +378,7 @@ func RunIter1ReconReviewCall(
 	if log != nil {
 		log.Log("synthesis", "iter1-review captured", map[string]any{
 			"chars":   len(text),
-			"preview": short(text, 600),
+			"preview": history.Short(text, 600),
 		})
 	}
 }

@@ -62,10 +62,10 @@ func TestOpenAIAgent_QueryAppendsWithoutSending(t *testing.T) {
 	require.Len(t, client.calls, 1)
 	msgs := client.calls[0].Messages
 	require.GreaterOrEqual(t, len(msgs), 3)
-	assert.Equal(t, roleSystem, msgs[0].Role)
-	assert.Equal(t, roleUser, msgs[1].Role)
+	assert.Equal(t, RoleSystem, msgs[0].Role)
+	assert.Equal(t, RoleUser, msgs[1].Role)
 	assert.Equal(t, "first", msgs[1].Content)
-	assert.Equal(t, roleUser, msgs[2].Role)
+	assert.Equal(t, RoleUser, msgs[2].Role)
 	assert.Equal(t, "second", msgs[2].Content)
 }
 
@@ -105,7 +105,7 @@ func TestOpenAIAgent_ToolDispatchLoop(t *testing.T) {
 	secondMsgs := client.calls[1].Messages
 	var sawTool bool
 	for _, m := range secondMsgs {
-		if m.Role == roleTool && m.ToolCallID == "c1" {
+		if m.Role == RoleTool && m.ToolCallID == "c1" {
 			sawTool = true
 			assert.Contains(t, m.Content, "echoed")
 		}
@@ -255,7 +255,7 @@ func TestOpenAIAgent_MalformedArgsReportsSchemaAndCapsRepairs(t *testing.T) {
 	second := client.calls[1].Messages
 	var errMsgs []string
 	for _, m := range second {
-		if m.Role == roleTool {
+		if m.Role == RoleTool {
 			errMsgs = append(errMsgs, m.Content)
 		}
 	}
@@ -360,12 +360,12 @@ func TestOpenAIAgent_SendWithRetry_ContextRejectedRecovery(t *testing.T) {
 	big := strings.Repeat("y", 1_500)
 	for range 6 {
 		a.history.Append(Message{
-			Role:      roleAssistant,
+			Role:      RoleAssistant,
 			Content:   big,
 			ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
 		})
 		a.history.Append(Message{
-			Role: roleTool, ToolCallID: "t", ToolName: "t",
+			Role: RoleTool, ToolCallID: "t", ToolName: "t",
 			Content: big, Summary120: "summary",
 		})
 	}
@@ -407,12 +407,12 @@ func TestOpenAIAgent_SendWithRetry_ContextRejectedFiresOncePerSend(t *testing.T)
 	big := strings.Repeat("z", 1_500)
 	for range 4 {
 		a.history.Append(Message{
-			Role:      roleAssistant,
+			Role:      RoleAssistant,
 			Content:   big,
 			ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
 		})
 		a.history.Append(Message{
-			Role: roleTool, ToolCallID: "t", ToolName: "t",
+			Role: RoleTool, ToolCallID: "t", ToolName: "t",
 			Content: big, Summary120: "summary",
 		})
 	}
@@ -554,7 +554,7 @@ func TestOpenAIAgent_ParallelToolsPreserveOrder(t *testing.T) {
 	second := client.calls[1].Messages
 	var toolOrder []string
 	for _, m := range second {
-		if m.Role == roleTool {
+		if m.Role == RoleTool {
 			toolOrder = append(toolOrder, m.ToolCallID)
 		}
 	}
@@ -741,23 +741,23 @@ func TestOpenAIAgent_RequestLifecycleCallbacksOnRetry(t *testing.T) {
 func TestOpenAIAgent_SynthesizePendingToolStubs(t *testing.T) {
 	t.Parallel()
 	a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(&fakeChatClient{})})
-	a.history.Append(Message{Role: roleUser, Content: "go"})
+	a.history.Append(Message{Role: RoleUser, Content: "go"})
 	a.history.Append(Message{
-		Role: roleAssistant,
+		Role: RoleAssistant,
 		ToolCalls: []ToolCall{
 			{ID: "a", Function: ToolFunction{Name: "t"}},
 			{ID: "b", Function: ToolFunction{Name: "t"}},
 			{ID: "c", Function: ToolFunction{Name: "t"}},
 		},
 	})
-	a.history.Append(Message{Role: roleTool, ToolCallID: "a", Content: "ok"})
+	a.history.Append(Message{Role: RoleTool, ToolCallID: "a", Content: "ok"})
 
 	a.synthesizePendingToolStubs()
 
 	msgs := a.history.Snapshot()
 	paired := map[string]string{}
 	for _, m := range msgs {
-		if m.Role == roleTool {
+		if m.Role == RoleTool {
 			paired[m.ToolCallID] = m.Content
 		}
 	}
@@ -789,7 +789,7 @@ func TestOpenAIAgent_DrainStoresRawThink_SendStripsOlderThanKeepN(t *testing.T) 
 	snap := a.history.Snapshot()
 	var assistants []Message
 	for _, m := range snap {
-		if m.Role == roleAssistant {
+		if m.Role == RoleAssistant {
 			assistants = append(assistants, m)
 		}
 	}
@@ -800,7 +800,7 @@ func TestOpenAIAgent_DrainStoresRawThink_SendStripsOlderThanKeepN(t *testing.T) 
 	sent := client.calls[2].Messages
 	var sentAssistants []ChatMessage
 	for _, m := range sent {
-		if m.Role == roleAssistant {
+		if m.Role == RoleAssistant {
 			sentAssistants = append(sentAssistants, m)
 		}
 	}
@@ -829,7 +829,7 @@ func TestOpenAIAgent_DrainStoresStructuredReasoning(t *testing.T) {
 	snap := a.history.Snapshot()
 	var asst Message
 	for _, m := range snap {
-		if m.Role == roleAssistant {
+		if m.Role == RoleAssistant {
 			asst = m
 		}
 	}
@@ -859,14 +859,14 @@ func TestOpenAIAgent_StructuredReasoningNotReplayed(t *testing.T) {
 
 	sent := client.calls[1].Messages
 	for _, m := range sent {
-		if m.Role == roleAssistant {
+		if m.Role == RoleAssistant {
 			assert.Empty(t, m.ReasoningContent)
 		}
 	}
 	// History retains raw reasoning for summaries.
 	snap := a.history.Snapshot()
 	assert.True(t, slices.ContainsFunc(snap, func(m Message) bool {
-		return m.Role == roleAssistant && m.ReasoningContent == "prior turn reasoning"
+		return m.Role == RoleAssistant && m.ReasoningContent == "prior turn reasoning"
 	}))
 }
 
@@ -903,12 +903,12 @@ func TestOpenAIAgent_ReplaceHistory(t *testing.T) {
 		a.Query("noisy first")
 		a.Query("noisy second")
 
-		a.ReplaceHistory([]Message{{Role: roleUser, Content: "recap"}})
+		a.ReplaceHistory([]Message{{Role: RoleUser, Content: "recap"}})
 		snap := a.Snapshot()
 		require.Len(t, snap, 2)
-		assert.Equal(t, roleSystem, snap[0].Role)
+		assert.Equal(t, RoleSystem, snap[0].Role)
 		assert.Equal(t, "sys", snap[0].Content)
-		assert.Equal(t, roleUser, snap[1].Role)
+		assert.Equal(t, RoleUser, snap[1].Role)
 		assert.Equal(t, "recap", snap[1].Content)
 	})
 
@@ -918,8 +918,8 @@ func TestOpenAIAgent_ReplaceHistory(t *testing.T) {
 			Pool: newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
 		})
 		a.ReplaceHistory([]Message{
-			{Role: roleSystem, Content: "explicit-sys"},
-			{Role: roleUser, Content: "recap"},
+			{Role: RoleSystem, Content: "explicit-sys"},
+			{Role: RoleUser, Content: "recap"},
 		})
 		snap := a.Snapshot()
 		require.Len(t, snap, 2)
@@ -935,7 +935,7 @@ func TestOpenAIAgent_ReplaceHistory(t *testing.T) {
 		a.ReplaceHistory(nil)
 		snap := a.Snapshot()
 		require.Len(t, snap, 1)
-		assert.Equal(t, roleSystem, snap[0].Role)
+		assert.Equal(t, RoleSystem, snap[0].Role)
 	})
 }
 
@@ -947,11 +947,11 @@ func TestOpenAIAgent_SnapshotSinceID(t *testing.T) {
 			Pool: newPoolWith(&fakeChatClient{}),
 		})
 		a.Query("hello")
-		a.History().Append(Message{Role: roleAssistant, Content: "world"})
+		a.History().Append(Message{Role: RoleAssistant, Content: "world"})
 		got := a.SnapshotSinceID(0)
 		require.Len(t, got, 2)
-		assert.Equal(t, roleUser, got[0].Role)
-		assert.Equal(t, roleAssistant, got[1].Role)
+		assert.Equal(t, RoleUser, got[0].Role)
+		assert.Equal(t, RoleAssistant, got[1].Role)
 	})
 	t.Run("cursor_returns_only_after", func(t *testing.T) {
 		a := NewOpenAIAgent(OpenAIAgentConfig{
@@ -960,8 +960,8 @@ func TestOpenAIAgent_SnapshotSinceID(t *testing.T) {
 		})
 		a.Query("first")
 		firstID := a.LastHistoryID()
-		a.History().Append(Message{Role: roleAssistant, Content: "second"})
-		a.History().Append(Message{Role: roleAssistant, Content: "third"})
+		a.History().Append(Message{Role: RoleAssistant, Content: "second"})
+		a.History().Append(Message{Role: RoleAssistant, Content: "third"})
 		got := a.SnapshotSinceID(firstID)
 		require.Len(t, got, 2)
 		assert.Equal(t, "second", got[0].Content)
@@ -997,7 +997,7 @@ func TestOpenAIAgent_MarkIterationBoundary(t *testing.T) {
 	a.MarkIterationBoundary()
 	// After [system, user], boundary records position 2.
 	assert.Equal(t, 2, a.IterationBoundary())
-	a.ReplaceHistory([]Message{{Role: roleUser, Content: "fresh"}})
+	a.ReplaceHistory([]Message{{Role: RoleUser, Content: "fresh"}})
 	// ReplaceHistory resets the boundary index.
 	assert.Zero(t, a.IterationBoundary())
 }
@@ -1015,14 +1015,14 @@ func TestOpenAIAgent_MaybeCompactRunsBoundarySummarizeBeforeFallthrough(t *testi
 		OnSummarizeBoundary: func(_ context.Context, snap []Message) ([]Message, error) {
 			summarizeCalls++
 			summarizeCallSnapshotLen = len(snap)
-			return []Message{{Role: roleUser, Content: "<recap>"}}, nil
+			return []Message{{Role: RoleUser, Content: "<recap>"}}, nil
 		},
 	})
 	// Fill chronicle with several user/assistant turns. These all sit
 	// BEFORE the iteration boundary.
 	for i := range 3 {
 		a.Query("noisy chronicle " + strconv.Itoa(i))
-		a.History().Append(Message{Role: roleAssistant, Content: "asst response " + strconv.Itoa(i)})
+		a.History().Append(Message{Role: RoleAssistant, Content: "asst response " + strconv.Itoa(i)})
 	}
 	// Mark the boundary, then add one more user message representing the
 	// in-iter directive that should be preserved verbatim.
@@ -1036,10 +1036,10 @@ func TestOpenAIAgent_MaybeCompactRunsBoundarySummarizeBeforeFallthrough(t *testi
 	snap := a.Snapshot()
 	// Expect: [system, user:<recap>, user:iter directive]
 	require.GreaterOrEqual(t, len(snap), 3)
-	assert.Equal(t, roleSystem, snap[0].Role)
-	assert.Equal(t, roleUser, snap[1].Role)
+	assert.Equal(t, RoleSystem, snap[0].Role)
+	assert.Equal(t, RoleUser, snap[1].Role)
 	assert.Equal(t, "<recap>", snap[1].Content)
-	assert.Equal(t, roleUser, snap[len(snap)-1].Role)
+	assert.Equal(t, RoleUser, snap[len(snap)-1].Role)
 	assert.Equal(t, "iter directive", snap[len(snap)-1].Content)
 }
 
@@ -1053,12 +1053,12 @@ func TestOpenAIAgent_MaybeCompactBoundaryCallbackOncePerIter(t *testing.T) {
 		Compaction: CompactionOptions{HighWatermark: 0.01, KeepTurns: 1},
 		OnSummarizeBoundary: func(_ context.Context, _ []Message) ([]Message, error) {
 			summarizeCalls++
-			return []Message{{Role: roleUser, Content: "<recap>"}}, nil
+			return []Message{{Role: RoleUser, Content: "<recap>"}}, nil
 		},
 	})
 	for i := range 3 {
 		a.Query("noise " + strconv.Itoa(i))
-		a.History().Append(Message{Role: roleAssistant, Content: "asst " + strconv.Itoa(i)})
+		a.History().Append(Message{Role: RoleAssistant, Content: "asst " + strconv.Itoa(i)})
 	}
 	a.MarkIterationBoundary()
 	a.Query("iter directive")
@@ -1083,7 +1083,7 @@ func TestOpenAIAgent_RunBoundarySummarize_EmptyReplacement(t *testing.T) {
 	})
 	for i := range 3 {
 		a.Query("pre " + strconv.Itoa(i))
-		a.History().Append(Message{Role: roleAssistant, Content: "ack " + strconv.Itoa(i)})
+		a.History().Append(Message{Role: RoleAssistant, Content: "ack " + strconv.Itoa(i)})
 	}
 	a.MarkIterationBoundary()
 	a.Query("iter directive")
@@ -1106,7 +1106,7 @@ func TestOpenAIAgent_MaybeCompactTieredFlow(t *testing.T) {
 	// so pass 0 (error-collapse) is a no-op by default.
 	buildBigHistory := func(maxCtx int, withErrorStreak bool) *History {
 		h := NewHistory(maxCtx)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
 		big := strings.Repeat("y", 800)
 		if withErrorStreak {
 			calls := []ToolCall{
@@ -1115,10 +1115,10 @@ func TestOpenAIAgent_MaybeCompactTieredFlow(t *testing.T) {
 				{ID: "e3", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
 				{ID: "e4", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
 			}
-			h.Append(Message{Role: roleAssistant, Content: "fan out", ToolCalls: calls})
+			h.Append(Message{Role: RoleAssistant, Content: "fan out", ToolCalls: calls})
 			for _, id := range []string{"e1", "e2", "e3", "e4"} {
 				h.Append(Message{
-					Role:       roleTool,
+					Role:       RoleTool,
 					ToolCallID: id,
 					ToolName:   "flaky",
 					Content:    "ERROR: same failure " + strings.Repeat("z", 600),
@@ -1127,11 +1127,11 @@ func TestOpenAIAgent_MaybeCompactTieredFlow(t *testing.T) {
 		}
 		for i := range 4 {
 			h.Append(Message{
-				Role: roleAssistant, Content: big,
+				Role: RoleAssistant, Content: big,
 				ToolCalls: []ToolCall{{ID: "t" + strconv.Itoa(i), Function: ToolFunction{Name: "t", Arguments: "{}"}}},
 			})
 			h.Append(Message{
-				Role: roleTool, ToolCallID: "t" + strconv.Itoa(i), ToolName: "t",
+				Role: RoleTool, ToolCallID: "t" + strconv.Itoa(i), ToolName: "t",
 				Content: big, Summary120: "s",
 			})
 		}
@@ -1223,7 +1223,7 @@ func TestOpenAIAgent_MaybeCompactTieredFlow(t *testing.T) {
 				out := make([]Message, len(snap))
 				copy(out, snap)
 				for i := range out {
-					if out[i].Role == roleTool {
+					if out[i].Role == RoleTool {
 						out[i].Content = "(distilled batch 1: brief summary)"
 						break
 					}
@@ -1292,7 +1292,7 @@ func TestOpenAIAgent_MaybeCompactFailOpenWhenCallbackErrors(t *testing.T) {
 	})
 	for i := range 5 {
 		a.Query("noise " + strconv.Itoa(i))
-		a.History().Append(Message{Role: roleAssistant, Content: "asst " + strconv.Itoa(i)})
+		a.History().Append(Message{Role: RoleAssistant, Content: "asst " + strconv.Itoa(i)})
 	}
 	a.MarkIterationBoundary()
 	a.Query("iter directive")
@@ -1316,14 +1316,14 @@ func TestOpenAIAgent_CompactPreservingBoundary_TracksDirectiveAcrossDeletions(t 
 	})
 	bulk := strings.Repeat("xy", 200)
 	for i := range 4 {
-		a.History().Append(Message{Role: roleUser, Content: "noise " + strconv.Itoa(i) + " " + bulk})
-		a.History().Append(Message{Role: roleAssistant, Content: "asst " + strconv.Itoa(i) + " " + bulk})
+		a.History().Append(Message{Role: RoleUser, Content: "noise " + strconv.Itoa(i) + " " + bulk})
+		a.History().Append(Message{Role: RoleAssistant, Content: "asst " + strconv.Itoa(i) + " " + bulk})
 	}
 	a.MarkIterationBoundary()
 	boundaryBefore := a.IterationBoundary()
 	require.Greater(t, boundaryBefore, 1)
 	a.Query("DIRECTIVE-MARKER")
-	a.History().Append(Message{Role: roleAssistant, Content: "in-iter assistant"})
+	a.History().Append(Message{Role: RoleAssistant, Content: "in-iter assistant"})
 
 	_, err := a.compactPreservingBoundary()
 	require.NoError(t, err)
@@ -1349,10 +1349,10 @@ func TestOpenAIAgent_CompactPreservingBoundary_ClampsWhenMarkerDropped(t *testin
 		},
 	})
 	bulk := strings.Repeat("xy", 400)
-	a.History().Append(Message{Role: roleUser, Content: "DIRECTIVE-MARKER"})
+	a.History().Append(Message{Role: RoleUser, Content: "DIRECTIVE-MARKER"})
 	a.MarkIterationBoundary()
-	a.History().Append(Message{Role: roleAssistant, Content: "iter1 " + bulk})
-	a.History().Append(Message{Role: roleAssistant, Content: "iter2 " + bulk})
+	a.History().Append(Message{Role: RoleAssistant, Content: "iter1 " + bulk})
+	a.History().Append(Message{Role: RoleAssistant, Content: "iter2 " + bulk})
 
 	_, _ = a.compactPreservingBoundary()
 	// If the marker was dropped, boundary must clamp into [0, len(history)].
@@ -1374,7 +1374,7 @@ func TestOpenAIAgent_RetireOnPressure_StopsCleanlyAtHighWatermark(t *testing.T) 
 	// Bulk content above the high watermark (200 * 0.5 = 100 tokens =
 	// 400 chars at default charsPerToken=4).
 	bulk := strings.Repeat("x", 600)
-	a.History().Append(Message{Role: roleAssistant, Content: bulk})
+	a.History().Append(Message{Role: RoleAssistant, Content: bulk})
 
 	sum, err := a.Drain(t.Context())
 	require.NoError(t, err)

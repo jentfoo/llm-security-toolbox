@@ -41,7 +41,7 @@ func TestRunDecisionPhase(t *testing.T) {
 			{AssistantText: "decide w1"},
 			{AssistantText: "decide w2"},
 		}}
-		turn := 0
+		var turn int
 		director.OnDrain = func(_ int) {
 			turn++
 			switch turn {
@@ -139,10 +139,7 @@ func TestRunDecisionPhase(t *testing.T) {
 				Fork: &ForkSubAction{NewWorkerID: 9, Instruction: "child probes /admin"},
 			})
 		}
-		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{},
-			Chronicle:     []agent.Message{{Role: "assistant", Content: "parent prior turn"}},
-			ChronicleIter: []int{1},
-		}
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}}
 		dirChat := NewDirectorChat()
 		fire, fired := scriptedFireFn(t, map[int][]agent.TurnSummary{
 			1: {{AssistantText: "w1 iter+1"}},
@@ -307,7 +304,7 @@ func TestRunIter1ReconPlanCall(t *testing.T) {
 			{AssistantText: "first response (no plan)"},
 			{AssistantText: "retry response (with plan)"},
 		}}
-		turn := 0
+		var turn int
 		director.OnDrain = func(_ int) {
 			turn++
 			if turn == 1 {
@@ -331,7 +328,7 @@ func TestRunIter1ReconPlanCall(t *testing.T) {
 			{AssistantText: "first"},
 			{AssistantText: "retry still no plan"},
 		}}
-		turn := 0
+		var turn int
 		director.OnDrain = func(_ int) {
 			turn++
 			if turn == 1 {

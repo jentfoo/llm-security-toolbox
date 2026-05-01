@@ -6,18 +6,8 @@ import (
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/orchestrator/history"
 )
-
-func short(s string, n int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= n {
-		return s
-	}
-	if n < 1 {
-		return "…"
-	}
-	return s[:n-1] + "…"
-}
 
 func formatToolCalls(calls []agent.ToolCallRecord, limit int) string {
 	if len(calls) == 0 {
@@ -32,7 +22,7 @@ func formatToolCalls(calls []agent.ToolCallRecord, limit int) string {
 		shown = shown[:limit]
 	}
 	for i, c := range shown {
-		status := ""
+		var status string
 		if c.IsError {
 			status = " [ERROR]"
 		}
@@ -79,7 +69,7 @@ func formatAutonomousRun(workerID int, turns []agent.TurnSummary, escalationReas
 		}
 		parts = append(parts, fmt.Sprintf(
 			"  Turn %d: tools=[%s] flows=[%s]\n    text: %s",
-			i+1, short(calls, 200), flows, short(firstLine, 240),
+			i+1, history.Short(calls, 200), flows, history.Short(firstLine, 240),
 		))
 	}
 	last := turns[len(turns)-1]
@@ -111,7 +101,7 @@ func formatPendingCandidates(pending []FindingCandidate) string {
 		lines = append(lines, fmt.Sprintf(
 			"- `%s` [%s] %s — %s\n  worker: %d\n  flows: %s\n  summary: %s\n  reproduction hint: %s",
 			c.CandidateID, c.Severity, c.Title, c.Endpoint, c.WorkerID, flows,
-			short(c.Summary, 200), short(c.ReproductionHint, 200),
+			history.Short(c.Summary, 200), history.Short(c.ReproductionHint, 200),
 		))
 	}
 	return strings.Join(lines, "\n")
@@ -184,7 +174,7 @@ func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissa
 		if h == "" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("- (filed: %s) %s", short(f.Title, 80), h))
+		lines = append(lines, fmt.Sprintf("- (filed: %s) %s", history.Short(f.Title, 80), h))
 	}
 	for _, d := range dismissals {
 		h := strings.TrimSpace(d.FollowUpHint)
@@ -271,7 +261,7 @@ func FormatPeerSummary(workers []*WorkerState, exceptID int) string {
 		if angle == "" {
 			angle = "(no instruction)"
 		}
-		lines = append(lines, fmt.Sprintf("- Worker %d: %s", w.ID, short(angle, 200)))
+		lines = append(lines, fmt.Sprintf("- Worker %d: %s", w.ID, history.Short(angle, 200)))
 	}
 	if len(lines) == 0 {
 		return ""
@@ -302,7 +292,7 @@ func BuildSynthesisPrompt(
 	if block := formatCompletedRoster(completed); block != "" {
 		parts = append(parts, "", block)
 	}
-	aliveCount := 0
+	var aliveCount int
 	aliveIDs := make([]string, 0, len(workers))
 	for _, w := range workers {
 		if !w.Alive {
@@ -333,7 +323,7 @@ func formatCompletedRoster(completed []CompletedWorker) string {
 	lines := []string{
 		"**Workers completed earlier this run** (reference context — these IDs are gone, do NOT plan or fork against them):",
 	}
-	start := 0
+	var start int
 	if len(completed) > completedWorkersRenderCap {
 		omitted := len(completed) - completedWorkersRenderCap
 		start = omitted
@@ -344,13 +334,13 @@ func formatCompletedRoster(completed []CompletedWorker) string {
 		if reason == "" {
 			reason = "(no reason given)"
 		}
-		summary := short(c.Summary, completedSummaryRenderCap)
+		summary := history.Short(c.Summary, completedSummaryRenderCap)
 		if summary == "" {
 			summary = "(summary unavailable)"
 		}
 		lines = append(lines, fmt.Sprintf(
 			"- Worker %d (stopped iter %d, reason: %s):\n  %s",
-			c.ID, c.StoppedAt, short(reason, 200), summary,
+			c.ID, c.StoppedAt, history.Short(reason, 200), summary,
 		))
 	}
 	return strings.Join(lines, "\n")

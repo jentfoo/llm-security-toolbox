@@ -9,10 +9,10 @@ import (
 
 // OpenAI chat message roles.
 const (
-	roleSystem    = "system"
-	roleUser      = "user"
-	roleAssistant = "assistant"
-	roleTool      = "tool"
+	RoleSystem    = "system"
+	RoleUser      = "user"
+	RoleAssistant = "assistant"
+	RoleTool      = "tool"
 )
 
 // EscalationReason values surfaced to the orchestrator.

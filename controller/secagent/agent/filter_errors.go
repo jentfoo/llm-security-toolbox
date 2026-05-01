@@ -23,12 +23,12 @@ func FilterErrorMessages(msgs []Message) []Message {
 	out := make([]Message, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
-		case roleTool:
+		case RoleTool:
 			if isErrorToolResult(m) {
 				continue
 			}
 			out = append(out, m)
-		case roleAssistant:
+		case RoleAssistant:
 			if len(m.ToolCalls) == 0 {
 				out = append(out, m)
 				continue
@@ -52,11 +52,11 @@ func FilterErrorMessages(msgs []Message) []Message {
 func HasSubstantiveMessages(msgs []Message) bool {
 	for _, m := range msgs {
 		switch m.Role {
-		case roleAssistant:
+		case RoleAssistant:
 			if strings.TrimSpace(m.Content) != "" || len(m.ToolCalls) > 0 {
 				return true
 			}
-		case roleTool:
+		case RoleTool:
 			return true
 		}
 	}
@@ -64,7 +64,7 @@ func HasSubstantiveMessages(msgs []Message) bool {
 }
 
 func isErrorToolResult(m Message) bool {
-	if m.Role != roleTool {
+	if m.Role != RoleTool {
 		return false
 	}
 	if m.IsRepairError {
@@ -89,7 +89,7 @@ func collapseSameToolErrorStreaks(msgs []Message) ([]Message, int) {
 			continue
 		}
 		for j := i + 1; j < len(msgs); j++ {
-			if msgs[j].Role != roleTool {
+			if msgs[j].Role != RoleTool {
 				continue
 			}
 			if isErrorToolResult(msgs[j]) && msgs[j].ToolName == m.ToolName {
@@ -102,16 +102,16 @@ func collapseSameToolErrorStreaks(msgs []Message) ([]Message, int) {
 		return msgs, 0
 	}
 	out := make([]Message, 0, len(msgs))
-	dropped := 0
+	var dropped int
 	for _, m := range msgs {
 		switch m.Role {
-		case roleTool:
+		case RoleTool:
 			if drop[m.ToolCallID] {
 				dropped++
 				continue
 			}
 			out = append(out, m)
-		case roleAssistant:
+		case RoleAssistant:
 			if len(m.ToolCalls) == 0 {
 				out = append(out, m)
 				continue

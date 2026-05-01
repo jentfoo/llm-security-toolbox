@@ -24,7 +24,7 @@ func canonicalToolName(s string) string {
 // controller-side `decide_worker`).
 func fuzzyContainsToolMatch(req string, canonNames map[string]string) string {
 	var match string
-	matches := 0
+	var matches int
 	for canon := range canonNames {
 		if canon == "" || canon == req {
 			continue
@@ -50,7 +50,7 @@ func wordBoundedContains(haystack, needle string) bool {
 	if len(needle) == 0 || len(needle) > len(haystack) {
 		return false
 	}
-	from := 0
+	var from int
 	for {
 		i := strings.Index(haystack[from:], needle)
 		if i < 0 {

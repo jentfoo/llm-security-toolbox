@@ -1,4 +1,4 @@
-package orchestrator
+package history
 
 import (
 	"context"
@@ -11,8 +11,12 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// selfPruneMaxTokens caps the selection-call response.
-const selfPruneMaxTokens = 8000
+const (
+	// selfPruneMaxTokens caps the selection-call response.
+	selfPruneMaxTokens = 8000
+	// selfPruneMinEvents is the minimum event count for a self-prune call.
+	selfPruneMinEvents = 6
+)
 
 const selfPruneSystemPrompt = `You are reviewing a security-testing agent's history of tool calls and helping it free context space without losing load-bearing evidence. Respond with JSON only — no prose, no markdown fences.`
 
@@ -31,7 +35,7 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent
 		listing := renderToolEventListing(events)
 
 		selPrompt := buildSelfPruneSelectionPrompt(listing)
-		selRaw, err := runOneShot(ctx, s.Pool, s.Model, selfPruneSystemPrompt, selPrompt,
+		selRaw, err := RunOneShot(ctx, s.Pool, s.Model, selfPruneSystemPrompt, selPrompt,
 			selfPruneMaxTokens, agent.CompressionReasoningEffort)
 		if err != nil {
 			if s.Log != nil {
@@ -43,7 +47,7 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent
 		if err != nil {
 			if s.Log != nil {
 				s.Log.Log("compact", "self-prune select parse error", map[string]any{
-					"err": err.Error(), "raw": short(selRaw, 240),
+					"err": err.Error(), "raw": Short(selRaw, 240),
 				})
 			}
 			return nil, err
@@ -72,9 +76,6 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent
 	}
 }
 
-// selfPruneMinEvents is the minimum event count for a self-prune call.
-const selfPruneMinEvents = 6
-
 // toolEvent is one tool-call/tool-result pair rendered in the prompt.
 type toolEvent struct {
 	Index      int
@@ -90,13 +91,13 @@ type toolEvent struct {
 func buildToolEvents(msgs []agent.Message) []toolEvent {
 	resultByID := map[string]agent.Message{}
 	for _, m := range msgs {
-		if m.Role == summarizeMsgRoleTool && m.ToolCallID != "" {
+		if m.Role == agent.RoleTool && m.ToolCallID != "" {
 			resultByID[m.ToolCallID] = m
 		}
 	}
 	var events []toolEvent
 	for _, m := range msgs {
-		if m.Role != summarizeMsgRoleAssistant || len(m.ToolCalls) == 0 {
+		if m.Role != agent.RoleAssistant || len(m.ToolCalls) == 0 {
 			continue
 		}
 		for _, tc := range m.ToolCalls {
@@ -104,10 +105,10 @@ func buildToolEvents(msgs []agent.Message) []toolEvent {
 				Index:      len(events),
 				ToolCallID: tc.ID,
 				ToolName:   tc.Function.Name,
-				ArgsPrev:   short(tc.Function.Arguments, 200),
+				ArgsPrev:   Short(tc.Function.Arguments, 200),
 			}
 			if r, ok := resultByID[tc.ID]; ok {
-				ev.ResultPrev = short(r.Content, 200)
+				ev.ResultPrev = Short(r.Content, 200)
 				ev.IsError = r.IsRepairError || strings.HasPrefix(r.Content, "ERROR:")
 			}
 			events = append(events, ev)
@@ -169,7 +170,7 @@ The "remove" array lists the 1-based event indices to drop from history. Empty a
 // parseEventIndexList parses {"remove":[...]} from raw and returns the
 // deduped sorted 0-based indices in [0, total).
 func parseEventIndexList(raw string, total int) ([]int, error) {
-	body := extractJSONObject(raw)
+	body := ExtractJSONObject(raw)
 	if body == "" {
 		return nil, errors.New("empty response")
 	}

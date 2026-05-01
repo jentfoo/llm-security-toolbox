@@ -16,6 +16,7 @@ import (
 	"github.com/go-appsec/secagent/agent"
 	"github.com/go-appsec/secagent/config"
 	"github.com/go-appsec/secagent/mcp"
+	"github.com/go-appsec/secagent/orchestrator/history"
 	"github.com/go-appsec/secagent/prompts"
 )
 
@@ -39,7 +40,7 @@ type OpenAIFactory struct {
 	// Reasoning handler for cfg.Model; nil falls back to inline.
 	Reasoning agent.ReasoningHandler
 	// Summarizer drives worker model-driven compaction callbacks; nil disables.
-	Summarizer *Summarizer
+	Summarizer *history.Summarizer
 	// ReconSummary is anchored into every subsequent worker's system prompt.
 	ReconSummary string
 }
@@ -227,8 +228,8 @@ func (f *OpenAIFactory) buildAgent(
 		cfg.FlowIDExtractor = ExtractFlowIDs
 	}
 	if wireCompactionAssist && f.Summarizer != nil {
-		cfg.OnSelfPruneCandidates = SelfPruneCallback(f.Summarizer)
-		cfg.OnDistillResults = DistillCallback(f.Summarizer)
+		cfg.OnSelfPruneCandidates = history.SelfPruneCallback(f.Summarizer)
+		cfg.OnDistillResults = history.DistillCallback(f.Summarizer)
 	}
 	return agent.NewOpenAIAgent(cfg)
 }
@@ -546,7 +547,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 	// the worker remembers across long runs and how the director's planning
 	// history compacts) so they get the main model, not the cheap log model.
 	// Fires only when context pressure trips the watermark, not every iter.
-	summarizer := &Summarizer{
+	summarizer := &history.Summarizer{
 		Pool:  pool,
 		Model: cfg.Model,
 		Log:   log,
@@ -692,7 +693,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		if log != nil {
 			log.Log("recon", "start", map[string]any{
 				"mission_chars":   len(reconMission),
-				"mission_preview": short(reconMission, 240),
+				"mission_preview": history.Short(reconMission, 240),
 			})
 		}
 		w1, err = spawnReconWorker(ctx, mcpURL, cfg.ToolResultMaxBytes, factory, reconMission, ReconDirective, cfg.AutonomousBudget)
@@ -857,7 +858,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 	// agent + MCP client here. Always treats numWorkers as len(alive)+1
 	// for the multi-worker addendum.
 	spawnChild := func(sctx context.Context, id int, instruction string) (*WorkerState, error) {
-		alive := 0
+		var alive int
 		for _, w := range workers {
 			if w.Alive {
 				alive++
@@ -907,7 +908,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 
 	// Iter-1 fire: kick off worker 1's recon run before the loop so the
 	// loop's wait-for-in-flight pattern works uniformly from iter 1.
-	installChronicle(w1, w1.LastInstruction)
+	w1.Chronicle.Install(w1.Agent, w1.LastInstruction)
 	inflight := map[int]func() []agent.TurnSummary{}
 	inflight[1] = fire(sd.WorkersCtx, w1)
 
@@ -996,7 +997,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 			writer.SummaryForOrchestrator(), factory.ReconSummary,
 			iteration, cfg.MaxIterations, writer.RunCount,
 		)
-		verifier.ReplaceHistory(ComposeVerifier(verifierDirective))
+		verifier.ReplaceHistory([]agent.Message{{Role: "user", Content: verifierDirective}})
 		if log != nil {
 			log.Log("compose", "installed", map[string]any{"role": "verifier", "iter": iteration})
 		}
@@ -1063,11 +1064,10 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 				}
 				// Discard the recon worker's chronicle now that we have
 				// the canonical summary in factory.ReconSummary. The
-				// worker agent is already closed by retire; nilling
-				// these slices releases the message backing storage so
-				// it doesn't sit around for the rest of the run.
-				w1.Chronicle = nil
-				w1.ChronicleIter = nil
+				// worker agent is already closed by retire; resetting
+				// the chronicle releases the backing storage so it
+				// doesn't sit around for the rest of the run.
+				w1.Chronicle.Reset()
 			}
 			LatchStallWarnings(workers, cfg.StallWarnAfter)
 
@@ -1097,8 +1097,8 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 					log.Log("recon", "synthesis produced no plan — injecting fallback worker 2", map[string]any{
 						"hint":            "director did not call plan_workers after retry; iter 2 spawns one worker with the original mission",
 						"fallback_worker": 2,
-						"fallback_assign": short(cfg.Prompt, 200),
-						"recon_summary":   short(factory.ReconSummary, 200),
+						"fallback_assign": history.Short(cfg.Prompt, 200),
+						"recon_summary":   history.Short(factory.ReconSummary, 200),
 					})
 				}
 			}
@@ -1184,7 +1184,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 				writer.SummaryForOrchestrator(), factory.ReconSummary,
 				iteration, cfg.MaxIterations, writer.RunCount,
 			)
-			verifier.ReplaceHistory(ComposeVerifier(finalDirective))
+			verifier.ReplaceHistory([]agent.Message{{Role: "user", Content: finalDirective}})
 			if log != nil {
 				log.Log("shutdown", "final-verification start", map[string]any{
 					"pending": len(candidates.Pending()),
@@ -1254,7 +1254,7 @@ func applyPlanAndFire(
 	log *Logger,
 ) {
 	byID := map[int]*WorkerState{}
-	existing := 0
+	var existing int
 	planned := map[int]bool{}
 	for _, w := range *workers {
 		byID[w.ID] = w
@@ -1280,7 +1280,7 @@ func applyPlanAndFire(
 			if log != nil {
 				log.Log("plan", "retarget", map[string]any{"worker_id": p.WorkerID})
 			}
-			installChronicle(w, w.LastInstruction)
+			w.Chronicle.Install(w.Agent, w.LastInstruction)
 			inflight[w.ID] = fire(ctx, w)
 			continue
 		}
@@ -1312,7 +1312,7 @@ func applyPlanAndFire(
 		*workers = append(*workers, nw)
 		byID[nw.ID] = nw
 		existing++
-		installChronicle(nw, nw.LastInstruction)
+		nw.Chronicle.Install(nw.Agent, nw.LastInstruction)
 		inflight[nw.ID] = fire(ctx, nw)
 		if log != nil {
 			log.Log("plan", "spawn", map[string]any{"worker_id": p.WorkerID})
@@ -1354,7 +1354,7 @@ func refireAlive(
 		if _, exists := inflight[w.ID]; exists {
 			continue
 		}
-		installChronicle(w, w.LastInstruction)
+		w.Chronicle.Install(w.Agent, w.LastInstruction)
 		inflight[w.ID] = fire(ctx, w)
 		if log != nil {
 			log.Log("refire", "alive worker", map[string]any{"worker_id": w.ID})
@@ -1414,13 +1414,13 @@ func snapshotIterationStart(alive []*WorkerState) (angleAt map[int]string, alive
 // content to its chronicle and runs in-place compaction.
 func extractWorkerChroniclesAtIterEnd(alive []*WorkerState, iteration int, log *Logger) {
 	for _, w := range alive {
-		extractAndAppend(w, iteration)
-		stripped, stubbed := compactChronicle(w, iteration, ChronicleKeepRecentIters)
+		w.Chronicle.ExtractAndAppend(w.Agent, iteration)
+		stripped, stubbed := w.Chronicle.Compact(iteration, history.ChronicleKeepRecentIters)
 		if log != nil {
 			log.Log("chronicle", "extract", map[string]any{
 				"worker_id":      w.ID,
 				"iter":           iteration,
-				"chronicle_msgs": len(w.Chronicle),
+				"chronicle_msgs": w.Chronicle.Len(),
 				"think_stripped": stripped,
 				"tool_stubbed":   stubbed,
 			})

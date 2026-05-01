@@ -29,8 +29,7 @@ func RunVerificationPhase(
 		}
 		return "No pending candidates this iteration."
 	}
-	appliedFindings := 0
-	appliedDismissals := 0
+	var appliedFindings, appliedDismissals int
 	for substep := 1; substep <= VerificationMaxSubsteps; substep++ {
 		pending := candidates.Pending()
 		if len(pending) == 0 {

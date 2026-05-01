@@ -783,7 +783,7 @@ func (c *sequentialClient) CreateChatCompletion(_ context.Context, req agent.Cha
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.requests = append(c.requests, req)
-	resp := ""
+	var resp string
 	if len(req.Messages) > 0 && req.Messages[0].Content == agentNarratorSystemPrompt {
 		if c.agentIdx < len(c.agentResp) {
 			resp = c.agentResp[c.agentIdx]

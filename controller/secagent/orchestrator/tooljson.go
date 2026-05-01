@@ -25,7 +25,7 @@ func unmarshalToolArgs(args json.RawMessage, dest any) error {
 		return origErr
 	}
 
-	patched := false
+	var patched bool
 	for i := 0; i < rt.NumField(); i++ {
 		f := rt.Field(i)
 		key := jsonFieldKey(f)

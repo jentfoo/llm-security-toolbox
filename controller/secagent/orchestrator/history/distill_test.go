@@ -1,4 +1,4 @@
-package orchestrator
+package history
 
 import (
 	"strings"
@@ -38,7 +38,7 @@ func buildDistillSnapshot(eligibleEvents int, eligibleBodyBytes int, trailingEve
 				}},
 			},
 			agent.Message{
-				Role: summarizeMsgRoleTool, ToolCallID: id, ToolName: "proxy_poll",
+				Role: agent.RoleTool, ToolCallID: id, ToolName: "proxy_poll",
 				Content: body,
 			},
 		)
@@ -58,7 +58,7 @@ func buildDistillSnapshot(eligibleEvents int, eligibleBodyBytes int, trailingEve
 				}},
 			},
 			agent.Message{
-				Role: summarizeMsgRoleTool, ToolCallID: id, ToolName: "flow_get",
+				Role: agent.RoleTool, ToolCallID: id, ToolName: "flow_get",
 				Content: "small recent",
 			},
 		)
@@ -83,9 +83,9 @@ func TestDistillCallback_RewritesEligibleBatches(t *testing.T) {
 	require.NotNil(t, out)
 	require.Len(t, out, len(snap), "snapshot shape preserved (pairing intact)")
 
-	rewritten := 0
+	var rewritten int
 	for i := range out {
-		if out[i].Role == summarizeMsgRoleTool && snap[i].Content != out[i].Content {
+		if out[i].Role == agent.RoleTool && snap[i].Content != out[i].Content {
 			rewritten++
 			assert.True(t, strings.HasPrefix(out[i].Content, agent.DistillPrefix))
 		}
@@ -158,7 +158,7 @@ func TestDistillCallback_AlreadyDistilledIsIdempotent(t *testing.T) {
 	snap := buildDistillSnapshot(6, 1024, 4)
 	// Pre-mark every eligible tool message as already distilled.
 	for i := range snap {
-		if snap[i].Role == summarizeMsgRoleTool {
+		if snap[i].Role == agent.RoleTool {
 			snap[i].Content = agent.DistillPrefix + "1: prior summary)"
 		}
 	}
@@ -188,7 +188,7 @@ func TestDistillCallback_MultipleBatches(t *testing.T) {
 
 	var joined strings.Builder
 	for _, m := range out {
-		if m.Role == summarizeMsgRoleTool && strings.HasPrefix(m.Content, agent.DistillPrefix) {
+		if m.Role == agent.RoleTool && strings.HasPrefix(m.Content, agent.DistillPrefix) {
 			joined.WriteString(m.Content)
 			joined.WriteString("\n")
 		}
@@ -212,7 +212,7 @@ func TestBuildDistillBatches_ExcludesRepairErrors(t *testing.T) {
 				ToolCalls: []agent.ToolCall{{ID: id, Function: agent.ToolFunction{Name: "t"}}},
 			},
 			agent.Message{
-				Role: summarizeMsgRoleTool, ToolCallID: id, ToolName: "t",
+				Role: agent.RoleTool, ToolCallID: id, ToolName: "t",
 				Content:       body,
 				IsRepairError: i == 1,
 			},

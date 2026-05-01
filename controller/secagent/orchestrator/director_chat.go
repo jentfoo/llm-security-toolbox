@@ -119,11 +119,11 @@ func (c *DirectorChat) RenderForSynthesis() []agent.Message {
 // are left untouched.
 func NormalizeEmptyContent(msgs []agent.Message) {
 	for i := range msgs {
-		if msgs[i].Content != "" || msgs[i].Role == summarizeMsgRoleAssistant {
+		if msgs[i].Content != "" || msgs[i].Role == agent.RoleAssistant {
 			continue
 		}
 		switch msgs[i].Role {
-		case summarizeMsgRoleTool:
+		case agent.RoleTool:
 			msgs[i].Content = "(tool returned no output)"
 		default:
 			msgs[i].Content = "(no content)"

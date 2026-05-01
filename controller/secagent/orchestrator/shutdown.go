@@ -96,7 +96,7 @@ func (s *Shutdown) RequestDumpUnvalidated() {
 // DumpUnvalidatedCandidates writes each pending candidate via
 // writer.WriteUnvalidated and returns the number of successful writes.
 func DumpUnvalidatedCandidates(pending []FindingCandidate, writer *FindingWriter, log *Logger) int {
-	written := 0
+	var written int
 	for _, c := range pending {
 		path, err := writer.WriteUnvalidated(c)
 		if err != nil {

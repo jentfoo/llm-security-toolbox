@@ -77,7 +77,7 @@ func TestRunVerificationPhase(t *testing.T) {
 
 		decisions := NewDecisionQueue()
 		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{{}, {}}}
-		call := 0
+		var call int
 		verifier.OnDrain = func(_ int) {
 			call++
 			// Record duplicate dismissals for the same candidate twice in a row,

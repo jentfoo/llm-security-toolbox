@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/orchestrator/history"
 )
 
 func TestNewRetireQueue(t *testing.T) {
@@ -41,15 +42,15 @@ func TestRetireQueueSubmit(t *testing.T) {
 
 	t.Run("flips_alive_and_summarizes", func(t *testing.T) {
 		client := &scriptedClient{response: "third-person recap"}
-		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		s := &history.Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
 		q := newRetireQueue(t.Context(), s, "mission", nil, 1)
 		fa := &agent.FakeAgent{}
 		w := &WorkerState{
 			ID: 4, Alive: true, Agent: fa,
-			Chronicle: []agent.Message{
+			Chronicle: history.NewChronicle([]agent.Message{
 				{Role: "user", Content: "directive"},
 				{Role: "assistant", Content: "did real work"},
-			},
+			}, nil),
 		}
 		q.Submit(w, "exhausted angle", 7)
 
@@ -67,7 +68,7 @@ func TestRetireQueueSubmit(t *testing.T) {
 
 	t.Run("empty_chronicle_skips_llm", func(t *testing.T) {
 		client := &scriptedClient{response: "should not be used"}
-		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		s := &history.Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
 		q := newRetireQueue(t.Context(), s, "mission", nil, 1)
 		w := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}}
 		q.Submit(w, "no work done", 2)
@@ -81,14 +82,14 @@ func TestRetireQueueSubmit(t *testing.T) {
 
 	t.Run("summarizer_error_records_empty_summary", func(t *testing.T) {
 		client := &scriptedClient{err: errors.New("upstream down")}
-		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		s := &history.Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
 		q := newRetireQueue(t.Context(), s, "mission", nil, 1)
 		w := &WorkerState{
 			ID: 9, Alive: true, Agent: &agent.FakeAgent{},
-			Chronicle: []agent.Message{
+			Chronicle: history.NewChronicle([]agent.Message{
 				{Role: "user", Content: "x"},
 				{Role: "assistant", Content: "y"},
-			},
+			}, nil),
 		}
 		q.Submit(w, "err", 3)
 		q.Wait()
@@ -101,13 +102,13 @@ func TestRetireQueueSubmit(t *testing.T) {
 
 	t.Run("canceled_ctx_skips_summarize", func(t *testing.T) {
 		client := &scriptedClient{response: "n/a"}
-		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		s := &history.Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		q := newRetireQueue(ctx, s, "mission", nil, 1)
 		w := &WorkerState{
 			ID: 1, Alive: true, Agent: &agent.FakeAgent{},
-			Chronicle: []agent.Message{{Role: "assistant", Content: "x"}},
+			Chronicle: history.NewChronicle([]agent.Message{{Role: "assistant", Content: "x"}}, nil),
 		}
 		q.Submit(w, "stop", 1)
 		q.Wait()
@@ -136,15 +137,15 @@ func TestRetireQueueDrainCompleted(t *testing.T) {
 
 	t.Run("drains_all_buffered", func(t *testing.T) {
 		client := &scriptedClient{response: "ok"}
-		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		s := &history.Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
 		q := newRetireQueue(t.Context(), s, "m", nil, 3)
 		for i := 1; i <= 3; i++ {
 			q.Submit(&WorkerState{
 				ID: i, Alive: true, Agent: &agent.FakeAgent{},
-				Chronicle: []agent.Message{
+				Chronicle: history.NewChronicle([]agent.Message{
 					{Role: "user", Content: "x"},
 					{Role: "assistant", Content: "y"},
-				},
+				}, nil),
 			}, "r", i)
 		}
 		q.Wait()
@@ -161,14 +162,14 @@ func TestRetireQueueWaitOne(t *testing.T) {
 
 	t.Run("returns_first_completed", func(t *testing.T) {
 		client := &scriptedClient{response: "ok"}
-		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		s := &history.Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
 		q := newRetireQueue(t.Context(), s, "m", nil, 1)
 		q.Submit(&WorkerState{
 			ID: 5, Alive: true, Agent: &agent.FakeAgent{},
-			Chronicle: []agent.Message{
+			Chronicle: history.NewChronicle([]agent.Message{
 				{Role: "user", Content: "x"},
 				{Role: "assistant", Content: "y"},
-			},
+			}, nil),
 		}, "done", 2)
 
 		res, ok := q.WaitOne(t.Context())

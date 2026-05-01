@@ -1,4 +1,4 @@
-package orchestrator
+package history
 
 import (
 	"context"
@@ -17,7 +17,7 @@ type Summarizer struct {
 	Model     string
 	MaxTokens int
 	Timeout   time.Duration
-	Log       *Logger
+	Log       Logger
 }
 
 const (
@@ -113,28 +113,23 @@ func (s *Summarizer) oneShot(ctx context.Context, system, user string) (string, 
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return runOneShot(cctx, s.Pool, s.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
+	return RunOneShot(cctx, s.Pool, s.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
 }
 
-// Message role string constants for the chat history.
-const (
-	summarizeMsgRoleTool      = "tool"
-	summarizeMsgRoleAssistant = "assistant"
-)
-
-// renderSnapshotForSummary returns snapshot rendered as a readable
-// transcript with inlined tool calls and results.
-func renderSnapshotForSummary(snapshot []agent.Message) string {
+// RenderSnapshotForSummary returns snapshot rendered as a readable
+// transcript with inlined tool calls and results. Used by both the
+// retired-worker summarizer and the orchestrator narrator.
+func RenderSnapshotForSummary(snapshot []agent.Message) string {
 	var b strings.Builder
 	for i, m := range snapshot {
 		fmt.Fprintf(&b, "[%d] ", i)
 		switch m.Role {
 		case "user":
-			fmt.Fprintf(&b, "USER: %s\n", short(m.Content, 4000))
-		case "assistant":
+			fmt.Fprintf(&b, "USER: %s\n", Short(m.Content, 4000))
+		case agent.RoleAssistant:
 			text := strings.TrimSpace(agent.StripThinkBlocks(m.Content))
 			if text != "" {
-				fmt.Fprintf(&b, "ASSISTANT: %s\n", short(text, 4000))
+				fmt.Fprintf(&b, "ASSISTANT: %s\n", Short(text, 4000))
 			}
 			for j, tc := range m.ToolCalls {
 				name := tc.Function.Name
@@ -142,23 +137,23 @@ func renderSnapshotForSummary(snapshot []agent.Message) string {
 					name = "?"
 				}
 				fmt.Fprintf(&b, "    call %d: %s(%s)\n", j+1, name,
-					short(tc.Function.Arguments, 600))
+					Short(tc.Function.Arguments, 600))
 			}
 			if text == "" && len(m.ToolCalls) == 0 {
 				b.WriteString("ASSISTANT: (empty)\n")
 			}
-		case summarizeMsgRoleTool:
+		case agent.RoleTool:
 			name := m.ToolName
 			if name == "" {
 				name = "?"
 			}
-			fmt.Fprintf(&b, "TOOL [%s]: %s\n", name, short(m.Content, 2400))
+			fmt.Fprintf(&b, "TOOL [%s]: %s\n", name, Short(m.Content, 2400))
 		case "system":
 			// Skipped — the agent already has the system prompt; summary
 			// input shouldn't repeat it.
 			continue
 		default:
-			fmt.Fprintf(&b, "%s: %s\n", m.Role, short(m.Content, 2000))
+			fmt.Fprintf(&b, "%s: %s\n", m.Role, Short(m.Content, 2000))
 		}
 	}
 	return b.String()
@@ -180,7 +175,7 @@ func buildCompletedWorkerPrompt(transcript []agent.Message, mission, reason stri
 		b.WriteString("\n\n")
 	}
 	b.WriteString("## Worker transcript (full history at retire time)\n\n")
-	b.WriteString(renderSnapshotForSummary(transcript))
+	b.WriteString(RenderSnapshotForSummary(transcript))
 	b.WriteString(`
 
 Write the recap now, in third person, framing this as "the worker". Be EXHAUSTIVE on the process, findings, and all other details — the director uses this to decide how to explore further, so missing detail directly costs coverage. Use clear, concise wording and don't excessively repeat details (every point appears once, in the most useful place). Length should be driven by content, not compressed for context.

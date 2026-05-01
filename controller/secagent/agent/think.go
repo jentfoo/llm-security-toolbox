@@ -48,7 +48,7 @@ func FilterThinkBlocks(msgs []Message, keepLastN int) []Message {
 	out := slices.Clone(msgs)
 	remaining := keepLastN
 	for i := len(out) - 1; i >= 0; i-- {
-		if out[i].Role != roleAssistant {
+		if out[i].Role != RoleAssistant {
 			continue
 		}
 		if remaining > 0 {
@@ -88,7 +88,7 @@ func HasInlineThink(s string) bool {
 // handled.
 func StripCodeFences(s string) string {
 	lines := strings.Split(s, "\n")
-	start := 0
+	var start int
 	for start < len(lines) && strings.TrimSpace(lines[start]) == "" {
 		start++
 	}

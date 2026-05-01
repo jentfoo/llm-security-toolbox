@@ -144,7 +144,7 @@ func (h *History) EstimateTokens() int {
 	if h.lastPromptTokens <= 0 {
 		return h.estimateRangeLocked(0, len(h.messages))
 	}
-	growth := 0
+	var growth int
 	if h.baselineMsgCount < len(h.messages) {
 		growth = h.estimateRangeLocked(h.baselineMsgCount, len(h.messages))
 	}
@@ -166,7 +166,7 @@ func (h *History) rawEstimateRangeLocked(start, end int) int {
 	if end > len(h.messages) {
 		end = len(h.messages)
 	}
-	total := 0
+	var total int
 	for i := start; i < end; i++ {
 		total += rawMessageTokens(h.messages[i])
 	}

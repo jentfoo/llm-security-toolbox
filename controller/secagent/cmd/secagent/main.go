@@ -43,7 +43,7 @@ func main() {
 	sig := make(chan os.Signal, 4)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		n := 0
+		var n int
 		for range sig {
 			n++
 			switch n {

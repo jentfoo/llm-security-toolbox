@@ -37,14 +37,14 @@ func TestHistory_TokenTracking(t *testing.T) {
 	t.Cleanup(resetCalibrationForTest)
 	h := NewHistory(4096)
 	assert.Equal(t, 4096, h.MaxContext())
-	h.Append(Message{Role: roleSystem, Content: "sys"})
-	h.Append(Message{Role: roleUser, Content: "hello world hello world"})
+	h.Append(Message{Role: RoleSystem, Content: "sys"})
+	h.Append(Message{Role: RoleUser, Content: "hello world hello world"})
 	assert.Positive(t, h.EstimateTokens())
 
 	h.SetPromptTokens(2048)
 	assert.Equal(t, 2048, h.EstimateTokens())
 
-	h.Append(Message{Role: roleAssistant, Content: "ok"})
+	h.Append(Message{Role: RoleAssistant, Content: "ok"})
 	assert.Greater(t, h.EstimateTokens(), 2048)
 }
 
@@ -61,9 +61,9 @@ func TestHistory_Calibration(t *testing.T) {
 		resetCalibrationForTest()
 		t.Cleanup(resetCalibrationForTest)
 		h := NewHistory(8192)
-		h.Append(Message{Role: roleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
 		for range 10 {
-			h.Append(Message{Role: roleUser, Content: "abcdefghij"})
+			h.Append(Message{Role: RoleUser, Content: "abcdefghij"})
 		}
 		// raw ≈ 69 tokens, reported 200 → observed ratio ≈ 2.9; EMA α=0.3 lands ~1.57
 		h.SetPromptTokens(200)
@@ -74,7 +74,7 @@ func TestHistory_Calibration(t *testing.T) {
 		resetCalibrationForTest()
 		t.Cleanup(resetCalibrationForTest)
 		h := NewHistory(8192)
-		h.Append(Message{Role: roleUser, Content: "hi"})
+		h.Append(Message{Role: RoleUser, Content: "hi"})
 		h.SetPromptTokens(1_000_000)
 		assert.InDelta(t, calibrationMax, h.Calibration(), 0.001)
 	})
@@ -83,7 +83,7 @@ func TestHistory_Calibration(t *testing.T) {
 		resetCalibrationForTest()
 		t.Cleanup(resetCalibrationForTest)
 		h := NewHistory(8192)
-		h.Append(Message{Role: roleUser, Content: strings.Repeat("x", 400)})
+		h.Append(Message{Role: RoleUser, Content: strings.Repeat("x", 400)})
 		// raw 104, real 208 → ratio 2.0; EMA converges over many updates
 		for range 50 {
 			h.SetPromptTokens(208)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/orchestrator/history"
 )
 
 // narratorSystemPrompt avoids word-count constraints — reasoning models echo them in output.
@@ -463,12 +464,12 @@ func buildAgentNarrationPrompt(prevSummaries []string, transcript string, trunca
 // renderAgentTranscript returns msgs rendered as a transcript fitting
 // budget tokens, head-truncating message-by-message as needed.
 func renderAgentTranscript(msgs []agent.Message, budget int) (rendered string, truncated bool) {
-	rendered = renderSnapshotForSummary(msgs)
+	rendered = history.RenderSnapshotForSummary(msgs)
 	if agent.EstimateStringTokens(rendered) <= budget {
 		return rendered, false
 	}
 	for start := 1; start < len(msgs); start++ {
-		candidate := renderSnapshotForSummary(msgs[start:])
+		candidate := history.RenderSnapshotForSummary(msgs[start:])
 		if agent.EstimateStringTokens(candidate) <= budget {
 			return candidate, true
 		}
@@ -476,7 +477,7 @@ func renderAgentTranscript(msgs []agent.Message, budget int) (rendered string, t
 	if len(msgs) == 0 {
 		return rendered, false
 	}
-	return renderSnapshotForSummary(msgs[len(msgs)-1:]), true
+	return history.RenderSnapshotForSummary(msgs[len(msgs)-1:]), true
 }
 
 // formatContextPercent returns tokens/max as "NN%", capped at 99%, or "?"

@@ -79,7 +79,7 @@ func drainOne(
 // updateToolErrorSignatures appends each error tool call's signature to
 // w.RecentToolErrors and clears w.CoachedErrorSig if any call succeeded.
 func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
-	sawSuccess := false
+	var sawSuccess bool
 	for _, tc := range summary.ToolCalls {
 		if !tc.IsError {
 			sawSuccess = true

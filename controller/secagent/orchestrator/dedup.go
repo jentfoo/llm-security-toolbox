@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/orchestrator/history"
 )
 
 // Dedup verdict actions. Pair-wise (DedupVerdict) uses unique / duplicate /
@@ -97,37 +98,7 @@ func (r *OpenAIDedupReviewer) oneShot(ctx context.Context, system, user string) 
 	if maxTokens <= 0 {
 		maxTokens = 20000
 	}
-	return runOneShot(ctx, r.Pool, r.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
-}
-
-// runOneShot runs one non-streaming system+user chat completion via a
-// pooled client and returns the trimmed response content. Pass "" for
-// reasoningEffort to inherit the model's default.
-func runOneShot(
-	ctx context.Context,
-	pool *agent.ClientPool,
-	model, system, user string,
-	maxTokens int,
-	reasoningEffort string,
-) (string, error) {
-	client, err := pool.Acquire(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer pool.Release(client)
-	resp, err := client.CreateChatCompletion(ctx, agent.ChatRequest{
-		Model: model,
-		Messages: []agent.ChatMessage{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
-		},
-		MaxTokens:       maxTokens,
-		ReasoningEffort: reasoningEffort,
-	})
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(resp.Content), nil
+	return history.RunOneShot(ctx, r.Pool, r.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
 }
 
 const dedupSystemPrompt = `You review security findings for duplication. Respond with JSON only — no prose, no markdown fences. Your output must parse as a single JSON object.`
@@ -230,7 +201,7 @@ Return only the JSON object. No prose, no markdown fences.
 }
 
 func parseCandidateVerdict(raw string, digests []FindingDigest) (CandidateDedupVerdict, error) {
-	body := extractJSONObject(raw)
+	body := history.ExtractJSONObject(raw)
 	var v struct {
 		Action          string `json:"action"`
 		MatchedFilename string `json:"matched_filename"`
@@ -274,7 +245,7 @@ func writeFindingBlock(b *strings.Builder, f FindingFiled) {
 }
 
 func parseVerdict(raw string) (DedupVerdict, error) {
-	body := extractJSONObject(raw)
+	body := history.ExtractJSONObject(raw)
 	var v struct {
 		Action       string `json:"action"`
 		MoreComplete string `json:"more_complete"`
@@ -296,7 +267,7 @@ func parseVerdict(raw string) (DedupVerdict, error) {
 }
 
 func parseMerge(raw string, fallback FindingFiled) (FindingFiled, error) {
-	body := extractJSONObject(raw)
+	body := history.ExtractJSONObject(raw)
 	var m struct {
 		Title             string `json:"title"`
 		Severity          string `json:"severity"`
@@ -336,22 +307,6 @@ func parseMerge(raw string, fallback FindingFiled) (FindingFiled, error) {
 		out.VerificationNotes = m.VerificationNotes
 	}
 	return out, nil
-}
-
-// extractJSONObject returns the first {..} block from raw, tolerating
-// markdown code fences and leading prose.
-func extractJSONObject(raw string) string {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	s = strings.TrimSpace(s)
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start < 0 || end < 0 || end < start {
-		return s
-	}
-	return s[start : end+1]
 }
 
 // ReviewAndWrite persists incoming after dedup. Returns (wrote, path, err)

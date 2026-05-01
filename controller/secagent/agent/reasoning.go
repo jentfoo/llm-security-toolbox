@@ -119,7 +119,7 @@ func (structuredHandler) Replay(msgs []Message, _ int) []Message {
 	// KeepThinkTurns has no meaning here; replay is strictly zero-turn.
 	out := slices.Clone(msgs)
 	for i := range out {
-		if out[i].Role == roleAssistant {
+		if out[i].Role == RoleAssistant {
 			out[i].ReasoningContent = ""
 		}
 	}
@@ -134,7 +134,7 @@ func (structuredHandler) ForSummary(msgs []Message) []Message {
 	out := slices.Clone(msgs)
 	for i := range out {
 		m := out[i]
-		if m.Role != roleAssistant || m.ReasoningContent == "" {
+		if m.Role != RoleAssistant || m.ReasoningContent == "" {
 			continue
 		}
 		wrapped := "<think>" + m.ReasoningContent + "</think>"
@@ -222,7 +222,7 @@ func DetectReasoningFormat(ctx context.Context, client ChatClient, model string)
 	resp, err := client.CreateChatCompletion(ctx, ChatRequest{
 		Model: model,
 		Messages: []ChatMessage{
-			{Role: roleUser, Content: reasoningProbePrompt},
+			{Role: RoleUser, Content: reasoningProbePrompt},
 		},
 		MaxTokens: reasoningProbeMaxTokens,
 	})

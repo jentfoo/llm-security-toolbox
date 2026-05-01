@@ -63,12 +63,12 @@ func TestFilterThinkBlocks(t *testing.T) {
 	t.Parallel()
 	build := func() []Message {
 		return []Message{
-			{Role: roleSystem, Content: "sys"},
-			{Role: roleUser, Content: "assignment"},
-			{Role: roleAssistant, Content: "<think>turn1</think>done1"},
-			{Role: roleTool, Content: "<think>not-stripped-in-tools</think>payload", ToolCallID: "c1"},
-			{Role: roleAssistant, Content: "<think>turn2</think>done2"},
-			{Role: roleAssistant, Content: "<think>turn3</think>done3"},
+			{Role: RoleSystem, Content: "sys"},
+			{Role: RoleUser, Content: "assignment"},
+			{Role: RoleAssistant, Content: "<think>turn1</think>done1"},
+			{Role: RoleTool, Content: "<think>not-stripped-in-tools</think>payload", ToolCallID: "c1"},
+			{Role: RoleAssistant, Content: "<think>turn2</think>done2"},
+			{Role: RoleAssistant, Content: "<think>turn3</think>done3"},
 		}
 	}
 
@@ -99,7 +99,7 @@ func TestFilterThinkBlocks(t *testing.T) {
 			msgs := FilterThinkBlocks(build(), tc.keepLastN)
 			var assistants []string
 			for _, m := range msgs {
-				if m.Role == roleAssistant {
+				if m.Role == RoleAssistant {
 					assistants = append(assistants, m.Content)
 				}
 			}

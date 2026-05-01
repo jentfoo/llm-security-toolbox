@@ -42,7 +42,7 @@ type CompactionReport struct {
 // Content. Returns true when Content changed. Non-assistant messages return
 // false. Idempotent.
 func StripAssistantThink(m *Message) bool {
-	if m.Role != roleAssistant {
+	if m.Role != RoleAssistant {
 		return false
 	}
 	before := m.Content
@@ -72,7 +72,7 @@ func IsCompactionStub(content string) bool {
 // when m.Content changed. Skips repair-error messages and content already
 // stubbed. Idempotent.
 func StubToolResult(m *Message) bool {
-	if m.Role != roleTool || m.IsRepairError {
+	if m.Role != RoleTool || m.IsRepairError {
 		return false
 	}
 	if IsCompactionStub(m.Content) {
@@ -163,7 +163,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	// Strip inline `<think>` blocks from oldest assistant messages outside
 	// the keep*2 trailing window, breaking early when the estimate drops to
 	// target so recent chain-of-thought continuity stays intact.
-	thinkCount := 0
+	var thinkCount int
 	for i := 0; i < len(msgs)-keep*2; i++ {
 		if !StripAssistantThink(&msgs[i]) {
 			continue
@@ -185,10 +185,9 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 
 	// Replace oldest tool results with stubs. Repair errors are skipped —
 	// they carry schema guidance the worker needs.
-	stubbed := 0
-	repairsProtected := 0
+	var stubbed, repairsProtected int
 	for i := 0; i < len(msgs)-keep*2; i++ {
-		if msgs[i].Role != roleTool {
+		if msgs[i].Role != RoleTool {
 			continue
 		}
 		if msgs[i].IsRepairError {
@@ -214,9 +213,9 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	}
 
 	// Truncate older assistant content to its first sentence.
-	truncCount := 0
+	var truncCount int
 	for i := 0; i < len(msgs)-keep*2; i++ {
-		if msgs[i].Role != roleAssistant {
+		if msgs[i].Role != RoleAssistant {
 			continue
 		}
 		if msgs[i].Content == "" {
@@ -248,7 +247,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	}
 
 	// Drop oldest full turn triples until under target or nothing left.
-	droppedTurns := 0
+	var droppedTurns int
 	for h.EstimateTokens() > target {
 		newMsgs, dropped := dropOldestTurn(msgs, keep)
 		if !dropped {
@@ -268,7 +267,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	// keep*2 trailing window. Shrink the keep window to 2 and drop more,
 	// still preserving tool-call/tool-result pairing.
 	if opt.HardTruncateOnOverflow && h.EstimateTokens() > high {
-		hardDropped := 0
+		var hardDropped int
 		for h.EstimateTokens() > high {
 			newMsgs, dropped := dropOldestTurn(msgs, 2)
 			if !dropped {
@@ -323,7 +322,7 @@ func ForceHardTruncate(h *History, targetTokens, keep int) CompactionReport {
 	}
 	report := CompactionReport{Before: h.EstimateTokens()}
 	msgs := h.Snapshot()
-	dropped := 0
+	var dropped int
 	for h.EstimateTokens() > targetTokens {
 		next, ok := dropOldestTurn(msgs, keep)
 		if !ok {
@@ -349,7 +348,7 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	if keep < 2 {
 		keep = 2
 	}
-	floor := 0
+	var floor int
 	if len(msgs) > 0 && msgs[0].Role == "system" {
 		floor = 1
 	}
@@ -359,19 +358,19 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	}
 
 	for i := floor; i < ceil; i++ {
-		if msgs[i].Role != roleAssistant {
+		if msgs[i].Role != RoleAssistant {
 			continue
 		}
 		end := i + 1
 		// consume paired tool results
-		for end < len(msgs) && msgs[end].Role == roleTool {
+		for end < len(msgs) && msgs[end].Role == RoleTool {
 			end++
 		}
 		// consume a trailing assistant TEXT (no tool calls of its own) if it
 		// immediately follows — it's part of this same turn's final reply.
 		// Do NOT swallow the next turn's assistant-with-tool-calls; doing so
 		// would orphan its tool results.
-		if end < len(msgs) && msgs[end].Role == roleAssistant && len(msgs[end].ToolCalls) == 0 {
+		if end < len(msgs) && msgs[end].Role == RoleAssistant && len(msgs[end].ToolCalls) == 0 {
 			end++
 		}
 		if end > ceil {

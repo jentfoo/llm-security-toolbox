@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"sync"
+
+	"github.com/go-appsec/secagent/orchestrator/history"
 )
 
 // retireResult holds one retirement result. Empty Summary indicates
@@ -18,7 +20,7 @@ type retireResult struct {
 // results for polled draining.
 type RetireQueue struct {
 	ctx     context.Context
-	sum     *Summarizer
+	sum     *history.Summarizer
 	mission string
 	log     *Logger
 	sem     chan struct{}
@@ -28,7 +30,7 @@ type RetireQueue struct {
 
 // newRetireQueue returns a RetireQueue; capacity caps simultaneous
 // summarize calls.
-func newRetireQueue(ctx context.Context, sum *Summarizer, mission string, log *Logger, capacity int) *RetireQueue {
+func newRetireQueue(ctx context.Context, sum *history.Summarizer, mission string, log *Logger, capacity int) *RetireQueue {
 	if capacity < 1 {
 		capacity = 1
 	}
@@ -49,7 +51,7 @@ func (q *RetireQueue) Submit(w *WorkerState, reason string, iter int) {
 		return
 	}
 	w.Alive = false
-	chronicle := w.Chronicle
+	chronicle := w.Chronicle.Messages()
 	w.Close()
 	if q.log != nil {
 		q.log.Log("retire", "enqueued", map[string]any{
@@ -70,7 +72,7 @@ func (q *RetireQueue) Submit(w *WorkerState, reason string, iter int) {
 			return
 		}
 		defer func() { <-q.sem }()
-		summary := ""
+		var summary string
 		if len(chronicle) > 0 && q.sum != nil {
 			s, err := q.sum.SummarizeCompletedWorker(q.ctx, chronicle, q.mission, reason, w.ID)
 			if err != nil {

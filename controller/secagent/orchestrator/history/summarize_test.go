@@ -1,4 +1,4 @@
-package orchestrator
+package history
 
 import (
 	"errors"
@@ -15,7 +15,7 @@ func TestRenderSnapshotForSummary(t *testing.T) {
 	t.Parallel()
 
 	t.Run("renders_roles", func(t *testing.T) {
-		out := renderSnapshotForSummary([]agent.Message{
+		out := RenderSnapshotForSummary([]agent.Message{
 			{Role: "user", Content: "directive text"},
 			{Role: "assistant", Content: "thinking out loud", ToolCalls: []agent.ToolCall{
 				{Function: agent.ToolFunction{Name: "proxy_poll", Arguments: `{"limit":5}`}},
@@ -31,7 +31,7 @@ func TestRenderSnapshotForSummary(t *testing.T) {
 	})
 
 	t.Run("assistant_empty_text", func(t *testing.T) {
-		out := renderSnapshotForSummary([]agent.Message{
+		out := RenderSnapshotForSummary([]agent.Message{
 			{Role: "assistant", Content: "", ToolCalls: []agent.ToolCall{
 				{Function: agent.ToolFunction{Name: "x"}},
 			}},

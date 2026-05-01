@@ -525,7 +525,7 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 					AutonomousBudget: budget,
 					Fork:             fork,
 				})
-				note := ""
+				var note string
 				if fork != nil {
 					note = fmt.Sprintf(" with fork → worker %d", fork.NewWorkerID)
 				}

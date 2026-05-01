@@ -55,7 +55,7 @@ func Classify(err error) (ErrCategory, time.Duration) {
 	}
 	var reqErr *openai.RequestError
 	if errors.As(err, &reqErr) {
-		body := ""
+		var body string
 		if reqErr.Err != nil {
 			body = reqErr.Err.Error()
 		}

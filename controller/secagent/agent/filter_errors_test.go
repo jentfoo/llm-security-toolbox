@@ -20,82 +20,82 @@ func TestFilterErrorMessages(t *testing.T) {
 		{
 			name: "no_errors_passthrough",
 			in: []Message{
-				{Role: roleSystem, Content: "sys"},
-				{Role: roleUser, Content: "u"},
-				{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "x"}}}},
-				{Role: roleTool, ToolCallID: "t1", Content: "ok result"},
-				{Role: roleAssistant, Content: "done"},
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleUser, Content: "u"},
+				{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "x"}}}},
+				{Role: RoleTool, ToolCallID: "t1", Content: "ok result"},
+				{Role: RoleAssistant, Content: "done"},
 			},
 			want: []Message{
-				{Role: roleSystem, Content: "sys"},
-				{Role: roleUser, Content: "u"},
-				{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "x"}}}},
-				{Role: roleTool, ToolCallID: "t1", Content: "ok result"},
-				{Role: roleAssistant, Content: "done"},
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleUser, Content: "u"},
+				{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "x"}}}},
+				{Role: RoleTool, ToolCallID: "t1", Content: "ok result"},
+				{Role: RoleAssistant, Content: "done"},
 			},
 		},
 		{
 			name: "drops_paired_error_call",
 			in: []Message{
-				{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "x"}}}},
-				{Role: roleTool, ToolCallID: "t1", Content: "ERROR: unknown tool \"x\""},
-				{Role: roleAssistant, Content: "moving on"},
+				{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "x"}}}},
+				{Role: RoleTool, ToolCallID: "t1", Content: "ERROR: unknown tool \"x\""},
+				{Role: RoleAssistant, Content: "moving on"},
 			},
-			want: []Message{{Role: roleAssistant, Content: "moving on"}},
+			want: []Message{{Role: RoleAssistant, Content: "moving on"}},
 		},
 		{
 			name: "keeps_partial_success",
 			in: []Message{
-				{Role: roleAssistant, Content: "trying both", ToolCalls: []ToolCall{
+				{Role: RoleAssistant, Content: "trying both", ToolCalls: []ToolCall{
 					{ID: "t1", Function: ToolFunction{Name: "x"}},
 					{ID: "t2", Function: ToolFunction{Name: "y"}},
 				}},
-				{Role: roleTool, ToolCallID: "t1", Content: "ERROR: bad args"},
-				{Role: roleTool, ToolCallID: "t2", Content: "good result"},
+				{Role: RoleTool, ToolCallID: "t1", Content: "ERROR: bad args"},
+				{Role: RoleTool, ToolCallID: "t2", Content: "good result"},
 			},
 			want: []Message{
-				{Role: roleAssistant, Content: "trying both", ToolCalls: []ToolCall{
+				{Role: RoleAssistant, Content: "trying both", ToolCalls: []ToolCall{
 					{ID: "t2", Function: ToolFunction{Name: "y"}},
 				}},
-				{Role: roleTool, ToolCallID: "t2", Content: "good result"},
+				{Role: RoleTool, ToolCallID: "t2", Content: "good result"},
 			},
 		},
 		{
 			name: "keeps_narration_only",
 			in: []Message{
-				{Role: roleAssistant, Content: "narration", ToolCalls: []ToolCall{
+				{Role: RoleAssistant, Content: "narration", ToolCalls: []ToolCall{
 					{ID: "t1", Function: ToolFunction{Name: "x"}},
 				}},
-				{Role: roleTool, ToolCallID: "t1", Content: "ERROR: nope"},
+				{Role: RoleTool, ToolCallID: "t1", Content: "ERROR: nope"},
 			},
-			want: []Message{{Role: roleAssistant, Content: "narration", ToolCalls: []ToolCall{}}},
+			want: []Message{{Role: RoleAssistant, Content: "narration", ToolCalls: []ToolCall{}}},
 		},
 		{
 			name: "drops_repair_errors",
 			in: []Message{
-				{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "x"}}}},
-				{Role: roleTool, ToolCallID: "t1", Content: "your arguments did not parse", IsRepairError: true},
-				{Role: roleAssistant, Content: "retry"},
+				{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "x"}}}},
+				{Role: RoleTool, ToolCallID: "t1", Content: "your arguments did not parse", IsRepairError: true},
+				{Role: RoleAssistant, Content: "retry"},
 			},
-			want: []Message{{Role: roleAssistant, Content: "retry"}},
+			want: []Message{{Role: RoleAssistant, Content: "retry"}},
 		},
 		{
 			name: "preserves_order",
 			in: []Message{
-				{Role: roleSystem, Content: "sys"},
-				{Role: roleUser, Content: "go"},
-				{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "good"}}}},
-				{Role: roleTool, ToolCallID: "t1", Content: "great"},
-				{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t2", Function: ToolFunction{Name: "bad"}}}},
-				{Role: roleTool, ToolCallID: "t2", Content: "ERROR: unknown"},
-				{Role: roleAssistant, Content: "summary"},
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleUser, Content: "go"},
+				{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "good"}}}},
+				{Role: RoleTool, ToolCallID: "t1", Content: "great"},
+				{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t2", Function: ToolFunction{Name: "bad"}}}},
+				{Role: RoleTool, ToolCallID: "t2", Content: "ERROR: unknown"},
+				{Role: RoleAssistant, Content: "summary"},
 			},
 			want: []Message{
-				{Role: roleSystem, Content: "sys"},
-				{Role: roleUser, Content: "go"},
-				{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "good"}}}},
-				{Role: roleTool, ToolCallID: "t1", Content: "great"},
-				{Role: roleAssistant, Content: "summary"},
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleUser, Content: "go"},
+				{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "good"}}}},
+				{Role: RoleTool, ToolCallID: "t1", Content: "great"},
+				{Role: RoleAssistant, Content: "summary"},
 			},
 		},
 	}
@@ -121,28 +121,28 @@ func TestHasSubstantiveMessages(t *testing.T) {
 	}{
 		{name: "empty"},
 		{name: "system_only", in: []Message{
-			{Role: roleSystem, Content: "sys"},
+			{Role: RoleSystem, Content: "sys"},
 		}},
 		{name: "system_and_user", in: []Message{
-			{Role: roleSystem, Content: "sys"},
-			{Role: roleUser, Content: "u"},
+			{Role: RoleSystem, Content: "sys"},
+			{Role: RoleUser, Content: "u"},
 		}},
 		{name: "assistant_text", in: []Message{
-			{Role: roleSystem, Content: "sys"},
-			{Role: roleUser, Content: "u"},
-			{Role: roleAssistant, Content: "did a thing"},
+			{Role: RoleSystem, Content: "sys"},
+			{Role: RoleUser, Content: "u"},
+			{Role: RoleAssistant, Content: "did a thing"},
 		}, want: true},
 		{name: "assistant_tool_calls", in: []Message{
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
 		}, want: true},
 		{name: "whitespace_only", in: []Message{
-			{Role: roleAssistant, Content: "   \n\t"},
+			{Role: RoleAssistant, Content: "   \n\t"},
 		}},
 		{name: "tool_result_present", in: []Message{
-			{Role: roleTool, ToolCallID: "t1", Content: "result"},
+			{Role: RoleTool, ToolCallID: "t1", Content: "result"},
 		}, want: true},
 		{name: "empty_tool_calls_slice", in: []Message{
-			{Role: roleAssistant, Content: "", ToolCalls: []ToolCall{}},
+			{Role: RoleAssistant, Content: "", ToolCalls: []ToolCall{}},
 		}},
 	}
 	for _, tc := range cases {
@@ -157,8 +157,8 @@ func TestCollapseSameToolErrorStreaks(t *testing.T) {
 
 	t.Run("no_errors_unchanged", func(t *testing.T) {
 		in := []Message{
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
-			{Role: roleTool, ToolCallID: "t1", ToolName: "x", Content: "ok"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
+			{Role: RoleTool, ToolCallID: "t1", ToolName: "x", Content: "ok"},
 		}
 		out, dropped := collapseSameToolErrorStreaks(in)
 		assert.Equal(t, in, out)
@@ -167,12 +167,12 @@ func TestCollapseSameToolErrorStreaks(t *testing.T) {
 
 	t.Run("collapses_streak_of_three", func(t *testing.T) {
 		in := []Message{
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
-			{Role: roleTool, ToolCallID: "t1", ToolName: "replay_send", Content: "ERROR: bad form"},
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t2"}}},
-			{Role: roleTool, ToolCallID: "t2", ToolName: "replay_send", Content: "ERROR: bad form again"},
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t3"}}},
-			{Role: roleTool, ToolCallID: "t3", ToolName: "replay_send", Content: "ERROR: still bad"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
+			{Role: RoleTool, ToolCallID: "t1", ToolName: "replay_send", Content: "ERROR: bad form"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t2"}}},
+			{Role: RoleTool, ToolCallID: "t2", ToolName: "replay_send", Content: "ERROR: bad form again"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t3"}}},
+			{Role: RoleTool, ToolCallID: "t3", ToolName: "replay_send", Content: "ERROR: still bad"},
 		}
 		out, dropped := collapseSameToolErrorStreaks(in)
 		assert.Equal(t, 2, dropped)
@@ -183,12 +183,12 @@ func TestCollapseSameToolErrorStreaks(t *testing.T) {
 
 	t.Run("different_tool_breaks_streak", func(t *testing.T) {
 		in := []Message{
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
-			{Role: roleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: a"},
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t2"}}},
-			{Role: roleTool, ToolCallID: "t2", ToolName: "y", Content: "ERROR: b"},
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t3"}}},
-			{Role: roleTool, ToolCallID: "t3", ToolName: "x", Content: "ERROR: c"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
+			{Role: RoleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: a"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t2"}}},
+			{Role: RoleTool, ToolCallID: "t2", ToolName: "y", Content: "ERROR: b"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t3"}}},
+			{Role: RoleTool, ToolCallID: "t3", ToolName: "x", Content: "ERROR: c"},
 		}
 		out, dropped := collapseSameToolErrorStreaks(in)
 		assert.Zero(t, dropped)
@@ -197,12 +197,12 @@ func TestCollapseSameToolErrorStreaks(t *testing.T) {
 
 	t.Run("success_breaks_streak", func(t *testing.T) {
 		in := []Message{
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
-			{Role: roleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: a"},
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t2"}}},
-			{Role: roleTool, ToolCallID: "t2", ToolName: "x", Content: "good"},
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t3"}}},
-			{Role: roleTool, ToolCallID: "t3", ToolName: "x", Content: "ERROR: c"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
+			{Role: RoleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: a"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t2"}}},
+			{Role: RoleTool, ToolCallID: "t2", ToolName: "x", Content: "good"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t3"}}},
+			{Role: RoleTool, ToolCallID: "t3", ToolName: "x", Content: "ERROR: c"},
 		}
 		out, dropped := collapseSameToolErrorStreaks(in)
 		assert.Zero(t, dropped)
@@ -214,13 +214,13 @@ func TestCollapseSameToolErrorStreaks(t *testing.T) {
 		// again. The "next tool result" after t1 is t2 (different tool name)
 		// so t1 is NOT collapsed even though a later same-tool error exists.
 		in := []Message{
-			{Role: roleAssistant, Content: "parallel", ToolCalls: []ToolCall{
+			{Role: RoleAssistant, Content: "parallel", ToolCalls: []ToolCall{
 				{ID: "t1"}, {ID: "t2"},
 			}},
-			{Role: roleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: a"},
-			{Role: roleTool, ToolCallID: "t2", ToolName: "y", Content: "ERROR: b"},
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t3"}}},
-			{Role: roleTool, ToolCallID: "t3", ToolName: "x", Content: "ERROR: c"},
+			{Role: RoleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: a"},
+			{Role: RoleTool, ToolCallID: "t2", ToolName: "y", Content: "ERROR: b"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t3"}}},
+			{Role: RoleTool, ToolCallID: "t3", ToolName: "x", Content: "ERROR: c"},
 		}
 		out, dropped := collapseSameToolErrorStreaks(in)
 		assert.Zero(t, dropped)
@@ -229,10 +229,10 @@ func TestCollapseSameToolErrorStreaks(t *testing.T) {
 
 	t.Run("collapses_repair_errors", func(t *testing.T) {
 		in := []Message{
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
-			{Role: roleTool, ToolCallID: "t1", ToolName: "x", IsRepairError: true, Content: "your arguments did not parse"},
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t2"}}},
-			{Role: roleTool, ToolCallID: "t2", ToolName: "x", IsRepairError: true, Content: "your arguments did not parse v2"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
+			{Role: RoleTool, ToolCallID: "t1", ToolName: "x", IsRepairError: true, Content: "your arguments did not parse"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t2"}}},
+			{Role: RoleTool, ToolCallID: "t2", ToolName: "x", IsRepairError: true, Content: "your arguments did not parse v2"},
 		}
 		out, dropped := collapseSameToolErrorStreaks(in)
 		assert.Equal(t, 1, dropped)
@@ -244,11 +244,11 @@ func TestCollapseSameToolErrorStreaks(t *testing.T) {
 		// Single assistant turn calls tool X twice in parallel; both error.
 		// First result's "next" finds the second (same tool, error) → collapse.
 		in := []Message{
-			{Role: roleAssistant, Content: "parallel x", ToolCalls: []ToolCall{
+			{Role: RoleAssistant, Content: "parallel x", ToolCalls: []ToolCall{
 				{ID: "t1"}, {ID: "t2"},
 			}},
-			{Role: roleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: a"},
-			{Role: roleTool, ToolCallID: "t2", ToolName: "x", Content: "ERROR: b"},
+			{Role: RoleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: a"},
+			{Role: RoleTool, ToolCallID: "t2", ToolName: "x", Content: "ERROR: b"},
 		}
 		out, dropped := collapseSameToolErrorStreaks(in)
 		assert.Equal(t, 1, dropped)
@@ -262,8 +262,8 @@ func TestCollapseSameToolErrorStreaks(t *testing.T) {
 	t.Run("trailing_error_kept", func(t *testing.T) {
 		// Final error result with no later tool result must NOT be collapsed.
 		in := []Message{
-			{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
-			{Role: roleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: trailing"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}},
+			{Role: RoleTool, ToolCallID: "t1", ToolName: "x", Content: "ERROR: trailing"},
 		}
 		out, dropped := collapseSameToolErrorStreaks(in)
 		assert.Zero(t, dropped)

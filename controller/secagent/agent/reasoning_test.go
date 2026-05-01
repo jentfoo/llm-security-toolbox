@@ -168,10 +168,10 @@ func TestReasoningHandler_Replay(t *testing.T) {
 	t.Run("inline_keeps_last_n", func(t *testing.T) {
 		h := NewReasoningHandler(ReasoningFormatInline)
 		msgs := []Message{
-			{Role: roleSystem, Content: "sys"},
-			{Role: roleAssistant, Content: "<think>turn1</think>done1"},
-			{Role: roleAssistant, Content: "<think>turn2</think>done2"},
-			{Role: roleAssistant, Content: "<think>turn3</think>done3"},
+			{Role: RoleSystem, Content: "sys"},
+			{Role: RoleAssistant, Content: "<think>turn1</think>done1"},
+			{Role: RoleAssistant, Content: "<think>turn2</think>done2"},
+			{Role: RoleAssistant, Content: "<think>turn3</think>done3"},
 		}
 		out := h.Replay(msgs, 1)
 		assert.Equal(t, "done1", out[1].Content)
@@ -182,9 +182,9 @@ func TestReasoningHandler_Replay(t *testing.T) {
 	t.Run("structured_blanks_reasoning", func(t *testing.T) {
 		h := NewReasoningHandler(ReasoningFormatStructured)
 		msgs := []Message{
-			{Role: roleAssistant, Content: "a1", ReasoningContent: "r1"},
-			{Role: roleAssistant, Content: "a2", ReasoningContent: "r2"},
-			{Role: roleAssistant, Content: "a3", ReasoningContent: "r3"},
+			{Role: RoleAssistant, Content: "a1", ReasoningContent: "r1"},
+			{Role: RoleAssistant, Content: "a2", ReasoningContent: "r2"},
+			{Role: RoleAssistant, Content: "a3", ReasoningContent: "r3"},
 		}
 		for _, keep := range []int{0, 1, 5} {
 			out := h.Replay(msgs, keep)
@@ -200,9 +200,9 @@ func TestReasoningHandler_Replay(t *testing.T) {
 	t.Run("structured_skips_non_assistant", func(t *testing.T) {
 		h := NewReasoningHandler(ReasoningFormatStructured)
 		msgs := []Message{
-			{Role: roleSystem, Content: "sys", ReasoningContent: "preserved"},
-			{Role: roleUser, Content: "u", ReasoningContent: "preserved"},
-			{Role: roleAssistant, Content: "a", ReasoningContent: "blanked"},
+			{Role: RoleSystem, Content: "sys", ReasoningContent: "preserved"},
+			{Role: RoleUser, Content: "u", ReasoningContent: "preserved"},
+			{Role: RoleAssistant, Content: "a", ReasoningContent: "blanked"},
 		}
 		out := h.Replay(msgs, 0)
 		assert.Equal(t, "preserved", out[0].ReasoningContent)
@@ -216,7 +216,7 @@ func TestReasoningHandler_ForSummary(t *testing.T) {
 
 	t.Run("inline_passes_through", func(t *testing.T) {
 		h := NewReasoningHandler(ReasoningFormatInline)
-		msgs := []Message{{Role: roleAssistant, Content: "<think>x</think>y"}}
+		msgs := []Message{{Role: RoleAssistant, Content: "<think>x</think>y"}}
 		out := h.ForSummary(msgs)
 		assert.Equal(t, msgs[0].Content, out[0].Content)
 	})
@@ -224,10 +224,10 @@ func TestReasoningHandler_ForSummary(t *testing.T) {
 	t.Run("structured_wraps_as_think", func(t *testing.T) {
 		h := NewReasoningHandler(ReasoningFormatStructured)
 		msgs := []Message{
-			{Role: roleSystem, Content: "sys"},
-			{Role: roleUser, Content: "assignment"},
-			{Role: roleAssistant, Content: "", ReasoningContent: "probing JWT"},
-			{Role: roleAssistant, Content: "final answer", ReasoningContent: "more reasoning"},
+			{Role: RoleSystem, Content: "sys"},
+			{Role: RoleUser, Content: "assignment"},
+			{Role: RoleAssistant, Content: "", ReasoningContent: "probing JWT"},
+			{Role: RoleAssistant, Content: "final answer", ReasoningContent: "more reasoning"},
 		}
 		out := h.ForSummary(msgs)
 		assert.Equal(t, "sys", out[0].Content)
@@ -239,8 +239,8 @@ func TestReasoningHandler_ForSummary(t *testing.T) {
 	t.Run("structured_skips_empty_reasoning", func(t *testing.T) {
 		h := NewReasoningHandler(ReasoningFormatStructured)
 		msgs := []Message{
-			{Role: roleAssistant, Content: "kept", ReasoningContent: ""},
-			{Role: roleUser, Content: "u", ReasoningContent: "should not wrap"},
+			{Role: RoleAssistant, Content: "kept", ReasoningContent: ""},
+			{Role: RoleUser, Content: "u", ReasoningContent: "should not wrap"},
 		}
 		out := h.ForSummary(msgs)
 		assert.Equal(t, "kept", out[0].Content)

@@ -1,4 +1,4 @@
-package orchestrator
+package history
 
 import (
 	"context"
@@ -34,8 +34,7 @@ func DistillCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.M
 		}
 		out := make([]agent.Message, len(snapshot))
 		copy(out, snapshot)
-		distilledBatches := 0
-		distilledMsgs := 0
+		var distilledBatches, distilledMsgs int
 		for batchIdx, b := range batches {
 			prose, err := runDistillBatch(ctx, s, b)
 			if err != nil {
@@ -94,7 +93,7 @@ func buildDistillBatches(snapshot []agent.Message) []distillBatch {
 
 	parentCall := map[string]agent.ToolCall{}
 	for _, m := range snapshot {
-		if m.Role == summarizeMsgRoleAssistant {
+		if m.Role == agent.RoleAssistant {
 			for _, tc := range m.ToolCalls {
 				parentCall[tc.ID] = tc
 			}
@@ -116,7 +115,7 @@ func buildDistillBatches(snapshot []agent.Message) []distillBatch {
 			flush()
 			continue
 		}
-		if m.Role != summarizeMsgRoleTool {
+		if m.Role != agent.RoleTool {
 			continue
 		}
 		if !isDistillEligible(m) {
@@ -127,7 +126,7 @@ func buildDistillBatches(snapshot []agent.Message) []distillBatch {
 		current.indices = append(current.indices, i)
 		current.calls = append(current.calls, distillCall{
 			Name:    tc.Function.Name,
-			Args:    short(tc.Function.Arguments, 240),
+			Args:    Short(tc.Function.Arguments, 240),
 			Content: m.Content,
 			IsError: m.IsRepairError || strings.HasPrefix(m.Content, "ERROR:"),
 		})
@@ -140,7 +139,7 @@ func buildDistillBatches(snapshot []agent.Message) []distillBatch {
 }
 
 func isDistillEligible(m agent.Message) bool {
-	if m.Role != summarizeMsgRoleTool {
+	if m.Role != agent.RoleTool {
 		return false
 	}
 	if m.IsRepairError {
@@ -153,7 +152,7 @@ func isDistillEligible(m agent.Message) bool {
 }
 
 func batchByteLen(b distillBatch) int {
-	total := 0
+	var total int
 	for _, c := range b.calls {
 		total += len(c.Content)
 	}
@@ -167,7 +166,7 @@ func runDistillBatch(
 	b distillBatch,
 ) (string, error) {
 	prompt := buildDistillPrompt(b)
-	raw, err := runOneShot(ctx, s.Pool, s.Model, distillSystemPrompt, prompt,
+	raw, err := RunOneShot(ctx, s.Pool, s.Model, distillSystemPrompt, prompt,
 		distillMaxTokens, agent.CompressionReasoningEffort)
 	if err != nil {
 		return "", err
@@ -185,7 +184,7 @@ func buildDistillPrompt(b distillBatch) string {
 		if c.IsError {
 			sb.WriteString("(error result)\n")
 		}
-		sb.WriteString(short(c.Content, 4000))
+		sb.WriteString(Short(c.Content, 4000))
 		sb.WriteString("\n\n")
 	}
 	return sb.String()

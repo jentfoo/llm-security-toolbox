@@ -217,7 +217,7 @@ func (a *OpenAIAgent) LastHistoryID() uint64 {
 		return 0
 	}
 	last := snap[len(snap)-1]
-	if last.Role == roleSystem {
+	if last.Role == RoleSystem {
 		return 0
 	}
 	return last.HistoryID
@@ -231,8 +231,8 @@ func (a *OpenAIAgent) SnapshotSinceID(id uint64) []Message {
 	if len(snap) == 0 {
 		return nil
 	}
-	start := 0
-	if snap[0].Role == roleSystem {
+	var start int
+	if snap[0].Role == RoleSystem {
 		start = 1
 	}
 	if id != 0 {
@@ -386,7 +386,7 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 		stripped := StripThinkBlocks(storeContent)
 		if len(resp.ToolCalls) == 0 {
 			a.history.Append(Message{
-				Role:             roleAssistant,
+				Role:             RoleAssistant,
 				Content:          storeContent,
 				ReasoningContent: storeReasoning,
 			})
@@ -400,7 +400,7 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 		}
 
 		a.history.Append(Message{
-			Role:             roleAssistant,
+			Role:             RoleAssistant,
 			Content:          storeContent,
 			ReasoningContent: storeReasoning,
 			ToolCalls:        resp.ToolCalls,
@@ -458,7 +458,7 @@ func (a *OpenAIAgent) dispatchToolCalls(
 			outcomes[i] = toolOutcome{
 				rec: rec,
 				histMsg: Message{
-					Role:          roleTool,
+					Role:          RoleTool,
 					Content:       errText,
 					ToolCallID:    tc.ID,
 					ToolName:      tc.Function.Name,
@@ -603,7 +603,7 @@ func (a *OpenAIAgent) runSingleTool(
 	return toolOutcome{
 		rec: rec,
 		histMsg: Message{
-			Role:       roleTool,
+			Role:       RoleTool,
 			Content:    content,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Function.Name,
@@ -825,16 +825,16 @@ func (a *OpenAIAgent) runDistillPreservingBoundary(ctx context.Context) Compacti
 // Returns the new slice and the count of tool-result messages dropped.
 func applySelfPrune(msgs []Message, dropSet map[string]bool) ([]Message, int) {
 	out := make([]Message, 0, len(msgs))
-	dropped := 0
+	var dropped int
 	for _, m := range msgs {
 		switch m.Role {
-		case roleTool:
+		case RoleTool:
 			if dropSet[m.ToolCallID] {
 				dropped++
 				continue
 			}
 			out = append(out, m)
-		case roleAssistant:
+		case RoleAssistant:
 			if len(m.ToolCalls) == 0 {
 				out = append(out, m)
 				continue
@@ -859,9 +859,9 @@ func countDistilledChanges(before, after []Message) int {
 	if len(after) < n {
 		n = len(after)
 	}
-	changed := 0
+	var changed int
 	for i := 0; i < n; i++ {
-		if before[i].Role != roleTool || after[i].Role != roleTool {
+		if before[i].Role != RoleTool || after[i].Role != RoleTool {
 			continue
 		}
 		if before[i].Content != after[i].Content {
@@ -960,8 +960,8 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	a.mu.Unlock()
 
 	msgs := a.buildChatMessages()
-	hardTruncated := false
-	retries := 0
+	var hardTruncated bool
+	var retries int
 
 	for attempt := 0; ; attempt++ {
 		resp, err := a.dispatchChatRequest(ctx, attempt, msgs, tools)
@@ -1094,20 +1094,20 @@ func (a *OpenAIAgent) synthesizePendingToolStubs() {
 	}
 	// Find the last assistant.tool_calls and count paired tool results.
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role != roleAssistant || len(msgs[i].ToolCalls) == 0 {
+		if msgs[i].Role != RoleAssistant || len(msgs[i].ToolCalls) == 0 {
 			continue
 		}
 		paired := map[string]bool{}
 		for j := i + 1; j < len(msgs); j++ {
-			if msgs[j].Role == roleTool {
+			if msgs[j].Role == RoleTool {
 				paired[msgs[j].ToolCallID] = true
 			}
 		}
-		stubs := 0
+		var stubs int
 		for _, tc := range msgs[i].ToolCalls {
 			if !paired[tc.ID] {
 				msgs = append(msgs, Message{
-					Role:       roleTool,
+					Role:       RoleTool,
 					Content:    "(interrupted before tool could run)",
 					ToolCallID: tc.ID,
 					ToolName:   tc.Function.Name,

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"github.com/go-appsec/secagent/agent"
 	"github.com/go-appsec/secagent/mcp"
+	"github.com/go-appsec/secagent/orchestrator/history"
 )
 
 // IterationOutcome classifies a worker's result for a single iteration.
@@ -43,12 +44,9 @@ type WorkerState struct {
 	AutonomousBudget   int
 	EscalationReason   string
 	AutonomousTurns    []agent.TurnSummary
-	// Chronicle is the worker's accumulated chat messages across iterations,
-	// installed onto the agent at each iter start.
-	Chronicle []agent.Message
-	// ChronicleIter is parallel to Chronicle: ChronicleIter[i] is the
-	// iteration in which Chronicle[i] was appended.
-	ChronicleIter []int
+	// Chronicle is the worker's accumulated chat history installed onto
+	// the agent at each iter start.
+	Chronicle history.Chronicle
 	// RecentToolErrors is a rolling window of recent tool-error signatures.
 	RecentToolErrors []string
 	// CoachedErrorSig is the last error signature for which coaching was

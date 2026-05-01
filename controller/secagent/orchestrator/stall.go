@@ -25,7 +25,7 @@ func UpdateStallStreaks(workers []*WorkerState) {
 		if !w.Alive {
 			continue
 		}
-		producedFlows := false
+		var producedFlows bool
 		for _, t := range w.AutonomousTurns {
 			if len(t.FlowIDs) > 0 {
 				producedFlows = true
