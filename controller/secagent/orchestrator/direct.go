@@ -75,6 +75,16 @@ func RunDecisionPhase(
 	slices.SortFunc(alive, func(a, b *WorkerState) int { return cmp.Compare(a.ID, b.ID) })
 
 	for _, w := range alive {
+		// Shutdown short-circuit: skip default-continue + fire when ctx is
+		// already canceled so we don't spawn doomed worker runs that just
+		// produce drain-error log noise.
+		if ctx.Err() != nil {
+			if log != nil {
+				log.Log("decision", "phase aborted", map[string]any{"err": ctx.Err().Error()})
+			}
+			break
+		}
+
 		// Append this worker's iter activity to the canonical chat.
 		// Activity = whatever was added to the worker agent's history
 		// from the iteration boundary onward (assistant turns + tool
@@ -86,6 +96,14 @@ func RunDecisionPhase(
 		decisionsBefore := len(in.Decisions.WorkerDecisions)
 		askWorker(ctx, in, w, log)
 		if len(in.Decisions.WorkerDecisions) == decisionsBefore {
+			if ctx.Err() != nil {
+				// askWorker drained against a canceled ctx. Don't record
+				// a stale default-continue or fire a doomed iter+1 run.
+				if log != nil {
+					log.Log("decision", "phase aborted", map[string]any{"err": ctx.Err().Error()})
+				}
+				break
+			}
 			// The director failed to record a decision (drain error or
 			// model didn't call the tool). Default to continue with the
 			// existing instruction so the worker doesn't silently lose
@@ -341,6 +359,15 @@ func RunSynthesisPhase(
 	}
 	closed := in.Decisions.HasDirectionDone || in.Decisions.HasEndRun
 	if !closed {
+		if ctx.Err() != nil {
+			// Shutdown was requested mid-drain. Don't auto-close — the
+			// controller is exiting and the next-iter loop check will
+			// break anyway.
+			if log != nil {
+				log.Log("synthesis", "phase aborted", map[string]any{"err": ctx.Err().Error()})
+			}
+			return false
+		}
 		// The synthesis call didn't close the phase. Auto-close so the
 		// controller doesn't wedge — director_done is the safe default.
 		in.Decisions.SetDirectionDone("auto: synthesis did not call direction_done")

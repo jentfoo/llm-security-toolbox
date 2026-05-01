@@ -7,6 +7,12 @@ const defaultAutonomousBudget = 8
 // decisionDrainMaxRounds caps the per-worker decide_worker drain.
 const decisionDrainMaxRounds = 4
 
+// defaultContinueDirective is the generic next-iter prompt used when the
+// director calls decide_worker(action="continue") without supplying an
+// instruction. Continue means "keep doing what you're doing", so this
+// directive is intentionally short and non-redirective.
+const defaultContinueDirective = "Continue your current investigation. Drive your active vector through to escalation, a hard dead-end, or completed coverage."
+
 // MinIterationsForDone is the earliest iteration at which `end_run` is
 // accepted with zero findings filed.
 const MinIterationsForDone = 5

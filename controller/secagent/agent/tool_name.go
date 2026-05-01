@@ -13,3 +13,56 @@ var underscoreRun = regexp.MustCompile(`_+`)
 func canonicalToolName(s string) string {
 	return underscoreRun.ReplaceAllString(strings.ToLower(s), "_")
 }
+
+// fuzzyContainsToolMatch returns the unique key in canonNames whose canonical
+// form is a word-bounded substring of req (or vice-versa). Returns "" when
+// zero or multiple keys match — ambiguity is not fuzzily resolved.
+//
+// Word-bounded means the match starts at string-start or after '_', and ends
+// at string-end or before '_'. Catches the common case where a model adds or
+// strips a namespace prefix (e.g. emits `mcp_sectool_decide_worker` for the
+// controller-side `decide_worker`).
+func fuzzyContainsToolMatch(req string, canonNames map[string]string) string {
+	var match string
+	matches := 0
+	for canon := range canonNames {
+		if canon == "" || canon == req {
+			continue
+		}
+		if !wordBoundedContains(req, canon) && !wordBoundedContains(canon, req) {
+			continue
+		}
+		matches++
+		if matches > 1 {
+			return ""
+		}
+		match = canon
+	}
+	if matches == 1 {
+		return match
+	}
+	return ""
+}
+
+// wordBoundedContains reports whether needle appears in haystack at a position
+// flanked by '_' or string edges on both sides.
+func wordBoundedContains(haystack, needle string) bool {
+	if len(needle) == 0 || len(needle) > len(haystack) {
+		return false
+	}
+	from := 0
+	for {
+		i := strings.Index(haystack[from:], needle)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(needle)
+		startOK := start == 0 || haystack[start-1] == '_'
+		endOK := end == len(haystack) || haystack[end] == '_'
+		if startOK && endOK {
+			return true
+		}
+		from = start + 1
+	}
+}

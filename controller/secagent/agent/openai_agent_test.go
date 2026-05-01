@@ -152,6 +152,42 @@ func TestOpenAIAgent_FuzzyToolNameFallback(t *testing.T) {
 		assert.Equal(t, "mcp__sectool__proxy_poll", fuzzyResolved)
 	})
 
+	t.Run("contains_match_resolves_prefix_overgeneralization", func(t *testing.T) {
+		client := &fakeChatClient{
+			responses: []ChatResponse{
+				{ToolCalls: []ToolCall{{
+					ID: "c1", Type: "function",
+					Function: ToolFunction{Name: "mcp_sectool_decide_worker", Arguments: `{}`},
+				}}},
+				{Content: "done"},
+			},
+		}
+		var fuzzyReceived, fuzzyResolved string
+		var handlerCalls int
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", Pool: newPoolWith(client),
+			OnFuzzyToolMatch: func(received, resolved string) {
+				fuzzyReceived, fuzzyResolved = received, resolved
+			},
+		})
+		a.SetTools([]ToolDef{{
+			Name:   "decide_worker",
+			Schema: map[string]any{"type": "object"},
+			Handler: func(_ context.Context, _ json.RawMessage) ToolResult {
+				handlerCalls++
+				return ToolResult{Text: "ok"}
+			},
+		}})
+		a.Query("go")
+		sum, err := a.Drain(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 1, handlerCalls)
+		require.Len(t, sum.ToolCalls, 1)
+		assert.False(t, sum.ToolCalls[0].IsError)
+		assert.Equal(t, "mcp_sectool_decide_worker", fuzzyReceived)
+		assert.Equal(t, "decide_worker", fuzzyResolved)
+	})
+
 	t.Run("unknown_tool_errors", func(t *testing.T) {
 		client := &fakeChatClient{
 			responses: []ChatResponse{

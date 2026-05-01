@@ -408,6 +408,31 @@ func TestDecisionToolDefs(t *testing.T) {
 		assert.Contains(t, res.Text, "instruction is required")
 	})
 
+	t.Run("continue_defaults_when_instruction_missing", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
+		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"worker_id": 1, "action": "continue",
+		}))
+		require.False(t, res.IsError, res.Text)
+		require.Len(t, dq.WorkerDecisions, 1)
+		assert.Equal(t, "continue", dq.WorkerDecisions[0].Kind)
+		assert.Equal(t, defaultContinueDirective, dq.WorkerDecisions[0].Instruction)
+	})
+
+	t.Run("continue_preserves_supplied_instruction", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
+		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"worker_id": 1, "action": "continue", "instruction": "press the SSRF angle on the federation endpoint",
+		}))
+		require.False(t, res.IsError, res.Text)
+		require.Len(t, dq.WorkerDecisions, 1)
+		assert.Equal(t, "press the SSRF angle on the federation endpoint", dq.WorkerDecisions[0].Instruction)
+	})
+
 	t.Run("stop_requires_reason", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseDirection)

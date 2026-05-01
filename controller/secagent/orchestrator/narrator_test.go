@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -663,7 +664,9 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 		client.mu.Lock()
 		defer client.mu.Unlock()
 		require.Len(t, client.requests, 2)
-		perAgent := client.requests[1].Messages[1].Content
+		agents := agentNarrationRequests(client.requests)
+		require.Len(t, agents, 1)
+		perAgent := agents[0].Messages[1].Content
 		assert.Contains(t, perAgent, "Activity since the last summary:")
 		assert.Contains(t, perAgent, "investigating /admin endpoints")
 	})
@@ -695,7 +698,9 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 		client.mu.Lock()
 		defer client.mu.Unlock()
 		require.GreaterOrEqual(t, len(client.requests), 4)
-		secondPerAgent := client.requests[3].Messages[1].Content
+		agents := agentNarrationRequests(client.requests)
+		require.Len(t, agents, 2)
+		secondPerAgent := agents[1].Messages[1].Content
 		assert.Contains(t, secondPerAgent, "Prior summaries")
 		assert.Contains(t, secondPerAgent, "first summary line")
 		assert.Contains(t, secondPerAgent, "newer probe of /api/v2")
@@ -703,10 +708,10 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 	})
 
 	t.Run("caps_prior_summaries_at_two", func(t *testing.T) {
-		client := &sequentialClient{responses: []string{
-			"orch one", "agent one", "orch two", "agent two",
-			"orch three", "agent three", "orch four", "agent four",
-		}}
+		client := &sequentialClient{
+			orchResp:  []string{"orch one", "orch two", "orch three", "orch four"},
+			agentResp: []string{"agent one", "agent two", "agent three", "agent four"},
+		}
 		l, _, _ := newCapturedLogger(t)
 		pool := agent.NewClientPoolWithClients([]agent.ChatClient{client})
 		a := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool})
@@ -728,11 +733,21 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 		client.mu.Lock()
 		defer client.mu.Unlock()
 		require.Len(t, client.requests, 8)
-		fourthPerAgent := client.requests[7].Messages[1].Content
+		agents := agentNarrationRequests(client.requests)
+		require.Len(t, agents, 4)
+		fourthPerAgent := agents[3].Messages[1].Content
 		assert.Contains(t, fourthPerAgent, "1. agent three")
 		assert.Contains(t, fourthPerAgent, "2. agent two")
 		assert.NotContains(t, fourthPerAgent, "agent one")
 	})
+}
+
+// agentNarrationRequests returns only requests sent to the per-agent
+// narrator prompt, in dispatch order.
+func agentNarrationRequests(reqs []agent.ChatRequest) []agent.ChatRequest {
+	return bulk.SliceFilter(func(r agent.ChatRequest) bool {
+		return len(r.Messages) > 0 && r.Messages[0].Content == agentNarratorSystemPrompt
+	}, reqs)
 }
 
 // appendAssistantMessage adds a substantive assistant message to a's
@@ -749,24 +764,36 @@ func recordSubstantiveEvents(n *Narrator, count int) {
 	}
 }
 
-// sequentialClient returns a different scripted response on each call so
-// tests can assert how a chain of summaries threads forward into prior
-// context. Mirrors scriptedClient's tracking fields.
+// sequentialClient returns a different scripted response per call type
+// (orchestrator vs per-agent) so tests can assert how a chain of summaries
+// threads forward into prior context regardless of concurrent dispatch
+// order. Mirrors scriptedClient's tracking fields.
 type sequentialClient struct {
 	mu        sync.Mutex
 	calls     int32
-	responses []string
+	orchResp  []string
+	agentResp []string
+	orchIdx   int
+	agentIdx  int
 	requests  []agent.ChatRequest
 }
 
 func (c *sequentialClient) CreateChatCompletion(_ context.Context, req agent.ChatRequest) (agent.ChatResponse, error) {
-	idx := atomic.AddInt32(&c.calls, 1) - 1
+	atomic.AddInt32(&c.calls, 1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.requests = append(c.requests, req)
 	resp := ""
-	if int(idx) < len(c.responses) {
-		resp = c.responses[idx]
+	if len(req.Messages) > 0 && req.Messages[0].Content == agentNarratorSystemPrompt {
+		if c.agentIdx < len(c.agentResp) {
+			resp = c.agentResp[c.agentIdx]
+			c.agentIdx++
+		}
+	} else {
+		if c.orchIdx < len(c.orchResp) {
+			resp = c.orchResp[c.orchIdx]
+			c.orchIdx++
+		}
 	}
 	return agent.ChatResponse{Content: resp}, nil
 }

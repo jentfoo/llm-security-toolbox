@@ -71,8 +71,7 @@ type Narrator struct {
 	// included in a successful narration; 0 means none yet.
 	lastNarrationHistoryID map[string]uint64
 
-	fireMu sync.Mutex
-	wg     sync.WaitGroup
+	wg sync.WaitGroup
 	// armed gates firing until a substantive event arrives (sticky).
 	armed bool
 
@@ -230,15 +229,13 @@ func (n *Narrator) TriggerNow() {
 	n.fireAsync()
 }
 
-// fireAsync spawns one serialized firing in a goroutine; concurrent
-// callers queue on fireMu.
+// fireAsync spawns a firing goroutine. Concurrent callers either win the
+// n.mu-guarded buffer snapshot (and proceed) or see an empty buffer (and
+// return); the log pool is the only cap on concurrent in-flight calls.
 func (n *Narrator) fireAsync() {
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
-		n.fireMu.Lock()
-		defer n.fireMu.Unlock()
-
 		n.mu.Lock()
 		if len(n.buf) == 0 {
 			n.mu.Unlock()
@@ -253,8 +250,9 @@ func (n *Narrator) fireAsync() {
 	}()
 }
 
-// runSummary sequentially dispatches one orchestrator-level summary and
-// one per-active-agent summary under a shared timeout.
+// runSummary concurrently dispatches one orchestrator-level summary and
+// one per-active-agent summary under a shared timeout. Pool capacity gates
+// real concurrency; surplus calls queue at Acquire.
 func (n *Narrator) runSummary(events []narratorEvent) {
 	// Parent derived from shutdownCtx — Close cancels it so ctrl+c aborts
 	// any in-flight summary HTTP call instead of waiting up to CallBudget.
@@ -271,16 +269,23 @@ func (n *Narrator) runSummary(events []narratorEvent) {
 	agents := append([]NamedAgent(nil), n.activeAgents...)
 	n.mu.Unlock()
 
-	n.runOrchestratorSummary(ctx, events)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		n.runOrchestratorSummary(ctx, events)
+	}()
 	for _, na := range agents {
-		if ctx.Err() != nil {
-			return
-		}
 		if na.Agent == nil || na.Name == "" {
 			continue
 		}
-		n.runAgentSummary(ctx, na)
+		wg.Add(1)
+		go func(na NamedAgent) {
+			defer wg.Done()
+			n.runAgentSummary(ctx, na)
+		}(na)
 	}
+	wg.Wait()
 }
 
 func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narratorEvent) {

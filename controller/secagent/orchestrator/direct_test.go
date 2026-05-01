@@ -166,6 +166,24 @@ func TestRunDecisionPhase(t *testing.T) {
 		assert.ElementsMatch(t, []int{1, 9}, fired())
 	})
 
+	t.Run("aborts_on_canceled_ctx", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		// Director would otherwise default-continue on every drain error.
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "would never run"}}}
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: "stale1"}
+		w2 := &WorkerState{ID: 2, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: "stale2"}
+		dirChat := NewDirectorChat()
+		fire, fired := scriptedFireFn(t, nil)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		RunDecisionPhase(ctx, DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: []*WorkerState{w1, w2}, Fire: fire,
+		}, nil)
+		assert.Empty(t, decisions.WorkerDecisions)
+		assert.Empty(t, fired())
+	})
+
 	t.Run("appends_activity_and_decision", func(t *testing.T) {
 		decisions := NewDecisionQueue()
 		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "decide"}}}
@@ -223,6 +241,20 @@ func TestRunSynthesisPhase(t *testing.T) {
 		}, nil)
 		assert.True(t, decisions.HasDirectionDone)
 		assert.Contains(t, decisions.DirectionDoneSummary, "auto: synthesis did not call direction_done")
+	})
+
+	t.Run("aborts_on_canceled_ctx", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "would never run"}}}
+		dirChat := NewDirectorChat()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		closed := RunSynthesisPhase(ctx, SynthesisPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			MaxWorkers: 4,
+		}, nil)
+		assert.False(t, closed)
+		assert.False(t, decisions.HasDirectionDone)
 	})
 }
 

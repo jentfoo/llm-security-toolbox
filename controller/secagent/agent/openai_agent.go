@@ -36,7 +36,8 @@ type OpenAIAgentConfig struct {
 	// Reasoning is the format-specific reasoning handler. Nil defaults to
 	// the inline handler.
 	Reasoning ReasoningHandler
-	// OnCompact is called with each compaction report (optional).
+	// OnCompact fires once per compaction event with the aggregated report
+	// across every pass that ran. Optional.
 	OnCompact func(CompactionReport)
 	// OnContextOverflow fires once per sendWithRetry call when the model
 	// rejected the request as over-context (optional).
@@ -318,7 +319,7 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 	if maxRounds <= 0 {
 		maxRounds = a.cfg.MaxTurnsPerAgent
 	}
-	inner, cancel := context.WithTimeout(ctx, a.cfg.TurnTimeout)
+	inner, cancel := context.WithCancel(ctx)
 	a.mu.Lock()
 	a.cancelCtx = cancel
 	a.mu.Unlock()
@@ -543,6 +544,17 @@ func (a *OpenAIAgent) runSingleTool(
 			if a.cfg.OnFuzzyToolMatch != nil {
 				a.cfg.OnFuzzyToolMatch(tc.Function.Name, a.canonNames[c])
 			}
+		} else if matched := fuzzyContainsToolMatch(c, a.canonNames); matched != "" {
+			// Word-bounded contains-match resolves prefix-overgeneralization
+			// (e.g. model emits `mcp_sectool_decide_worker` for the
+			// controller-side `decide_worker`). Only fires when exactly one
+			// registered name is a unique word-bounded substring — ambiguous
+			// cases fall through to "unknown tool".
+			handler = a.canonHandlers[matched]
+			known = true
+			if a.cfg.OnFuzzyToolMatch != nil {
+				a.cfg.OnFuzzyToolMatch(tc.Function.Name, a.canonNames[matched])
+			}
 		}
 	}
 	var result ToolResult
@@ -657,11 +669,17 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	recoveryGoal := int(float64(maxCtx) * threshold)
 	startTokens := a.history.EstimateTokens()
 
+	aggregate := CompactionReport{Before: startTokens}
+	defer func() {
+		aggregate.After = a.history.EstimateTokens()
+		if a.cfg.OnCompact != nil && len(aggregate.PassesApplied) > 0 {
+			a.cfg.OnCompact(aggregate)
+		}
+	}()
+
 	// Cheap, deterministic same-tool error-streak collapse first.
 	r0 := a.compactErrorsOnlyPreservingBoundary()
-	if a.cfg.OnCompact != nil {
-		a.cfg.OnCompact(r0)
-	}
+	aggregate = mergeReports(aggregate, r0)
 	if a.history.EstimateTokens() < high {
 		return nil
 	}
@@ -671,9 +689,7 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	// and a callback is wired.
 	if startTokens-a.history.EstimateTokens() < recoveryGoal && a.cfg.OnSelfPruneCandidates != nil {
 		rB := a.runSelfPrunePreservingBoundary(ctx)
-		if a.cfg.OnCompact != nil {
-			a.cfg.OnCompact(rB)
-		}
+		aggregate = mergeReports(aggregate, rB)
 		if a.history.EstimateTokens() < high {
 			return nil
 		}
@@ -683,9 +699,7 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	// prose summaries so load-bearing facts survive byte-count stubbing.
 	if startTokens-a.history.EstimateTokens() < recoveryGoal && a.cfg.OnDistillResults != nil {
 		rC := a.runDistillPreservingBoundary(ctx)
-		if a.cfg.OnCompact != nil {
-			a.cfg.OnCompact(rC)
-		}
+		aggregate = mergeReports(aggregate, rC)
 		if a.history.EstimateTokens() < high {
 			return nil
 		}
@@ -694,9 +708,7 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 	// Mechanical fallback (think-strip, tool-stub, text-trunc, turn-drop,
 	// hard-truncate). Always runs if we still need headroom.
 	r1, err := a.compactRemainderPreservingBoundary()
-	if a.cfg.OnCompact != nil {
-		a.cfg.OnCompact(r1)
-	}
+	aggregate = mergeReports(aggregate, r1)
 	if err != nil {
 		return err
 	}
@@ -718,9 +730,7 @@ func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
 
 	// Last-resort mechanical remainder, potentially biting into in-iter content.
 	r2, err := a.compactRemainderPreservingBoundary()
-	if a.cfg.OnCompact != nil {
-		a.cfg.OnCompact(r2)
-	}
+	aggregate = mergeReports(aggregate, r2)
 	return err
 }
 
@@ -1040,11 +1050,14 @@ func (a *OpenAIAgent) dispatchChatRequest(
 	}
 	defer a.cfg.Pool.Release(client)
 
+	callCtx, cancel := context.WithTimeout(ctx, a.cfg.TurnTimeout)
+	defer cancel()
+
 	if a.cfg.OnRequestStart != nil {
 		a.cfg.OnRequestStart(attempt)
 	}
 	start := time.Now()
-	resp, err := client.CreateChatCompletion(ctx, ChatRequest{
+	resp, err := client.CreateChatCompletion(callCtx, ChatRequest{
 		Model:    a.cfg.Model,
 		Messages: msgs,
 		Tools:    tools,

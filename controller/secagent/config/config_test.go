@@ -1,32 +1,84 @@
 package config
 
 import (
+	"flag"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestEffectiveKeepThinkTurns(t *testing.T) {
+func TestParse(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name       string
-		configured int
-		maxContext int
-		want       int
-	}{
-		{"auto_small_context", 0, 32_768, 4},
-		{"auto_edge_128k_exact", 0, 128_000, 4},
-		{"auto_large_context", 0, 200_000, 8},
-		{"auto_very_large", 0, 1_000_000, 8},
-		{"explicit_override_small_ctx", 2, 32_768, 2},
-		{"explicit_override_large_ctx", 12, 200_000, 12},
-		{"explicit_one", 1, 32_768, 1},
-		{"negative_treated_as_auto", -1, 32_768, 4},
+
+	parse := func(t *testing.T, args ...string) *Config {
+		t.Helper()
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		c, err := Parse(fs, args)
+		require.NoError(t, err)
+		require.NotNil(t, c)
+		return c
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c := &Config{KeepThinkTurns: tc.configured}
-			assert.Equal(t, tc.want, c.EffectiveKeepThinkTurns(tc.maxContext))
-		})
-	}
+
+	t.Run("prompt_required", func(t *testing.T) {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		_, err := Parse(fs, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--prompt")
+	})
+
+	t.Run("flag_parse_error", func(t *testing.T) {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		_, err := Parse(fs, []string{"-prompt", "x", "-no-such-flag"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no-such-flag")
+	})
+
+	t.Run("max_workers_clamped_high", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-max-workers", "99")
+		assert.Equal(t, MaxWorkers, c.MaxWorkers)
+	})
+
+	t.Run("max_workers_clamped_low", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-max-workers", "0")
+		assert.Equal(t, MinWorkers, c.MaxWorkers)
+	})
+
+	t.Run("autonomous_budget_clamped_high", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-autonomous-budget", "999")
+		assert.Equal(t, MaxAutonomousBudget, c.AutonomousBudget)
+	})
+
+	t.Run("autonomous_budget_clamped_low", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-autonomous-budget", "0")
+		assert.Equal(t, 1, c.AutonomousBudget)
+	})
+
+	t.Run("log_model_inherits", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-model", "main")
+		assert.Equal(t, "main", c.Model)
+		assert.Equal(t, "main", c.LogModel)
+	})
+
+	t.Run("log_model_explicit", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-model", "main", "-log-model", "small")
+		assert.Equal(t, "main", c.Model)
+		assert.Equal(t, "small", c.LogModel)
+	})
+
+	t.Run("log_max_context_inherits", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-max-context", "64000")
+		assert.Equal(t, 64000, c.MaxContext)
+		assert.Equal(t, 64000, c.LogMaxContext)
+	})
+
+	t.Run("log_max_context_explicit", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-max-context", "64000", "-log-max-context", "16000")
+		assert.Equal(t, 64000, c.MaxContext)
+		assert.Equal(t, 16000, c.LogMaxContext)
+	})
 }

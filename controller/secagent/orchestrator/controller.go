@@ -155,6 +155,27 @@ func (f *OpenAIFactory) summarizeErrorCallback(role string) func(error) {
 	}
 }
 
+// compactCallback returns a hook that logs each completed compaction event
+// tagged with role. phase is the deepest pass the compactor had to reach
+// to relieve pressure (last entry in PassesApplied). Returns nil when
+// f.Log is nil.
+func (f *OpenAIFactory) compactCallback(role string) func(agent.CompactionReport) {
+	if f.Log == nil {
+		return nil
+	}
+	return func(r agent.CompactionReport) {
+		fields := map[string]any{
+			"role":   role,
+			"before": r.Before,
+			"after":  r.After,
+		}
+		if n := len(r.PassesApplied); n > 0 {
+			fields["phase"] = r.PassesApplied[n-1]
+		}
+		f.Log.Log("agent", "compact", fields)
+	}
+}
+
 // buildAgent assembles an OpenAIAgent for a role.
 //
 // setFlowExtractor wires ExtractFlowIDs onto the agent's turn summaries.
@@ -199,6 +220,7 @@ func (f *OpenAIFactory) buildAgent(
 		OnFuzzyToolMatch:  f.fuzzyToolMatchCallback(role),
 		OnContextOverflow: onContextOverflow,
 		OnSummarizeError:  f.summarizeErrorCallback(role),
+		OnCompact:         f.compactCallback(role),
 		RetireOnPressure:  retireOnPressure,
 	}
 	if setFlowExtractor {
@@ -491,7 +513,10 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 	// keep-alives that survive context cancellation.
 	httpTimeout := cfg.TurnTimeout + 2*time.Minute
 	pool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.AgentPoolSize, httpTimeout)
-	mainReasoning, logReasoning := probeReasoningHandlers(ctx, cfg, pool, log)
+	// Dedicated log pool isolates narrator + log-model probes from main-pool
+	// contention, so worker turns can't starve operator-facing narration.
+	logPool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.LogPoolSize(), httpTimeout)
+	mainReasoning, logReasoning := probeReasoningHandlers(ctx, cfg, pool, logPool, log)
 
 	malformed := NewMalformedCounter(log)
 	defer malformed.Flush()
@@ -769,13 +794,13 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		return nil
 	}
 
-	// Narration runs through the shared pool with the log model. The
-	// narrator's internal fireMu serializes calls so the "one summary in
-	// flight" invariant holds without a dedicated pool slot.
+	// Narration runs through its own logPool so worker traffic on the main
+	// pool can't starve operator-facing summaries. Pool capacity itself is
+	// the only cap on concurrent narration calls.
 	narrator := NewNarrator(NarratorConfig{
 		Interval:   cfg.NarrateInterval,
 		Model:      cfg.LogModel,
-		Pool:       pool,
+		Pool:       logPool,
 		CallBudget: cfg.NarrateTimeout(),
 		Summarizer: logReasoning,
 		// Parent ctx — ctrl+c propagates to in-flight narration HTTP calls
@@ -797,7 +822,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 			fields["enabled"] = true
 			fields["interval"] = cfg.NarrateInterval.String()
 			fields["timeout"] = cfg.NarrateTimeout().String()
-			fields["pool_size"] = pool.Size()
+			fields["pool_size"] = logPool.Size()
 		}
 		log.Log("server", "narrator", fields)
 	}
@@ -1348,9 +1373,10 @@ func harvestInflight(inflight map[int]func() []agent.TurnSummary) map[int][]agen
 }
 
 // probeReasoningHandlers returns reasoning handlers for cfg.Model and
-// cfg.LogModel.
+// cfg.LogModel. The main probe goes through pool; the log probe through
+// logPool so the two probes don't contend on a single shared slot.
 func probeReasoningHandlers(
-	ctx context.Context, cfg *config.Config, pool *agent.ClientPool, log *Logger,
+	ctx context.Context, cfg *config.Config, pool, logPool *agent.ClientPool, log *Logger,
 ) (mainR, logR agent.ReasoningHandler) {
 	cache := agent.NewReasoningFormatCache()
 	if cfg.LogModel == cfg.Model {
@@ -1365,7 +1391,7 @@ func probeReasoningHandlers(
 		return nil
 	})
 	g.Go(func() error {
-		logFmt = resolveFormat(gctx, cache, pool, "log", cfg.BaseURL, cfg.LogModel, log)
+		logFmt = resolveFormat(gctx, cache, logPool, "log", cfg.BaseURL, cfg.LogModel, log)
 		return nil
 	})
 	_ = g.Wait()

@@ -447,10 +447,16 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 				}
 				action := strings.ToLower(strings.TrimSpace(in.Action))
 				switch action {
-				case decideActionContinue, decideActionExpand:
+				case decideActionContinue:
+					// instruction is optional for continue: empty falls back to
+					// the generic continue directive at apply time.
+					if strings.TrimSpace(in.Instruction) == "" {
+						in.Instruction = defaultContinueDirective
+					}
+				case decideActionExpand:
 					if strings.TrimSpace(in.Instruction) == "" {
 						return agent.ToolResult{
-							Text:    "Rejected: instruction is required for action=continue|expand.",
+							Text:    "Rejected: instruction is required for action=expand (use action=continue to keep the existing angle).",
 							IsError: true,
 						}
 					}

@@ -57,6 +57,17 @@ func (c *Config) NarrateTimeout() time.Duration {
 	return max(2*c.NarrateInterval, 15*time.Minute)
 }
 
+// LogPoolSize returns the dedicated log-pool capacity. A distinct log model
+// gets 2 slots so async narration overlaps with itself without queueing on
+// the main pool; a missing or matching log model gets 1, since the calls land
+// on the same backend as main work and one-at-a-time is enough.
+func (c *Config) LogPoolSize() int {
+	if c.LogModel == "" || c.LogModel == c.Model {
+		return 1
+	}
+	return 2
+}
+
 // Bounds used for clamping.
 const (
 	MinWorkers          = 1
@@ -92,7 +103,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.MaxWorkers, "max-workers", 4, "max parallel workers")
 	fs.IntVar(&c.AutonomousBudget, "autonomous-budget", DefaultAutoBudget, "turns per worker per iteration")
 	// Defaults sized generously for slow local models with long tool chains.
-	fs.DurationVar(&c.TurnTimeout, "turn-timeout", 20*time.Minute, "per-turn ctx timeout")
+	fs.DurationVar(&c.TurnTimeout, "turn-timeout", 10*time.Minute, "per-turn ctx timeout")
 	fs.DurationVar(&c.PerToolTimeout, "per-tool-timeout", 5*time.Minute, "per-tool-call ctx timeout")
 	fs.IntVar(&c.MaxParallelTools, "max-parallel-tools", 4, "max concurrent in-flight tool calls per assistant response")
 	fs.IntVar(&c.MaxTurnsPerAgent, "max-turns-per-agent", 100, "hard cap per Drain chain")
