@@ -7,27 +7,21 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// ChronicleKeepRecentIters is the trailing iteration window kept raw;
-// older iters are compacted in place by Chronicle.Compact.
+// ChronicleKeepRecentIters is the trailing iter window kept raw.
 const ChronicleKeepRecentIters = 2
 
-// Chronicle holds a worker's investigative chat history accumulated
-// across iterations alongside the per-message iteration index, and owns
-// the parallel-array invariant.
+// Chronicle holds a worker's chat history with per-message iteration indices.
 type Chronicle struct {
 	messages []agent.Message
 	iters    []int
 }
 
-// NewChronicle returns a Chronicle seeded with messages and their
-// per-message iteration indices. iters may be nil or shorter than
-// messages; in that case Compact will break early on the missing tail.
+// NewChronicle returns a Chronicle seeded with messages and iteration indices.
 func NewChronicle(messages []agent.Message, iters []int) Chronicle {
 	return Chronicle{messages: messages, iters: iters}
 }
 
-// Messages returns the chronicle's current message slice. The returned
-// slice aliases internal storage; callers must not mutate it.
+// Messages returns the internal message slice; callers must not mutate it.
 func (c *Chronicle) Messages() []agent.Message {
 	if c == nil {
 		return nil
@@ -43,27 +37,22 @@ func (c *Chronicle) Len() int {
 	return len(c.messages)
 }
 
-// Install replaces a's history with the chronicle, marks the iteration
-// boundary, and queues directive.
+// Install replaces a's history with the chronicle and queues directive.
 func (c *Chronicle) Install(a agent.Agent, directive string) {
 	a.ReplaceHistory(c.messages)
 	a.MarkIterationBoundary()
 	a.Query(directive)
 }
 
-// snapshotter is implemented by agents exposing the full message history.
 type snapshotter interface {
 	Snapshot() []agent.Message
 }
 
-// boundaryReader is implemented by agents exposing an iteration watermark.
 type boundaryReader interface {
 	IterationBoundaryID() uint64
 }
 
-// SnapshotSinceBoundary returns a clone of a's history with HistoryID
-// strictly greater than the iter watermark. Returns nil when a doesn't
-// expose a snapshot or watermark, or when no message lies above it.
+// SnapshotSinceBoundary returns a clone of a's history above the iter watermark, or nil.
 func SnapshotSinceBoundary(a agent.Agent) []agent.Message {
 	tail := snapshotSinceBoundary(a)
 	if tail == nil {
@@ -72,9 +61,7 @@ func SnapshotSinceBoundary(a agent.Agent) []agent.Message {
 	return slices.Clone(tail)
 }
 
-// snapshotSinceBoundary returns a's history above the iter watermark
-// without cloning. Internal callers that immediately copy via append skip
-// the extra allocation.
+// snapshotSinceBoundary returns a's history above the iter watermark (uncloned).
 func snapshotSinceBoundary(a agent.Agent) []agent.Message {
 	s, ok := a.(snapshotter)
 	if !ok {
@@ -86,30 +73,24 @@ func snapshotSinceBoundary(a agent.Agent) []agent.Message {
 	}
 	full := s.Snapshot()
 	watermark := br.IterationBoundaryID()
-	for i := range full {
-		if full[i].HistoryID > watermark {
-			return full[i:]
-		}
+	idx := slices.IndexFunc(full, func(m agent.Message) bool { return m.HistoryID > watermark })
+	if idx < 0 {
+		return nil
 	}
-	return nil
+	return full[idx:]
 }
 
-// ExtractAndAppend appends a's iter messages onto the chronicle, each
-// tagged with iter. No-op when a doesn't expose a snapshot or boundary.
+// ExtractAndAppend appends a's iter messages onto the chronicle, tagged with iter.
 func (c *Chronicle) ExtractAndAppend(a agent.Agent, iter int) {
 	newMsgs := snapshotSinceBoundary(a)
 	if len(newMsgs) == 0 {
 		return
 	}
 	c.messages = append(c.messages, newMsgs...)
-	for range newMsgs {
-		c.iters = append(c.iters, iter)
-	}
+	c.iters = append(c.iters, slices.Repeat([]int{iter}, len(newMsgs))...)
 }
 
-// Compact applies in-place think-strip and tool-stub compaction to
-// chronicle messages older than the keepRecentIters window. Returns
-// counts of stripped and stubbed messages.
+// Compact strips and stubs messages older than keepRecentIters; returns counts.
 func (c *Chronicle) Compact(currentIter, keepRecentIters int) (stripped, stubbed int) {
 	if c == nil || len(c.messages) == 0 || keepRecentIters < 1 {
 		return 0, 0
@@ -132,9 +113,7 @@ func (c *Chronicle) Compact(currentIter, keepRecentIters int) (stripped, stubbed
 	return stripped, stubbed
 }
 
-// ApplySelfPrune mirrors a worker agent's self-prune onto the chronicle so
-// the next Install reflects the same pruned reality. Maintains the
-// messages/iters parallel-array invariant. Returns dropped tool-result count.
+// ApplySelfPrune drops tool-call IDs from the chronicle; returns dropped count.
 func (c *Chronicle) ApplySelfPrune(dropIDs []string) int {
 	if c == nil || len(dropIDs) == 0 || len(c.messages) == 0 {
 		return 0
@@ -155,12 +134,11 @@ func (c *Chronicle) ApplySelfPrune(dropIDs []string) int {
 	return dropped
 }
 
-// buildDropSet returns a non-empty-only set view of ids.
+// buildDropSet returns a set of non-empty ids.
 func buildDropSet(ids []string) map[string]struct{} {
 	return bulk.SliceToSet(bulk.SliceFilter(func(s string) bool { return s != "" }, ids))
 }
 
-// Reset clears the chronicle.
 func (c *Chronicle) Reset() {
 	if c == nil {
 		return
@@ -169,11 +147,14 @@ func (c *Chronicle) Reset() {
 	c.iters = nil
 }
 
-// CloneWithDirective returns a new Chronicle that prepends a user-role
-// directive (tagged with iter) onto a clone of the existing messages.
+// CloneWithDirective returns a Chronicle clone with directive prepended at iter.
 func (c *Chronicle) CloneWithDirective(directive string, iter int) Chronicle {
-	srcMsgs := c.Messages()
-	srcIters := c.iter()
+	var srcMsgs []agent.Message
+	var srcIters []int
+	if c != nil {
+		srcMsgs = c.messages
+		srcIters = c.iters
+	}
 	msgs := make([]agent.Message, 0, 1+len(srcMsgs))
 	msgs = append(msgs, agent.Message{Role: "user", Content: directive})
 	msgs = append(msgs, srcMsgs...)
@@ -181,11 +162,4 @@ func (c *Chronicle) CloneWithDirective(directive string, iter int) Chronicle {
 	iters = append(iters, iter)
 	iters = append(iters, srcIters...)
 	return Chronicle{messages: msgs, iters: iters}
-}
-
-func (c *Chronicle) iter() []int {
-	if c == nil {
-		return nil
-	}
-	return c.iters
 }

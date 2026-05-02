@@ -1,5 +1,4 @@
-// Command secagent runs the autonomous security exploration controller
-// against an OpenAI-compatible endpoint.
+// Command secagent is the autonomous security exploration controller.
 package main
 
 import (
@@ -36,10 +35,7 @@ func main() {
 	defer cancel()
 	sd := orchestrator.NewShutdown(ctx, log)
 
-	// Three-stage Ctrl+C / SIGTERM handling:
-	//   1. cancel non-validation workers, run final verification
-	//   2. interrupt the verifier, dump still-pending candidates as UNVALIDATED
-	//   3. hard-exit with status 130
+	// three-stage Ctrl+C / SIGTERM: verify-only, dump unvalidated, kill
 	sig := make(chan os.Signal, 4)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

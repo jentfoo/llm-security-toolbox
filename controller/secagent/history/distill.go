@@ -3,12 +3,12 @@ package history
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
 )
 
-// distillMaxTokens caps each per-batch model response.
 const distillMaxTokens = 4000
 
 const distillSystemPrompt = `You compress one or more tool-call results from a security-testing agent's history into 1-3 sentences of plain prose. Capture status codes, key fields, observed behavior, and cross-call patterns — anything the agent might need to reference later. Drop boilerplate, byte-level minutiae, and anything already obvious from the tool name. Return prose only — no preamble, no markdown headings or fences.`
@@ -20,9 +20,7 @@ const (
 	distillMinBatchBytes  = 2048
 )
 
-// DistillCallback returns an OnDistillResults callback that replaces
-// eligible tool-result content with model-generated prose summaries.
-// Returns nil when s is nil or unconfigured.
+// DistillCallback returns an OnDistillResults callback; nil if s is unconfigured.
 func DistillCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.Message) ([]agent.Message, error) {
 	return func(ctx context.Context, snapshot []agent.Message) ([]agent.Message, error) {
 		if s == nil || s.Pool == nil || s.Model == "" {
@@ -32,8 +30,7 @@ func DistillCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.M
 		if len(batches) == 0 {
 			return nil, nil
 		}
-		out := make([]agent.Message, len(snapshot))
-		copy(out, snapshot)
+		out := slices.Clone(snapshot)
 		var distilledBatches, distilledMsgs int
 		for batchIdx, b := range batches {
 			prose, err := runDistillBatch(ctx, s, b)
@@ -69,13 +66,12 @@ func DistillCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.M
 	}
 }
 
-// distillBatch groups snapshot indices and rendered calls summarized together.
+// distillBatch is one summarization batch.
 type distillBatch struct {
 	indices []int
 	calls   []distillCall
 }
 
-// distillCall is one tool-call/result pair for the distill prompt.
 type distillCall struct {
 	Name    string
 	Args    string
@@ -103,7 +99,11 @@ func buildDistillBatches(snapshot []agent.Message) []distillBatch {
 	var batches []distillBatch
 	var current distillBatch
 	flush := func() {
-		if len(current.indices) >= distillMinBatchEvents && batchByteLen(current) >= distillMinBatchBytes {
+		var total int
+		for _, c := range current.calls {
+			total += len(c.Content)
+		}
+		if len(current.indices) >= distillMinBatchEvents && total >= distillMinBatchBytes {
 			batches = append(batches, current)
 		}
 		current = distillBatch{}
@@ -151,15 +151,7 @@ func isDistillEligible(m agent.Message) bool {
 	return true
 }
 
-func batchByteLen(b distillBatch) int {
-	var total int
-	for _, c := range b.calls {
-		total += len(c.Content)
-	}
-	return total
-}
-
-// runDistillBatch returns the prose summary for one batch.
+// runDistillBatch returns the prose summary for batch b.
 func runDistillBatch(
 	ctx context.Context,
 	s *Summarizer,

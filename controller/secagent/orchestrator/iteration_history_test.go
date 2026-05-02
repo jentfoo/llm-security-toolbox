@@ -157,7 +157,7 @@ func TestDeriveIterationOutcome(t *testing.T) {
 			pool := NewCandidatePool()
 			dq := NewDecisionQueue()
 			cids := tc.populate(pool, dq)
-			out := DeriveIterationOutcome(tc.worker, nil, dq, pool, cids)
+			out := DeriveIterationOutcome(tc.worker, dq, pool, cids)
 			assert.Equal(t, tc.expectedKind, out)
 		})
 	}
@@ -212,24 +212,5 @@ func TestAppendIterationHistory(t *testing.T) {
 		entry := w.RecentHistory()[0]
 		assert.Equal(t, 3, entry.ToolCalls)
 		assert.Equal(t, 3, entry.FlowsTouched)
-	})
-}
-
-func TestTruncateAngle(t *testing.T) {
-	t.Parallel()
-
-	long := make([]byte, angleMaxLen+50)
-	for i := range long {
-		long[i] = 'a'
-	}
-
-	t.Run("whitespace_compressed", func(t *testing.T) {
-		assert.Equal(t, "compressed whitespace", truncateAngle("  compressed\t  whitespace\n"))
-	})
-
-	t.Run("long_input_truncated", func(t *testing.T) {
-		got := truncateAngle(string(long))
-		assert.Len(t, got, angleMaxLen)
-		assert.Equal(t, "…", got[len(got)-len("…"):])
 	})
 }

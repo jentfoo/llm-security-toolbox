@@ -14,14 +14,9 @@ func canonicalToolName(s string) string {
 	return underscoreRun.ReplaceAllString(strings.ToLower(s), "_")
 }
 
-// fuzzyContainsToolMatch returns the unique key in canonNames whose canonical
-// form is a word-bounded substring of req (or vice-versa). Returns "" when
-// zero or multiple keys match — ambiguity is not fuzzily resolved.
-//
-// Word-bounded means the match starts at string-start or after '_', and ends
-// at string-end or before '_'. Catches the common case where a model adds or
-// strips a namespace prefix (e.g. emits `mcp_sectool_decide_worker` for the
-// controller-side `decide_worker`).
+// fuzzyContainsToolMatch returns the unique key in canonNames whose
+// canonical form is a word-bounded substring of req (or vice-versa).
+// Returns "" on zero or multiple matches.
 func fuzzyContainsToolMatch(req string, canonNames map[string]string) string {
 	var match string
 	var matches int

@@ -7,8 +7,7 @@ import (
 	"strings"
 )
 
-// Logger is the minimal sink history needs for structured events.
-// orchestrator's *Logger satisfies this structurally.
+// Logger is a minimal structured-event sink.
 type Logger interface {
 	Log(tag, msg string, fields map[string]any)
 }
@@ -24,4 +23,18 @@ func Short(s string, n int) string {
 		return "…"
 	}
 	return s[:n-1] + "…"
+}
+
+func fallbackName(s string) string {
+	if s == "" {
+		return "?"
+	}
+	return s
+}
+
+func fallbackArgs(s string) string {
+	if s == "" {
+		return "{}"
+	}
+	return s
 }

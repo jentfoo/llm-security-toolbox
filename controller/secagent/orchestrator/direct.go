@@ -60,10 +60,8 @@ func (r *DecisionPhaseResult) Wait() map[int][]agent.TurnSummary {
 	return out
 }
 
-// RunDecisionPhase makes one decide_worker call per alive worker (in
-// deterministic ID order) and applies each decision to the worker. The
-// returned result holds join handles for the iter+1 runs fired by
-// continue/expand/fork decisions.
+// RunDecisionPhase records one decide_worker decision per alive worker and
+// returns the join handles for any iter+1 runs fired by those decisions.
 func RunDecisionPhase(
 	ctx context.Context,
 	in DecisionPhaseInput,
@@ -77,9 +75,7 @@ func RunDecisionPhase(
 	slices.SortFunc(alive, func(a, b *WorkerState) int { return cmp.Compare(a.ID, b.ID) })
 
 	for _, w := range alive {
-		// Shutdown short-circuit: skip default-continue + fire when ctx is
-		// already canceled so we don't spawn doomed worker runs that just
-		// produce drain-error log noise.
+		// shutdown short-circuit: don't spawn doomed runs on cancelled ctx
 		if ctx.Err() != nil {
 			if log != nil {
 				log.Log("decision", "phase aborted", map[string]any{"err": ctx.Err().Error()})
@@ -87,16 +83,11 @@ func RunDecisionPhase(
 			break
 		}
 
-		// Apply buffered self-prune drops before fresh activity is appended.
+		// drain buffered self-prunes before appending fresh activity
 		if drops := w.DrainSelfPrunes(); len(drops) > 0 {
 			in.DirChat.ApplyWorkerSelfPrune(w.ID, drops)
 			w.Chronicle.ApplySelfPrune(drops)
 		}
-		// Append this worker's iter activity to the canonical chat.
-		// Activity = whatever was added to the worker agent's history
-		// from the iteration boundary onward (assistant turns + tool
-		// calls + tool results). Snapshot BEFORE the agent runs its
-		// next iter run (which we'll fire after the decision lands).
 		activity := snapshotWorkerIterActivity(w)
 		in.DirChat.AppendWorkerActivity(w.ID, in.Iter, activity)
 
@@ -104,17 +95,12 @@ func RunDecisionPhase(
 		askWorker(ctx, in, w, log)
 		if len(in.Decisions.WorkerDecisions) == decisionsBefore {
 			if ctx.Err() != nil {
-				// askWorker drained against a canceled ctx. Don't record
-				// a stale default-continue or fire a doomed iter+1 run.
 				if log != nil {
 					log.Log("decision", "phase aborted", map[string]any{"err": ctx.Err().Error()})
 				}
 				break
 			}
-			// The director failed to record a decision (drain error or
-			// model didn't call the tool). Default to continue with the
-			// existing instruction so the worker doesn't silently lose
-			// its directive.
+			// no decision recorded — default-continue so the directive isn't lost
 			if log != nil {
 				log.Log("decision", "no-decision-defaulting-to-continue", map[string]any{
 					"worker_id": w.ID,
@@ -128,8 +114,6 @@ func RunDecisionPhase(
 		}
 
 		d := in.Decisions.WorkerDecisions[len(in.Decisions.WorkerDecisions)-1]
-		// Mirror the decision into the director chat so the next worker's
-		// per-worker prompt sees the decision in its peer-context.
 		appendDecisionToChat(in.DirChat, w.ID, in.Iter, d)
 
 		applyDecisionAndFire(ctx, in, w, d, res, log)
@@ -192,10 +176,6 @@ func applyDecisionAndFire(
 		}
 		w.AutonomousBudget = budget
 		w.LastInstruction = d.Instruction
-		// Reset per-iter state and fire the next-iter run as a goroutine.
-		// installChronicle puts the (compacted) chronicle + new directive
-		// onto the worker agent; the join captures the result for caller
-		// wait at iter end.
 		if in.Fire != nil {
 			w.Chronicle.Install(w.Agent, w.LastInstruction)
 			join := in.Fire(ctx, w)
@@ -209,10 +189,7 @@ func applyDecisionAndFire(
 			})
 		}
 	}
-	// Fork (optional): spawn the child, copy parent chronicle, fire its
-	// first iter run. Parent's own decision (continue/expand) already
-	// landed above; stop+fork is meaningless (spawning a child off a
-	// worker we're retiring) and we silently skip the fork in that case.
+	// stop+fork is meaningless (child of a retired worker), so skip
 	if d.Fork != nil && d.Kind != "stop" && in.SpawnChild != nil {
 		nw, err := in.SpawnChild(ctx, d.Fork.NewWorkerID, d.Fork.Instruction)
 		if err != nil {
@@ -223,16 +200,11 @@ func applyDecisionAndFire(
 			}
 			return
 		}
-		// Inherit parent's chronicle: clone with an inheritance header
-		// prepended so the next install reads cleanly.
-		nw.Chronicle = w.Chronicle.CloneWithDirective(
-			forkInheritanceHeader(w.ID, in.Iter, nw.ID), in.Iter,
-		)
-		// Append child to the workers slice via the shared callback so
-		// the controller can see it. We don't mutate Workers here
-		// directly because the slice is owned by the controller. Instead,
-		// rely on the spawn callback to do the append.
-		// Fire the child's iter run.
+		header := "[Inherited investigative history from worker " + strconv.Itoa(w.ID) +
+			" at iter " + strconv.Itoa(in.Iter) +
+			". The remainder of this chronicle records that worker's prior turns; you are now worker " +
+			strconv.Itoa(nw.ID) + ", picking up the thread under a new directive.]"
+		nw.Chronicle = w.Chronicle.CloneWithDirective(header, in.Iter)
 		if in.Fire != nil {
 			nw.Chronicle.Install(nw.Agent, nw.LastInstruction)
 			join := in.Fire(ctx, nw)
@@ -282,15 +254,6 @@ func appendDecisionToChat(c *DirectorChat, workerID, iter int, d WorkerDecision)
 	c.Append(agent.Message{Role: "user", Content: body}, workerID, iter)
 }
 
-// forkInheritanceHeader returns the chronicle handoff header prepended
-// to a forked child's inherited chronicle.
-func forkInheritanceHeader(parentID, iter, newID int) string {
-	return "[Inherited investigative history from worker " + strconv.Itoa(parentID) +
-		" at iter " + strconv.Itoa(iter) +
-		". The remainder of this chronicle records that worker's prior turns; you are now worker " +
-		strconv.Itoa(newID) + ", picking up the thread under a new directive.]"
-}
-
 // SynthesisPhaseInput bundles the inputs to RunSynthesisPhase.
 type SynthesisPhaseInput struct {
 	Director        agent.Agent
@@ -306,10 +269,8 @@ type SynthesisPhaseInput struct {
 	MaxWorkers      int
 }
 
-// RunSynthesisPhase runs the post-decision synthesis call against
-// in.Director, populating in.Decisions via the synthesis tools. Returns
-// true; if the director didn't close the phase, direction_done is
-// auto-recorded.
+// RunSynthesisPhase runs the post-decision synthesis call. If the director
+// didn't close the phase explicitly, direction_done is auto-recorded.
 func RunSynthesisPhase(
 	ctx context.Context,
 	in SynthesisPhaseInput,

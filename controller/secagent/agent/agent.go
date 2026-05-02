@@ -15,7 +15,7 @@ const (
 	RoleTool      = "tool"
 )
 
-// EscalationReason values surfaced to the orchestrator.
+// Escalation reasons.
 const (
 	escalationCandidate        = "candidate"
 	escalationSilent           = "silent"
@@ -23,7 +23,7 @@ const (
 	escalationContextExhausted = "context_exhausted"
 )
 
-// Phase identifies which orchestrator phase an in-process tool is gated for.
+// Phase gates in-process tools to an orchestrator phase.
 type Phase int
 
 const (
@@ -82,7 +82,7 @@ type TurnSummary struct {
 	TimedOut         bool
 }
 
-// Agent is the sole interface used by the orchestrator.
+// Agent is the orchestrator's interface to a chat model.
 type Agent interface {
 	Query(content string)
 	Drain(ctx context.Context) (TurnSummary, error)

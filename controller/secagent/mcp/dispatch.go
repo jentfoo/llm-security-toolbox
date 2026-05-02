@@ -2,8 +2,8 @@ package mcp
 
 import "fmt"
 
-// TruncateResult applies the per-tool-result cap with the instructive notice.
-// When s fits under maxBytes (or maxBytes <= 0), s is returned unchanged.
+// TruncateResult caps s at maxBytes, appending a notice that instructs the
+// caller to narrow the next call. maxBytes <= 0 disables the cap.
 func TruncateResult(s string, maxBytes int) string {
 	if maxBytes <= 0 || len(s) <= maxBytes {
 		return s

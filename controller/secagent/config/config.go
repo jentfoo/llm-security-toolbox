@@ -12,7 +12,7 @@ type Config struct {
 	// Connection
 	BaseURL       string
 	APIKey        string
-	Model         string // workers, verifier, director, Summarizer, verifier-side dedup
+	Model         string // workers, verifier, director, summarizer, verifier-side dedup
 	LogModel      string // narrator, candidate-dedup classifier, async-merge; defaults to Model
 	AgentPoolSize int    // shared pool size
 
@@ -39,7 +39,7 @@ type Config struct {
 	MaxParallelTools int
 	MaxTurnsPerAgent int
 	FindingsDir      string
-	SkipRecon        bool // when true, iter 1 spawns a normal testing worker instead of the recon worker
+	SkipRecon        bool // iter 1 spawns a normal worker instead of recon
 
 	// Stall
 	StallWarnAfter int
@@ -51,24 +51,22 @@ type Config struct {
 	LogFile             string
 }
 
-// NarrateTimeout returns the per-summary narrator call timeout, floored
-// at 15 minutes so slow reasoning models don't time out routinely.
+// NarrateTimeout returns the per-summary narrator call timeout.
 func (c *Config) NarrateTimeout() time.Duration {
+	// 15-minute floor so slow reasoning models don't time out routinely
 	return max(2*c.NarrateInterval, 15*time.Minute)
 }
 
-// LogPoolSize returns the dedicated log-pool capacity. A distinct log model
-// gets 2 slots so async narration overlaps with itself without queueing on
-// the main pool; a missing or matching log model gets 1, since the calls land
-// on the same backend as main work and one-at-a-time is enough.
+// LogPoolSize returns the dedicated log-pool capacity.
 func (c *Config) LogPoolSize() int {
+	// shared backend → 1 slot; distinct log model → 2 so async narration can overlap
 	if c.LogModel == "" || c.LogModel == c.Model {
 		return 1
 	}
 	return 2
 }
 
-// Bounds used for clamping.
+// Clamping bounds.
 const (
 	MinWorkers          = 1
 	MaxWorkers          = 5
@@ -76,8 +74,7 @@ const (
 	DefaultAutoBudget   = 8
 )
 
-// Parse parses os.Args (via the default flag set) and returns a Config.
-// Any validation error causes os.Exit via flag.CommandLine.
+// Parse parses args against fs and returns a populated Config.
 func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	c := &Config{}
 
@@ -102,7 +99,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.MaxIterations, "max-iterations", 30, "hard iteration cap")
 	fs.IntVar(&c.MaxWorkers, "max-workers", 4, "max parallel workers")
 	fs.IntVar(&c.AutonomousBudget, "autonomous-budget", DefaultAutoBudget, "turns per worker per iteration")
-	// Defaults sized generously for slow local models with long tool chains.
+	// Defaults generous for slow local models with long tool chains.
 	fs.DurationVar(&c.TurnTimeout, "turn-timeout", 10*time.Minute, "per-turn ctx timeout")
 	fs.DurationVar(&c.PerToolTimeout, "per-tool-timeout", 5*time.Minute, "per-tool-call ctx timeout")
 	fs.IntVar(&c.MaxParallelTools, "max-parallel-tools", 4, "max concurrent in-flight tool calls per assistant response")
@@ -134,15 +131,13 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	return c, nil
 }
 
-// EffectiveKeepThinkTurns returns the number of recent assistant messages
-// that should retain their `<think>` blocks when replaying history to the
-// model. An explicit positive KeepThinkTurns takes precedence; otherwise
-// auto-resolves based on maxContext — small contexts get a tighter window
-// (4) since think blocks can be large, larger contexts keep 8.
+// EffectiveKeepThinkTurns returns how many recent assistant messages should
+// retain their <think> blocks when replaying history.
 func (c *Config) EffectiveKeepThinkTurns(maxContext int) int {
 	if c.KeepThinkTurns > 0 {
 		return c.KeepThinkTurns
 	}
+	// tighter window for small contexts; think blocks can be large
 	if maxContext <= 128_000 {
 		return 4
 	}

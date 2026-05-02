@@ -63,7 +63,10 @@ func formatAutonomousRun(workerID int, turns []agent.TurnSummary, escalationReas
 		if len(s.FlowIDs) > 0 {
 			flows = strings.Join(s.FlowIDs, ", ")
 		}
-		firstLine := firstNonEmptyLine(s.AssistantText)
+		firstLine := strings.TrimSpace(s.AssistantText)
+		if i := strings.IndexByte(firstLine, '\n'); i >= 0 {
+			firstLine = strings.TrimSpace(firstLine[:i])
+		}
 		if firstLine == "" {
 			firstLine = "(no text)"
 		}
@@ -77,14 +80,6 @@ func formatAutonomousRun(workerID int, turns []agent.TurnSummary, escalationReas
 	parts = append(parts, fmt.Sprintf("Last turn tool calls (%d):", len(last.ToolCalls)))
 	parts = append(parts, formatToolCalls(last.ToolCalls, 10))
 	return strings.Join(parts, "\n")
-}
-
-func firstNonEmptyLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return s
 }
 
 func formatPendingCandidates(pending []FindingCandidate) string {

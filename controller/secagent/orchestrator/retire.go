@@ -62,7 +62,7 @@ func (q *RetireQueue) Submit(w *WorkerState, reason string, iter int) {
 	q.wg.Add(1)
 	go func() {
 		defer q.wg.Done()
-		// Fast bail when run is already cancelled.
+		// pre-cancel bail
 		if err := q.ctx.Err(); err != nil {
 			return
 		}

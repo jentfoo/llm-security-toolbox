@@ -25,8 +25,7 @@ const (
 	summarizeTimeout   = 20 * time.Minute
 )
 
-// SummarizeReconMission returns a recon-scoped goal derived from mission
-// (testing/exploitation language stripped).
+// SummarizeReconMission returns a recon-scoped goal derived from mission.
 func (s *Summarizer) SummarizeReconMission(ctx context.Context, mission string) (string, error) {
 	if s == nil || s.Pool == nil || s.Model == "" {
 		return "", errors.New("summarizer: not configured")
@@ -68,16 +67,10 @@ func (s *Summarizer) SummarizeCompletedWorker(
 	if len(transcript) == 0 {
 		return "", errors.New("summarizer: empty transcript")
 	}
-	// Tool errors (unknown-tool synthetics, MCP failures, malformed-arg
-	// repair stubs) are noise to the summarizer — the recap describes what
-	// the worker LEARNED, not what it bumbled. Stripping them reclaims a
-	// large slice of context on noisy runs.
+	// strip tool errors — they're noise to the recap
 	transcript = agent.FilterErrorMessages(transcript)
 	if !agent.HasSubstantiveMessages(transcript) {
-		// Filtered transcript is system/user only — nothing happened
-		// worth summarizing. Skip the LLM call rather than spend budget
-		// recapping noise. retire.go's empty-summary path keeps raw
-		// worker activity in dirChat as the existing fall-through.
+		// noise-only transcript — skip the LLM call
 		if s.Log != nil {
 			s.Log.Log("summarize", "completed-worker skip-noise-only", map[string]any{
 				"worker_id": workerID,
@@ -116,9 +109,7 @@ func (s *Summarizer) oneShot(ctx context.Context, system, user string) (string, 
 	return RunOneShot(cctx, s.Pool, s.Model, system, user, maxTokens, agent.CompressionReasoningEffort, nil)
 }
 
-// RenderSnapshotForSummary returns snapshot rendered as a readable
-// transcript with inlined tool calls and results. Used by both the
-// retired-worker summarizer and the orchestrator narrator.
+// RenderSnapshotForSummary returns snapshot as a readable transcript with inlined tool calls and results.
 func RenderSnapshotForSummary(snapshot []agent.Message) string {
 	var b strings.Builder
 	for i, m := range snapshot {
@@ -149,8 +140,7 @@ func RenderSnapshotForSummary(snapshot []agent.Message) string {
 			}
 			fmt.Fprintf(&b, "TOOL [%s]: %s\n", name, Short(m.Content, 2400))
 		case "system":
-			// Skipped — the agent already has the system prompt; summary
-			// input shouldn't repeat it.
+			// system already known by agent; skip
 			continue
 		default:
 			fmt.Fprintf(&b, "%s: %s\n", m.Role, Short(m.Content, 2000))

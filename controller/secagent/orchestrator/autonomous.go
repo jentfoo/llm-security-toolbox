@@ -12,10 +12,10 @@ import (
 
 // StatusSummaryInterval is the turn count between periodic status summaries
 // per agent. 0 disables.
-var StatusSummaryInterval int = 0
+var StatusSummaryInterval int
 
-// emitStatusIfDue logs a one-line status summary when turn is a non-zero
-// multiple of StatusSummaryInterval and a is an *agent.OpenAIAgent.
+// emitStatusIfDue logs a one-line status summary when StatusSummaryInterval
+// gates this turn. No-op when log is nil or a is not an OpenAI agent.
 func emitStatusIfDue(ctx context.Context, a agent.Agent, tag string, turn int, log *Logger) {
 	if StatusSummaryInterval <= 0 || turn == 0 || turn%StatusSummaryInterval != 0 {
 		return
@@ -36,8 +36,8 @@ func emitStatusIfDue(ctx context.Context, a agent.Agent, tag string, turn int, l
 	}
 }
 
-// drainOne runs one agent Drain, classifies the turn against candidates,
-// appends it to w.AutonomousTurns, and returns the summary.
+// drainOne drains one turn on w and returns its summary, also appending
+// it to w.AutonomousTurns and updating the worker's escalation reason.
 func drainOne(
 	ctx context.Context,
 	w *WorkerState,
@@ -76,8 +76,8 @@ func drainOne(
 	return summary, nil
 }
 
-// updateToolErrorSignatures appends each error tool call's signature to
-// w.RecentToolErrors and clears w.CoachedErrorSig if any call succeeded.
+// updateToolErrorSignatures records summary's error-tool signatures into
+// w.RecentToolErrors. Any successful call clears w.CoachedErrorSig.
 func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
 	var sawSuccess bool
 	for _, tc := range summary.ToolCalls {
@@ -106,10 +106,9 @@ func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
 // autonomous phase to nudge the model to its next turn.
 const intraPhaseContinuePrompt = "Continue your current testing plan. Take the next concrete step."
 
-// RunWorkerUntilEscalation drains up to w.AutonomousBudget turns (capped
-// at 20) or until the worker escalates, returning the turn summaries.
-// w.EscalationReason is set on return. The caller must install the
-// worker's per-iteration history before invoking.
+// RunWorkerUntilEscalation drains w up to its AutonomousBudget (capped at
+// 20) or until escalation. Returns each turn's summary and sets
+// w.EscalationReason. Caller must install the per-iter chronicle first.
 func RunWorkerUntilEscalation(
 	ctx context.Context,
 	w *WorkerState,
@@ -138,9 +137,8 @@ func RunWorkerUntilEscalation(
 	return runs, nil
 }
 
-// runOneWorker drains one alive worker for one iteration with one
-// recovery attempt on mid-iter error, returning the turn summaries.
-// w.EscalationReason and w.AutonomousTurns are reset before draining.
+// runOneWorker drains w for one iteration and returns the turn summaries.
+// One recovery attempt is made on mid-iter error.
 func runOneWorker(
 	ctx context.Context,
 	w *WorkerState,

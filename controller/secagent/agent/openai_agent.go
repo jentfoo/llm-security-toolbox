@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// TruncationNotice is appended to truncated tool results. Exported so MCP
-// dispatch can share the format.
+// TruncationNotice is the user-facing message appended to truncated tool
+// results.
 const TruncationNotice = "\n…(truncated: %d of %d bytes shown. Reduce scope — e.g., add filters, raise `since`, or request specific fields — then call again.)"
 
 // OpenAIAgentConfig configures a single agent instance.
@@ -35,9 +35,8 @@ type OpenAIAgentConfig struct {
 	// Reasoning is the format-specific reasoning handler. Nil defaults to
 	// the inline handler.
 	Reasoning ReasoningHandler
-	// OnHardTruncate fires once after sendWithRetry's overflow-recovery
-	// hard-truncate. Compaction-policy events come from the Compactor's own
-	// OnCompact hook; this is the agent-internal recovery path.
+	// OnHardTruncate fires once after sendWithRetry hard-truncates to
+	// recover from a context-overflow rejection (optional).
 	OnHardTruncate func(CompactionReport)
 	// OnContextOverflow fires once per sendWithRetry call when the model
 	// rejected the request as over-context (optional).
@@ -171,7 +170,7 @@ func (a *OpenAIAgent) Interrupt() {
 	}
 }
 
-// Close is a no-op for OpenAIAgent (pool + history have no OS handles).
+// Close is a no-op for OpenAIAgent.
 func (a *OpenAIAgent) Close() error { return nil }
 
 // ContextUsage returns (tokens, max).
@@ -179,8 +178,8 @@ func (a *OpenAIAgent) ContextUsage() (int, int) {
 	return a.history.EstimateTokens(), a.history.MaxContext()
 }
 
-// EffectiveContextUsage is like ContextUsage but reports the post-shrink
-// ceiling that the agent will be measured against on the next send.
+// EffectiveContextUsage is like ContextUsage but reports the effective
+// context ceiling.
 func (a *OpenAIAgent) EffectiveContextUsage() (tokens, max int) {
 	return a.history.EstimateTokens(), a.history.EffectiveMaxContext()
 }
@@ -205,9 +204,9 @@ func (a *OpenAIAgent) LastHistoryID() uint64 {
 	return last.HistoryID
 }
 
-// SnapshotSinceID returns post-system messages following the message with
-// HistoryID == id, normalized via Reasoning.ForSummary. When id is 0 or has
-// been compacted away, returns all post-system messages.
+// SnapshotSinceID returns post-system messages whose HistoryID > id,
+// normalized for summary use. Returns all post-system messages when id is
+// 0 or has been compacted away.
 func (a *OpenAIAgent) SnapshotSinceID(id uint64) []Message {
 	snap := a.history.Snapshot()
 	if len(snap) == 0 {
@@ -345,11 +344,9 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 		}
 		summary.TokensOut += resp.Usage.CompletionTokens
 
-		// Delegate format-specific storage to the reasoning handler: inline
-		// keeps raw <think> in Content; structured splits Content from the
-		// dedicated ReasoningContent field. Observability (AssistantText,
-		// flow IDs) operates on stripped Content — reasoning is for replay
-		// and summary, not for flow extraction.
+		// reasoning handler decides storage shape (inline keeps <think> in
+		// Content; structured splits via ReasoningContent). observability
+		// uses stripped Content
 		storeContent, storeReasoning := a.cfg.Reasoning.Ingest(resp)
 		stripped := StripThinkBlocks(storeContent)
 		if len(resp.ToolCalls) == 0 {
@@ -482,8 +479,8 @@ func (a *OpenAIAgent) dispatchToolCalls(
 	}
 }
 
-// runSingleTool invokes one handler with the per-tool timeout and start/end
-// callbacks, returning a self-contained outcome. Safe for concurrent use.
+// runSingleTool invokes one handler with the per-tool timeout and
+// start/end callbacks, returning a self-contained outcome.
 func (a *OpenAIAgent) runSingleTool(
 	inner context.Context,
 	tc ToolCall,
@@ -581,10 +578,11 @@ func (a *OpenAIAgent) runSingleTool(
 	}
 }
 
-// formatRepairError renders the error the model sees when its tool_call
-// arguments do not parse. The tool schema is embedded when known.
+// maxRepairSchemaBytes caps the tool schema embedded in repair errors.
 const maxRepairSchemaBytes = 500
 
+// formatRepairError renders the error sent to the model when its tool_call
+// arguments fail to parse. The tool schema is embedded when known.
 func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string {
 	a.mu.Lock()
 	var schemaJSON []byte
@@ -610,10 +608,8 @@ func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string
 	)
 }
 
-// sendWithRetry dispatches one chat-completion request, applying a typed
-// retry policy. ErrRateLimit and ErrTransientNet retry up to DrainRetryMax;
-// ErrContextOverflow triggers a single in-place hard-truncate retry; other
-// categories propagate immediately.
+// sendWithRetry dispatches one chat-completion request and applies the
+// typed retry policy from Classify and BackoffFor.
 func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	a.mu.Lock()
 	tools := a.tools
@@ -634,9 +630,9 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 			return ChatResponse{}, err
 
 		case ErrContextOverflow:
-			// Once-per-call fast-path. Shrink EffectiveMaxContext based on
-			// what was just rejected, force-truncate, and retry without
-			// debiting the retry budget — the truncate itself is the fix.
+			// once-per-call fast-path: shrink ceiling, force-truncate, retry
+			// without debiting the retry budget — the truncate itself is the
+			// fix
 			if hardTruncated {
 				return ChatResponse{}, err
 			}
@@ -686,21 +682,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// isContextRejectedError reports whether err came from the upstream model
-// rejecting the request as too large.
-func isContextRejectedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "context size has been exceeded") ||
-		strings.Contains(s, "context_length_exceeded") ||
-		strings.Contains(s, "maximum context length") ||
-		strings.Contains(s, "context window")
-}
-
-// dispatchChatRequest acquires a pooled client, runs one request with
-// start/end callbacks, and releases the client.
+// dispatchChatRequest sends one chat completion using a pooled client.
 func (a *OpenAIAgent) dispatchChatRequest(
 	ctx context.Context, attempt int, msgs []ChatMessage, tools []ChatTool,
 ) (ChatResponse, error) {
@@ -728,8 +710,7 @@ func (a *OpenAIAgent) dispatchChatRequest(
 	return resp, err
 }
 
-// buildChatMessages returns history filtered to OpenAI-compatible shape via
-// the agent's reasoning handler. History storage is not mutated.
+// buildChatMessages returns the next request's chat messages.
 func (a *OpenAIAgent) buildChatMessages() []ChatMessage {
 	snap := a.cfg.Reasoning.Replay(a.history.Snapshot(), a.cfg.KeepThinkTurns)
 	out := make([]ChatMessage, 0, len(snap))

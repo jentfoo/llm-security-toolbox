@@ -73,18 +73,12 @@ Embed cross-worker context verbatim. Workers do NOT see each other's tool calls 
 Up to %d concurrent workers. Each worker owns a narrow, mutually-exclusive slice of the surface. Under-parallelizing is the more common failure — a lone worker scatters coverage.
 `
 
-// BuildDirectorDecisionSystemPrompt returns the director prompt scoped to
-// the per-worker decision phase. Only `decide_worker` is described; the
-// synthesis tools are deliberately absent so the model does not hallucinate
-// calls to them mid-decision.
+// BuildDirectorDecisionSystemPrompt returns the director prompt for the per-worker decision phase.
 func BuildDirectorDecisionSystemPrompt(maxWorkers int) string {
 	return fmt.Sprintf(directorDecisionBase, maxWorkers)
 }
 
-// BuildDirectorSynthesisSystemPrompt returns the director prompt scoped to
-// the synthesis phase. Describes plan_workers / direction_done / end_run;
-// decide_worker is intentionally not mentioned because per-worker decisions
-// are finalized in a separate pass before synthesis runs.
+// BuildDirectorSynthesisSystemPrompt returns the director prompt for the synthesis phase.
 func BuildDirectorSynthesisSystemPrompt(maxWorkers int) string {
 	return fmt.Sprintf(directorSynthesisBase, maxWorkers)
 }

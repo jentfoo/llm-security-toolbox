@@ -83,9 +83,8 @@ func (h *History) Append(m Message) {
 	h.messages = append(h.messages, m)
 }
 
-// SetPromptTokens records the server-reported prompt token count n. Used
-// by EstimateTokens as the baseline for future growth and feeds the
-// package-level calibration EMA.
+// SetPromptTokens records the server-reported prompt token count n and
+// updates the calibration EMA baseline.
 func (h *History) SetPromptTokens(n int) {
 	h.mu.Lock()
 	raw := h.rawEstimateRangeLocked(0, len(h.messages))
@@ -100,9 +99,8 @@ func (h *History) MaxContext() int {
 	return h.maxContext
 }
 
-// EffectiveMaxContext returns the smaller of the configured ceiling and any
-// shrinkage learned from context-rejected errors. Use this for watermark
-// math so adaptive shrinkage takes effect.
+// EffectiveMaxContext returns the smaller of the configured ceiling and
+// any shrinkage learned from context-rejected errors.
 func (h *History) EffectiveMaxContext() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -139,8 +137,7 @@ func (h *History) Calibration() float64 {
 }
 
 // EstimateTokens returns the estimated total prompt token count for the
-// current history. Uses the last server-reported count as a baseline and
-// adds an estimate for messages appended since.
+// current history.
 func (h *History) EstimateTokens() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()

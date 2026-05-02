@@ -6,16 +6,14 @@ import (
 )
 
 // PhaseRecover holds optional hooks for one-shot phase recovery.
-// Compact runs between the failed first attempt and the retry; OnExhausted
-// runs when the retry also fails. Both are optional.
 type PhaseRecover struct {
-	Compact     func()
-	OnExhausted func(err error)
+	Compact     func()          // optional; runs between attempts
+	OnExhausted func(err error) // optional; runs after final failure
 }
 
-// RunPhaseAttempt runs attempt once; on non-context error it invokes
-// policy.Compact, retries once, and on further failure invokes
-// policy.OnExhausted. Context errors propagate immediately.
+// RunPhaseAttempt runs attempt with one-shot recovery via policy. Context
+// errors propagate immediately; other errors trigger Compact then a retry,
+// with OnExhausted called on second failure.
 func RunPhaseAttempt[T any](
 	ctx context.Context,
 	attempt func(context.Context) (T, error),

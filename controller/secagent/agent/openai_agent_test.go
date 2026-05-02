@@ -309,28 +309,6 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 	assert.Equal(t, 3, int(flaky.idx))
 }
 
-func TestIsContextRejectedError(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"unrelated_net_err", errors.New("connection refused"), false},
-		{"local_model_phrasing", errors.New(`error, status code: 400, status: 400 Bad Request, message: , body: {"error":"Context size has been exceeded."}`), true},
-		{"openai_code", errors.New("context_length_exceeded"), true},
-		{"maximum_context_length", errors.New("This model's maximum context length is 8192 tokens"), true},
-		{"context_window_phrasing", errors.New("request exceeds context window"), true},
-		{"case_insensitive", errors.New("CONTEXT_LENGTH_EXCEEDED"), true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			assert.Equal(t, c.want, isContextRejectedError(c.err))
-		})
-	}
-}
-
 func TestOpenAIAgent_SendWithRetry_ContextRejectedRecovery(t *testing.T) {
 	t.Parallel()
 	// First call returns a context-exceeded 400; second call succeeds.

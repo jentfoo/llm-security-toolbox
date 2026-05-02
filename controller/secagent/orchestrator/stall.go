@@ -45,7 +45,10 @@ func UpdateStallStreaks(workers []*WorkerState) {
 			w.ProgressNoneStreak++
 		}
 		if repeated && w.CoachedErrorSig != repeatedSig && w.Agent != nil {
-			w.Agent.Query(buildRepeatedErrorCoaching(repeatedSig))
+			w.Agent.Query(fmt.Sprintf(
+				"Your last several tool calls returned the same error: %q. Try a different tool or approach. If you're stuck, report what you've learned via report_finding_candidate and describe the blocker.",
+				repeatedSig,
+			))
 			w.CoachedErrorSig = repeatedSig
 		}
 	}
@@ -65,15 +68,6 @@ func repeatedErrorSignature(sigs []string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// buildRepeatedErrorCoaching returns the coaching nudge for a worker
-// stuck on the error signature sig.
-func buildRepeatedErrorCoaching(sig string) string {
-	return fmt.Sprintf(
-		"Your last several tool calls returned the same error: %q. Try a different tool or approach. If you're stuck, report what you've learned via report_finding_candidate and describe the blocker.",
-		sig,
-	)
 }
 
 // hasProductiveTurn reports whether any turn issued a tool call or

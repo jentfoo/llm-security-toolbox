@@ -1,5 +1,5 @@
-// Package mcp wraps the mark3labs/mcp-go streamable HTTP client and
-// exposes a sectool-tool-to-ToolDef bridge.
+// Package mcp wraps the mark3labs/mcp-go streamable HTTP client and exposes
+// sectool tools as agent.ToolDef values.
 package mcp
 
 import (
@@ -23,7 +23,8 @@ type Client struct {
 	url string
 }
 
-// Connect initializes and returns an MCP client.
+// Connect dials url and initializes the MCP session. Closes the underlying
+// client on initialize failure.
 func Connect(ctx context.Context, url string) (*Client, error) {
 	httpClient := &http.Client{Timeout: 25 * time.Minute}
 	cl, err := mcpclient.NewStreamableHttpClient(url, transport.WithHTTPBasicClient(httpClient))
@@ -41,9 +42,8 @@ func Connect(ctx context.Context, url string) (*Client, error) {
 	return &Client{c: cl, url: url}, nil
 }
 
-// Close closes the underlying MCP client.
 func (c *Client) Close() error {
-	if c == nil || c.c == nil {
+	if c == nil {
 		return nil
 	}
 	return c.c.Close()
@@ -58,20 +58,16 @@ func (c *Client) ListTools(ctx context.Context) ([]mcp.Tool, error) {
 	return res.Tools, nil
 }
 
-// CallTool invokes a tool, returns the concatenated text and error flag.
+// CallTool invokes a tool and returns its concatenated text content and the
+// is_error flag from the response.
 func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (string, bool, error) {
 	req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: name, Arguments: args}}
 	res, err := c.c.CallTool(ctx, req)
 	if err != nil {
 		return "", true, err
 	}
-	text := extractTextContent(res.Content)
-	return text, res.IsError, nil
-}
-
-func extractTextContent(content []mcp.Content) string {
 	var sb strings.Builder
-	for i, ci := range content {
+	for i, ci := range res.Content {
 		if tc, ok := ci.(mcp.TextContent); ok {
 			if i > 0 {
 				sb.WriteString("\n")
@@ -79,12 +75,11 @@ func extractTextContent(content []mcp.Content) string {
 			sb.WriteString(tc.Text)
 		}
 	}
-	return sb.String()
+	return sb.String(), res.IsError, nil
 }
 
-// BuildToolDefs lists sectool tools and wraps each as an agent.ToolDef whose
-// handler dispatches through this client with per-result truncation. Tool
-// names are prefixed with `prefix`.
+// BuildToolDefs returns one agent.ToolDef per sectool tool. Names are
+// prefixed with prefix; results are truncated to maxResultBytes.
 func (c *Client) BuildToolDefs(ctx context.Context, prefix string, maxResultBytes int) ([]agent.ToolDef, error) {
 	tools, err := c.ListTools(ctx)
 	if err != nil {
@@ -92,22 +87,25 @@ func (c *Client) BuildToolDefs(ctx context.Context, prefix string, maxResultByte
 	}
 	defs := make([]agent.ToolDef, 0, len(tools))
 	for _, t := range tools {
-		name := t.Name
-		prefixed := prefix + name
-		schema, err := toolSchemaAsMap(t)
+		raw, err := json.Marshal(t.InputSchema)
 		if err != nil {
-			return nil, fmt.Errorf("mcp: schema for %s: %w", name, err)
+			return nil, fmt.Errorf("mcp: schema for %s: %w", t.Name, err)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			return nil, fmt.Errorf("mcp: schema for %s: %w", t.Name, err)
 		}
 		defs = append(defs, agent.ToolDef{
-			Name:        prefixed,
+			Name:        prefix + t.Name,
 			Description: t.Description,
 			Schema:      schema,
-			Handler:     c.dispatchHandler(name, maxResultBytes),
+			Handler:     c.dispatchHandler(t.Name, maxResultBytes),
 		})
 	}
 	return defs, nil
 }
 
+// dispatchHandler returns a ToolHandler that calls realName via this client.
 func (c *Client) dispatchHandler(realName string, maxResultBytes int) agent.ToolHandler {
 	return func(ctx context.Context, args json.RawMessage) agent.ToolResult {
 		var m map[string]any
@@ -129,17 +127,4 @@ func (c *Client) dispatchHandler(realName string, maxResultBytes int) agent.Tool
 		text = TruncateResult(text, maxResultBytes)
 		return agent.ToolResult{Text: text, IsError: isErr}
 	}
-}
-
-// toolSchemaAsMap converts mcp.ToolInputSchema to a JSON-schema-compatible map.
-func toolSchemaAsMap(t mcp.Tool) (map[string]any, error) {
-	raw, err := json.Marshal(t.InputSchema)
-	if err != nil {
-		return nil, err
-	}
-	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
 }

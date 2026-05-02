@@ -448,8 +448,7 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 				action := strings.ToLower(strings.TrimSpace(in.Action))
 				switch action {
 				case decideActionContinue:
-					// instruction is optional for continue: empty falls back to
-					// the generic continue directive at apply time.
+					// continue: empty instruction → defaultContinueDirective at apply time
 					if strings.TrimSpace(in.Instruction) == "" {
 						in.Instruction = defaultContinueDirective
 					}
@@ -638,8 +637,7 @@ func SynthesisToolDefs(
 						continue
 					}
 					seen[p.WorkerID] = true
-					// Reject completed IDs explicitly. Alive IDs are fine
-					// (retarget). Fresh IDs are fine (spawn).
+					// alive → retarget, fresh → spawn, completed → reject
 					if done != nil && done[p.WorkerID] {
 						reasons = append(reasons, fmt.Sprintf(
 							"plans[%d]: worker_id=%d is a retired worker — pick a fresh integer (taken: %s)",

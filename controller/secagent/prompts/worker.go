@@ -59,7 +59,5 @@ const reconWorkerBase = `You are the **recon worker**. Your single job is to map
 4. When the surface is mapped, end your turn with a concise observation summary. Your work will be distilled into a recon summary that anchors the testing workers spawned after you.
 `
 
-// BuildReconWorkerSystemPrompt returns the iter-1 recon worker's
-// system prompt. The recon worker is always solo and always worker 1,
-// so role-sizing is implicit.
+// BuildReconWorkerSystemPrompt returns the recon worker system prompt.
 func BuildReconWorkerSystemPrompt() string { return reconWorkerBase }

@@ -44,7 +44,12 @@ func Classify(err error) (ErrCategory, time.Duration) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return ErrDeadline, 0
 	}
-	if isContextRejectedError(err) {
+	// upstream context-overflow rejection
+	emsg := strings.ToLower(err.Error())
+	if strings.Contains(emsg, "context size has been exceeded") ||
+		strings.Contains(emsg, "context_length_exceeded") ||
+		strings.Contains(emsg, "maximum context length") ||
+		strings.Contains(emsg, "context window") {
 		return ErrContextOverflow, 0
 	}
 

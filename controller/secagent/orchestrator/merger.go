@@ -39,9 +39,7 @@ func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		// Fast-path bail when the run is already cancelled — important
-		// because select picks randomly when both cases are ready, so a
-		// pre-cancelled ctx would otherwise still race the semaphore send.
+		// pre-cancel bail: select races a cancelled ctx against semaphore send
 		if err := m.ctx.Err(); err != nil {
 			return
 		}

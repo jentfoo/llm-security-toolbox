@@ -187,15 +187,12 @@ func (noReasoningHandler) ForSummary(msgs []Message) []Message       { return ms
 func (noReasoningHandler) Extract(resp ChatResponse) string          { return ExtractProse(resp.Content) }
 func (noReasoningHandler) Tail(_ ChatResponse) string                { return "" }
 
-// reasoningProbePrompt is the question sent during format detection.
-// Picked because it reliably induces multi-step thinking in reasoning-
-// trained models (requires explanation of three interacting physical
-// phenomena) while being cheap and obvious to classify afterward.
+// reasoningProbePrompt induces multi-step thinking in reasoning-trained
+// models while staying cheap to classify.
 const reasoningProbePrompt = "If the sky is blue, why is the sun orange and the moon white?"
 
-// reasoningProbeMaxTokens is the per-probe output cap. Kept high so a
-// long-thinking reasoning model isn't truncated before emitting content
-// and then misclassified as ReasoningFormatNone.
+// reasoningProbeMaxTokens caps probe output. Kept high so long-thinking
+// models reach content before truncation.
 const reasoningProbeMaxTokens = 20000
 
 // SummaryReasoningEffort is forwarded as `reasoning_effort` on summary
@@ -203,12 +200,10 @@ const reasoningProbeMaxTokens = 20000
 // supporting backends; unsupported backends ignore it.
 const SummaryReasoningEffort = "none"
 
-// CompressionReasoningEffort is forwarded as `reasoning_effort` on
-// iteration-boundary history compression. "low" lets the summary model
-// reason briefly about which evidence to preserve without burning the
-// budget that "medium"/"high" would on qwen3-class models. The asymmetry
-// with SummaryReasoningEffort is deliberate: narration is best-effort
-// status text; compression is the agent's only memory of prior work.
+// CompressionReasoningEffort is forwarded as reasoning_effort on
+// iteration-boundary history compression. "low" preserves evidence
+// selection without burning budget on qwen3-class models — narration is
+// best-effort, but compression is the agent's only memory of prior work.
 const CompressionReasoningEffort = "low"
 
 // reasoningProbeTimeout bounds probe latency.

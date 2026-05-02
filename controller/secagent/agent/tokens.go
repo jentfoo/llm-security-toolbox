@@ -3,14 +3,9 @@ package agent
 import "sync"
 
 // Tunables for the learned token calibration. The estimator multiplies a
-// raw char/charsPerToken count by a calibration factor that is updated by
-// EMA whenever an upstream call returns a real prompt-token count via
-// ObservePromptTokens. Bounds prevent a single outlier from wrecking the
-// estimator. Calibration is process-wide because every History feeds the
-// same EMA — agents pointed at the same model converge faster, and the
-// non-History sites (status budgeting, stub annotations, recon-summary
-// logging) read the same learned ratio instead of three uncalibrated
-// duplicates.
+// raw char/charsPerToken count by a calibration factor updated by EMA on
+// each observed prompt-token count. Bounds prevent outliers. Calibration
+// is process-wide so all sites read the same learned ratio.
 const (
 	charsPerToken      = 4
 	perMessageOverhead = 4
@@ -32,9 +27,9 @@ func Calibration() float64 {
 	return calibration
 }
 
-// ObservePromptTokens feeds one observation into the calibration EMA: real
-// is the server-reported prompt token count, raw is the matching
-// uncalibrated estimate. No-op when either is non-positive.
+// ObservePromptTokens updates the calibration EMA from one (real, raw)
+// observation. real is the server-reported prompt token count, raw the
+// matching uncalibrated estimate. No-op when either is non-positive.
 func ObservePromptTokens(real, raw int) {
 	if real <= 0 || raw <= 0 {
 		return

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -255,19 +256,16 @@ func (n *Narrator) fireAsync() {
 // one per-active-agent summary under a shared timeout. Pool capacity gates
 // real concurrency; surplus calls queue at Acquire.
 func (n *Narrator) runSummary(events []narratorEvent) {
-	// Parent derived from shutdownCtx — Close cancels it so ctrl+c aborts
-	// any in-flight summary HTTP call instead of waiting up to CallBudget.
+	// shutdownCtx parent so Close aborts in-flight HTTP calls
 	ctx, cancel := context.WithTimeout(n.shutdownCtx, n.cfg.CallBudget)
 	defer cancel()
 
-	// If shutdown has already fired, skip entirely rather than acquiring
-	// a pool slot just to discover the ctx is cancelled inside Acquire.
 	if ctx.Err() != nil {
 		return
 	}
 
 	n.mu.Lock()
-	agents := append([]NamedAgent(nil), n.activeAgents...)
+	agents := slices.Clone(n.activeAgents)
 	n.mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -313,9 +311,6 @@ func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narrator
 		}
 		return
 	}
-	// Confident line first: Extract runs the full defensive cascade
-	// (strip think/fences, parse JSON wrappers, salvage Final:/Output:
-	// markers). Fall back to Tail only when no usable line was found.
 	if line := n.cfg.Summarizer.Extract(resp); isUsableNarration(line) {
 		if n.log != nil {
 			n.log.Log("narrate", "orchestrator: "+line, map[string]any{
@@ -346,7 +341,7 @@ func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narrator
 func (n *Narrator) runAgentSummary(ctx context.Context, na NamedAgent) {
 	n.mu.Lock()
 	since := n.lastNarrationHistoryID[na.Name]
-	prev := append([]string(nil), n.lastSummaries[na.Name]...)
+	prev := slices.Clone(n.lastSummaries[na.Name])
 	n.mu.Unlock()
 
 	slice := na.Agent.SnapshotSinceID(since)
@@ -462,7 +457,7 @@ func buildAgentNarrationPrompt(prevSummaries []string, transcript string, trunca
 }
 
 // renderAgentTranscript returns msgs rendered as a transcript fitting
-// budget tokens, head-truncating message-by-message as needed.
+// budget tokens, and whether older messages were dropped to fit.
 func renderAgentTranscript(msgs []agent.Message, budget int) (rendered string, truncated bool) {
 	rendered = history.RenderSnapshotForSummary(msgs)
 	if agent.EstimateStringTokens(rendered) <= budget {
@@ -491,8 +486,7 @@ func formatContextPercent(tokens, max int) string {
 		pct = 0
 	}
 	rounded := int(pct + 0.5)
-	// Clamp the rendered value at 99% so the operator's "we hit the wall"
-	// signal isn't muddied by floating-point overshoot at boundary cases.
+	// clamp at 99% so floating-point overshoot doesn't muddy the "hit wall" signal
 	if rounded >= 100 {
 		rounded = 99
 	}

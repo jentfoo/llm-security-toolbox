@@ -23,7 +23,7 @@ const (
 	ansiMedGreen = "\033[38;5;34m"
 )
 
-var useColor = false
+var useColor bool
 
 // IsTerminal reports whether f is a character device.
 func IsTerminal(f *os.File) bool {

@@ -24,7 +24,7 @@ type CompactionOptions struct {
 // telemetry (wired via orchestrator.OpenAIFactory.compactCallback).
 const defaultRecoveryThreshold = 0.25
 
-// CompactionReport describes what Compact did in one pass.
+// CompactionReport describes the result of a Compact call.
 type CompactionReport struct {
 	Before           int
 	After            int
@@ -55,8 +55,8 @@ func StripAssistantThink(m *Message) bool {
 	return true
 }
 
-// Markers identifying tool-result content already replaced by a
-// compaction step. New replacement formats must be added to IsCompactionStub.
+// Compaction-stub marker prefixes; new prefixes must also be added to
+// IsCompactionStub.
 const (
 	stubPrefix    = "(compacted: "
 	DistillPrefix = "(distilled batch "
@@ -80,10 +80,17 @@ func StubToolResult(m *Message) bool {
 		return false
 	}
 	approxTokens := EstimateStringTokens(m.Content)
+	toolName := m.ToolName
+	if toolName == "" {
+		toolName = "tool"
+	}
+	summary := m.Summary120
+	if summary == "" {
+		summary = truncate(m.Content, 120)
+	}
 	stub := fmt.Sprintf(
 		"%s%s returned ~%d tokens — %s)",
-		stubPrefix, fallback(m.ToolName, "tool"), approxTokens,
-		fallback(m.Summary120, truncate(m.Content, 120)),
+		stubPrefix, toolName, approxTokens, summary,
 	)
 	if m.Content == stub {
 		return false
@@ -92,10 +99,8 @@ func StubToolResult(m *Message) bool {
 	return true
 }
 
-// ApplyCompactionDefaults fills zero-value fields with default values.
-// Single source of truth for HighWatermark / LowWatermark / KeepTurns /
-// RecoveryThreshold defaults — sibling-package callers (e.g. history.Compactor)
-// should call this rather than re-encoding the fallbacks.
+// ApplyCompactionDefaults fills zero-value fields in opt with package
+// defaults.
 func ApplyCompactionDefaults(opt *CompactionOptions) {
 	if opt.HighWatermark <= 0 {
 		opt.HighWatermark = 0.80
@@ -111,9 +116,8 @@ func ApplyCompactionDefaults(opt *CompactionOptions) {
 	}
 }
 
-// CompactErrorsOnly collapses consecutive same-tool error streaks in h in
-// place, leaving only the most recent error in each streak. Returns a
-// report describing what was done.
+// CompactErrorsOnly drops redundant repeated tool errors from h. Returns a
+// report describing what changed.
 func CompactErrorsOnly(h *History, opt CompactionOptions) CompactionReport {
 	ApplyCompactionDefaults(&opt)
 	before := h.EstimateTokens()
@@ -133,8 +137,8 @@ func CompactErrorsOnly(h *History, opt CompactionOptions) CompactionReport {
 	return report
 }
 
-// CompactRemainder runs mechanical fallback compaction on h in place.
-// Returns an error if the final estimate is still over HighWatermark.
+// CompactRemainder runs the post-self-prune compaction passes on h in
+// place. Returns an error when h still exceeds HighWatermark.
 func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, error) {
 	ApplyCompactionDefaults(&opt)
 	before := h.EstimateTokens()
@@ -149,9 +153,8 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	msgs := h.Snapshot()
 	keep := opt.KeepTurns
 
-	// Strip inline `<think>` blocks from oldest assistant messages outside
-	// the keep*2 trailing window, breaking early when the estimate drops to
-	// target so recent chain-of-thought continuity stays intact.
+	// strip <think> from oldest assistants; keep*2 trailing window stays
+	// for chain-of-thought continuity
 	var thinkCount int
 	for i := 0; i < len(msgs)-keep*2; i++ {
 		if !StripAssistantThink(&msgs[i]) {
@@ -172,8 +175,8 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		return report, nil
 	}
 
-	// Replace oldest tool results with stubs. Repair errors are skipped —
-	// they carry schema guidance the worker needs.
+	// stub oldest tool results; repair errors carry schema guidance, skip
+	// them
 	var stubbed, repairsProtected int
 	for i := 0; i < len(msgs)-keep*2; i++ {
 		if msgs[i].Role != RoleTool {
@@ -251,10 +254,8 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		report.DroppedTurns = droppedTurns
 	}
 
-	// Hard truncate: a single very large tool result can leave history
-	// over HighWatermark even after the turn-drop step preserved the
-	// keep*2 trailing window. Shrink the keep window to 2 and drop more,
-	// still preserving tool-call/tool-result pairing.
+	// hard truncate: a single huge tool result can survive turn-drop;
+	// shrink keep window to 2 to drop more while preserving tool pairing
 	if opt.HardTruncateOnOverflow && h.EstimateTokens() > high {
 		var hardDropped int
 		for h.EstimateTokens() > high {
@@ -284,10 +285,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 }
 
 // MergeReports concatenates PassesApplied and sums counters across a and b.
-// Exported so callers in sibling packages (e.g., history.Compactor) can
-// aggregate reports across passes.
-// Before is taken from a (the running aggregate's start point); After is
-// taken from b.After when non-zero, falling back to a.After.
+// Before is taken from a; After is b.After when non-zero, else a.After.
 func MergeReports(a, b CompactionReport) CompactionReport {
 	after := b.After
 	if after == 0 {
@@ -308,11 +306,9 @@ func MergeReports(a, b CompactionReport) CompactionReport {
 	}
 }
 
-// ForceHardTruncate unconditionally drops oldest turns from h until the
-// estimated token count is at or below targetTokens or nothing more can be
-// dropped. Preserves the system prompt and a trailing window of keep*2
-// messages (keep is clamped to a minimum of 2). Returns a report describing
-// what was done.
+// ForceHardTruncate drops oldest turns from h until estimated tokens ≤
+// targetTokens, preserving the system prompt and a trailing keep*2 window
+// (keep is floored at 2). Returns a report of what was done.
 func ForceHardTruncate(h *History, targetTokens, keep int) CompactionReport {
 	if keep < 2 {
 		keep = 2
@@ -337,10 +333,10 @@ func ForceHardTruncate(h *History, targetTokens, keep int) CompactionReport {
 	return report
 }
 
-// dropOldestTurn drops the oldest assistant-with-tool-calls turn (with its
-// paired tool results and any trailing assistant text) from msgs. Preserves
-// the system prompt and the trailing keep*2 messages. Returns the new slice
-// and whether a turn was dropped.
+// dropOldestTurn removes the oldest assistant-tool-calls turn (paired tool
+// results plus a trailing assistant text) from msgs, keeping the system
+// prompt and the trailing keep*2 window. Returns the new slice and whether
+// a turn was dropped.
 func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	if keep < 2 {
 		keep = 2
@@ -381,9 +377,3 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	return msgs, false
 }
 
-func fallback(v, def string) string {
-	if v == "" {
-		return def
-	}
-	return v
-}

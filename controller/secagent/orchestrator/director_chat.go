@@ -1,10 +1,5 @@
 package orchestrator
 
-// DirectorChat is the controller-owned canonical chat history for the
-// director. Worker activity, director decisions, recon summaries, retired-
-// worker summaries, and verifier reports live here tagged with
-// (WorkerID, Iter) for selective compaction at render time.
-
 import (
 	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/secagent/agent"
@@ -66,14 +61,10 @@ func (c *DirectorChat) ReplaceWorkerWithSummary(workerID int, summary string, it
 		keptMeta = append(keptMeta, c.Meta[i])
 	}
 	if firstIdx < 0 {
-		// No messages for this worker; nothing to replace.
 		return
 	}
 	summaryMsg := agent.Message{Role: "user", Content: summary}
 	summaryMeta := DirectorMsgMeta{WorkerID: 0, Iter: iter}
-	// Insert the summary at firstIdx (the position the first removed
-	// message occupied in the kept slice — which is now slightly different
-	// from the original index because everything between has shifted left).
 	c.Messages = append(keptMsgs[:firstIdx],
 		append([]agent.Message{summaryMsg}, keptMsgs[firstIdx:]...)...)
 	c.Meta = append(keptMeta[:firstIdx],

@@ -37,11 +37,11 @@ type OpenAIFactory struct {
 	Pool      *agent.ClientPool
 	Malformed *MalformedCounter
 	Log       *Logger
-	// Reasoning handler for cfg.Model; nil falls back to inline.
+	// Reasoning handler; nil falls back to inline.
 	Reasoning agent.ReasoningHandler
-	// Summarizer drives worker model-driven compaction callbacks; nil disables.
+	// Summarizer enables worker compaction callbacks; nil disables.
 	Summarizer *history.Summarizer
-	// ReconSummary is anchored into every subsequent worker's system prompt.
+	// ReconSummary is prepended to non-recon worker system prompts.
 	ReconSummary string
 }
 
@@ -178,13 +178,7 @@ func (f *OpenAIFactory) compactCallback(role string) func(agent.CompactionReport
 	}
 }
 
-// buildAgent assembles an OpenAIAgent for a role.
-//
-// setFlowExtractor wires ExtractFlowIDs onto the agent's turn summaries.
-// onContextOverflow fires once per chat-completion call rejected as
-// over-context. retireOnPressure stops compaction so the agent retires at
-// the high watermark instead. wireCompactionAssist installs the
-// model-driven self-prune and distill callbacks (workers only).
+// buildAgent assembles an OpenAIAgent for the given role.
 func (f *OpenAIFactory) buildAgent(
 	role, model, systemPrompt string,
 	pool *agent.ClientPool,
@@ -305,7 +299,7 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 	return f.buildAgent(
 		"verifier",
 		f.Cfg.Model,
-		f.withMission(prompts.BuildVerifierSystemPrompt(f.Cfg.MaxWorkers)),
+		f.withMission(prompts.BuildVerifierSystemPrompt()),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -505,8 +499,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 
 	mcpURL := srv.URL
 
-	// ProgressLogInterval is the deprecated per-turn status summary; when the
-	// narrator is active it subsumes that channel, so force-disable it.
+	// narrator subsumes the per-turn channel
 	if cfg.NarrateInterval > 0 {
 		StatusSummaryInterval = 0
 	} else {
@@ -520,13 +513,10 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		})
 	}
 
-	// HTTP timeout is TurnTimeout + 2m headroom so context cancellation is
-	// the normal termination path — the HTTP deadline only catches wedged
-	// keep-alives that survive context cancellation.
+	// 2m headroom keeps context cancellation as the normal termination path
 	httpTimeout := cfg.TurnTimeout + 2*time.Minute
 	pool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.AgentPoolSize, httpTimeout)
-	// Dedicated log pool isolates narrator + log-model probes from main-pool
-	// contention, so worker turns can't starve operator-facing narration.
+	// dedicated log pool isolates narrator from main-pool contention
 	logPool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.LogPoolSize(), httpTimeout)
 	mainReasoning, logReasoning := probeReasoningHandlers(ctx, cfg, pool, logPool, log)
 
@@ -541,56 +531,31 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 	candidates := NewCandidatePool()
 	decisions := NewDecisionQueue()
 	writer := NewFindingWriter(cfg.FindingsDir)
-	// dedupReviewer is shared between the verifier-side filed-finding dedup
-	// pipeline, the worker-hot-path candidate classifier, and the async
-	// merger. All three feed verdicts back into agent context (worker tool
-	// results, merged finding bodies the director reads), so they run on
-	// the main model — the cheaper log model produced too many false-merge
-	// verdicts that silently dropped distinct findings.
+	// shared between worker hot path, verifier dedup, and async merger; main
+	// model only — the log model produced too many false-merge verdicts
 	dedupReviewer := &OpenAIDedupReviewer{
 		Pool:  pool,
 		Model: cfg.Model,
 		Log:   log,
 	}
-	// summarizer runs the on-demand boundary-summarize callback for workers
-	// and the oldest-iters compression for the director. Routed through the
-	// main pool/model — these summaries are load-bearing (they determine what
-	// the worker remembers across long runs and how the director's planning
-	// history compacts) so they get the main model, not the cheap log model.
-	// Fires only when context pressure trips the watermark, not every iter.
+	// load-bearing summaries (worker recall, director planning compaction); main model
 	summarizer := &history.Summarizer{
 		Pool:  pool,
 		Model: cfg.Model,
 		Log:   log,
 	}
-	// Wire the summarizer onto the factory so subsequent NewWorker calls
-	// install the model-driven self-prune and distill callbacks.
 	factory.Summarizer = summarizer
-	// asyncMerger schedules merge-into-existing-finding goroutines when the
-	// worker tool's dedup verdict is "merge". Bounded concurrency (cap=4) so
-	// a flurry of candidates can't saturate the shared pool. Run() waits on
-	// in-flight merges at shutdown so the user doesn't lose work mid-merge.
+	// cap=4 so a candidate flurry can't saturate the shared pool; Wait at
+	// shutdown so the user doesn't lose work mid-merge
 	asyncMerger := newAsyncMerger(ctx, dedupReviewer, writer, log, 4)
 	defer asyncMerger.Wait()
 
-	// completed is the controller-side registry of retired workers — used
-	// for plan_workers ID-collision validation and synthesis-prompt
-	// rendering. Mutated on the main goroutine when DrainCompleted picks
-	// up async retire summaries; read by closures handed to the tools
-	// layer.
+	// retired-worker registry; mutated on the main goroutine
 	var completed []CompletedWorker
-	// retireQueue summarizes retired workers in the background so the
-	// controller's main loop never blocks on the LLM call.
 	retireQueue := newRetireQueue(ctx, summarizer, cfg.Prompt, log, 4)
 	defer retireQueue.Wait()
 
-	// verifierOverflowed is set true by the OpenAIAgent OnContextOverflow
-	// callback when a chat-completion request was rejected as over-context.
-	// The controller resets it before each verification phase compose and
-	// reads it after the phase to drive the auto-dismiss-on-budget-exhaust
-	// path. The write happens inside Drain on the agent's request goroutine
-	// and the read happens after Drain returns on the controller goroutine,
-	// so the goroutine join is the synchronizing event.
+	// goroutine join (Drain return) is the read/write synchronizing event
 	var verifierOverflowed bool
 	verifier, err := factory.NewVerifier(func() {
 		verifierOverflowed = true
@@ -599,11 +564,8 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		return fmt.Errorf("new verifier: %w", err)
 	}
 	defer func() { _ = verifier.Close() }()
-	// Two phase-scoped director agents share the canonical DirectorChat.
-	// The decision agent's system prompt only describes decide_worker; the
-	// synthesis agent's only describes plan_workers / direction_done /
-	// end_run. Splitting them keeps the model from hallucinating tools that
-	// aren't registered for the current phase.
+	// two phase-scoped director agents share DirectorChat; split prompts
+	// stop the model from hallucinating wrong-phase tools
 	decisionDirector, err := factory.NewDecisionDirector()
 	if err != nil {
 		return fmt.Errorf("new decision director: %w", err)
@@ -615,7 +577,6 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 	}
 	defer func() { _ = synthesisDirector.Close() }()
 
-	// per spec §6 each agent gets its own MCP client; workers get theirs in spawnWorker
 	verifierMCP, err := mcp.Connect(ctx, mcpURL)
 	if err != nil {
 		return fmt.Errorf("mcp connect (verifier): %w", err)
@@ -664,14 +625,6 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 			w.Close()
 		}
 	}()
-	// Iter 1 spawn: either the recon worker (default) or a normal
-	// testing worker (--skip-recon). The recon worker is anchored to a
-	// recon-mission summary, not cfg.Prompt, and has no
-	// report_finding_candidate registered; its retirement summary
-	// becomes the anchored context for every subsequent worker
-	// (factory.ReconSummary). With --skip-recon the iter-1 worker is a
-	// regular testing worker against cfg.Prompt — useful for A/B
-	// comparing the value of the recon iter on a given target.
 	var w1 *WorkerState
 	if cfg.SkipRecon {
 		if log != nil {
@@ -687,11 +640,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 	} else {
 		reconMission, rerr := summarizer.SummarizeReconMission(ctx, cfg.Prompt)
 		if rerr != nil || reconMission == "" {
-			// Fail-soft: if the recon-mission summary fails (model
-			// error, empty output), use cfg.Prompt verbatim. The recon
-			// worker is still tool-restricted so the worst case is it
-			// reads the full mission and tries to test — better than
-			// blocking the entire run on a one-shot summarize call.
+			// fail-soft: degrade to verbatim cfg.Prompt
 			if log != nil {
 				fields := map[string]any{"fallback": "cfg.Prompt verbatim"}
 				if rerr != nil {
@@ -717,23 +666,17 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 	}
 	workers = append(workers, w1)
 
-	// Canonical director chat — the long-lived record of every worker's
-	// activity, every per-worker decision, the recon summary, retired-
-	// worker summaries, verifier reports. The director agent is stateless
-	// per call; each per-worker decision call and each synthesis call
-	// installs a selectively-compacted view via ReplaceHistory.
+	// canonical long-lived chat; each director call installs a compacted
+	// view via ReplaceHistory
 	dirChat := NewDirectorChat()
 
-	// guardIteration is updated by the main loop below; the closure captures
-	// its address so end_run / takenIDs see live state instead of a stale
-	// snapshot. writer.RunCount is read directly — the FindingWriter is
-	// race-safe (internal mutex).
+	// captured by closures so end_run / takenIDs see live state
 	var guardIteration int
 	guardStateFn := func() (int, int) { return guardIteration, writer.RunCount }
 	takenIDsFn := func() map[int]bool {
 		out := map[int]bool{}
 		for _, w := range workers {
-			out[w.ID] = true // alive AND dead — both are taken
+			out[w.ID] = true
 		}
 		for _, c := range completed {
 			out[c.ID] = true
@@ -745,8 +688,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		for _, c := range completed {
 			out[c.ID] = true
 		}
-		// Also include retired workers still in the workers slice (Alive=false)
-		// — they may not yet be in `completed` (summary still in flight).
+		// retired workers whose summary is still in flight
 		for _, w := range workers {
 			if !w.Alive {
 				out[w.ID] = true
@@ -764,15 +706,10 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		return out
 	}
 
-	// currentPhase drives which agents the narrator summarizes per firing.
-	// Mutated only on the main loop goroutine (phaseTransition); snapshots
-	// are pushed to the narrator via SetActiveAgents so the narrator's
-	// goroutine never dereferences controller-owned state directly.
+	// pushed to the narrator via SetActiveAgents; narrator never dereferences
+	// controller-owned state directly
 	currentPhase := "idle"
 
-	// computeActiveAgents returns the agents active for currentPhase. Called
-	// only from the main loop goroutine. Fake agents used in tests are
-	// interface-only and skipped.
 	computeActiveAgents := func() []NamedAgent {
 		switch currentPhase {
 		case "autonomous":
@@ -839,9 +776,8 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		log.Log("server", "narrator", fields)
 	}
 
-	// phaseTransition logs a phase change, republishes the narrator's
-	// active-agent snapshot for the new phase, and force-fires a summary
-	// so the operator always gets a fresh sentence at phase boundaries.
+	// force-fires a narrator summary so the operator gets a fresh sentence
+	// at every phase boundary
 	phaseTransition := func(from, to string) {
 		currentPhase = to
 		narrator.SetActiveAgents(computeActiveAgents())
@@ -851,10 +787,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		narrator.TriggerNow()
 	}
 
-	// Closure: fire one worker's iter run as a goroutine, returning a
-	// blocking join function. Used both to start iter-1 (worker 1) and to
-	// fire each worker's iter+1 run from RunDecisionPhase / applyPlanAndFire
-	// the moment its decision lands.
+	// fires one worker's iter run as a goroutine; the returned func blocks for the result
 	fire := func(fctx context.Context, w *WorkerState) func() []agent.TurnSummary {
 		resultCh := make(chan []agent.TurnSummary, 1)
 		go func() {
@@ -863,11 +796,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		return func() []agent.TurnSummary { return <-resultCh }
 	}
 
-	// Closure: spawn a forked child worker (used by RunDecisionPhase when
-	// a decide_worker call carries a fork sub-action). The child gets its
-	// inherited chronicle copied in by direct.go; we just provision the
-	// agent + MCP client here. Always treats numWorkers as len(alive)+1
-	// for the multi-worker addendum.
+	// provisions a forked child; chronicle inheritance happens in direct.go
 	spawnChild := func(sctx context.Context, id int, instruction string) (*WorkerState, error) {
 		var alive int
 		for _, w := range workers {
@@ -883,18 +812,11 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		return nw, nil
 	}
 
-	// Closure: enqueue a worker for async retire. Workers go Alive=false
-	// immediately; the LLM summarize call runs in the background and the
-	// summary lands on retireQueue's results channel for the main loop
-	// to drain at iter boundaries.
 	retire := func(w *WorkerState, reason string, iter int) {
 		retireQueue.Submit(w, reason, iter)
 	}
 
-	// applyRetiredSummaries drains every completed retire result from the
-	// queue, replaces the worker's messages in dirChat with the summary
-	// when one exists, and appends to the controller-side completed
-	// registry. Idempotent / safe to call repeatedly.
+	// drains completed retire results into dirChat + completed; idempotent
 	applyRetiredSummaries := func() {
 		for _, r := range retireQueue.DrainCompleted() {
 			if r.Summary != "" {
@@ -917,8 +839,6 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		}
 	}
 
-	// Iter-1 fire: kick off worker 1's recon run before the loop so the
-	// loop's wait-for-in-flight pattern works uniformly from iter 1.
 	w1.Chronicle.Install(w1.Agent, w1.LastInstruction)
 	inflight := map[int]func() []agent.TurnSummary{}
 	inflight[1] = fire(sd.WorkersCtx, w1)
@@ -927,18 +847,12 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 	for iteration = 1; iteration <= cfg.MaxIterations; iteration++ {
 		guardIteration = iteration
 
-		// Wait for in-flight worker iter runs (fired at end of iter-1 seed
-		// or end of prior iter's decision/synthesis phase). workerRuns is
-		// the iter's autonomous-phase output map.
 		phaseTransition("idle", "autonomous")
 		narrator.Tick()
 		workerRuns := harvestInflight(inflight)
 		inflight = map[int]func() []agent.TurnSummary{}
 
-		// Cancellation checks AFTER harvest so any in-flight workers from
-		// the previous iter are cleanly reaped first. Root-ctx cancellation
-		// (parent died) takes the existing fast path; shutdown stage ≥ 1
-		// breaks out so the post-loop block can run final verification.
+		// cancel-check AFTER harvest so prior-iter in-flight workers are reaped first
 		if err := ctx.Err(); err != nil {
 			if log != nil {
 				log.Log("controller", "cancelled", map[string]any{"iter": iteration, "err": err.Error()})
@@ -954,7 +868,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 			break
 		}
 
-		alive := aliveWorkers(workers)
+		alive := bulk.SliceFilter(func(w *WorkerState) bool { return w.Alive }, workers)
 		if len(alive) == 0 {
 			if log != nil {
 				log.Log("controller", "no alive workers, stopping", map[string]any{"iter": iteration})
@@ -973,24 +887,16 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		angleAt, aliveAtStart := snapshotIterationStart(alive)
 
 		UpdateStallStreaks(alive)
-		// Extract iter's content into each alive worker's chronicle (and
-		// run in-place compaction so older iters' bulk folds into stubs).
 		extractWorkerChroniclesAtIterEnd(alive, iteration, log)
 
-		// stall-force-stop: workers that have hit the silent-streak
-		// threshold get retired. The retire enqueues async summarization;
-		// the worker is Alive=false immediately so subsequent phases skip it.
 		enforceStallStopsAsync(workers, cfg.StallStopAfter, retire, iteration, log)
 
-		// Dead-iteration short-circuit: nothing happened, no candidates
-		// filed. Skip verification/direction; record history; continue.
+		// dead-iteration short-circuit: skip verify/direction, refire alive workers
 		if isDeadIteration(workerRuns, candidatesBefore, candidates.Counter()) {
 			if log != nil {
 				log.Log("controller", "dead-iteration", map[string]any{"iter": iteration})
 			}
 			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
-			// Re-fire still-alive workers' next-iter runs with their existing
-			// LastInstruction so the loop doesn't wedge on no-in-flight.
 			refireAlive(sd.WorkersCtx, workers, fire, inflight, log)
 			narrator.TriggerNow()
 			continue
@@ -998,10 +904,6 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 
 		decisions.Reset()
 
-		// Verification phase: fresh compose with the iter's directive.
-		// Reset overflow watchdog. Mission and recon summary live in the
-		// verifier's system prompt anchor; the per-iter directive includes
-		// the recon summary as a header from iter 2+ (BuildVerifierPrompt).
 		verifierOverflowed = false
 		verifierDirective := BuildVerifierPrompt(
 			workers, workerRuns, candidates.Pending(),
@@ -1020,8 +922,6 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 			AutoDismissOnContextOverflow(candidates, decisions, log)
 		}
 
-		// Drain any retire summaries that have completed since last drain
-		// (e.g. workers retired at iter N-1 that finished summarizing).
 		applyRetiredSummaries()
 
 		phaseTransition("verification", "direction")
@@ -1030,24 +930,8 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		iterStatus := statusLine(iteration, cfg.MaxIterations, writer.RunCount)
 
 		if iteration == 1 && !cfg.SkipRecon {
-			// Iter-1 recon flow:
-			//   1. Append worker 1's iter activity to dirChat.
-			//   2. Retire worker 1, block on summary. ReplaceWorkerWithSummary
-			//      ONLY when the summary is non-empty — an empty summary
-			//      (summarize timeout / model error) would otherwise
-			//      collapse the worker's evidence into nothing, leaving
-			//      the director with no recon context.
-			//   3. Review call: SetTools(nil); director reads the recon
-			//      and produces free-form text proposing iter-2 worker
-			//      assignments. Response is appended to dirChat.
-			//   4. Plan call: SetTools(synthesis); director formalizes
-			//      via plan_workers + direction_done, with one mandatory
-			//      retry if plan_workers wasn't called.
-			//   5. Fallback plan: if plan_workers still missing after
-			//      retry, inject a single-worker plan with the original
-			//      cfg.Prompt as the directive so iter 2 runs. Without
-			//      this fallback the run terminates at iter 2's alive-
-			//      check whenever the director can't commit to a plan.
+			// iter-1 recon: retire w1, review, plan; fallback to single-worker
+			// plan if synthesis didn't commit (avoids iter-2 alive-check kill).
 			dirChat.AppendWorkerActivity(w1.ID, iteration, snapshotWorkerIterActivity(w1))
 			retire(w1, "recon complete", iteration)
 			if r, ok := retireQueue.WaitOne(ctx); ok {
@@ -1063,21 +947,15 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 					ID: r.WorkerID, StoppedAt: r.Iter, Reason: r.Reason, Summary: r.Summary,
 				})
 				if log != nil {
-					// summary_tokens_est: calibrated estimate of the recon
-					// summary anchored into every subsequent worker/director
-					// system prompt — so this is the recurring per-call cost
-					// the summary imposes on the rest of the run.
+					// summary_tokens_est: recurring per-call cost the recon
+					// summary imposes on every subsequent system prompt
 					log.Log("recon", "end", map[string]any{
 						"worker_id":          r.WorkerID,
 						"summary_chars":      len(r.Summary),
 						"summary_tokens_est": agent.EstimateStringTokens(r.Summary),
 					})
 				}
-				// Discard the recon worker's chronicle now that we have
-				// the canonical summary in factory.ReconSummary. The
-				// worker agent is already closed by retire; resetting
-				// the chronicle releases the backing storage so it
-				// doesn't sit around for the rest of the run.
+				// canonical summary is in factory.ReconSummary; release backing storage
 				w1.Chronicle.Reset()
 			}
 			LatchStallWarnings(workers, cfg.StallWarnAfter)
@@ -1097,11 +975,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 				break
 			}
 			if !decisions.HasPlan {
-				// Fallback: synthesis failed to commit to a plan even
-				// after the retry. Inject a default single-worker plan
-				// using the original mission so iter 2 still has work to
-				// do. Surfacing the failure prominently so the operator
-				// can tune the prompts; the run continues regardless.
+				// synthesis failed to plan even after retry; inject a default so iter 2 has work
 				fallback := []PlanEntry{{WorkerID: 2, Assignment: cfg.Prompt}}
 				decisions.SetPlan(fallback)
 				if log != nil {
@@ -1119,11 +993,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 			continue
 		}
 
-		// Iter 2+: per-worker decision loop, then synthesis. Both directors
-		// get sectool tools alongside their phase-primary tools so the
-		// model can spot-check worker activity instead of either spawning
-		// a verification worker or hallucinating tool calls from the
-		// worker history that's already in its rendered view.
+		// directors get sectool tools so they can spot-check rather than hallucinate
 		decisionDirector.SetTools(append(slices.Clone(decisionDirectorSectoolDefs),
 			DecisionToolDefs(decisions, takenIDsFn, log)...))
 		decRes := RunDecisionPhase(sd.WorkersCtx, DecisionPhaseInput{
@@ -1136,10 +1006,8 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 			Retire:     retire,
 		}, log)
 		LatchStallWarnings(workers, cfg.StallWarnAfter)
-		// Drain retires that completed during the decision loop (stops).
 		applyRetiredSummaries()
 
-		// Synthesis call.
 		synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
 			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
 		RunSynthesisPhase(sd.WorkersCtx, SynthesisPhaseInput{
@@ -1158,16 +1026,11 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 			break
 		}
 
-		// Per-worker decisions may already have fired iter+1 runs. Publish them
-		// before synthesis-plan apply so retargeting the same worker can cancel
-		// and replace that in-flight run instead of launching a concurrent second
-		// Drain on the same WorkerState.
+		// publish per-worker decision joins BEFORE plan apply so retargets
+		// cancel/replace the in-flight run instead of double-Draining
 		for id, j := range decRes.joins {
 			inflight[id] = j
 		}
-		// Apply plan_workers (spawn fresh / retarget alive) and fire
-		// iter+1 runs for the affected workers. Merge their joins into
-		// inflight alongside the per-worker decision-fired runs.
 		if decisions.HasPlan {
 			applyPlanAndFire(sd.WorkersCtx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
 		}
@@ -1176,17 +1039,12 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		narrator.TriggerNow()
 	}
 
-	// Wait for any in-flight runs the loop may have fired but never
-	// harvested (e.g. end_run break path).
+	// drain in-flight runs the loop fired but never harvested (end_run break)
 	for _, j := range inflight {
 		_ = j()
 	}
 
-	// Multi-stage shutdown finalization. Runs only when the operator
-	// requested a graceful shutdown via *Shutdown (Ctrl+C path). Stage 1
-	// runs the verifier once on every still-pending candidate; stage 2
-	// (or stage 1 followed by an in-flight 2nd Ctrl+C) dumps whatever's
-	// still pending under the UNVALIDATED banner.
+	// graceful-shutdown finalization: stage 1 verify pending, stage 2 dump unvalidated
 	if sd.Phase() >= ShutdownPhaseVerifyOnly {
 		if sd.Phase() == ShutdownPhaseVerifyOnly && len(candidates.Pending()) > 0 {
 			verifierOverflowed = false
@@ -1213,7 +1071,6 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		}
 	}
 
-	// Drain any retire summaries still pending so logs are complete.
 	retireQueue.Wait()
 	applyRetiredSummaries()
 
@@ -1228,10 +1085,6 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		}
 	}
 	return nil
-}
-
-func aliveWorkers(ws []*WorkerState) []*WorkerState {
-	return bulk.SliceFilter(func(w *WorkerState) bool { return w.Alive }, ws)
 }
 
 // isDeadIteration reports whether the autonomous phase produced no tool
@@ -1295,12 +1148,7 @@ func applyPlanAndFire(
 			inflight[w.ID] = fire(ctx, w)
 			continue
 		}
-		// Defense-in-depth: an ID present in workers (Alive=false) belongs
-		// to a retired worker. The plan_workers handler already rejects
-		// these, but reorderings (e.g. iter-1 path retires worker 1
-		// between handler-time and apply-time) could in principle let one
-		// slip through. Skip explicitly so we never spawn a duplicate ID
-		// that would shadow the dead entry in findWorker-style lookups.
+		// retired worker (Alive=false) — never shadow the dead entry
 		if w, ok := byID[p.WorkerID]; ok && !w.Alive {
 			if log != nil {
 				log.Log("plan", "spawn skipped: id taken by retired worker", map[string]any{"worker_id": p.WorkerID})

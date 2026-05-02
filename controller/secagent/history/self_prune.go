@@ -5,36 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
 )
 
 const (
-	// selfPruneMaxTokens caps the selection-call response.
 	selfPruneMaxTokens = 8000
-	// selfPruneMinEvents is the minimum event count for a self-prune call.
 	selfPruneMinEvents = 6
 )
 
 const selfPruneSystemPrompt = `You are reviewing a security-testing agent's history of tool calls and helping it free context space without losing load-bearing evidence. Respond with JSON only — no prose, no markdown fences.`
 
-// selfPruneRetryTemperature is the sampling temperature used on the
-// retry attempt after a blank response, slightly above the typical model
-// default to encourage variance.
+// selfPruneRetryTemperature is the retry temp; slightly above default to encourage variance.
 const selfPruneRetryTemperature float32 = 1.2
 
-// ErrEmptyResponse signals that the model returned an empty/whitespace-only
-// body where a JSON object was expected. Callers can errors.Is against it
-// to drive a single retry.
+// ErrEmptyResponse signals an empty model response (drives one retry).
 var ErrEmptyResponse = errors.New("empty response")
 
-// SelfPruneCallback returns an OnSelfPruneCandidates callback that picks
-// redundant tool-call IDs for removal. Returns nil when s is nil or
-// unconfigured. An empty-response from the model is retried once; a second
-// empty response is treated as "no selections" without an error so the
-// compactor's OnCallbackError doesn't fire on a transient model blank.
+// SelfPruneCallback returns an OnSelfPruneCandidates callback; nil if s is unconfigured.
 func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.Message) ([]string, error) {
 	return func(ctx context.Context, snapshot []agent.Message) ([]string, error) {
 		if s == nil || s.Pool == nil || s.Model == "" {
@@ -75,10 +65,8 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent
 	}
 }
 
-// runSelfPruneSelection runs one selection call, retrying once with a
-// bumped temperature on ErrEmptyResponse. A second empty body returns
-// (nil, nil) so the caller treats it as "no selections" rather than an
-// error from a transient model blank.
+// runSelfPruneSelection runs one selection call, retrying once on ErrEmptyResponse;
+// returns nil/nil on a second blank.
 func runSelfPruneSelection(ctx context.Context, s *Summarizer, prompt string, total int) ([]int, error) {
 	selected, raw, err := selfPruneRunOnce(ctx, s, prompt, total, nil)
 	if err == nil {
@@ -106,9 +94,7 @@ func runSelfPruneSelection(ctx context.Context, s *Summarizer, prompt string, to
 	return nil, err
 }
 
-// selfPruneRunOnce makes a single selection call and parses the result.
-// Returns the parsed indices, the raw body (for error logging), and the
-// error from RunOneShot or parseEventIndexList.
+// selfPruneRunOnce returns parsed indices, raw body, and the call/parse error.
 func selfPruneRunOnce(
 	ctx context.Context, s *Summarizer, prompt string, total int, temp *float32,
 ) ([]int, string, error) {
@@ -124,7 +110,6 @@ func selfPruneRunOnce(
 	return selected, raw, parseErr
 }
 
-// logSelectError logs a parse failure against raw under the standard tag.
 func (s *Summarizer) logSelectError(err error, raw string) {
 	if s.Log == nil {
 		return
@@ -134,7 +119,6 @@ func (s *Summarizer) logSelectError(err error, raw string) {
 	})
 }
 
-// toolEvent is one tool-call/tool-result pair rendered in the prompt.
 type toolEvent struct {
 	Index      int
 	ToolCallID string
@@ -144,8 +128,7 @@ type toolEvent struct {
 	IsError    bool
 }
 
-// buildToolEvents returns one toolEvent per assistant tool_call paired
-// with its matching tool-result message.
+// buildToolEvents returns one toolEvent per tool_call paired with its result.
 func buildToolEvents(msgs []agent.Message) []toolEvent {
 	resultByID := map[string]agent.Message{}
 	for _, m := range msgs {
@@ -191,20 +174,6 @@ func renderToolEventListing(events []toolEvent) string {
 	return b.String()
 }
 
-func fallbackName(s string) string {
-	if s == "" {
-		return "?"
-	}
-	return s
-}
-
-func fallbackArgs(s string) string {
-	if s == "" {
-		return "{}"
-	}
-	return s
-}
-
 // buildSelfPruneSelectionPrompt returns the user message asking the model
 // to pick removal-eligible event indices.
 func buildSelfPruneSelectionPrompt(listing string) string {
@@ -225,8 +194,7 @@ The "remove" array lists the 1-based event indices to drop from history. Empty a
 	return b.String()
 }
 
-// parseEventIndexList parses {"remove":[...]} from raw and returns the
-// deduped sorted 0-based indices in [0, total).
+// parseEventIndexList returns deduped sorted 0-based indices in [0, total).
 func parseEventIndexList(raw string, total int) ([]int, error) {
 	body := ExtractJSONObject(raw)
 	if body == "" {
@@ -238,19 +206,13 @@ func parseEventIndexList(raw string, total int) ([]int, error) {
 	if err := json.Unmarshal([]byte(body), &v); err != nil {
 		return nil, fmt.Errorf("parse index list: %w (raw: %q)", err, raw)
 	}
-	seen := make(map[int]bool, len(v.Remove))
 	out := make([]int, 0, len(v.Remove))
 	for _, idx := range v.Remove {
 		zero := idx - 1
-		if zero < 0 || zero >= total {
-			continue
+		if zero >= 0 && zero < total {
+			out = append(out, zero)
 		}
-		if seen[zero] {
-			continue
-		}
-		seen[zero] = true
-		out = append(out, zero)
 	}
-	sort.Ints(out)
-	return out, nil
+	slices.Sort(out)
+	return slices.Compact(out), nil
 }

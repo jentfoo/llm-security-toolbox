@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/go-analyze/bulk"
 )
 
 var nonSlugChar = regexp.MustCompile(`[^a-z0-9\s-]+`)
@@ -67,31 +69,19 @@ func TitlesSimilar(a, b string) bool {
 	if sa == sb || strings.Contains(sa, sb) || strings.Contains(sb, sa) {
 		return true
 	}
-	wa, wb := map[string]bool{}, map[string]bool{}
-	for _, w := range strings.Split(sa, "-") {
-		if w != "" {
-			wa[w] = true
-		}
-	}
-	for _, w := range strings.Split(sb, "-") {
-		if w != "" {
-			wb[w] = true
-		}
-	}
+	notEmpty := func(s string) bool { return s != "" }
+	wa := bulk.SliceToSet(bulk.SliceFilter(notEmpty, strings.Split(sa, "-")))
+	wb := bulk.SliceToSet(bulk.SliceFilter(notEmpty, strings.Split(sb, "-")))
 	if len(wa) == 0 || len(wb) == 0 {
 		return false
 	}
 	var overlap int
 	for w := range wa {
-		if wb[w] {
+		if _, ok := wb[w]; ok {
 			overlap++
 		}
 	}
-	denom := len(wa)
-	if len(wb) > denom {
-		denom = len(wb)
-	}
-	return float64(overlap)/float64(denom) > 0.5
+	return float64(overlap)/float64(max(len(wa), len(wb))) > 0.5
 }
 
 // MatchTier reports which rule matched a pending candidate to a filed finding.
@@ -686,6 +676,14 @@ func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
 	}
 	name := fmt.Sprintf("unvalidated-%02d-%s.md", next, slug)
 	path := filepath.Join(w.findingsDir, name)
+	flowList := noneSentinel
+	if len(c.FlowIDs) > 0 {
+		var fb strings.Builder
+		for _, id := range c.FlowIDs {
+			fmt.Fprintf(&fb, "- %s\n", id)
+		}
+		flowList = strings.TrimRight(fb.String(), "\n")
+	}
 	body := fmt.Sprintf(unvalidatedTemplate,
 		c.Title,
 		orDefault(c.Severity, "unknown"),
@@ -695,7 +693,7 @@ func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
 		orDefault(c.Summary, noneSentinel),
 		orDefault(c.EvidenceNotes, noneSentinel),
 		orDefault(c.ReproductionHint, noneSentinel),
-		formatFlowIDList(c.FlowIDs),
+		flowList,
 	)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return "", err
@@ -703,15 +701,4 @@ func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
 	w.UnvalidatedCount = next
 	w.Paths = append(w.Paths, path)
 	return path, nil
-}
-
-func formatFlowIDList(ids []string) string {
-	if len(ids) == 0 {
-		return noneSentinel
-	}
-	var b strings.Builder
-	for _, id := range ids {
-		fmt.Fprintf(&b, "- %s\n", id)
-	}
-	return strings.TrimRight(b.String(), "\n")
 }

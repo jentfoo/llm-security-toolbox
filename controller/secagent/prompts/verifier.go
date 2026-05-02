@@ -18,4 +18,4 @@ When polling shared proxy history, window with explicit offset+limit rather than
 `
 
 // BuildVerifierSystemPrompt returns the verifier prompt.
-func BuildVerifierSystemPrompt(maxWorkers int) string { return verifierBase }
+func BuildVerifierSystemPrompt() string { return verifierBase }

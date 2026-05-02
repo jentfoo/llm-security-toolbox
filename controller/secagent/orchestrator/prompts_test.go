@@ -9,26 +9,6 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-func TestFirstNonEmptyLine(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"leading_blank_then_first", "\n  first\nsecond", "first"},
-		{"single_line", "only", "only"},
-		{"empty", "", ""},
-		{"whitespace_only", "   \n\t  ", ""},
-		{"trailing_whitespace", "hello  ", "hello"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			assert.Equal(t, c.want, firstNonEmptyLine(c.in))
-		})
-	}
-}
-
 func TestFormatToolCalls(t *testing.T) {
 	t.Parallel()
 

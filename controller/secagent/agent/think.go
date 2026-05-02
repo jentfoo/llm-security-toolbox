@@ -6,8 +6,7 @@ import (
 	"strings"
 )
 
-// Think-block variants seen in practice. Matches are case-insensitive,
-// multiline, non-greedy. Add more as new models surface.
+// Think-block variants seen in practice; case-insensitive, non-greedy.
 var thinkBlockPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)<think>.*?</think>`),
 	regexp.MustCompile(`(?is)<thinking>.*?</thinking>`),
@@ -15,8 +14,8 @@ var thinkBlockPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)<reasoning>.*?</reasoning>`),
 }
 
-// thinkTagPairs mirrors thinkBlockPatterns as literal open/close strings for
-// unclosed-tag detection. Kept in sync by hand.
+// Literal open/close strings mirroring thinkBlockPatterns for unclosed-tag
+// detection; must be kept in sync.
 var thinkTagPairs = []struct {
 	open, close string
 }{
@@ -83,9 +82,8 @@ func HasInlineThink(s string) bool {
 	return false
 }
 
-// StripCodeFences removes a leading and/or trailing markdown fenced-code
-// line from s. Strips one fence at each end; nested blocks are not
-// handled.
+// StripCodeFences removes a leading and trailing markdown fenced-code line
+// from s.
 func StripCodeFences(s string) string {
 	lines := strings.Split(s, "\n")
 	var start int

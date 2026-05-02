@@ -7,10 +7,7 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// RunOneShot runs one non-streaming system+user chat completion via a
-// pooled client and returns the trimmed response content. Pass "" for
-// reasoningEffort to inherit the model's default. Pass nil for
-// temperature to leave sampling temperature unset (backend default).
+// RunOneShot runs a single chat completion via pool; returns the trimmed response content.
 func RunOneShot(
 	ctx context.Context,
 	pool *agent.ClientPool,
@@ -40,8 +37,7 @@ func RunOneShot(
 	return strings.TrimSpace(resp.Content), nil
 }
 
-// ExtractJSONObject returns the first {..} block from raw, tolerating
-// markdown code fences and leading prose.
+// ExtractJSONObject returns the first {..} block from raw, tolerating fences and prose.
 func ExtractJSONObject(raw string) string {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimPrefix(s, "```json")

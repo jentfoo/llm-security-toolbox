@@ -7,13 +7,10 @@ import (
 	"github.com/go-appsec/secagent/agent"
 )
 
-// PruneToolResults drops tool-result messages whose ToolCallID is in
-// dropSet, strips matching ToolCalls from preceding assistant messages,
-// and removes assistant messages left with no ToolCalls and no content.
-// inScope decides per-index eligibility; nil treats every index as
-// eligible. Out-of-scope messages pass through verbatim. keptIndices
-// reports which original indices survived so callers can rebuild parallel
-// arrays (e.g. Chronicle.iters, DirectorChat.Meta).
+// PruneToolResults drops tool-results in dropSet, strips matching tool calls from preceding
+// assistants, and removes assistants left empty.
+// inScope decides per-index eligibility (nil = all eligible). keptIndices reports surviving
+// original indices for parallel-array rebuild.
 func PruneToolResults(
 	msgs []agent.Message,
 	dropSet map[string]struct{},
