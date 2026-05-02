@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/orchestrator/history"
+	"github.com/go-appsec/secagent/history"
 )
 
 // FireWorkerFunc starts one worker's iter+1 autonomous run and returns a
@@ -87,6 +87,11 @@ func RunDecisionPhase(
 			break
 		}
 
+		// Apply buffered self-prune drops before fresh activity is appended.
+		if drops := w.DrainSelfPrunes(); len(drops) > 0 {
+			in.DirChat.ApplyWorkerSelfPrune(w.ID, drops)
+			w.Chronicle.ApplySelfPrune(drops)
+		}
 		// Append this worker's iter activity to the canonical chat.
 		// Activity = whatever was added to the worker agent's history
 		// from the iteration boundary onward (assistant turns + tool

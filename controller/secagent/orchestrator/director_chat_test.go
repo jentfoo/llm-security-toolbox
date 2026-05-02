@@ -189,3 +189,102 @@ func TestDirectorChatReplaceWorkerWithSummary(t *testing.T) {
 		assert.Len(t, c.Messages, pre)
 	})
 }
+
+func TestDirectorChatApplyWorkerSelfPrune(t *testing.T) {
+	t.Parallel()
+
+	build := func() *DirectorChat {
+		c := NewDirectorChat()
+		c.Append(agent.Message{Role: "user", Content: "mission"}, 0, 1)
+		c.AppendWorkerActivity(3, 1, []agent.Message{
+			{
+				Role: "assistant", Content: "fan out",
+				ToolCalls: []agent.ToolCall{
+					{ID: "w3a", Function: agent.ToolFunction{Name: "proxy_poll"}},
+					{ID: "w3b", Function: agent.ToolFunction{Name: "flow_get"}},
+				},
+			},
+			{Role: "tool", ToolCallID: "w3a", ToolName: "proxy_poll", Content: "result a"},
+			{Role: "tool", ToolCallID: "w3b", ToolName: "flow_get", Content: "result b"},
+		})
+		c.AppendWorkerActivity(5, 1, []agent.Message{
+			{
+				Role:      "assistant",
+				ToolCalls: []agent.ToolCall{{ID: "w5a", Function: agent.ToolFunction{Name: "proxy_poll"}}},
+			},
+			{Role: "tool", ToolCallID: "w5a", ToolName: "proxy_poll", Content: "w5 result"},
+		})
+		return c
+	}
+
+	t.Run("drops_only_target_worker", func(t *testing.T) {
+		c := build()
+		dropped := c.ApplyWorkerSelfPrune(3, []string{"w3a"})
+		assert.Equal(t, 1, dropped)
+		// mission(0) + assistant(3 with one toolcall left) + tool(w3b) + assistant(5) + tool(w5a) = 5
+		require.Len(t, c.Messages, 5)
+		require.Len(t, c.Meta, 5)
+		// worker-5 messages untouched
+		assert.Equal(t, 5, c.Meta[3].WorkerID)
+		assert.Equal(t, "w5a", c.Messages[4].ToolCallID)
+		// worker-3 assistant retained with the other tool call
+		assert.Len(t, c.Messages[1].ToolCalls, 1)
+		assert.Equal(t, "w3b", c.Messages[1].ToolCalls[0].ID)
+		assert.Equal(t, "w3b", c.Messages[2].ToolCallID)
+	})
+
+	t.Run("retains_assistant_with_text", func(t *testing.T) {
+		c := build()
+		dropped := c.ApplyWorkerSelfPrune(3, []string{"w3a", "w3b"})
+		assert.Equal(t, 2, dropped)
+		// Worker-3 assistant had Content="fan out", so it's retained even
+		// though both ToolCalls were stripped.
+		// Result: mission + assistant("fan out", no toolcalls) + assistant(5) + tool(w5a) = 4
+		require.Len(t, c.Messages, 4)
+		assert.Equal(t, "fan out", c.Messages[1].Content)
+		assert.Empty(t, c.Messages[1].ToolCalls)
+		assert.Equal(t, 5, c.Meta[2].WorkerID)
+		assert.Equal(t, "w5a", c.Messages[3].ToolCallID)
+	})
+
+	t.Run("drops_empty_assistant_shell", func(t *testing.T) {
+		c := NewDirectorChat()
+		c.Append(agent.Message{Role: "user", Content: "mission"}, 0, 1)
+		c.AppendWorkerActivity(3, 1, []agent.Message{
+			{
+				Role: "assistant",
+				ToolCalls: []agent.ToolCall{
+					{ID: "w3a", Function: agent.ToolFunction{Name: "proxy_poll"}},
+				},
+			},
+			{Role: "tool", ToolCallID: "w3a", ToolName: "proxy_poll", Content: "result a"},
+		})
+		c.AppendWorkerActivity(5, 1, []agent.Message{
+			{Role: "assistant", Content: "w5 turn"},
+		})
+		dropped := c.ApplyWorkerSelfPrune(3, []string{"w3a"})
+		assert.Equal(t, 1, dropped)
+		// w3 assistant had no Content and only ToolCall dropped → removed.
+		// Result: mission + assistant(5) = 2
+		require.Len(t, c.Messages, 2)
+		assert.Equal(t, "mission", c.Messages[0].Content)
+		assert.Equal(t, "w5 turn", c.Messages[1].Content)
+		assert.Equal(t, 5, c.Meta[1].WorkerID)
+	})
+
+	t.Run("foreign_id_is_noop", func(t *testing.T) {
+		c := build()
+		dropped := c.ApplyWorkerSelfPrune(3, []string{"w5a"})
+		assert.Equal(t, 0, dropped)
+		// Cross-worker ID ignored even if present in another worker's slice.
+		require.Len(t, c.Messages, 6)
+	})
+
+	t.Run("empty_inputs_noop", func(t *testing.T) {
+		c := build()
+		assert.Equal(t, 0, c.ApplyWorkerSelfPrune(0, []string{"w3a"}))
+		assert.Equal(t, 0, c.ApplyWorkerSelfPrune(3, nil))
+		assert.Equal(t, 0, c.ApplyWorkerSelfPrune(3, []string{""}))
+		require.Len(t, c.Messages, 6)
+	})
+}

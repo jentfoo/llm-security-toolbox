@@ -69,222 +69,33 @@ func assertToolPairing(t *testing.T, snap []Message) {
 	}
 }
 
-func TestCompact(t *testing.T) {
+func TestMergeReports(t *testing.T) {
 	t.Parallel()
 
-	t.Run("think_strip_tool_stub", func(t *testing.T) {
-		big := strings.Repeat("x", 6_000)
-		h := buildFattyHistory(8192, big)
-		before := h.EstimateTokens()
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
-		})
-		require.NoError(t, err)
-		assert.Contains(t, report.PassesApplied, "think-strip")
-		assert.Contains(t, report.PassesApplied, "tool-stub")
-		assert.Less(t, report.After, before)
+	t.Run("preserves_before_from_a", func(t *testing.T) {
+		a := CompactionReport{Before: 5000, After: 4000, PassesApplied: []string{"error-collapse"}}
+		b := CompactionReport{Before: 4000, After: 3000, PassesApplied: []string{"tool-stub"}}
+		got := MergeReports(a, b)
+		assert.Equal(t, 5000, got.Before)
+		assert.Equal(t, 3000, got.After)
+		assert.Equal(t, []string{"error-collapse", "tool-stub"}, got.PassesApplied)
 	})
 
-	t.Run("drop_turn_fallback", func(t *testing.T) {
-		big := strings.Repeat("y", 20_000)
-		h := NewHistory(2048)
-		h.Append(Message{Role: RoleSystem, Content: "sys"})
-		for range 6 {
-			h.Append(Message{
-				Role:      RoleAssistant,
-				Content:   big,
-				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
-			})
-			h.Append(Message{
-				Role: RoleTool, ToolCallID: "t", ToolName: "t",
-				Content: big, Summary120: "summary",
-			})
-		}
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
-		})
-		require.Error(t, err)
-		assert.Contains(t, report.PassesApplied, "turn-drop")
+	t.Run("after_falls_back_to_a", func(t *testing.T) {
+		a := CompactionReport{Before: 5000, After: 4200}
+		b := CompactionReport{} // no work — After=0
+		got := MergeReports(a, b)
+		assert.Equal(t, 5000, got.Before)
+		assert.Equal(t, 4200, got.After)
 	})
 
-	t.Run("fail_fast_no_truncate", func(t *testing.T) {
-		big := strings.Repeat("z", 8_000)
-		h := NewHistory(1024)
-		h.Append(Message{Role: RoleSystem, Content: "sys"})
-		for range 3 {
-			h.Append(Message{Role: RoleAssistant, Content: big})
-			h.Append(Message{Role: RoleUser, Content: big})
-		}
-		_, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 8,
-			HardTruncateOnOverflow: false,
-		})
-		require.ErrorContains(t, err, "high watermark")
-	})
-
-	t.Run("under_target_noop", func(t *testing.T) {
-		h := NewHistory(8192)
-		h.Append(Message{Role: RoleSystem, Content: "sys"})
-		h.Append(Message{Role: RoleUser, Content: "hi"})
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
-		})
-		require.NoError(t, err)
-		assert.Empty(t, report.PassesApplied)
-		assert.Equal(t, report.Before, report.After)
-	})
-
-	t.Run("repair_errors_protected", func(t *testing.T) {
-		// Regression: repair schema hint was stubbed; Pass 2 must preserve IsRepairError.
-		big := strings.Repeat("x", 6_000)
-		h := NewHistory(8192)
-		h.Append(Message{Role: RoleSystem, Content: "sys prompt"})
-		repairText := `ERROR: arguments did not parse. schema: {"scope":"request_headers|request_body|response_headers|response_body|all"}`
-		for i := range 5 {
-			h.Append(Message{
-				Role:      RoleAssistant,
-				Content:   "try tool",
-				ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "flow_get", Arguments: "{}"}}},
-			})
-			if i%2 == 0 {
-				h.Append(Message{
-					Role: RoleTool, ToolCallID: "t1", ToolName: "flow_get",
-					Content: big, Summary120: Summarize120(big),
-				})
-			} else {
-				h.Append(Message{
-					Role: RoleTool, ToolCallID: "t1", ToolName: "flow_get",
-					Content: repairText, Summary120: Summarize120(repairText),
-					IsRepairError: true,
-				})
-			}
-		}
-		h.Append(Message{Role: RoleUser, Content: "continue"})
-		h.Append(Message{Role: RoleAssistant, Content: "ok"})
-
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
-		})
-		require.NoError(t, err)
-		assert.Contains(t, report.PassesApplied, "tool-stub")
-		assert.Positive(t, report.RepairsProtected)
-
-		var repairs, stubbedNonRepairs int
-		for _, m := range h.Snapshot() {
-			if m.IsRepairError && strings.Contains(m.Content, "schema:") {
-				repairs++
-			}
-			if m.Role == RoleTool && !m.IsRepairError && strings.Contains(m.Content, strings.Repeat("x", 200)) {
-				stubbedNonRepairs++
-			}
-		}
-		assert.Positive(t, repairs)
-		assert.Zero(t, stubbedNonRepairs)
-	})
-
-	t.Run("think_strip_breaks_early", func(t *testing.T) {
-		// Small overflow: Pass 1 should stop stripping as soon as estimate hits target.
-		think := "<think>" + strings.Repeat("r", 2_000) + "</think>"
-		h := NewHistory(4096)
-		h.Append(Message{Role: RoleSystem, Content: "sys"})
-		for range 6 {
-			h.Append(Message{
-				Role: RoleAssistant, Content: think + "answer",
-				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
-			})
-			h.Append(Message{
-				Role: RoleTool, ToolCallID: "t", ToolName: "t",
-				Content: "ok", Summary120: "ok",
-			})
-		}
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 2,
-		})
-		require.NoError(t, err)
-		assert.Contains(t, report.PassesApplied, "think-strip")
-		assert.Positive(t, report.ThinkStripped)
-		// 6 assistants total minus the keep*2 trailing window (last 2 assistants) = 4 eligible.
-		assert.Less(t, report.ThinkStripped, 4)
-	})
-
-	t.Run("uses_effective_max_context", func(t *testing.T) {
-		// Watermark math must follow EffectiveMaxContext after a rejection shrink.
-		big := strings.Repeat("y", 3_000)
-		h := NewHistory(200_000)
-		h.Append(Message{Role: RoleSystem, Content: "sys"})
-		for range 6 {
-			h.Append(Message{
-				Role:      RoleAssistant,
-				Content:   big,
-				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
-			})
-			h.Append(Message{
-				Role: RoleTool, ToolCallID: "t", ToolName: "t",
-				Content: big, Summary120: "summary",
-			})
-		}
-
-		// 18k estimate is well under 200k × 0.80 trigger → early-return.
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
-		})
-		require.NoError(t, err)
-		assert.Empty(t, report.PassesApplied)
-
-		h.ShrinkEffectiveMaxOnRejection(25_000) // × 0.80 = 20k
-		report, err = Compact(h, CompactionOptions{
-			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
-			HardTruncateOnOverflow: true,
-		})
-		require.NoError(t, err)
-		assert.NotEmpty(t, report.PassesApplied)
-	})
-
-	t.Run("hard_truncate_on_overflow", func(t *testing.T) {
-		// KeepTurns=4 trailing window still overflows; hard-truncate must drop further.
-		big := strings.Repeat("y", 3_000)
-		h := buildToolCallHistory(8192, big, 8)
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 4,
-			HardTruncateOnOverflow: true,
-		})
-		require.NoError(t, err)
-		assert.Contains(t, report.PassesApplied, "hard-truncate")
-		assertToolPairing(t, h.Snapshot())
-	})
-
-	t.Run("wrapper_runs_both_phases", func(t *testing.T) {
-		big := strings.Repeat("x", 3_000)
-		h := NewHistory(8192)
-		h.Append(Message{Role: RoleSystem, Content: "sys"})
-		calls := []ToolCall{
-			{ID: "e1", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
-			{ID: "e2", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
-			{ID: "e3", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
-		}
-		h.Append(Message{Role: RoleAssistant, Content: "fan out", ToolCalls: calls})
-		for i, id := range []string{"e1", "e2", "e3"} {
-			h.Append(Message{
-				Role: RoleTool, ToolCallID: id, ToolName: "flaky",
-				Content: "ERROR: same " + strconv.Itoa(i),
-			})
-		}
-		for i := range 4 {
-			h.Append(Message{
-				Role: RoleAssistant, Content: big,
-				ToolCalls: []ToolCall{{ID: "t" + strconv.Itoa(i), Function: ToolFunction{Name: "t", Arguments: "{}"}}},
-			})
-			h.Append(Message{
-				Role: RoleTool, ToolCallID: "t" + strconv.Itoa(i), ToolName: "t",
-				Content: big, Summary120: "summary",
-			})
-		}
-		report, err := Compact(h, CompactionOptions{
-			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
-		})
-		require.NoError(t, err)
-		assert.Contains(t, report.PassesApplied, "error-collapse")
-		assert.Positive(t, report.CollapsedErrors)
+	t.Run("counters_sum", func(t *testing.T) {
+		a := CompactionReport{StubbedResults: 1, DroppedTurns: 2, SelfPrunedCalls: 3}
+		b := CompactionReport{StubbedResults: 4, DroppedTurns: 5, SelfPrunedCalls: 6}
+		got := MergeReports(a, b)
+		assert.Equal(t, 5, got.StubbedResults)
+		assert.Equal(t, 7, got.DroppedTurns)
+		assert.Equal(t, 9, got.SelfPrunedCalls)
 	})
 }
 
@@ -386,6 +197,182 @@ func TestCompactRemainder(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotContains(t, report.PassesApplied, "error-collapse")
 		assert.Less(t, h.EstimateTokens(), before)
+	})
+
+	t.Run("think_strip_tool_stub", func(t *testing.T) {
+		big := strings.Repeat("x", 6_000)
+		h := buildFattyHistory(8192, big)
+		before := h.EstimateTokens()
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, report.PassesApplied, "think-strip")
+		assert.Contains(t, report.PassesApplied, "tool-stub")
+		assert.Less(t, report.After, before)
+	})
+
+	t.Run("drop_turn_fallback", func(t *testing.T) {
+		big := strings.Repeat("y", 20_000)
+		h := NewHistory(2048)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		for range 6 {
+			h.Append(Message{
+				Role:      RoleAssistant,
+				Content:   big,
+				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: RoleTool, ToolCallID: "t", ToolName: "t",
+				Content: big, Summary120: "summary",
+			})
+		}
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		require.Error(t, err)
+		assert.Contains(t, report.PassesApplied, "turn-drop")
+	})
+
+	t.Run("fail_fast_no_truncate", func(t *testing.T) {
+		big := strings.Repeat("z", 8_000)
+		h := NewHistory(1024)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		for range 3 {
+			h.Append(Message{Role: RoleAssistant, Content: big})
+			h.Append(Message{Role: RoleUser, Content: big})
+		}
+		_, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 8,
+			HardTruncateOnOverflow: false,
+		})
+		require.ErrorContains(t, err, "high watermark")
+	})
+
+	t.Run("under_target_noop", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: "hi"})
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, report.PassesApplied)
+		assert.Equal(t, report.Before, report.After)
+	})
+
+	t.Run("repair_errors_protected", func(t *testing.T) {
+		// Regression: repair schema hint was stubbed; tool-stub must preserve IsRepairError.
+		big := strings.Repeat("x", 6_000)
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys prompt"})
+		repairText := `ERROR: arguments did not parse. schema: {"scope":"request_headers|request_body|response_headers|response_body|all"}`
+		for i := range 5 {
+			h.Append(Message{
+				Role:      RoleAssistant,
+				Content:   "try tool",
+				ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "flow_get", Arguments: "{}"}}},
+			})
+			if i%2 == 0 {
+				h.Append(Message{
+					Role: RoleTool, ToolCallID: "t1", ToolName: "flow_get",
+					Content: big, Summary120: Summarize120(big),
+				})
+			} else {
+				h.Append(Message{
+					Role: RoleTool, ToolCallID: "t1", ToolName: "flow_get",
+					Content: repairText, Summary120: Summarize120(repairText),
+					IsRepairError: true,
+				})
+			}
+		}
+		h.Append(Message{Role: RoleUser, Content: "continue"})
+		h.Append(Message{Role: RoleAssistant, Content: "ok"})
+
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, report.PassesApplied, "tool-stub")
+		assert.Positive(t, report.RepairsProtected)
+
+		var repairs, stubbedNonRepairs int
+		for _, m := range h.Snapshot() {
+			if m.IsRepairError && strings.Contains(m.Content, "schema:") {
+				repairs++
+			}
+			if m.Role == RoleTool && !m.IsRepairError && strings.Contains(m.Content, strings.Repeat("x", 200)) {
+				stubbedNonRepairs++
+			}
+		}
+		assert.Positive(t, repairs)
+		assert.Zero(t, stubbedNonRepairs)
+	})
+
+	t.Run("think_strip_breaks_early", func(t *testing.T) {
+		think := "<think>" + strings.Repeat("r", 2_000) + "</think>"
+		h := NewHistory(4096)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		for range 6 {
+			h.Append(Message{
+				Role: RoleAssistant, Content: think + "answer",
+				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: RoleTool, ToolCallID: "t", ToolName: "t",
+				Content: "ok", Summary120: "ok",
+			})
+		}
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 2,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, report.PassesApplied, "think-strip")
+		assert.Positive(t, report.ThinkStripped)
+		assert.Less(t, report.ThinkStripped, 4)
+	})
+
+	t.Run("uses_effective_max_context", func(t *testing.T) {
+		big := strings.Repeat("y", 3_000)
+		h := NewHistory(200_000)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		for range 6 {
+			h.Append(Message{
+				Role:      RoleAssistant,
+				Content:   big,
+				ToolCalls: []ToolCall{{ID: "t", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: RoleTool, ToolCallID: "t", ToolName: "t",
+				Content: big, Summary120: "summary",
+			})
+		}
+
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, report.PassesApplied)
+
+		h.ShrinkEffectiveMaxOnRejection(25_000)
+		report, err = CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 4,
+			HardTruncateOnOverflow: true,
+		})
+		require.NoError(t, err)
+		assert.NotEmpty(t, report.PassesApplied)
+	})
+
+	t.Run("hard_truncate_on_overflow", func(t *testing.T) {
+		big := strings.Repeat("y", 3_000)
+		h := buildToolCallHistory(8192, big, 8)
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 4,
+			HardTruncateOnOverflow: true,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, report.PassesApplied, "hard-truncate")
+		assertToolPairing(t, h.Snapshot())
 	})
 }
 

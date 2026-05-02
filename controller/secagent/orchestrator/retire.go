@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/go-appsec/secagent/orchestrator/history"
+	"github.com/go-appsec/secagent/history"
 )
 
 // retireResult holds one retirement result. Empty Summary indicates

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/history"
 )
 
 // scriptedFireFn returns a Fire callback that records invocations and
@@ -188,7 +189,7 @@ func TestRunDecisionPhase(t *testing.T) {
 			decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1, Instruction: "next"})
 		}
 		workerAgent := &agent.FakeAgent{
-			LastBoundaryIdx: 0,
+			LastBoundaryID: 0,
 			SnapshotMessages: []agent.Message{
 				{Role: "assistant", Content: "worker activity"},
 				{Role: "tool", ToolName: "proxy_poll", Content: "tool result"},
@@ -206,6 +207,54 @@ func TestRunDecisionPhase(t *testing.T) {
 		last := dirChat.Messages[len(dirChat.Messages)-1]
 		assert.Contains(t, last.Content, "director decision recorded for worker 1")
 		assert.Contains(t, last.Content, "continue")
+	})
+
+	t.Run("flushes_pending_self_prune_drops", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "decide"}}}
+		director.OnDrain = func(_ int) {
+			decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1, Instruction: "next"})
+		}
+		// Pre-populate dirChat with a prior iteration's worker activity that
+		// includes a tool-call we'll mark for pruning.
+		dirChat := NewDirectorChat()
+		dirChat.AppendWorkerActivity(1, 1, []agent.Message{
+			{
+				Role:      "assistant",
+				ToolCalls: []agent.ToolCall{{ID: "old1", Function: agent.ToolFunction{Name: "proxy_poll"}}},
+			},
+			{Role: "tool", ToolCallID: "old1", ToolName: "proxy_poll", Content: "old result"},
+		})
+		require.Len(t, dirChat.Messages, 2)
+
+		workerAgent := &agent.FakeAgent{LastBoundaryID: 0}
+		w := &WorkerState{
+			ID: 1, Alive: true, Agent: workerAgent,
+			Chronicle: history.NewChronicle([]agent.Message{
+				{
+					Role:      "assistant",
+					ToolCalls: []agent.ToolCall{{ID: "old1", Function: agent.ToolFunction{Name: "proxy_poll"}}},
+				},
+				{Role: "tool", ToolCallID: "old1", ToolName: "proxy_poll", Content: "old result"},
+				{Role: "assistant", Content: "kept"},
+			}, []int{1, 1, 1}),
+		}
+		w.BufferSelfPrunes([]string{"old1"})
+		fire, _ := scriptedFireFn(t, nil)
+		RunDecisionPhase(t.Context(), DecisionPhaseInput{
+			Director: director, DirChat: dirChat, Decisions: decisions,
+			Workers: []*WorkerState{w}, Fire: fire, Iter: 2,
+		}, nil)
+		assert.Empty(t, w.DrainSelfPrunes())
+		for _, m := range dirChat.Messages {
+			assert.NotEqual(t, "old1", m.ToolCallID)
+			for _, tc := range m.ToolCalls {
+				assert.NotEqual(t, "old1", tc.ID)
+			}
+		}
+		chronMsgs := w.Chronicle.Messages()
+		require.Len(t, chronMsgs, 1)
+		assert.Equal(t, "kept", chronMsgs[0].Content)
 	})
 }
 

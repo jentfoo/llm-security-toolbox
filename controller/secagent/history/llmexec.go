@@ -9,13 +9,15 @@ import (
 
 // RunOneShot runs one non-streaming system+user chat completion via a
 // pooled client and returns the trimmed response content. Pass "" for
-// reasoningEffort to inherit the model's default.
+// reasoningEffort to inherit the model's default. Pass nil for
+// temperature to leave sampling temperature unset (backend default).
 func RunOneShot(
 	ctx context.Context,
 	pool *agent.ClientPool,
 	model, system, user string,
 	maxTokens int,
 	reasoningEffort string,
+	temperature *float32,
 ) (string, error) {
 	client, err := pool.Acquire(ctx)
 	if err != nil {
@@ -30,6 +32,7 @@ func RunOneShot(
 		},
 		MaxTokens:       maxTokens,
 		ReasoningEffort: reasoningEffort,
+		Temperature:     temperature,
 	})
 	if err != nil {
 		return "", err

@@ -113,7 +113,7 @@ func (s *Summarizer) oneShot(ctx context.Context, system, user string) (string, 
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return RunOneShot(cctx, s.Pool, s.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
+	return RunOneShot(cctx, s.Pool, s.Model, system, user, maxTokens, agent.CompressionReasoningEffort, nil)
 }
 
 // RenderSnapshotForSummary returns snapshot rendered as a readable

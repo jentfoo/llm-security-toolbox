@@ -15,8 +15,8 @@ import (
 
 	"github.com/go-appsec/secagent/agent"
 	"github.com/go-appsec/secagent/config"
+	"github.com/go-appsec/secagent/history"
 	"github.com/go-appsec/secagent/mcp"
-	"github.com/go-appsec/secagent/orchestrator/history"
 	"github.com/go-appsec/secagent/prompts"
 )
 
@@ -142,14 +142,15 @@ func (f *OpenAIFactory) fuzzyToolMatchCallback(role string) func(received, resol
 	}
 }
 
-// summarizeErrorCallback returns a hook that logs failed boundary-summarize
-// attempts. Returns nil when f.Log is nil.
-func (f *OpenAIFactory) summarizeErrorCallback(role string) func(error) {
+// callbackErrorCallback returns a hook that logs failures from the
+// model-driven aux compaction passes (self-prune, distill). Returns nil
+// when f.Log is nil.
+func (f *OpenAIFactory) callbackErrorCallback(role string) func(error) {
 	if f.Log == nil {
 		return nil
 	}
 	return func(err error) {
-		f.Log.Log("agent", "summarize-error", map[string]any{
+		f.Log.Log("agent", "compact-callback-error", map[string]any{
 			"role": role,
 			"err":  err.Error(),
 		})
@@ -196,17 +197,27 @@ func (f *OpenAIFactory) buildAgent(
 ) agent.Agent {
 	onReqStart, onReqEnd := f.requestCallbacks(role)
 	onToolStart, onToolEnd := f.toolCallbacks(role)
+	compactionOpts := agent.CompactionOptions{
+		HighWatermark:          f.Cfg.HighWatermark,
+		LowWatermark:           f.Cfg.LowWatermark,
+		KeepTurns:              f.Cfg.KeepTurns,
+		HardTruncateOnOverflow: true,
+	}
+	compactorOpts := history.CompactorOptions{
+		Compaction:       compactionOpts,
+		RetireOnPressure: retireOnPressure,
+		OnCallbackError:  f.callbackErrorCallback(role),
+		OnCompact:        f.compactCallback(role),
+	}
+	if wireCompactionAssist && f.Summarizer != nil {
+		compactorOpts.OnSelfPruneCandidates = history.SelfPruneCallback(f.Summarizer)
+		compactorOpts.OnDistillResults = history.DistillCallback(f.Summarizer)
+	}
 	cfg := agent.OpenAIAgentConfig{
-		Model:        model,
-		SystemPrompt: systemPrompt,
-		Pool:         pool,
-		MaxContext:   maxContext,
-		Compaction: agent.CompactionOptions{
-			HighWatermark:          f.Cfg.HighWatermark,
-			LowWatermark:           f.Cfg.LowWatermark,
-			KeepTurns:              f.Cfg.KeepTurns,
-			HardTruncateOnOverflow: true,
-		},
+		Model:             model,
+		SystemPrompt:      systemPrompt,
+		Pool:              pool,
+		MaxContext:        maxContext,
 		TurnTimeout:       f.Cfg.TurnTimeout,
 		PerToolTimeout:    f.Cfg.PerToolTimeout,
 		MaxParallelTools:  f.Cfg.MaxParallelTools,
@@ -220,16 +231,11 @@ func (f *OpenAIFactory) buildAgent(
 		OnToolEnd:         onToolEnd,
 		OnFuzzyToolMatch:  f.fuzzyToolMatchCallback(role),
 		OnContextOverflow: onContextOverflow,
-		OnSummarizeError:  f.summarizeErrorCallback(role),
-		OnCompact:         f.compactCallback(role),
-		RetireOnPressure:  retireOnPressure,
+		OnHardTruncate:    f.compactCallback(role),
+		Compactor:         history.NewLayeredCompactor(compactorOpts),
 	}
 	if setFlowExtractor {
 		cfg.FlowIDExtractor = ExtractFlowIDs
-	}
-	if wireCompactionAssist && f.Summarizer != nil {
-		cfg.OnSelfPruneCandidates = history.SelfPruneCallback(f.Summarizer)
-		cfg.OnDistillResults = history.DistillCallback(f.Summarizer)
 	}
 	return agent.NewOpenAIAgent(cfg)
 }
@@ -306,7 +312,7 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 		true,
 		onContextOverflow,
 		false,
-		false, // verifier compaction stays mechanical
+		true, // wire model-driven compaction assist (parity with workers)
 	), nil
 }
 
@@ -438,6 +444,11 @@ func newWorkerSpawner(
 			Alive:            true,
 			LastInstruction:  assignment,
 			AutonomousBudget: autonomousBudget,
+		}
+		// Buffer self-prune drops so RunDecisionPhase can mirror them onto
+		// DirectorChat and the chronicle.
+		if oa, ok := a.(*agent.OpenAIAgent); ok {
+			oa.SetOnSelfPruneApplied(ws.BufferSelfPrunes)
 		}
 		return ws, nil
 	}

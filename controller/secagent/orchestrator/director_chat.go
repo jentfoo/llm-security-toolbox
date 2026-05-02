@@ -6,7 +6,9 @@ package orchestrator
 // (WorkerID, Iter) for selective compaction at render time.
 
 import (
+	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/history"
 )
 
 // DirectorMsgMeta tags one DirectorChat message with the worker it belongs
@@ -76,6 +78,30 @@ func (c *DirectorChat) ReplaceWorkerWithSummary(workerID int, summary string, it
 		append([]agent.Message{summaryMsg}, keptMsgs[firstIdx:]...)...)
 	c.Meta = append(keptMeta[:firstIdx],
 		append([]DirectorMsgMeta{summaryMeta}, keptMeta[firstIdx:]...)...)
+}
+
+// ApplyWorkerSelfPrune mirrors a worker agent's self-prune onto the
+// director chat, scoped to messages tagged for workerID. Messages from
+// other workers (or director-owned) pass through. Returns dropped count.
+func (c *DirectorChat) ApplyWorkerSelfPrune(workerID int, dropIDs []string) int {
+	if workerID <= 0 || len(dropIDs) == 0 {
+		return 0
+	}
+	dropSet := bulk.SliceToSet(bulk.SliceFilter(func(s string) bool { return s != "" }, dropIDs))
+	if len(dropSet) == 0 {
+		return 0
+	}
+	keptMsgs, keptIndices, dropped := history.PruneToolResults(
+		c.Messages, dropSet,
+		func(i int) bool { return c.Meta[i].WorkerID == workerID },
+	)
+	keptMeta := make([]DirectorMsgMeta, 0, len(keptIndices))
+	for _, i := range keptIndices {
+		keptMeta = append(keptMeta, c.Meta[i])
+	}
+	c.Messages = keptMsgs
+	c.Meta = keptMeta
+	return dropped
 }
 
 // RenderForWorker returns a deep-copied view of the chat where messages

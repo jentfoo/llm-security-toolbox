@@ -20,7 +20,8 @@ type CompactionOptions struct {
 	RecoveryThreshold float64
 }
 
-// TODO: tune defaultRecoveryThreshold once OnCompact telemetry is available.
+// TODO: tune defaultRecoveryThreshold based on history.CompactorOptions.OnCompact
+// telemetry (wired via orchestrator.OpenAIFactory.compactCallback).
 const defaultRecoveryThreshold = 0.25
 
 // CompactionReport describes what Compact did in one pass.
@@ -91,8 +92,11 @@ func StubToolResult(m *Message) bool {
 	return true
 }
 
-// applyCompactionDefaults fills zero-value fields with default values.
-func applyCompactionDefaults(opt *CompactionOptions) {
+// ApplyCompactionDefaults fills zero-value fields with default values.
+// Single source of truth for HighWatermark / LowWatermark / KeepTurns /
+// RecoveryThreshold defaults — sibling-package callers (e.g. history.Compactor)
+// should call this rather than re-encoding the fallbacks.
+func ApplyCompactionDefaults(opt *CompactionOptions) {
 	if opt.HighWatermark <= 0 {
 		opt.HighWatermark = 0.80
 	}
@@ -107,26 +111,11 @@ func applyCompactionDefaults(opt *CompactionOptions) {
 	}
 }
 
-// Compact shrinks h in place until tokens <= LowWatermark * max. Returns
-// the merged report and an error if still over HighWatermark.
-func Compact(h *History, opt CompactionOptions) (CompactionReport, error) {
-	applyCompactionDefaults(&opt)
-	r0 := CompactErrorsOnly(h, opt)
-	r1, err := CompactRemainder(h, opt)
-	merged := mergeReports(r0, r1)
-	merged.Before = r0.Before
-	merged.After = r1.After
-	if r1.After == 0 {
-		merged.After = r0.After
-	}
-	return merged, err
-}
-
 // CompactErrorsOnly collapses consecutive same-tool error streaks in h in
 // place, leaving only the most recent error in each streak. Returns a
 // report describing what was done.
 func CompactErrorsOnly(h *History, opt CompactionOptions) CompactionReport {
-	applyCompactionDefaults(&opt)
+	ApplyCompactionDefaults(&opt)
 	before := h.EstimateTokens()
 	report := CompactionReport{Before: before, After: before}
 	maxCtx := h.EffectiveMaxContext()
@@ -147,7 +136,7 @@ func CompactErrorsOnly(h *History, opt CompactionOptions) CompactionReport {
 // CompactRemainder runs mechanical fallback compaction on h in place.
 // Returns an error if the final estimate is still over HighWatermark.
 func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, error) {
-	applyCompactionDefaults(&opt)
+	ApplyCompactionDefaults(&opt)
 	before := h.EstimateTokens()
 	report := CompactionReport{Before: before, After: before}
 	maxCtx := h.EffectiveMaxContext()
@@ -294,10 +283,19 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	return report, nil
 }
 
-// mergeReports concatenates PassesApplied and sums counters across a and b.
-// Before/After are caller-managed.
-func mergeReports(a, b CompactionReport) CompactionReport {
-	out := CompactionReport{
+// MergeReports concatenates PassesApplied and sums counters across a and b.
+// Exported so callers in sibling packages (e.g., history.Compactor) can
+// aggregate reports across passes.
+// Before is taken from a (the running aggregate's start point); After is
+// taken from b.After when non-zero, falling back to a.After.
+func MergeReports(a, b CompactionReport) CompactionReport {
+	after := b.After
+	if after == 0 {
+		after = a.After
+	}
+	return CompactionReport{
+		Before:           a.Before,
+		After:            after,
 		PassesApplied:    append(append([]string{}, a.PassesApplied...), b.PassesApplied...),
 		StubbedResults:   a.StubbedResults + b.StubbedResults,
 		DroppedTurns:     a.DroppedTurns + b.DroppedTurns,
@@ -308,7 +306,6 @@ func mergeReports(a, b CompactionReport) CompactionReport {
 		SelfPrunedCalls:  a.SelfPrunedCalls + b.SelfPrunedCalls,
 		DistilledResults: a.DistilledResults + b.DistilledResults,
 	}
-	return out
 }
 
 // ForceHardTruncate unconditionally drops oldest turns from h until the

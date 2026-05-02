@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/orchestrator/history"
+	"github.com/go-appsec/secagent/history"
 )
 
 // narratorSystemPrompt avoids word-count constraints — reasoning models echo them in output.

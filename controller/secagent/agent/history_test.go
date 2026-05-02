@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHistory_ShrinkEffectiveMaxOnRejection(t *testing.T) {
@@ -89,5 +90,77 @@ func TestHistory_Calibration(t *testing.T) {
 			h.SetPromptTokens(208)
 		}
 		assert.InDelta(t, 2.0, h.Calibration(), 0.05)
+	})
+}
+
+func TestHistory_IterationBoundaryID(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unset_returns_zero", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: "hi"})
+		assert.Zero(t, h.IterationBoundaryID())
+	})
+
+	t.Run("mark_records_nextid", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: "before"})
+		h.MarkIterationBoundary()
+		watermark := h.IterationBoundaryID()
+		require.Equal(t, h.Snapshot()[1].HistoryID, watermark)
+
+		h.Append(Message{Role: RoleAssistant, Content: "iter"})
+		assert.Greater(t, h.Snapshot()[2].HistoryID, watermark)
+	})
+
+	t.Run("watermark_survives_replaceall", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: "old1"})
+		h.Append(Message{Role: RoleUser, Content: "old2"})
+		h.MarkIterationBoundary()
+		watermark := h.IterationBoundaryID()
+		h.Append(Message{Role: RoleAssistant, Content: "iter content"})
+		iterID := h.Snapshot()[3].HistoryID
+
+		// Drop the two pre-boundary user messages, keep system + iter content.
+		snap := h.Snapshot()
+		h.ReplaceAll([]Message{snap[0], snap[3]})
+
+		assert.Equal(t, watermark, h.IterationBoundaryID())
+		// Iter message keeps its ID; still > watermark.
+		assert.Equal(t, iterID, h.Snapshot()[1].HistoryID)
+		assert.Greater(t, h.Snapshot()[1].HistoryID, h.IterationBoundaryID())
+	})
+
+	t.Run("salvages_surviving_tail_when_boundary_msg_dropped", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.MarkIterationBoundary()
+		h.Append(Message{Role: RoleUser, Content: "u1"})
+		h.Append(Message{Role: RoleAssistant, Content: "a1"})
+		h.Append(Message{Role: RoleAssistant, Content: "a2"})
+		watermark := h.IterationBoundaryID()
+		survivorID := h.Snapshot()[3].HistoryID
+
+		// Drop the first iter message but retain a later one — the watermark
+		// stays valid and the survivor is still classified as iter content.
+		snap := h.Snapshot()
+		h.ReplaceAll([]Message{snap[0], snap[3]})
+
+		assert.Equal(t, watermark, h.IterationBoundaryID())
+		assert.Greater(t, survivorID, watermark)
+	})
+
+	t.Run("reset_clears_watermark", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: "u1"})
+		h.MarkIterationBoundary()
+		require.NotZero(t, h.IterationBoundaryID())
+		h.ResetIterationBoundary()
+		assert.Zero(t, h.IterationBoundaryID())
 	})
 }

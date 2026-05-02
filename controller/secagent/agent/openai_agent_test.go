@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -992,411 +991,59 @@ func TestOpenAIAgent_MarkIterationBoundary(t *testing.T) {
 		Model: "m", SystemPrompt: "sys",
 		Pool: newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
 	})
-	assert.Zero(t, a.IterationBoundary())
+	assert.Zero(t, a.IterationBoundaryID())
 	a.Query("hello")
 	a.MarkIterationBoundary()
-	// After [system, user], boundary records position 2.
-	assert.Equal(t, 2, a.IterationBoundary())
+	// Watermark equals the highest HistoryID at mark time (system + user).
+	snap := a.Snapshot()
+	require.Len(t, snap, 2)
+	assert.Equal(t, snap[1].HistoryID, a.IterationBoundaryID())
 	a.ReplaceHistory([]Message{{Role: RoleUser, Content: "fresh"}})
-	// ReplaceHistory resets the boundary index.
-	assert.Zero(t, a.IterationBoundary())
+	// ReplaceHistory resets the watermark.
+	assert.Zero(t, a.IterationBoundaryID())
 }
 
-func TestOpenAIAgent_MaybeCompactRunsBoundarySummarizeBeforeFallthrough(t *testing.T) {
-	t.Parallel()
-	// Set a deliberately tight watermark so any history triggers it.
-	var summarizeCalls int
-	var summarizeCallSnapshotLen int
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "sys",
-		Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-		MaxContext: 200,
-		Compaction: CompactionOptions{HighWatermark: 0.01, KeepTurns: 1},
-		OnSummarizeBoundary: func(_ context.Context, snap []Message) ([]Message, error) {
-			summarizeCalls++
-			summarizeCallSnapshotLen = len(snap)
-			return []Message{{Role: RoleUser, Content: "<recap>"}}, nil
-		},
-	})
-	// Fill chronicle with several user/assistant turns. These all sit
-	// BEFORE the iteration boundary.
-	for i := range 3 {
-		a.Query("noisy chronicle " + strconv.Itoa(i))
-		a.History().Append(Message{Role: RoleAssistant, Content: "asst response " + strconv.Itoa(i)})
-	}
-	// Mark the boundary, then add one more user message representing the
-	// in-iter directive that should be preserved verbatim.
-	a.MarkIterationBoundary()
-	a.Query("iter directive")
-
-	require.NoError(t, a.maybeCompact(t.Context()))
-	require.Equal(t, 1, summarizeCalls)
-	assert.Positive(t, summarizeCallSnapshotLen)
-
-	snap := a.Snapshot()
-	// Expect: [system, user:<recap>, user:iter directive]
-	require.GreaterOrEqual(t, len(snap), 3)
-	assert.Equal(t, RoleSystem, snap[0].Role)
-	assert.Equal(t, RoleUser, snap[1].Role)
-	assert.Equal(t, "<recap>", snap[1].Content)
-	assert.Equal(t, RoleUser, snap[len(snap)-1].Role)
-	assert.Equal(t, "iter directive", snap[len(snap)-1].Content)
+// stubCompactor is a deterministic agent.Compactor for Drain integration tests.
+type stubCompactor struct {
+	err   error
+	calls int
 }
 
-func TestOpenAIAgent_MaybeCompactBoundaryCallbackOncePerIter(t *testing.T) {
-	t.Parallel()
-	var summarizeCalls int
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "sys",
-		Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-		MaxContext: 200,
-		Compaction: CompactionOptions{HighWatermark: 0.01, KeepTurns: 1},
-		OnSummarizeBoundary: func(_ context.Context, _ []Message) ([]Message, error) {
-			summarizeCalls++
-			return []Message{{Role: RoleUser, Content: "<recap>"}}, nil
-		},
-	})
-	for i := range 3 {
-		a.Query("noise " + strconv.Itoa(i))
-		a.History().Append(Message{Role: RoleAssistant, Content: "asst " + strconv.Itoa(i)})
-	}
-	a.MarkIterationBoundary()
-	a.Query("iter directive")
-	require.NoError(t, a.maybeCompact(t.Context()))
-	// Second call within the same iter must NOT re-fire the callback.
-	require.NoError(t, a.maybeCompact(t.Context()))
-	assert.Equal(t, 1, summarizeCalls)
+func (s *stubCompactor) MaybeCompact(_ context.Context, _ *History) error {
+	s.calls++
+	return s.err
 }
 
-func TestOpenAIAgent_RunBoundarySummarize_EmptyReplacement(t *testing.T) {
+func (s *stubCompactor) SetOnSelfPruneApplied(_ func([]string)) {}
+
+func TestOpenAIAgent_DrainPropagatesRetireSentinelFromCompactor(t *testing.T) {
 	t.Parallel()
-	// Empty replacement still latches iterationSummarized so the callback
-	// isn't re-invoked over the same pre-boundary slice.
-	var calls int
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "sys",
-		Pool: newPoolWith(&fakeChatClient{}),
-		OnSummarizeBoundary: func(_ context.Context, _ []Message) ([]Message, error) {
-			calls++
-			return nil, nil
-		},
-	})
-	for i := range 3 {
-		a.Query("pre " + strconv.Itoa(i))
-		a.History().Append(Message{Role: RoleAssistant, Content: "ack " + strconv.Itoa(i)})
-	}
-	a.MarkIterationBoundary()
-	a.Query("iter directive")
-
-	preLen := a.history.Len()
-	require.NoError(t, a.runBoundarySummarize(t.Context()))
-	assert.Equal(t, 1, calls)
-	assert.Equal(t, preLen, a.history.Len(), "history must be unchanged on empty replacement")
-	assert.True(t, a.iterationSummarized, "latch must fire so a second call no-ops via maybeCompact")
-
-	require.NoError(t, a.maybeCompact(t.Context()))
-	assert.Equal(t, 1, calls, "maybeCompact must not re-invoke when latch is set")
-}
-
-func TestOpenAIAgent_MaybeCompactTieredFlow(t *testing.T) {
-	t.Parallel()
-
-	// buildBigHistory seeds history past the 80% high watermark so
-	// maybeCompact engages. No same-tool error streaks unless requested,
-	// so pass 0 (error-collapse) is a no-op by default.
-	buildBigHistory := func(maxCtx int, withErrorStreak bool) *History {
-		h := NewHistory(maxCtx)
-		h.Append(Message{Role: RoleSystem, Content: "sys"})
-		big := strings.Repeat("y", 800)
-		if withErrorStreak {
-			calls := []ToolCall{
-				{ID: "e1", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
-				{ID: "e2", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
-				{ID: "e3", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
-				{ID: "e4", Function: ToolFunction{Name: "flaky", Arguments: "{}"}},
-			}
-			h.Append(Message{Role: RoleAssistant, Content: "fan out", ToolCalls: calls})
-			for _, id := range []string{"e1", "e2", "e3", "e4"} {
-				h.Append(Message{
-					Role:       RoleTool,
-					ToolCallID: id,
-					ToolName:   "flaky",
-					Content:    "ERROR: same failure " + strings.Repeat("z", 600),
-				})
-			}
-		}
-		for i := range 4 {
-			h.Append(Message{
-				Role: RoleAssistant, Content: big,
-				ToolCalls: []ToolCall{{ID: "t" + strconv.Itoa(i), Function: ToolFunction{Name: "t", Arguments: "{}"}}},
-			})
-			h.Append(Message{
-				Role: RoleTool, ToolCallID: "t" + strconv.Itoa(i), ToolName: "t",
-				Content: big, Summary120: "s",
-			})
-		}
-		return h
-	}
-
-	t.Run("pass_0_clears_threshold", func(t *testing.T) {
-		var bCalls, cCalls int
-		// RecoveryThreshold tiny → pass 0 alone clears it on a history
-		// with a large error streak.
-		a := NewOpenAIAgent(OpenAIAgentConfig{
-			Model: "m", SystemPrompt: "sys",
-			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-			MaxContext: 4096,
-			Compaction: CompactionOptions{
-				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
-				RecoveryThreshold:      0.01, // any drop above 41 tokens skips B
-				HardTruncateOnOverflow: true,
-			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []Message) ([]string, error) {
-				bCalls++
-				return nil, nil
-			},
-			OnDistillResults: func(_ context.Context, _ []Message) ([]Message, error) {
-				cCalls++
-				return nil, nil
-			},
-		})
-		// Replace the auto-system-prompt with the seeded history that has
-		// the error streak.
-		a.history.ReplaceAll(buildBigHistory(4096, true).Snapshot())
-		require.NoError(t, a.maybeCompact(t.Context()))
-		assert.Zero(t, bCalls)
-		assert.Zero(t, cCalls)
-	})
-
-	t.Run("pass_0_short_runs_b", func(t *testing.T) {
-		var bCalls, cCalls int
-		var bSnapshotLen int
-		a := NewOpenAIAgent(OpenAIAgentConfig{
-			Model: "m", SystemPrompt: "sys",
-			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-			MaxContext: 4096,
-			Compaction: CompactionOptions{
-				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
-				// Threshold larger than what the absent error streak could
-				// possibly free → Pass 0 always falls short.
-				RecoveryThreshold:      0.99,
-				HardTruncateOnOverflow: true,
-			},
-			OnSelfPruneCandidates: func(_ context.Context, snap []Message) ([]string, error) {
-				bCalls++
-				bSnapshotLen = len(snap)
-				// Return drop set that frees significant space (drop tool ids).
-				return []string{"t0", "t1", "t2", "t3"}, nil
-			},
-			OnDistillResults: func(_ context.Context, _ []Message) ([]Message, error) {
-				cCalls++
-				return nil, nil
-			},
-		})
-		a.history.ReplaceAll(buildBigHistory(4096, false).Snapshot())
-		// maybeCompact may return an error if mechanical passes can't fully
-		// clear the watermark after B's drops; that's OK for this test —
-		// we only verify B fires when Pass 0 fell short of the threshold.
-		_ = a.maybeCompact(t.Context())
-		assert.Equal(t, 1, bCalls)
-		assert.Positive(t, bSnapshotLen)
-	})
-
-	t.Run("b_empty_runs_c", func(t *testing.T) {
-		var bCalls, cCalls int
-		a := NewOpenAIAgent(OpenAIAgentConfig{
-			Model: "m", SystemPrompt: "sys",
-			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-			MaxContext: 4096,
-			Compaction: CompactionOptions{
-				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
-				RecoveryThreshold:      0.99,
-				HardTruncateOnOverflow: true,
-			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []Message) ([]string, error) {
-				bCalls++
-				return nil, nil // B has nothing to prune
-			},
-			OnDistillResults: func(_ context.Context, snap []Message) ([]Message, error) {
-				cCalls++
-				// Return the snapshot with first eligible tool result rewritten.
-				out := make([]Message, len(snap))
-				copy(out, snap)
-				for i := range out {
-					if out[i].Role == RoleTool {
-						out[i].Content = "(distilled batch 1: brief summary)"
-						break
-					}
-				}
-				return out, nil
-			},
-		})
-		a.history.ReplaceAll(buildBigHistory(4096, false).Snapshot())
-		require.NoError(t, a.maybeCompact(t.Context()))
-		assert.Equal(t, 1, bCalls)
-		assert.Equal(t, 1, cCalls)
-	})
-
-	t.Run("nil_callbacks_mechanical_only", func(t *testing.T) {
-		// Without B/C wired, maybeCompact must reduce to its prior behaviour
-		// (mechanical passes only).
-		a := NewOpenAIAgent(OpenAIAgentConfig{
-			Model: "m", SystemPrompt: "sys",
-			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-			MaxContext: 4096,
-			Compaction: CompactionOptions{
-				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
-				HardTruncateOnOverflow: true,
-			},
-		})
-		a.history.ReplaceAll(buildBigHistory(4096, false).Snapshot())
-		require.NoError(t, a.maybeCompact(t.Context()))
-		// Just verify the call returned cleanly — the existing mechanical
-		// passes do their job; behaviour is byte-for-byte equivalent to
-		// pre-change Compact().
-	})
-
-	t.Run("b_error_falls_through", func(t *testing.T) {
-		var summarizeErrs int
-		a := NewOpenAIAgent(OpenAIAgentConfig{
-			Model: "m", SystemPrompt: "sys",
-			Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-			MaxContext: 4096,
-			Compaction: CompactionOptions{
-				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
-				RecoveryThreshold:      0.99,
-				HardTruncateOnOverflow: true,
-			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []Message) ([]string, error) {
-				return nil, errors.New("boom")
-			},
-			OnSummarizeError: func(_ error) { summarizeErrs++ },
-		})
-		a.history.ReplaceAll(buildBigHistory(4096, false).Snapshot())
-		// B callback errors must not propagate; mechanical passes still run.
-		require.NoError(t, a.maybeCompact(t.Context()))
-		assert.Equal(t, 1, summarizeErrs)
-	})
-}
-
-func TestOpenAIAgent_MaybeCompactFailOpenWhenCallbackErrors(t *testing.T) {
-	t.Parallel()
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "sys",
-		Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-		MaxContext: 200,
-		Compaction: CompactionOptions{HighWatermark: 0.01, KeepTurns: 1},
-		OnSummarizeBoundary: func(_ context.Context, _ []Message) ([]Message, error) {
-			return nil, errors.New("downstream summarize failure")
-		},
-	})
-	for i := range 5 {
-		a.Query("noise " + strconv.Itoa(i))
-		a.History().Append(Message{Role: RoleAssistant, Content: "asst " + strconv.Itoa(i)})
-	}
-	a.MarkIterationBoundary()
-	a.Query("iter directive")
-	// Callback errors are absorbed; existing Compact is the safety net.
-	assert.NoError(t, a.maybeCompact(t.Context()))
-}
-
-func TestOpenAIAgent_CompactPreservingBoundary_TracksDirectiveAcrossDeletions(t *testing.T) {
-	t.Parallel()
-	// MaxContext sized so that pre-iter bulk content trips Compact's
-	// dropOldestTurn pass (which deletes oldest assistant-headed turn
-	// triples), but with enough headroom that the operation completes.
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "sys",
-		Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-		MaxContext: 4000,
-		Compaction: CompactionOptions{
-			HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
-			HardTruncateOnOverflow: true,
-		},
-	})
-	bulk := strings.Repeat("xy", 200)
-	for i := range 4 {
-		a.History().Append(Message{Role: RoleUser, Content: "noise " + strconv.Itoa(i) + " " + bulk})
-		a.History().Append(Message{Role: RoleAssistant, Content: "asst " + strconv.Itoa(i) + " " + bulk})
-	}
-	a.MarkIterationBoundary()
-	boundaryBefore := a.IterationBoundary()
-	require.Greater(t, boundaryBefore, 1)
-	a.Query("DIRECTIVE-MARKER")
-	a.History().Append(Message{Role: RoleAssistant, Content: "in-iter assistant"})
-
-	_, err := a.compactPreservingBoundary()
-	require.NoError(t, err)
-
-	snap := a.Snapshot()
-	boundaryAfter := a.IterationBoundary()
-	require.Less(t, boundaryAfter, boundaryBefore)
-	require.Less(t, boundaryAfter, len(snap))
-	assert.Equal(t, "DIRECTIVE-MARKER", snap[boundaryAfter].Content)
-}
-
-func TestOpenAIAgent_CompactPreservingBoundary_ClampsWhenMarkerDropped(t *testing.T) {
-	t.Parallel()
-	// HardTruncateOnOverflow=true with very tight watermarks lets Compact's
-	// last-resort hard-truncate pass eat past the boundary if needed.
-	a := NewOpenAIAgent(OpenAIAgentConfig{
-		Model: "m", SystemPrompt: "sys",
-		Pool:       newPoolWith(&fakeChatClient{responses: []ChatResponse{{Content: "ok"}}}),
-		MaxContext: 200,
-		Compaction: CompactionOptions{
-			HighWatermark: 0.05, LowWatermark: 0.01, KeepTurns: 1,
-			HardTruncateOnOverflow: true,
-		},
-	})
-	bulk := strings.Repeat("xy", 400)
-	a.History().Append(Message{Role: RoleUser, Content: "DIRECTIVE-MARKER"})
-	a.MarkIterationBoundary()
-	a.History().Append(Message{Role: RoleAssistant, Content: "iter1 " + bulk})
-	a.History().Append(Message{Role: RoleAssistant, Content: "iter2 " + bulk})
-
-	_, _ = a.compactPreservingBoundary()
-	// If the marker was dropped, boundary must clamp into [0, len(history)].
-	assert.LessOrEqual(t, a.IterationBoundary(), a.History().Len())
-}
-
-func TestOpenAIAgent_RetireOnPressure_StopsCleanlyAtHighWatermark(t *testing.T) {
-	t.Parallel()
-	// fakeChatClient with no responses scripted — the test asserts the
-	// agent must NOT issue an LLM call once pressure is hit.
 	client := &fakeChatClient{}
 	a := NewOpenAIAgent(OpenAIAgentConfig{
 		Model: "m", SystemPrompt: "sys",
-		Pool:             newPoolWith(client),
-		MaxContext:       200,
-		Compaction:       CompactionOptions{HighWatermark: 0.5, KeepTurns: 2},
-		RetireOnPressure: true,
+		Pool:      newPoolWith(client),
+		Compactor: &stubCompactor{err: ErrRetireOnPressure},
 	})
-	// Bulk content above the high watermark (200 * 0.5 = 100 tokens =
-	// 400 chars at default charsPerToken=4).
-	bulk := strings.Repeat("x", 600)
-	a.History().Append(Message{Role: RoleAssistant, Content: bulk})
-
+	a.Query("go")
 	sum, err := a.Drain(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, escalationContextExhausted, sum.EscalationReason)
 	assert.Empty(t, client.calls)
 }
 
-func TestOpenAIAgent_RetireOnPressure_RunsNormallyBelowWatermark(t *testing.T) {
+func TestOpenAIAgent_DrainRunsNormallyWhenCompactorReturnsNil(t *testing.T) {
 	t.Parallel()
-	client := &fakeChatClient{
-		responses: []ChatResponse{{Content: "done"}},
-	}
+	client := &fakeChatClient{responses: []ChatResponse{{Content: "done"}}}
+	c := &stubCompactor{}
 	a := NewOpenAIAgent(OpenAIAgentConfig{
 		Model: "m", SystemPrompt: "sys",
-		Pool:             newPoolWith(client),
-		MaxContext:       4096,
-		Compaction:       CompactionOptions{HighWatermark: 0.8, KeepTurns: 2},
-		RetireOnPressure: true,
+		Pool:      newPoolWith(client),
+		Compactor: c,
 	})
 	a.Query("go")
 	sum, err := a.Drain(t.Context())
 	require.NoError(t, err)
 	assert.NotEqual(t, escalationContextExhausted, sum.EscalationReason)
 	assert.Len(t, client.calls, 1)
+	assert.Positive(t, c.calls)
 }

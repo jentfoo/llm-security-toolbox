@@ -96,9 +96,9 @@ type Agent interface {
 	// prompt is preserved (re-prepended if msgs[0] is not a system message).
 	// Cancels any in-flight Drain and resets iteration-boundary state.
 	ReplaceHistory(msgs []Message)
-	// MarkIterationBoundary records the current history length as the start
-	// of the active iteration's content. Safe to call multiple times per
-	// iteration; each call updates the index.
+	// MarkIterationBoundary records the current HistoryID watermark as the
+	// start of the active iter's content. Safe to call multiple times per
+	// iter; each call updates the watermark.
 	MarkIterationBoundary()
 	Close() error
 }

@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/orchestrator/history"
+	"github.com/go-appsec/secagent/history"
 )
 
 func formatToolCalls(calls []agent.ToolCallRecord, limit int) string {

@@ -144,6 +144,44 @@ func TestSelfPruneCallback(t *testing.T) {
 		require.Error(t, err)
 		assert.Empty(t, dropIDs)
 	})
+
+	t.Run("empty_then_valid_retries_once", func(t *testing.T) {
+		client := &sequenceClient{
+			responses: []agent.ChatResponse{
+				{Content: ""},
+				{Content: `{"remove":[1,3]}`},
+			},
+		}
+		s := &Summarizer{Pool: poolOf(client), Model: "m"}
+		cb := SelfPruneCallback(s)
+
+		dropIDs, err := cb(t.Context(), buildSelfPruneSnapshot(8))
+		require.NoError(t, err)
+		require.Len(t, dropIDs, 2)
+		assert.Contains(t, dropIDs, "cA")
+		assert.Contains(t, dropIDs, "cC")
+		assert.Equal(t, 2, client.callCount())
+		// First attempt: no temperature override; retry: bumped.
+		assert.Nil(t, client.requests[0].Temperature)
+		require.NotNil(t, client.requests[1].Temperature)
+		assert.InEpsilon(t, selfPruneRetryTemperature, *client.requests[1].Temperature, 0.0001)
+	})
+
+	t.Run("empty_twice_returns_no_selections", func(t *testing.T) {
+		client := &sequenceClient{
+			responses: []agent.ChatResponse{
+				{Content: ""},
+				{Content: ""},
+			},
+		}
+		s := &Summarizer{Pool: poolOf(client), Model: "m"}
+		cb := SelfPruneCallback(s)
+
+		dropIDs, err := cb(t.Context(), buildSelfPruneSnapshot(8))
+		require.NoError(t, err)
+		assert.Empty(t, dropIDs)
+		assert.Equal(t, 2, client.callCount())
+	})
 }
 
 func TestParseEventIndexList(t *testing.T) {
@@ -173,6 +211,12 @@ func TestParseEventIndexList(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+
+	t.Run("empty_raw_returns_sentinel", func(t *testing.T) {
+		got, err := parseEventIndexList("", 5)
+		require.ErrorIs(t, err, ErrEmptyResponse)
+		assert.Empty(t, got)
+	})
 }
 
 func TestBuildToolEvents(t *testing.T) {

@@ -20,9 +20,21 @@ const (
 
 const selfPruneSystemPrompt = `You are reviewing a security-testing agent's history of tool calls and helping it free context space without losing load-bearing evidence. Respond with JSON only — no prose, no markdown fences.`
 
+// selfPruneRetryTemperature is the sampling temperature used on the
+// retry attempt after a blank response, slightly above the typical model
+// default to encourage variance.
+const selfPruneRetryTemperature float32 = 1.2
+
+// ErrEmptyResponse signals that the model returned an empty/whitespace-only
+// body where a JSON object was expected. Callers can errors.Is against it
+// to drive a single retry.
+var ErrEmptyResponse = errors.New("empty response")
+
 // SelfPruneCallback returns an OnSelfPruneCandidates callback that picks
 // redundant tool-call IDs for removal. Returns nil when s is nil or
-// unconfigured.
+// unconfigured. An empty-response from the model is retried once; a second
+// empty response is treated as "no selections" without an error so the
+// compactor's OnCallbackError doesn't fire on a transient model blank.
 func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.Message) ([]string, error) {
 	return func(ctx context.Context, snapshot []agent.Message) ([]string, error) {
 		if s == nil || s.Pool == nil || s.Model == "" {
@@ -33,23 +45,10 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent
 			return nil, nil
 		}
 		listing := renderToolEventListing(events)
-
 		selPrompt := buildSelfPruneSelectionPrompt(listing)
-		selRaw, err := RunOneShot(ctx, s.Pool, s.Model, selfPruneSystemPrompt, selPrompt,
-			selfPruneMaxTokens, agent.CompressionReasoningEffort)
+
+		selected, err := runSelfPruneSelection(ctx, s, selPrompt, len(events))
 		if err != nil {
-			if s.Log != nil {
-				s.Log.Log("compact", "self-prune select error", map[string]any{"err": err.Error()})
-			}
-			return nil, err
-		}
-		selected, err := parseEventIndexList(selRaw, len(events))
-		if err != nil {
-			if s.Log != nil {
-				s.Log.Log("compact", "self-prune select parse error", map[string]any{
-					"err": err.Error(), "raw": Short(selRaw, 240),
-				})
-			}
 			return nil, err
 		}
 		if len(selected) == 0 {
@@ -74,6 +73,65 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent
 		}
 		return ids, nil
 	}
+}
+
+// runSelfPruneSelection runs one selection call, retrying once with a
+// bumped temperature on ErrEmptyResponse. A second empty body returns
+// (nil, nil) so the caller treats it as "no selections" rather than an
+// error from a transient model blank.
+func runSelfPruneSelection(ctx context.Context, s *Summarizer, prompt string, total int) ([]int, error) {
+	selected, raw, err := selfPruneRunOnce(ctx, s, prompt, total, nil)
+	if err == nil {
+		return selected, nil
+	}
+	if !errors.Is(err, ErrEmptyResponse) {
+		s.logSelectError(err, raw)
+		return nil, err
+	}
+	if s.Log != nil {
+		s.Log.Log("compact", "self-prune empty response, retrying", nil)
+	}
+	retryTemp := selfPruneRetryTemperature
+	selected, raw, err = selfPruneRunOnce(ctx, s, prompt, total, &retryTemp)
+	if err == nil {
+		return selected, nil
+	}
+	if errors.Is(err, ErrEmptyResponse) {
+		if s.Log != nil {
+			s.Log.Log("compact", "self-prune empty after retry — treating as no selections", nil)
+		}
+		return nil, nil
+	}
+	s.logSelectError(err, raw)
+	return nil, err
+}
+
+// selfPruneRunOnce makes a single selection call and parses the result.
+// Returns the parsed indices, the raw body (for error logging), and the
+// error from RunOneShot or parseEventIndexList.
+func selfPruneRunOnce(
+	ctx context.Context, s *Summarizer, prompt string, total int, temp *float32,
+) ([]int, string, error) {
+	raw, err := RunOneShot(ctx, s.Pool, s.Model, selfPruneSystemPrompt, prompt,
+		selfPruneMaxTokens, agent.CompressionReasoningEffort, temp)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Log("compact", "self-prune select error", map[string]any{"err": err.Error()})
+		}
+		return nil, raw, err
+	}
+	selected, parseErr := parseEventIndexList(raw, total)
+	return selected, raw, parseErr
+}
+
+// logSelectError logs a parse failure against raw under the standard tag.
+func (s *Summarizer) logSelectError(err error, raw string) {
+	if s.Log == nil {
+		return
+	}
+	s.Log.Log("compact", "self-prune select parse error", map[string]any{
+		"err": err.Error(), "raw": Short(raw, 240),
+	})
 }
 
 // toolEvent is one tool-call/tool-result pair rendered in the prompt.
@@ -172,7 +230,7 @@ The "remove" array lists the 1-based event indices to drop from history. Empty a
 func parseEventIndexList(raw string, total int) ([]int, error) {
 	body := ExtractJSONObject(raw)
 	if body == "" {
-		return nil, errors.New("empty response")
+		return nil, ErrEmptyResponse
 	}
 	var v struct {
 		Remove []int `json:"remove"`

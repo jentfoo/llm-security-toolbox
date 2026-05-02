@@ -47,6 +47,9 @@ type History struct {
 	// doesn't re-hit the same rejection next turn.
 	effectiveMax int
 	nextID       uint64
+	// iterStartID is the HistoryID watermark recorded at iter start.
+	// Iter content = messages with HistoryID > iterStartID.
+	iterStartID uint64
 }
 
 const (
@@ -181,7 +184,9 @@ func (h *History) Snapshot() []Message {
 }
 
 // ReplaceAll replaces the message slice with msgs and resets the token
-// baseline.
+// baseline. Preserves the iteration watermark — IDs on retained messages
+// are unchanged, so iter content stays identifiable. Use ResetIterationBoundary
+// for a wholesale memory swap that should also end the current iter.
 func (h *History) ReplaceAll(msgs []Message) {
 	h.mu.Lock()
 	h.nextID = 0
@@ -199,6 +204,29 @@ func (h *History) ReplaceAll(msgs []Message) {
 	h.lastPromptTokens = 0
 	h.baselineMsgCount = 0
 	h.mu.Unlock()
+}
+
+// IterationBoundaryID returns the HistoryID watermark for the current iter.
+// Iter content = messages with HistoryID > this value.
+func (h *History) IterationBoundaryID() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.iterStartID
+}
+
+// MarkIterationBoundary records the current nextID as the iter watermark.
+func (h *History) MarkIterationBoundary() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.iterStartID = h.nextID
+}
+
+// ResetIterationBoundary clears the iter watermark. Intended for callers
+// that swap the working memory wholesale (e.g. ReplaceHistory).
+func (h *History) ResetIterationBoundary() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.iterStartID = 0
 }
 
 // Len returns the current message count.

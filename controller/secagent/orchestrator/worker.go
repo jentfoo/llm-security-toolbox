@@ -1,9 +1,11 @@
 package orchestrator
 
 import (
+	"sync"
+
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/history"
 	"github.com/go-appsec/secagent/mcp"
-	"github.com/go-appsec/secagent/orchestrator/history"
 )
 
 // IterationOutcome classifies a worker's result for a single iteration.
@@ -57,6 +59,28 @@ type WorkerState struct {
 	History     [WorkerHistoryRing]IterationEntry
 	HistoryLen  int // 0..WorkerHistoryRing
 	HistoryHead int // next write index (mod WorkerHistoryRing)
+	// Self-prune drops buffered during Drain; drained at next decision phase.
+	pruneMu             sync.Mutex
+	pendingSelfPruneIDs []string
+}
+
+// BufferSelfPrunes appends ids to the pending self-prune buffer.
+func (w *WorkerState) BufferSelfPrunes(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	w.pruneMu.Lock()
+	defer w.pruneMu.Unlock()
+	w.pendingSelfPruneIDs = append(w.pendingSelfPruneIDs, ids...)
+}
+
+// DrainSelfPrunes returns and clears the pending self-prune buffer.
+func (w *WorkerState) DrainSelfPrunes() []string {
+	w.pruneMu.Lock()
+	defer w.pruneMu.Unlock()
+	ids := w.pendingSelfPruneIDs
+	w.pendingSelfPruneIDs = nil
+	return ids
 }
 
 // AppendHistory records e in the ring buffer, overwriting the oldest entry

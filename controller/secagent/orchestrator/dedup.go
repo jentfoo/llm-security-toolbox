@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/orchestrator/history"
+	"github.com/go-appsec/secagent/history"
 )
 
 // Dedup verdict actions. Pair-wise (DedupVerdict) uses unique / duplicate /
@@ -98,7 +98,7 @@ func (r *OpenAIDedupReviewer) oneShot(ctx context.Context, system, user string) 
 	if maxTokens <= 0 {
 		maxTokens = 20000
 	}
-	return history.RunOneShot(ctx, r.Pool, r.Model, system, user, maxTokens, agent.CompressionReasoningEffort)
+	return history.RunOneShot(ctx, r.Pool, r.Model, system, user, maxTokens, agent.CompressionReasoningEffort, nil)
 }
 
 const dedupSystemPrompt = `You review security findings for duplication. Respond with JSON only — no prose, no markdown fences. Your output must parse as a single JSON object.`

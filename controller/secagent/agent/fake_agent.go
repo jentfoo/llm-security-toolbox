@@ -37,10 +37,10 @@ type FakeAgent struct {
 	// BoundaryCalls counts MarkIterationBoundary invocations so tests can
 	// assert "exactly one boundary mark per iter per agent" semantics.
 	BoundaryCalls int
-	// LastBoundaryIdx is what IterationBoundary() returns. Set by
-	// MarkIterationBoundary; tests may overwrite for chronicle extraction
-	// scenarios.
-	LastBoundaryIdx int
+	// LastBoundaryID is the HistoryID watermark IterationBoundaryID()
+	// returns. Tests may set it directly; values map 1:1 to legacy index
+	// semantics because Snapshot() assigns HistoryID = i+1 per message.
+	LastBoundaryID uint64
 	// SnapshotMessages, when non-nil, is what Snapshot() returns. Lets
 	// tests script a synthetic chat history for chronicle-extraction
 	// assertions without driving a full Drain sequence.
@@ -95,34 +95,43 @@ func (f *FakeAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSummar
 	return t, err
 }
 
-// MarkIterationBoundary records a boundary index derived from
+// MarkIterationBoundary records a watermark derived from
 // LastReplacedHistory + QueriedInputs and increments BoundaryCalls.
 func (f *FakeAgent) MarkIterationBoundary() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.BoundaryCalls++
-	f.LastBoundaryIdx = len(f.LastReplacedHistory) + len(f.QueriedInputs)
+	f.LastBoundaryID = uint64(len(f.LastReplacedHistory) + len(f.QueriedInputs))
 }
 
-// IterationBoundary returns the recorded boundary index.
-func (f *FakeAgent) IterationBoundary() int {
+// IterationBoundaryID returns the recorded watermark.
+func (f *FakeAgent) IterationBoundaryID() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.LastBoundaryIdx
+	return f.LastBoundaryID
 }
 
 // Snapshot returns SnapshotMessages when set, otherwise a slice synthesized
-// from LastReplacedHistory and QueriedInputs.
+// from LastReplacedHistory and QueriedInputs. Messages without HistoryID
+// are stamped with positional IDs (msg[i].HistoryID = i+1) so chronicle
+// boundary filters see watermark-comparable values.
 func (f *FakeAgent) Snapshot() []Message {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	var out []Message
 	if f.SnapshotMessages != nil {
-		return slices.Clone(f.SnapshotMessages)
+		out = slices.Clone(f.SnapshotMessages)
+	} else {
+		out = make([]Message, 0, len(f.LastReplacedHistory)+len(f.QueriedInputs))
+		out = append(out, f.LastReplacedHistory...)
+		for _, q := range f.QueriedInputs {
+			out = append(out, Message{Role: "user", Content: q})
+		}
 	}
-	out := make([]Message, 0, len(f.LastReplacedHistory)+len(f.QueriedInputs))
-	out = append(out, f.LastReplacedHistory...)
-	for _, q := range f.QueriedInputs {
-		out = append(out, Message{Role: "user", Content: q})
+	for i := range out {
+		if out[i].HistoryID == 0 {
+			out[i].HistoryID = uint64(i + 1)
+		}
 	}
 	return out
 }

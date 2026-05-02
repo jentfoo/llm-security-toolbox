@@ -3,6 +3,7 @@ package history
 import (
 	"slices"
 
+	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/secagent/agent"
 )
 
@@ -55,15 +56,14 @@ type snapshotter interface {
 	Snapshot() []agent.Message
 }
 
-// boundaryReader is implemented by agents exposing an iteration boundary
-// index.
+// boundaryReader is implemented by agents exposing an iteration watermark.
 type boundaryReader interface {
-	IterationBoundary() int
+	IterationBoundaryID() uint64
 }
 
-// SnapshotSinceBoundary returns a clone of a's history from its iteration
-// boundary onward, or nil when the agent doesn't expose a snapshot or
-// boundary, or when the boundary is out of range.
+// SnapshotSinceBoundary returns a clone of a's history with HistoryID
+// strictly greater than the iter watermark. Returns nil when a doesn't
+// expose a snapshot or watermark, or when no message lies above it.
 func SnapshotSinceBoundary(a agent.Agent) []agent.Message {
 	tail := snapshotSinceBoundary(a)
 	if tail == nil {
@@ -72,23 +72,26 @@ func SnapshotSinceBoundary(a agent.Agent) []agent.Message {
 	return slices.Clone(tail)
 }
 
-// snapshotSinceBoundary returns a's history from the iteration boundary
-// onward without cloning. Internal callers that immediately copy via
-// append skip the extra allocation.
+// snapshotSinceBoundary returns a's history above the iter watermark
+// without cloning. Internal callers that immediately copy via append skip
+// the extra allocation.
 func snapshotSinceBoundary(a agent.Agent) []agent.Message {
 	s, ok := a.(snapshotter)
 	if !ok {
 		return nil
 	}
-	full := s.Snapshot()
-	boundary := -1
-	if br, ok := a.(boundaryReader); ok {
-		boundary = br.IterationBoundary()
-	}
-	if boundary < 0 || boundary >= len(full) {
+	br, ok := a.(boundaryReader)
+	if !ok {
 		return nil
 	}
-	return full[boundary:]
+	full := s.Snapshot()
+	watermark := br.IterationBoundaryID()
+	for i := range full {
+		if full[i].HistoryID > watermark {
+			return full[i:]
+		}
+	}
+	return nil
 }
 
 // ExtractAndAppend appends a's iter messages onto the chronicle, each
@@ -127,6 +130,34 @@ func (c *Chronicle) Compact(currentIter, keepRecentIters int) (stripped, stubbed
 		}
 	}
 	return stripped, stubbed
+}
+
+// ApplySelfPrune mirrors a worker agent's self-prune onto the chronicle so
+// the next Install reflects the same pruned reality. Maintains the
+// messages/iters parallel-array invariant. Returns dropped tool-result count.
+func (c *Chronicle) ApplySelfPrune(dropIDs []string) int {
+	if c == nil || len(dropIDs) == 0 || len(c.messages) == 0 {
+		return 0
+	}
+	dropSet := buildDropSet(dropIDs)
+	if len(dropSet) == 0 {
+		return 0
+	}
+	keptMsgs, keptIndices, dropped := PruneToolResults(c.messages, dropSet, nil)
+	keptIters := make([]int, 0, len(keptIndices))
+	for _, i := range keptIndices {
+		if i < len(c.iters) {
+			keptIters = append(keptIters, c.iters[i])
+		}
+	}
+	c.messages = keptMsgs
+	c.iters = keptIters
+	return dropped
+}
+
+// buildDropSet returns a non-empty-only set view of ids.
+func buildDropSet(ids []string) map[string]struct{} {
+	return bulk.SliceToSet(bulk.SliceFilter(func(s string) bool { return s != "" }, ids))
 }
 
 // Reset clears the chronicle.

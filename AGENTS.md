@@ -153,13 +153,22 @@ Go module (`github.com/go-appsec/secagent`) targeting any OpenAI-compatible chat
 - `controller/secagent/agent/openai_agent.go` - `OpenAIAgent`: OpenAI chat-completions driver, tool-call dispatch loop, `Drain` chain, truncation notice
 - `controller/secagent/agent/openai_client.go` - `ChatClient` HTTP implementation against the OpenAI-compatible endpoint
 - `controller/secagent/agent/pool.go` - `ClientPool`: bounded-concurrency gate; one pool per base URL, shared across workers/verifier/director
-- `controller/secagent/agent/history.go` - Message history storage (system + turn messages + tool results)
-- `controller/secagent/agent/compact.go` - Context compaction: high/low watermark passes, `KeepTurns` trailing guard, stubbing of old tool results
+- `controller/secagent/agent/history.go` - Message history storage (system + turn messages + tool results) and iteration-boundary tracking
+- `controller/secagent/agent/compact.go` - Compaction primitives: `CompactErrorsOnly`, `CompactRemainder` (think-strip → tool-stub → text-trunc → turn-drop → hard-truncate), `ForceHardTruncate`; consumed by `history.Compactor`
+- `controller/secagent/agent/compactor.go` - `Compactor` interface (`MaybeCompact`, `SetOnSelfPruneApplied`) and `ErrRetireOnPressure` sentinel
 - `controller/secagent/agent/turn.go` - `TurnSummary` construction from tool calls and flow IDs
 - `controller/secagent/agent/status.go` - Periodic one-line status summary prompt (`ProgressLogInterval`-gated)
 - `controller/secagent/agent/think.go` - Reasoning/thinking message handling for models that emit it
 - `controller/secagent/agent/repair.go` - Malformed-tool-call repair (reprompts with schema hints)
 - `controller/secagent/agent/fake_agent.go` - Scripted `FakeAgent` used throughout the orchestrator test suite
+- `controller/secagent/history/compactor.go` - `Compactor` orchestration: layered passes (error-collapse → self-prune → distill → mechanical) gated on the high watermark; honors `RetireOnPressure` by returning `agent.ErrRetireOnPressure`
+- `controller/secagent/history/prune.go` - `PruneToolResults`: shared self-prune helper used by the compactor, `Chronicle.ApplySelfPrune`, and `DirectorChat.ApplyWorkerSelfPrune` to drop tool-call/tool-result pairs
+- `controller/secagent/history/chronicle.go` - Per-worker raw chronicle: `Install` swaps it onto the agent and marks the iteration boundary; `ExtractAndAppend` harvests each iter's content; `Compact` strips think blocks and stubs older tool results in place
+- `controller/secagent/history/self_prune.go` - `SelfPruneCallback`: model-driven selection of redundant tool-event indices (one-shot LLM call, retried once on empty response)
+- `controller/secagent/history/distill.go` - `DistillCallback`: model-driven prose summaries replacing batches of older tool-result content
+- `controller/secagent/history/summarize.go` - `Summarizer`: recon-mission and retired-worker recap one-shot LLM calls
+- `controller/secagent/history/llmexec.go` - `RunOneShot`: shared pooled chat-completion helper used by the history-package callbacks
+- `controller/secagent/history/util.go` - Shared text helpers (`Short`, `ExtractJSONObject`)
 - `controller/secagent/mcp/client.go` - `mark3labs/mcp-go` streamable-HTTP wrapper; converts sectool MCP tools to `agent.ToolDef`
 - `controller/secagent/mcp/dispatch.go` - `TruncateResult`: per-tool-result byte cap with the instructive truncation notice
 - `controller/secagent/orchestrator/controller.go` - `Run` entry + `AgentFactory` (`OpenAIFactory` builds real agents; tests inject fakes); top-level iteration loop

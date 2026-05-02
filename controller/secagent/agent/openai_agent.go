@@ -23,7 +23,6 @@ type OpenAIAgentConfig struct {
 	Pool              *ClientPool
 	MaxContext        int
 	MaxToolRepairs    int // per-assistant-message
-	Compaction        CompactionOptions
 	TurnTimeout       time.Duration
 	PerToolTimeout    time.Duration // per-tool-call timeout; 0 disables.
 	MaxParallelTools  int           // bound on concurrent tool dispatch; <=1 runs serial.
@@ -36,25 +35,13 @@ type OpenAIAgentConfig struct {
 	// Reasoning is the format-specific reasoning handler. Nil defaults to
 	// the inline handler.
 	Reasoning ReasoningHandler
-	// OnCompact fires once per compaction event with the aggregated report
-	// across every pass that ran. Optional.
-	OnCompact func(CompactionReport)
+	// OnHardTruncate fires once after sendWithRetry's overflow-recovery
+	// hard-truncate. Compaction-policy events come from the Compactor's own
+	// OnCompact hook; this is the agent-internal recovery path.
+	OnHardTruncate func(CompactionReport)
 	// OnContextOverflow fires once per sendWithRetry call when the model
 	// rejected the request as over-context (optional).
 	OnContextOverflow func()
-	// OnSummarizeBoundary receives messages eligible for summarization and
-	// returns a replacement slice or error. Optional; nil disables this step.
-	OnSummarizeBoundary func(ctx context.Context, snapshot []Message) ([]Message, error)
-	// OnSummarizeError fires when OnSummarizeBoundary returned an error
-	// (optional).
-	OnSummarizeError func(err error)
-	// OnSelfPruneCandidates receives a history snapshot and returns the set
-	// of ToolCallIDs to drop. Optional; nil disables this step.
-	OnSelfPruneCandidates func(ctx context.Context, snapshot []Message) ([]string, error)
-	// OnDistillResults receives a history snapshot and returns a rewritten
-	// snapshot where eligible tool-result Content is replaced. Callers must
-	// preserve message order and pairing. Optional; nil disables this step.
-	OnDistillResults func(ctx context.Context, snapshot []Message) ([]Message, error)
 	// OnToolStart fires before a tool handler runs (optional).
 	OnToolStart func(name string, args json.RawMessage)
 	// OnToolEnd fires after a tool handler returns (optional). timedOut is
@@ -76,10 +63,10 @@ type OpenAIAgentConfig struct {
 	// Rand is the randomness source used by retry backoff jitter. nil → the
 	// package default.
 	Rand *rand.Rand
-	// RetireOnPressure disables compaction. When usage crosses the high
-	// watermark the next Drain round returns immediately with
-	// EscalationReason="context_exhausted".
-	RetireOnPressure bool
+	// Compactor manages context compaction. Nil disables compaction.
+	// Returning ErrRetireOnPressure short-circuits Drain so the controller
+	// can retire and summarize.
+	Compactor Compactor
 }
 
 // OpenAIAgent implements Agent over an OpenAI-compatible endpoint.
@@ -96,11 +83,6 @@ type OpenAIAgent struct {
 	canonNames    map[string]string
 	mu            sync.Mutex
 	cancelCtx     func()
-	// iterationStartIdx marks where the current iteration's content begins.
-	iterationStartIdx int
-	// iterationSummarized prevents the boundary-summarize callback from firing
-	// twice in the same iteration.
-	iterationSummarized bool
 }
 
 // NewOpenAIAgent constructs an agent and seeds history with system prompt.
@@ -267,45 +249,29 @@ func (a *OpenAIAgent) ReplaceHistory(msgs []Message) {
 		}
 	}
 	a.history.ReplaceAll(msgs)
-	a.iterationStartIdx = 0
-	a.iterationSummarized = false
+	a.history.ResetIterationBoundary()
 }
 
-// MarkIterationBoundary records the current history length as the start of
-// the active iteration's content.
+// MarkIterationBoundary records the current HistoryID watermark as the
+// start of the active iter's content.
 func (a *OpenAIAgent) MarkIterationBoundary() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.iterationStartIdx = a.history.Len()
-	a.iterationSummarized = false
+	a.history.MarkIterationBoundary()
 }
 
-// IterationBoundary returns the current iteration-boundary index.
-func (a *OpenAIAgent) IterationBoundary() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.iterationStartIdx
+// IterationBoundaryID returns the current iter watermark.
+func (a *OpenAIAgent) IterationBoundaryID() uint64 {
+	return a.history.IterationBoundaryID()
 }
 
-// SetOnSummarizeBoundary swaps in a new boundary-summarize callback.
-func (a *OpenAIAgent) SetOnSummarizeBoundary(f func(ctx context.Context, snapshot []Message) ([]Message, error)) {
+// SetOnSelfPruneApplied forwards a new post-apply hook to the wired
+// Compactor. No-op when no compactor is set.
+func (a *OpenAIAgent) SetOnSelfPruneApplied(f func(droppedIDs []string)) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.cfg.OnSummarizeBoundary = f
-}
-
-// SetOnSelfPruneCandidates swaps in a new self-prune callback.
-func (a *OpenAIAgent) SetOnSelfPruneCandidates(f func(ctx context.Context, snapshot []Message) ([]string, error)) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.cfg.OnSelfPruneCandidates = f
-}
-
-// SetOnDistillResults swaps in a new distill callback.
-func (a *OpenAIAgent) SetOnDistillResults(f func(ctx context.Context, snapshot []Message) ([]Message, error)) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.cfg.OnDistillResults = f
+	c := a.cfg.Compactor
+	a.mu.Unlock()
+	if c != nil {
+		c.SetOnSelfPruneApplied(f)
+	}
 }
 
 // Drain runs the dispatch loop and returns one TurnSummary.
@@ -342,19 +308,21 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 			summary.EscalationReason = escalationSilent
 			return summary, nil
 		}
-		if err := a.maybeCompact(inner); err != nil {
-			if errors.Is(err, errRetireOnPressure) {
-				// RetireOnPressure agents (currently: recon worker) hit
-				// the high-watermark and stop cleanly so the controller
-				// can retire and summarize the full chronicle. This is a
-				// successful end-of-work signal, not a failure — return
-				// nil error so the autonomous loop treats it like any
-				// other turn boundary.
-				summary.EscalationReason = escalationContextExhausted
-				return summary, nil
+		if c := a.cfg.Compactor; c != nil {
+			if err := c.MaybeCompact(inner, a.history); err != nil {
+				if errors.Is(err, ErrRetireOnPressure) {
+					// RetireOnPressure agents (currently: recon worker) hit
+					// the high-watermark and stop cleanly so the controller
+					// can retire and summarize the full chronicle. This is a
+					// successful end-of-work signal, not a failure — return
+					// nil error so the autonomous loop treats it like any
+					// other turn boundary.
+					summary.EscalationReason = escalationContextExhausted
+					return summary, nil
+				}
+				summary.EscalationReason = escalationSilent
+				return summary, err
 			}
-			summary.EscalationReason = escalationSilent
-			return summary, err
 		}
 
 		resp, err := a.sendWithRetry(inner)
@@ -642,314 +610,6 @@ func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string
 	)
 }
 
-// errRetireOnPressure is returned by maybeCompact when RetireOnPressure is
-// set and the high watermark has been crossed.
-var errRetireOnPressure = errors.New("retire on context pressure")
-
-func (a *OpenAIAgent) maybeCompact(ctx context.Context) error {
-	// EffectiveMaxContext tracks adaptive shrinkage from past rejections;
-	// when none has happened it equals the configured MaxContext.
-	maxCtx := a.history.EffectiveMaxContext()
-	high := int(float64(maxCtx) * a.cfg.Compaction.HighWatermark)
-	if high <= 0 {
-		high = int(float64(maxCtx) * 0.80)
-	}
-	if a.history.EstimateTokens() < high {
-		return nil
-	}
-	if a.cfg.RetireOnPressure {
-		return errRetireOnPressure
-	}
-
-	opt := a.cfg.Compaction
-	threshold := opt.RecoveryThreshold
-	if threshold <= 0 {
-		threshold = defaultRecoveryThreshold
-	}
-	recoveryGoal := int(float64(maxCtx) * threshold)
-	startTokens := a.history.EstimateTokens()
-
-	aggregate := CompactionReport{Before: startTokens}
-	defer func() {
-		aggregate.After = a.history.EstimateTokens()
-		if a.cfg.OnCompact != nil && len(aggregate.PassesApplied) > 0 {
-			a.cfg.OnCompact(aggregate)
-		}
-	}()
-
-	// Cheap, deterministic same-tool error-streak collapse first.
-	r0 := a.compactErrorsOnlyPreservingBoundary()
-	aggregate = mergeReports(aggregate, r0)
-	if a.history.EstimateTokens() < high {
-		return nil
-	}
-
-	// Model-driven self-prune of low-signal tool-call/result pairs. Only
-	// fires when the previous step fell short of the recovery threshold
-	// and a callback is wired.
-	if startTokens-a.history.EstimateTokens() < recoveryGoal && a.cfg.OnSelfPruneCandidates != nil {
-		rB := a.runSelfPrunePreservingBoundary(ctx)
-		aggregate = mergeReports(aggregate, rB)
-		if a.history.EstimateTokens() < high {
-			return nil
-		}
-	}
-
-	// Model-driven distillation: replace old tool-result content with
-	// prose summaries so load-bearing facts survive byte-count stubbing.
-	if startTokens-a.history.EstimateTokens() < recoveryGoal && a.cfg.OnDistillResults != nil {
-		rC := a.runDistillPreservingBoundary(ctx)
-		aggregate = mergeReports(aggregate, rC)
-		if a.history.EstimateTokens() < high {
-			return nil
-		}
-	}
-
-	// Mechanical fallback (think-strip, tool-stub, text-trunc, turn-drop,
-	// hard-truncate). Always runs if we still need headroom.
-	r1, err := a.compactRemainderPreservingBoundary()
-	aggregate = mergeReports(aggregate, r1)
-	if err != nil {
-		return err
-	}
-	if a.history.EstimateTokens() < high {
-		return nil
-	}
-
-	// Boundary-summarize callback when an iteration boundary has been
-	// marked, the callback is wired, and we haven't summarized yet this iteration.
-	if a.cfg.OnSummarizeBoundary != nil && !a.iterationSummarized && a.iterationStartIdx > 1 {
-		if err := a.runBoundarySummarize(ctx); err != nil && a.cfg.OnSummarizeError != nil {
-			// Fail open and fall through to the final remainder.
-			a.cfg.OnSummarizeError(err)
-		}
-		if a.history.EstimateTokens() < high {
-			return nil
-		}
-	}
-
-	// Last-resort mechanical remainder, potentially biting into in-iter content.
-	r2, err := a.compactRemainderPreservingBoundary()
-	aggregate = mergeReports(aggregate, r2)
-	return err
-}
-
-// compactErrorsOnlyPreservingBoundary wraps CompactErrorsOnly and rebases
-// the iteration-boundary marker afterwards.
-func (a *OpenAIAgent) compactErrorsOnlyPreservingBoundary() CompactionReport {
-	markerID, hasMarker := a.iterationBoundaryMarker()
-	report := CompactErrorsOnly(a.history, a.cfg.Compaction)
-	a.rebaseIterationBoundary(markerID, hasMarker)
-	return report
-}
-
-// compactRemainderPreservingBoundary wraps CompactRemainder and rebases
-// the iteration-boundary marker afterwards.
-func (a *OpenAIAgent) compactRemainderPreservingBoundary() (CompactionReport, error) {
-	markerID, hasMarker := a.iterationBoundaryMarker()
-	report, err := CompactRemainder(a.history, a.cfg.Compaction)
-	a.rebaseIterationBoundary(markerID, hasMarker)
-	return report, err
-}
-
-// runSelfPrunePreservingBoundary invokes OnSelfPruneCandidates and applies
-// the returned ToolCallID drop set in place. Failures fall through with an
-// empty report.
-func (a *OpenAIAgent) runSelfPrunePreservingBoundary(ctx context.Context) CompactionReport {
-	before := a.history.EstimateTokens()
-	report := CompactionReport{Before: before, After: before}
-	snap := a.history.Snapshot()
-	dropIDs, err := a.cfg.OnSelfPruneCandidates(ctx, snap)
-	if err != nil {
-		if a.cfg.OnSummarizeError != nil {
-			a.cfg.OnSummarizeError(err)
-		}
-		return report
-	}
-	if len(dropIDs) == 0 {
-		return report
-	}
-	dropSet := make(map[string]bool, len(dropIDs))
-	for _, id := range dropIDs {
-		if id != "" {
-			dropSet[id] = true
-		}
-	}
-	if len(dropSet) == 0 {
-		return report
-	}
-	markerID, hasMarker := a.iterationBoundaryMarker()
-	pruned, dropped := applySelfPrune(snap, dropSet)
-	if dropped == 0 {
-		return report
-	}
-	a.history.ReplaceAll(pruned)
-	a.rebaseIterationBoundary(markerID, hasMarker)
-	report.SelfPrunedCalls = dropped
-	report.PassesApplied = append(report.PassesApplied, "self-prune")
-	report.After = a.history.EstimateTokens()
-	return report
-}
-
-// runDistillPreservingBoundary invokes OnDistillResults and installs the
-// returned snapshot. Counts only tool-result Content changes.
-func (a *OpenAIAgent) runDistillPreservingBoundary(ctx context.Context) CompactionReport {
-	before := a.history.EstimateTokens()
-	report := CompactionReport{Before: before, After: before}
-	snap := a.history.Snapshot()
-	replacement, err := a.cfg.OnDistillResults(ctx, snap)
-	if err != nil {
-		if a.cfg.OnSummarizeError != nil {
-			a.cfg.OnSummarizeError(err)
-		}
-		return report
-	}
-	if len(replacement) == 0 {
-		return report
-	}
-	distilled := countDistilledChanges(snap, replacement)
-	if distilled == 0 {
-		return report
-	}
-	markerID, hasMarker := a.iterationBoundaryMarker()
-	a.history.ReplaceAll(replacement)
-	a.rebaseIterationBoundary(markerID, hasMarker)
-	report.DistilledResults = distilled
-	report.PassesApplied = append(report.PassesApplied, "distill")
-	report.After = a.history.EstimateTokens()
-	return report
-}
-
-// applySelfPrune drops every tool-result whose ToolCallID is in dropSet and
-// strips matching ToolCall entries from preceding assistant messages.
-// Returns the new slice and the count of tool-result messages dropped.
-func applySelfPrune(msgs []Message, dropSet map[string]bool) ([]Message, int) {
-	out := make([]Message, 0, len(msgs))
-	var dropped int
-	for _, m := range msgs {
-		switch m.Role {
-		case RoleTool:
-			if dropSet[m.ToolCallID] {
-				dropped++
-				continue
-			}
-			out = append(out, m)
-		case RoleAssistant:
-			if len(m.ToolCalls) == 0 {
-				out = append(out, m)
-				continue
-			}
-			kept := m
-			kept.ToolCalls = filterToolCalls(m.ToolCalls, dropSet)
-			if len(kept.ToolCalls) == 0 && strings.TrimSpace(kept.Content) == "" {
-				continue
-			}
-			out = append(out, kept)
-		default:
-			out = append(out, m)
-		}
-	}
-	return out, dropped
-}
-
-// countDistilledChanges returns the number of tool-result messages whose
-// Content differs between before and after, paired by index.
-func countDistilledChanges(before, after []Message) int {
-	n := len(before)
-	if len(after) < n {
-		n = len(after)
-	}
-	var changed int
-	for i := 0; i < n; i++ {
-		if before[i].Role != RoleTool || after[i].Role != RoleTool {
-			continue
-		}
-		if before[i].Content != after[i].Content {
-			changed++
-		}
-	}
-	return changed
-}
-
-// compactPreservingBoundary wraps Compact and rebases iterationStartIdx
-// onto the same message it originally pointed to. Clamps the boundary to
-// history end if the marker message was dropped.
-func (a *OpenAIAgent) compactPreservingBoundary() (CompactionReport, error) {
-	markerID, hasMarker := a.iterationBoundaryMarker()
-	report, err := Compact(a.history, a.cfg.Compaction)
-	a.rebaseIterationBoundary(markerID, hasMarker)
-	return report, err
-}
-
-func (a *OpenAIAgent) forceHardTruncatePreservingBoundary(targetTokens, keep int) CompactionReport {
-	markerID, hasMarker := a.iterationBoundaryMarker()
-	report := ForceHardTruncate(a.history, targetTokens, keep)
-	a.rebaseIterationBoundary(markerID, hasMarker)
-	return report
-}
-
-func (a *OpenAIAgent) iterationBoundaryMarker() (uint64, bool) {
-	preLen := a.history.Len()
-	if a.iterationStartIdx <= 0 || a.iterationStartIdx >= preLen {
-		return 0, false
-	}
-	snap := a.history.Snapshot()
-	return snap[a.iterationStartIdx].HistoryID, true
-}
-
-func (a *OpenAIAgent) rebaseIterationBoundary(markerID uint64, hasMarker bool) {
-	if !hasMarker {
-		if a.iterationStartIdx > a.history.Len() {
-			a.iterationStartIdx = a.history.Len()
-		}
-		return
-	}
-	snap := a.history.Snapshot()
-	for i := range snap {
-		if snap[i].HistoryID == markerID {
-			a.iterationStartIdx = i
-			return
-		}
-	}
-	a.iterationStartIdx = len(snap)
-}
-
-// runBoundarySummarize hands messages[1:iterationStartIdx] to
-// OnSummarizeBoundary and splices the returned slice back into history in
-// place of the snapshot.
-func (a *OpenAIAgent) runBoundarySummarize(ctx context.Context) error {
-	full := a.history.Snapshot()
-	// Defensive bounds check — iterationStartIdx may be stale if history
-	// shrank via prior compaction. Clamp.
-	end := a.iterationStartIdx
-	if end > len(full) {
-		end = len(full)
-	}
-	if end <= 1 {
-		return nil
-	}
-	preIter := full[1:end]
-	replacement, err := a.cfg.OnSummarizeBoundary(ctx, preIter)
-	if err != nil {
-		return err
-	}
-	if len(replacement) == 0 {
-		// Callback chose not to summarize (e.g. nothing useful to compress).
-		// Still mark summarized so we don't re-call this iter.
-		a.iterationSummarized = true
-		return nil
-	}
-	// Splice: [system] + replacement + full[end:].
-	rebuilt := make([]Message, 0, 1+len(replacement)+len(full)-end)
-	rebuilt = append(rebuilt, full[0])
-	rebuilt = append(rebuilt, replacement...)
-	rebuilt = append(rebuilt, full[end:]...)
-	a.history.ReplaceAll(rebuilt)
-	a.iterationStartIdx = 1 + len(replacement)
-	a.iterationSummarized = true
-	return nil
-}
-
 // sendWithRetry dispatches one chat-completion request, applying a typed
 // retry policy. ErrRateLimit and ErrTransientNet retry up to DrainRetryMax;
 // ErrContextOverflow triggers a single in-place hard-truncate retry; other
@@ -986,9 +646,9 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 				a.cfg.OnContextOverflow()
 			}
 			target := a.history.EffectiveMaxContext() / 2
-			report := a.forceHardTruncatePreservingBoundary(target, 2)
-			if a.cfg.OnCompact != nil {
-				a.cfg.OnCompact(report)
+			report := ForceHardTruncate(a.history, target, 2)
+			if a.cfg.OnHardTruncate != nil {
+				a.cfg.OnHardTruncate(report)
 			}
 			if report.DroppedTurns == 0 {
 				return ChatResponse{}, err

@@ -47,7 +47,7 @@ func TestChronicle_ExtractAndAppend(t *testing.T) {
 
 	t.Run("tags_messages_with_iter", func(t *testing.T) {
 		fake := &agent.FakeAgent{
-			LastBoundaryIdx: 1,
+			LastBoundaryID: 1,
 			SnapshotMessages: []agent.Message{
 				{Role: "user", Content: "directive"},
 				{Role: "assistant", Content: "thinking"},
@@ -158,6 +158,110 @@ func TestChronicle_Compact(t *testing.T) {
 	})
 }
 
+func TestChronicle_ApplySelfPrune(t *testing.T) {
+	t.Parallel()
+
+	build := func() *Chronicle {
+		return &Chronicle{
+			messages: []agent.Message{
+				{Role: "user", Content: "iter 1 directive"},
+				{
+					Role:    "assistant",
+					Content: "fan out",
+					ToolCalls: []agent.ToolCall{
+						{ID: "a", Function: agent.ToolFunction{Name: "proxy_poll"}},
+						{ID: "b", Function: agent.ToolFunction{Name: "flow_get"}},
+					},
+				},
+				{Role: "tool", ToolCallID: "a", ToolName: "proxy_poll", Content: "result a"},
+				{Role: "tool", ToolCallID: "b", ToolName: "flow_get", Content: "result b"},
+				{
+					Role:      "assistant",
+					ToolCalls: []agent.ToolCall{{ID: "c", Function: agent.ToolFunction{Name: "proxy_poll"}}},
+				},
+				{Role: "tool", ToolCallID: "c", ToolName: "proxy_poll", Content: "result c"},
+			},
+			iters: []int{1, 1, 1, 1, 2, 2},
+		}
+	}
+
+	t.Run("drops_tool_result", func(t *testing.T) {
+		c := build()
+		dropped := c.ApplySelfPrune([]string{"a"})
+		assert.Equal(t, 1, dropped)
+		// directive(0) + assistant(b only) + tool(b) + assistant(c) + tool(c) = 5
+		require.Len(t, c.messages, 5)
+		require.Len(t, c.iters, 5)
+		assert.Equal(t, []int{1, 1, 1, 2, 2}, c.iters)
+		assert.Len(t, c.messages[1].ToolCalls, 1)
+		assert.Equal(t, "b", c.messages[1].ToolCalls[0].ID)
+		assert.Equal(t, "b", c.messages[2].ToolCallID)
+	})
+
+	t.Run("strips_tool_call_keeps_assistant_with_text", func(t *testing.T) {
+		c := build()
+		dropped := c.ApplySelfPrune([]string{"a", "b"})
+		assert.Equal(t, 2, dropped)
+		// Assistant with Content="fan out" survives despite both ToolCalls dropped.
+		// directive + assistant("fan out", no toolcalls) + assistant(c) + tool(c) = 4
+		require.Len(t, c.messages, 4)
+		require.Len(t, c.iters, 4)
+		assert.Equal(t, "fan out", c.messages[1].Content)
+		assert.Empty(t, c.messages[1].ToolCalls)
+		assert.Equal(t, []int{1, 1, 2, 2}, c.iters)
+	})
+
+	t.Run("drops_empty_assistant_shell", func(t *testing.T) {
+		c := build()
+		dropped := c.ApplySelfPrune([]string{"c"})
+		assert.Equal(t, 1, dropped)
+		// Assistant shell holding only "c" drops entirely (no Content).
+		// directive + assistant(a,b) + tool(a) + tool(b) = 4
+		require.Len(t, c.messages, 4)
+		require.Len(t, c.iters, 4)
+		assert.Equal(t, []int{1, 1, 1, 1}, c.iters)
+	})
+
+	t.Run("iters_shorter_than_messages", func(t *testing.T) {
+		// Mirrors the chronicle invariant Compact tolerates: iters may be
+		// shorter than messages. Drops still happen; the missing-iters tail
+		// is silently skipped.
+		c := &Chronicle{
+			messages: []agent.Message{
+				{
+					Role:      "assistant",
+					ToolCalls: []agent.ToolCall{{ID: "a", Function: agent.ToolFunction{Name: "proxy_poll"}}},
+				},
+				{Role: "tool", ToolCallID: "a", ToolName: "proxy_poll", Content: "result a"},
+				{Role: "assistant", Content: "trailing"},
+			},
+			iters: []int{1, 1}, // shorter — no entry for the trailing assistant
+		}
+		dropped := c.ApplySelfPrune([]string{"a"})
+		assert.Equal(t, 1, dropped)
+		// Empty assistant shell + its tool result both gone; trailing remains.
+		require.Len(t, c.messages, 1)
+		assert.Equal(t, "trailing", c.messages[0].Content)
+		assert.Empty(t, c.iters)
+	})
+
+	t.Run("empty_inputs_noop", func(t *testing.T) {
+		c := build()
+		assert.Equal(t, 0, c.ApplySelfPrune(nil))
+		assert.Equal(t, 0, c.ApplySelfPrune([]string{""}))
+		assert.Len(t, c.messages, 6)
+		assert.Len(t, c.iters, 6)
+	})
+
+	t.Run("foreign_id_noop", func(t *testing.T) {
+		c := build()
+		dropped := c.ApplySelfPrune([]string{"not-present"})
+		assert.Equal(t, 0, dropped)
+		assert.Len(t, c.messages, 6)
+		assert.Len(t, c.iters, 6)
+	})
+}
+
 func TestChronicle_CloneWithDirective(t *testing.T) {
 	t.Parallel()
 
@@ -198,19 +302,11 @@ func TestSnapshotSinceBoundary(t *testing.T) {
 		assert.Nil(t, SnapshotSinceBoundary(&noopAgent{}))
 	})
 
-	t.Run("missing_boundary_returns_nil", func(t *testing.T) {
-		// LastBoundaryIdx zero-value is 0, but FakeAgent reports
-		// IterationBoundary() as -1 when not yet marked.
+	t.Run("watermark_above_all_ids_returns_nil", func(t *testing.T) {
+		// FakeAgent.Snapshot stamps positional IDs (1, 2, ...). A watermark
+		// above the highest assigned ID yields no iter content.
 		fake := &agent.FakeAgent{
-			LastBoundaryIdx:  -1,
-			SnapshotMessages: []agent.Message{{Role: "user", Content: "x"}},
-		}
-		assert.Nil(t, SnapshotSinceBoundary(fake))
-	})
-
-	t.Run("boundary_past_end_returns_nil", func(t *testing.T) {
-		fake := &agent.FakeAgent{
-			LastBoundaryIdx:  3,
+			LastBoundaryID:   3,
 			SnapshotMessages: []agent.Message{{Role: "user", Content: "x"}},
 		}
 		assert.Nil(t, SnapshotSinceBoundary(fake))
@@ -218,7 +314,7 @@ func TestSnapshotSinceBoundary(t *testing.T) {
 
 	t.Run("returns_tail_clone", func(t *testing.T) {
 		fake := &agent.FakeAgent{
-			LastBoundaryIdx: 1,
+			LastBoundaryID: 1,
 			SnapshotMessages: []agent.Message{
 				{Role: "user", Content: "directive"},
 				{Role: "assistant", Content: "thinking"},
@@ -235,9 +331,9 @@ func TestSnapshotSinceBoundary(t *testing.T) {
 		assert.Equal(t, "thinking", fake.SnapshotMessages[1].Content)
 	})
 
-	t.Run("boundary_zero_returns_full_history", func(t *testing.T) {
+	t.Run("watermark_zero_returns_full_history", func(t *testing.T) {
 		fake := &agent.FakeAgent{
-			LastBoundaryIdx: 0,
+			LastBoundaryID: 0,
 			SnapshotMessages: []agent.Message{
 				{Role: "user", Content: "directive"},
 				{Role: "assistant", Content: "ack"},

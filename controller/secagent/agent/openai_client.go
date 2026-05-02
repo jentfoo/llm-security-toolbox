@@ -58,6 +58,9 @@ type ChatRequest struct {
 	// drains where reasoning is desirable; see SummaryReasoningEffort for
 	// the value used on narrator/status calls.
 	ReasoningEffort string
+	// Temperature overrides sampling temperature when non-nil. nil = leave
+	// unset so the backend's default applies.
+	Temperature *float32
 }
 
 // ChatResponse captures the assistant reply.
@@ -153,6 +156,9 @@ func (c *OpenAIChatClient) CreateChatCompletion(ctx context.Context, req ChatReq
 		Tools:           tools,
 		MaxTokens:       req.MaxTokens,
 		ReasoningEffort: req.ReasoningEffort,
+	}
+	if req.Temperature != nil {
+		ocr.Temperature = *req.Temperature
 	}
 	resp, err := c.client.CreateChatCompletion(ctx, ocr)
 	if err != nil {

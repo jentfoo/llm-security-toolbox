@@ -167,7 +167,7 @@ func runDistillBatch(
 ) (string, error) {
 	prompt := buildDistillPrompt(b)
 	raw, err := RunOneShot(ctx, s.Pool, s.Model, distillSystemPrompt, prompt,
-		distillMaxTokens, agent.CompressionReasoningEffort)
+		distillMaxTokens, agent.CompressionReasoningEffort, nil)
 	if err != nil {
 		return "", err
 	}
