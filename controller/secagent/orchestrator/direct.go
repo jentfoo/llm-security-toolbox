@@ -11,6 +11,7 @@ import (
 	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/secagent/agent"
 	"github.com/go-appsec/secagent/history"
+	"github.com/go-appsec/secagent/util"
 )
 
 // FireWorkerFunc starts one worker's iter+1 autonomous run and returns a
@@ -239,16 +240,16 @@ func appendDecisionToChat(c *DirectorChat, workerID, iter int, d WorkerDecision)
 		d.Kind
 	switch d.Kind {
 	case "continue", "expand":
-		body += " — " + history.Short(d.Instruction, 400)
+		body += " — " + util.Truncate(d.Instruction, 400)
 		if d.AutonomousBudget > 0 {
 			body += " (budget=" + strconv.Itoa(d.AutonomousBudget) + ")"
 		}
 	case "stop":
-		body += " — " + history.Short(d.Reason, 400)
+		body += " — " + util.Truncate(d.Reason, 400)
 	}
 	if d.Fork != nil {
 		body += " | fork worker " + strconv.Itoa(d.Fork.NewWorkerID) + ": " +
-			history.Short(d.Fork.Instruction, 400)
+			util.Truncate(d.Fork.Instruction, 400)
 	}
 	body += "]"
 	c.Append(agent.Message{Role: "user", Content: body}, workerID, iter)
@@ -344,7 +345,7 @@ func RunIter1ReconReviewCall(
 	if log != nil {
 		log.Log("synthesis", "iter1-review captured", map[string]any{
 			"chars":   len(text),
-			"preview": history.Short(text, 600),
+			"preview": util.Truncate(text, 600),
 		})
 	}
 }

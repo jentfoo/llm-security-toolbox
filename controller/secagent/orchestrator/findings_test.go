@@ -9,26 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSlugify(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		out  string
-	}{
-		{"path_and_spaces", "Reflected XSS in /search", "reflected-xss-in-search"},
-		{"extra_whitespace", "  Hello   World!  ", "hello-world"},
-		{"underscore_equals_hyphen", "plaintext client_secret exposure", "plaintext-client-secret-exposure"},
-		{"hyphen_equivalence", "plaintext client-secret exposure", "plaintext-client-secret-exposure"},
-		{"empty", "", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			assert.Equal(t, c.out, Slugify(c.in))
-		})
-	}
-}
-
 func TestCanonicalEndpoint(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

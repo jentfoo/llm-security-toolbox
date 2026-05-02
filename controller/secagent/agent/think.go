@@ -82,27 +82,6 @@ func HasInlineThink(s string) bool {
 	return false
 }
 
-// StripCodeFences removes a leading and trailing markdown fenced-code line
-// from s.
-func StripCodeFences(s string) string {
-	lines := strings.Split(s, "\n")
-	var start int
-	for start < len(lines) && strings.TrimSpace(lines[start]) == "" {
-		start++
-	}
-	if start < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[start]), "```") {
-		start++
-	}
-	end := len(lines)
-	for end > start && strings.TrimSpace(lines[end-1]) == "" {
-		end--
-	}
-	if end > start && strings.TrimSpace(lines[end-1]) == "```" {
-		end--
-	}
-	return strings.Join(lines[start:end], "\n")
-}
-
 // TruncatedThinkTail returns a best-effort tail of the content inside an
 // unclosed think block in s, or "" when no unclosed think tag is found.
 func TruncatedThinkTail(s string) string {

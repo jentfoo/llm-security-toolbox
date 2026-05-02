@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+
+	"github.com/go-appsec/secagent/util"
 )
 
 var fencedJSON = regexp.MustCompile("(?s)^\\s*```(?:json)?\\s*(.*?)\\s*```\\s*$")
@@ -68,16 +70,5 @@ func RepairToolArgs(raw string) (json.RawMessage, error) {
 type RepairError struct{ Raw string }
 
 func (e *RepairError) Error() string {
-	return "unable to parse tool arguments as JSON: " + truncate(e.Raw, 200)
-}
-
-func truncate(s string, n int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= n {
-		return s
-	}
-	if n < 1 {
-		return "…"
-	}
-	return s[:n-1] + "…"
+	return "unable to parse tool arguments as JSON: " + util.Truncate(e.Raw, 200)
 }

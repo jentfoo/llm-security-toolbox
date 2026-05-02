@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/util"
 )
 
 // Summarizer produces on-demand recon and worker-retire recaps via the
@@ -116,11 +117,11 @@ func RenderSnapshotForSummary(snapshot []agent.Message) string {
 		fmt.Fprintf(&b, "[%d] ", i)
 		switch m.Role {
 		case "user":
-			fmt.Fprintf(&b, "USER: %s\n", Short(m.Content, 4000))
+			fmt.Fprintf(&b, "USER: %s\n", util.Truncate(m.Content, 4000))
 		case agent.RoleAssistant:
 			text := strings.TrimSpace(agent.StripThinkBlocks(m.Content))
 			if text != "" {
-				fmt.Fprintf(&b, "ASSISTANT: %s\n", Short(text, 4000))
+				fmt.Fprintf(&b, "ASSISTANT: %s\n", util.Truncate(text, 4000))
 			}
 			for j, tc := range m.ToolCalls {
 				name := tc.Function.Name
@@ -128,7 +129,7 @@ func RenderSnapshotForSummary(snapshot []agent.Message) string {
 					name = "?"
 				}
 				fmt.Fprintf(&b, "    call %d: %s(%s)\n", j+1, name,
-					Short(tc.Function.Arguments, 600))
+					util.Truncate(tc.Function.Arguments, 600))
 			}
 			if text == "" && len(m.ToolCalls) == 0 {
 				b.WriteString("ASSISTANT: (empty)\n")
@@ -138,12 +139,12 @@ func RenderSnapshotForSummary(snapshot []agent.Message) string {
 			if name == "" {
 				name = "?"
 			}
-			fmt.Fprintf(&b, "TOOL [%s]: %s\n", name, Short(m.Content, 2400))
+			fmt.Fprintf(&b, "TOOL [%s]: %s\n", name, util.Truncate(m.Content, 2400))
 		case "system":
 			// system already known by agent; skip
 			continue
 		default:
-			fmt.Fprintf(&b, "%s: %s\n", m.Role, Short(m.Content, 2000))
+			fmt.Fprintf(&b, "%s: %s\n", m.Role, util.Truncate(m.Content, 2000))
 		}
 	}
 	return b.String()

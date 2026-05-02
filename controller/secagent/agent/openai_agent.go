@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-appsec/secagent/util"
 )
 
 // TruncationNotice is the user-facing message appended to truncated tool
@@ -417,9 +419,9 @@ func (a *OpenAIAgent) dispatchToolCalls(
 				a.cfg.OnMalformedCall(tc.Function.Name, repairErr)
 			}
 			rec := ToolCallRecord{Name: tc.Function.Name, IsError: true}
-			rec.InputSummary = truncate(tc.Function.Arguments, 240)
+			rec.InputSummary = util.Truncate(tc.Function.Arguments, 240)
 			errText := a.formatRepairError(tc.Function.Name, repairErr)
-			rec.ResultSummary = truncate(errText, 300)
+			rec.ResultSummary = util.Truncate(errText, 300)
 			outcomes[i] = toolOutcome{
 				rec: rec,
 				histMsg: Message{
@@ -489,7 +491,7 @@ func (a *OpenAIAgent) runSingleTool(
 	extractFlow func(...any) []string,
 ) toolOutcome {
 	rec := ToolCallRecord{Name: tc.Function.Name, RawInput: args}
-	rec.InputSummary = truncate(string(args), 240)
+	rec.InputSummary = util.Truncate(string(args), 240)
 
 	if a.cfg.OnToolStart != nil {
 		a.cfg.OnToolStart(tc.Function.Name, args)
@@ -550,11 +552,11 @@ func (a *OpenAIAgent) runSingleTool(
 	elapsed := time.Since(start)
 
 	rec.IsError = result.IsError
-	rec.ResultSummary = truncate(result.Text, 300)
+	rec.ResultSummary = util.Truncate(result.Text, 300)
 	if a.cfg.OnToolEnd != nil {
 		var errText string
 		if result.IsError {
-			errText = truncate(result.Text, 240)
+			errText = util.Truncate(result.Text, 240)
 		}
 		a.cfg.OnToolEnd(tc.Function.Name, args, elapsed, result.IsError, timedOut, errText)
 	}

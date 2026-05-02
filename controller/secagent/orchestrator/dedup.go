@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-appsec/secagent/agent"
 	"github.com/go-appsec/secagent/history"
+	"github.com/go-appsec/secagent/util"
 )
 
 // Dedup verdict actions. Pair-wise (DedupVerdict) uses unique / duplicate /
@@ -201,7 +202,7 @@ Return only the JSON object. No prose, no markdown fences.
 }
 
 func parseCandidateVerdict(raw string, digests []FindingDigest) (CandidateDedupVerdict, error) {
-	body := history.ExtractJSONObject(raw)
+	body := util.ExtractJSONObject(raw)
 	var v struct {
 		Action          string `json:"action"`
 		MatchedFilename string `json:"matched_filename"`
@@ -245,7 +246,7 @@ func writeFindingBlock(b *strings.Builder, f FindingFiled) {
 }
 
 func parseVerdict(raw string) (DedupVerdict, error) {
-	body := history.ExtractJSONObject(raw)
+	body := util.ExtractJSONObject(raw)
 	var v struct {
 		Action       string `json:"action"`
 		MoreComplete string `json:"more_complete"`
@@ -267,7 +268,7 @@ func parseVerdict(raw string) (DedupVerdict, error) {
 }
 
 func parseMerge(raw string, fallback FindingFiled) (FindingFiled, error) {
-	body := history.ExtractJSONObject(raw)
+	body := util.ExtractJSONObject(raw)
 	var m struct {
 		Title             string `json:"title"`
 		Severity          string `json:"severity"`

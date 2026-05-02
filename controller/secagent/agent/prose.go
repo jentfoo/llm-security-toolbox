@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/go-analyze/bulk"
+	"github.com/go-appsec/secagent/util"
 )
 
 // outputMarkers are common patterns reasoning models use to demarcate their
@@ -32,7 +33,7 @@ var jsonSummaryFields = []string{
 // ExtractProse returns a best-effort single-line prose summary from s, or
 // "" when nothing usable remains.
 func ExtractProse(s string) string {
-	s = StripCodeFences(StripThinkBlocks(s))
+	s = util.StripCodeFences(StripThinkBlocks(s))
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""

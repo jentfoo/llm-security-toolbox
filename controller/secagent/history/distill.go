@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/util"
 )
 
 const distillMaxTokens = 4000
@@ -126,7 +127,7 @@ func buildDistillBatches(snapshot []agent.Message) []distillBatch {
 		current.indices = append(current.indices, i)
 		current.calls = append(current.calls, distillCall{
 			Name:    tc.Function.Name,
-			Args:    Short(tc.Function.Arguments, 240),
+			Args:    util.Truncate(tc.Function.Arguments, 240),
 			Content: m.Content,
 			IsError: m.IsRepairError || strings.HasPrefix(m.Content, "ERROR:"),
 		})
@@ -176,7 +177,7 @@ func buildDistillPrompt(b distillBatch) string {
 		if c.IsError {
 			sb.WriteString("(error result)\n")
 		}
-		sb.WriteString(Short(c.Content, 4000))
+		sb.WriteString(util.Truncate(c.Content, 4000))
 		sb.WriteString("\n\n")
 	}
 	return sb.String()

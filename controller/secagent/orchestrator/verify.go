@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/util"
 )
 
 // VerificationMaxSubsteps is the hard cap on verifier substeps per iteration.
@@ -71,7 +72,7 @@ func RunVerificationPhase(
 		// dedup pipeline: skip exact same-title/same-endpoint repeats this substep
 		seenFindings := map[string]bool{}
 		for _, filed := range decisions.Findings[appliedFindings:] {
-			titleKey := Slugify(filed.Title)
+			titleKey := util.Slugify(filed.Title)
 			if titleKey == "" {
 				titleKey = filed.Title
 			}

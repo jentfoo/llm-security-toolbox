@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/history"
+	"github.com/go-appsec/secagent/util"
 )
 
 func formatToolCalls(calls []agent.ToolCallRecord, limit int) string {
@@ -72,7 +72,7 @@ func formatAutonomousRun(workerID int, turns []agent.TurnSummary, escalationReas
 		}
 		parts = append(parts, fmt.Sprintf(
 			"  Turn %d: tools=[%s] flows=[%s]\n    text: %s",
-			i+1, history.Short(calls, 200), flows, history.Short(firstLine, 240),
+			i+1, util.Truncate(calls, 200), flows, util.Truncate(firstLine, 240),
 		))
 	}
 	last := turns[len(turns)-1]
@@ -96,7 +96,7 @@ func formatPendingCandidates(pending []FindingCandidate) string {
 		lines = append(lines, fmt.Sprintf(
 			"- `%s` [%s] %s — %s\n  worker: %d\n  flows: %s\n  summary: %s\n  reproduction hint: %s",
 			c.CandidateID, c.Severity, c.Title, c.Endpoint, c.WorkerID, flows,
-			history.Short(c.Summary, 200), history.Short(c.ReproductionHint, 200),
+			util.Truncate(c.Summary, 200), util.Truncate(c.ReproductionHint, 200),
 		))
 	}
 	return strings.Join(lines, "\n")
@@ -169,7 +169,7 @@ func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissa
 		if h == "" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("- (filed: %s) %s", history.Short(f.Title, 80), h))
+		lines = append(lines, fmt.Sprintf("- (filed: %s) %s", util.Truncate(f.Title, 80), h))
 	}
 	for _, d := range dismissals {
 		h := strings.TrimSpace(d.FollowUpHint)
@@ -256,7 +256,7 @@ func FormatPeerSummary(workers []*WorkerState, exceptID int) string {
 		if angle == "" {
 			angle = "(no instruction)"
 		}
-		lines = append(lines, fmt.Sprintf("- Worker %d: %s", w.ID, history.Short(angle, 200)))
+		lines = append(lines, fmt.Sprintf("- Worker %d: %s", w.ID, util.Truncate(angle, 200)))
 	}
 	if len(lines) == 0 {
 		return ""
@@ -329,13 +329,13 @@ func formatCompletedRoster(completed []CompletedWorker) string {
 		if reason == "" {
 			reason = "(no reason given)"
 		}
-		summary := history.Short(c.Summary, completedSummaryRenderCap)
+		summary := util.Truncate(c.Summary, completedSummaryRenderCap)
 		if summary == "" {
 			summary = "(summary unavailable)"
 		}
 		lines = append(lines, fmt.Sprintf(
 			"- Worker %d (stopped iter %d, reason: %s):\n  %s",
-			c.ID, c.StoppedAt, history.Short(reason, 200), summary,
+			c.ID, c.StoppedAt, util.Truncate(reason, 200), summary,
 		))
 	}
 	return strings.Join(lines, "\n")

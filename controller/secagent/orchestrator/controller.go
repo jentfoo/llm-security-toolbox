@@ -18,6 +18,7 @@ import (
 	"github.com/go-appsec/secagent/history"
 	"github.com/go-appsec/secagent/mcp"
 	"github.com/go-appsec/secagent/prompts"
+	"github.com/go-appsec/secagent/util"
 )
 
 // AgentFactory builds Agent instances per role. NewReconWorker omits
@@ -653,7 +654,7 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 		if log != nil {
 			log.Log("recon", "start", map[string]any{
 				"mission_chars":   len(reconMission),
-				"mission_preview": history.Short(reconMission, 240),
+				"mission_preview": util.Truncate(reconMission, 240),
 			})
 		}
 		w1, err = spawnReconWorker(ctx, mcpURL, cfg.ToolResultMaxBytes, factory, reconMission, ReconDirective, cfg.AutonomousBudget)
@@ -982,8 +983,8 @@ func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) err
 					log.Log("recon", "synthesis produced no plan — injecting fallback worker 2", map[string]any{
 						"hint":            "director did not call plan_workers after retry; iter 2 spawns one worker with the original mission",
 						"fallback_worker": 2,
-						"fallback_assign": history.Short(cfg.Prompt, 200),
-						"recon_summary":   history.Short(factory.ReconSummary, 200),
+						"fallback_assign": util.Truncate(cfg.Prompt, 200),
+						"recon_summary":   util.Truncate(factory.ReconSummary, 200),
 					})
 				}
 			}

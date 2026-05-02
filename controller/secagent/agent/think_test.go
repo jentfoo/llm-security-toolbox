@@ -32,33 +32,6 @@ func TestStripThinkBlocks(t *testing.T) {
 	}
 }
 
-func TestStripCodeFences(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "empty", in: "", want: ""},
-		{name: "no_fence", in: "hello world", want: "hello world"},
-		{name: "bare_fence_pair", in: "```\nhello\n```", want: "hello"},
-		{name: "language_tag", in: "```json\n{\"foo\":\"bar\"}\n```", want: `{"foo":"bar"}`},
-		{name: "leading_blanks_fence", in: "\n\n```\nline one\nline two\n```\n", want: "line one\nline two"},
-		{name: "leading_only", in: "```md\nprose", want: "prose"},
-		{name: "trailing_only", in: "prose\n```", want: "prose"},
-		{name: "fence_only", in: "```", want: ""},
-		{name: "two_fences_only", in: "```\n```", want: ""},
-		{name: "inline_backticks_untouched", in: "the `foo` bar", want: "the `foo` bar"},
-		{name: "opener_trailer_not_stripped", in: "prose\n```json", want: "prose\n```json"},
-		{name: "fence_in_body_preserved", in: "intro\n```\ncode\n```\noutro", want: "intro\n```\ncode\n```\noutro"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, StripCodeFences(tc.in))
-		})
-	}
-}
-
 func TestFilterThinkBlocks(t *testing.T) {
 	t.Parallel()
 	build := func() []Message {

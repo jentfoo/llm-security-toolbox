@@ -11,26 +11,15 @@ import (
 	"sync"
 
 	"github.com/go-analyze/bulk"
+	"github.com/go-appsec/secagent/util"
 )
 
-var nonSlugChar = regexp.MustCompile(`[^a-z0-9\s-]+`)
-var slugDashes = regexp.MustCompile(`[-\s]+`)
 var findingIndexRe = regexp.MustCompile(`^finding-(\d+)-.*\.md$`)
 var unvalidatedIndexRe = regexp.MustCompile(`^unvalidated-(\d+)-.*\.md$`)
 
 var httpMethods = map[string]bool{
 	"GET": true, "POST": true, "PUT": true, "PATCH": true,
 	"DELETE": true, "HEAD": true, "OPTIONS": true,
-}
-
-// Slugify produces a URL-safe slug from text. Underscores are normalized
-// to spaces, so `client_secret` and `client-secret` yield the same slug.
-func Slugify(text string) string {
-	t := strings.ToLower(strings.TrimSpace(text))
-	t = strings.ReplaceAll(t, "_", " ")
-	t = nonSlugChar.ReplaceAllString(t, "")
-	t = slugDashes.ReplaceAllString(t, "-")
-	return strings.Trim(t, "-")
 }
 
 // CanonicalEndpoint returns endpoint lowercased with method prefix and
@@ -62,7 +51,7 @@ func CanonicalEndpoint(endpoint string) string {
 // TitlesSimilar reports whether a and b's slugs match exactly, are
 // substrings of each other, or share more than half their slug words.
 func TitlesSimilar(a, b string) bool {
-	sa, sb := Slugify(a), Slugify(b)
+	sa, sb := util.Slugify(a), util.Slugify(b)
 	if sa == "" || sb == "" {
 		return false
 	}
@@ -318,10 +307,14 @@ func parseFindingMarkdown(raw string) (FindingFiled, bool) {
 	if len(lines) == 0 || !strings.HasPrefix(lines[0], "# ") {
 		return FindingFiled{}, false
 	}
+	ep := findMarkdownField(lines, "- **Affected Endpoint**: ")
+	if ep == "N/A" {
+		ep = ""
+	}
 	filed := FindingFiled{
 		Title:    strings.TrimSpace(strings.TrimPrefix(lines[0], "# ")),
 		Severity: findMarkdownField(lines, "- **Severity**: "),
-		Endpoint: normalizeStoredEndpoint(findMarkdownField(lines, "- **Affected Endpoint**: ")),
+		Endpoint: ep,
 	}
 	filed.Description = findingSection(raw, "Description", "Reproduction Steps")
 	filed.ReproductionSteps = findingSection(raw, "Reproduction Steps", "Evidence")
@@ -360,19 +353,12 @@ func findingSection(raw, heading, next string) string {
 	return strings.TrimSpace(raw[start:end])
 }
 
-func normalizeStoredEndpoint(endpoint string) string {
-	if endpoint == "N/A" {
-		return ""
-	}
-	return endpoint
-}
-
 // IsDuplicate reports whether filed matches a written finding on exact
 // title-slug AND canonical-endpoint equality.
 func (w *FindingWriter) IsDuplicate(filed FindingFiled) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	titleSlug := Slugify(filed.Title)
+	titleSlug := util.Slugify(filed.Title)
 	canonEP := CanonicalEndpoint(filed.Endpoint)
 	if titleSlug == "" {
 		return false
@@ -391,7 +377,7 @@ func (w *FindingWriter) IsDuplicate(filed FindingFiled) bool {
 func (w *FindingWriter) MatchesFiled(title, endpoint string) (matchedTitle, path string, ok bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	titleSlug := Slugify(title)
+	titleSlug := util.Slugify(title)
 	canonEP := CanonicalEndpoint(endpoint)
 	if titleSlug == "" {
 		return "", "", false
@@ -409,7 +395,7 @@ func (w *FindingWriter) MatchesFiled(title, endpoint string) (matchedTitle, path
 func (w *FindingWriter) FindSimilarEntries(filed FindingFiled) []SimilarFinding {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	titleSlug := Slugify(filed.Title)
+	titleSlug := util.Slugify(filed.Title)
 	var out []SimilarFinding
 	for _, e := range w.index {
 		if titleSlug != "" && titleSlug == e.titleSlug {
@@ -484,7 +470,7 @@ func (w *FindingWriter) indexOfPath(path string) int {
 }
 
 func findingFilename(seq int, title string) string {
-	slug := Slugify(title)
+	slug := util.Slugify(title)
 	if slug == "" {
 		slug = "untitled"
 	}
@@ -527,7 +513,7 @@ func renderFinding(filed FindingFiled) string {
 func indexEntry(filed FindingFiled, path string) findingIndexEntry {
 	return findingIndexEntry{
 		filed:     filed,
-		titleSlug: Slugify(filed.Title),
+		titleSlug: util.Slugify(filed.Title),
 		endpoint:  CanonicalEndpoint(filed.Endpoint),
 		path:      path,
 	}
@@ -565,27 +551,19 @@ func (w *FindingWriter) Digests() []FindingDigest {
 	defer w.mu.Unlock()
 	out := make([]FindingDigest, 0, len(w.index))
 	for _, e := range w.index {
+		lines := strings.SplitN(e.filed.Description, "\n", findingDigestDescriptionLines+1)
+		if len(lines) > findingDigestDescriptionLines {
+			lines = lines[:findingDigestDescriptionLines]
+		}
 		out = append(out, FindingDigest{
 			Filename:   filepath.Base(e.path),
 			Title:      e.filed.Title,
 			Severity:   e.filed.Severity,
 			Endpoint:   orDefault(e.filed.Endpoint, "N/A"),
-			FirstLines: firstNLines(e.filed.Description, findingDigestDescriptionLines),
+			FirstLines: strings.Join(lines, "\n"),
 		})
 	}
 	return out
-}
-
-// firstNLines returns the first n lines of s, joined with newlines.
-func firstNLines(s string, n int) string {
-	if s == "" || n <= 0 {
-		return ""
-	}
-	lines := strings.SplitN(s, "\n", n+1)
-	if len(lines) > n {
-		lines = lines[:n]
-	}
-	return strings.Join(lines, "\n")
 }
 
 // SummaryForOrchestrator renders a short listing of all filed findings.
@@ -667,7 +645,7 @@ func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
 		return "", err
 	}
 	next := w.UnvalidatedCount + 1
-	slug := Slugify(c.Title)
+	slug := util.Slugify(c.Title)
 	if slug == "" {
 		slug = "untitled"
 	}

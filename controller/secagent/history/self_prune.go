@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/secagent/util"
 )
 
 const (
@@ -115,7 +116,7 @@ func (s *Summarizer) logSelectError(err error, raw string) {
 		return
 	}
 	s.Log.Log("compact", "self-prune select parse error", map[string]any{
-		"err": err.Error(), "raw": Short(raw, 240),
+		"err": err.Error(), "raw": util.Truncate(raw, 240),
 	})
 }
 
@@ -146,10 +147,10 @@ func buildToolEvents(msgs []agent.Message) []toolEvent {
 				Index:      len(events),
 				ToolCallID: tc.ID,
 				ToolName:   tc.Function.Name,
-				ArgsPrev:   Short(tc.Function.Arguments, 200),
+				ArgsPrev:   util.Truncate(tc.Function.Arguments, 200),
 			}
 			if r, ok := resultByID[tc.ID]; ok {
-				ev.ResultPrev = Short(r.Content, 200)
+				ev.ResultPrev = util.Truncate(r.Content, 200)
 				ev.IsError = r.IsRepairError || strings.HasPrefix(r.Content, "ERROR:")
 			}
 			events = append(events, ev)
@@ -196,7 +197,7 @@ The "remove" array lists the 1-based event indices to drop from history. Empty a
 
 // parseEventIndexList returns deduped sorted 0-based indices in [0, total).
 func parseEventIndexList(raw string, total int) ([]int, error) {
-	body := ExtractJSONObject(raw)
+	body := util.ExtractJSONObject(raw)
 	if body == "" {
 		return nil, ErrEmptyResponse
 	}

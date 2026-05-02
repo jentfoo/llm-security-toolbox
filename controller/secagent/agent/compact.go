@@ -3,6 +3,8 @@ package agent
 import (
 	"fmt"
 	"strings"
+
+	"github.com/go-appsec/secagent/util"
 )
 
 // CompactionOptions controls compaction thresholds.
@@ -86,7 +88,7 @@ func StubToolResult(m *Message) bool {
 	}
 	summary := m.Summary120
 	if summary == "" {
-		summary = truncate(m.Content, 120)
+		summary = util.Truncate(m.Content, 120)
 	}
 	stub := fmt.Sprintf(
 		"%s%s returned ~%d tokens — %s)",
@@ -376,4 +378,3 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	}
 	return msgs, false
 }
-
