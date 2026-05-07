@@ -193,8 +193,8 @@ func TestBurpCreateRepeaterTab_HTTP(t *testing.T) {
 
 	params := RepeaterTabParams{
 		TabName:        "st-http-test",
-		Content:        "GET /get HTTP/1.1\r\nHost: httpbin.org\r\n\r\n",
-		TargetHostname: "httpbin.org",
+		Content:        "GET /get HTTP/1.1\r\nHost: example.com\r\n\r\n",
+		TargetHostname: "example.com",
 		TargetPort:     80,
 		UsesHTTPS:      false,
 	}
@@ -204,29 +204,30 @@ func TestBurpCreateRepeaterTab_HTTP(t *testing.T) {
 
 func TestBurpSendHTTP1Request(t *testing.T) {
 	client := connectOrSkip(t)
+	domain, waitFor := testutil.NewInteractsh(t)
 
 	params := SendRequestParams{
-		Content:        "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: sectool-test\r\nConnection: close\r\n\r\n",
-		TargetHostname: "httpbin.org",
+		Content:        "GET /get HTTP/1.1\r\nHost: " + domain + "\r\nUser-Agent: sectool-test\r\nConnection: close\r\n\r\n",
+		TargetHostname: domain,
 		TargetPort:     443,
 		UsesHTTPS:      true,
 	}
 	response, err := client.SendHTTP1Request(t.Context(), params)
 	require.NoError(t, err)
 
-	t.Logf("Response length: %d bytes", len(response))
-	t.Logf("Response preview: %s", util.TruncateString(response, 500))
-
-	// Should have HTTP response
 	assert.Contains(t, response, "HTTP/")
+
+	i := waitFor("GET", "/get")
+	assert.Contains(t, i.RawRequest, "User-Agent: sectool-test")
 }
 
 func TestBurpSendHTTP1Request_HTTP(t *testing.T) {
 	client := connectOrSkip(t)
+	domain, waitFor := testutil.NewInteractsh(t)
 
 	params := SendRequestParams{
-		Content:        "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: sectool-test\r\nConnection: close\r\n\r\n",
-		TargetHostname: "httpbin.org",
+		Content:        "GET /get HTTP/1.1\r\nHost: " + domain + "\r\nUser-Agent: sectool-test\r\nConnection: close\r\n\r\n",
+		TargetHostname: domain,
 		TargetPort:     80,
 		UsesHTTPS:      false,
 	}
@@ -234,22 +235,25 @@ func TestBurpSendHTTP1Request_HTTP(t *testing.T) {
 	response, err := client.SendHTTP1Request(t.Context(), params)
 	require.NoError(t, err)
 
-	t.Logf("HTTP Response length: %d bytes", len(response))
 	assert.Contains(t, response, "HTTP/")
+
+	i := waitFor("GET", "/get")
+	assert.Contains(t, i.RawRequest, "User-Agent: sectool-test")
 }
 
 func TestBurpSendHTTP1Request_POST(t *testing.T) {
 	client := connectOrSkip(t)
+	domain, waitFor := testutil.NewInteractsh(t)
 
 	body := `{"test": "data"}`
 	params := SendRequestParams{
 		Content: "POST /post HTTP/1.1\r\n" +
-			"Host: httpbin.org\r\n" +
+			"Host: " + domain + "\r\n" +
 			"Content-Type: application/json\r\n" +
 			"Content-Length: " + itoa(len(body)) + "\r\n" +
 			"Connection: close\r\n\r\n" +
 			body,
-		TargetHostname: "httpbin.org",
+		TargetHostname: domain,
 		TargetPort:     443,
 		UsesHTTPS:      true,
 	}
@@ -257,10 +261,10 @@ func TestBurpSendHTTP1Request_POST(t *testing.T) {
 	response, err := client.SendHTTP1Request(t.Context(), params)
 	require.NoError(t, err)
 
-	t.Logf("POST Response length: %d bytes", len(response))
 	assert.Contains(t, response, "HTTP/")
-	// httpbin echoes back the posted data
-	assert.Contains(t, response, "test")
+
+	i := waitFor("POST", "/post")
+	assert.Contains(t, i.RawRequest, body)
 }
 
 func TestBurpCloseAndReconnect(t *testing.T) {
@@ -330,29 +334,28 @@ func itoa(n int) string {
 
 func TestBurpSendHTTP2Request(t *testing.T) {
 	client := connectOrSkip(t)
+	domain, waitFor := testutil.NewInteractsh(t)
 
 	params := SendHTTP2RequestParams{
 		PseudoHeaders: map[string]string{
 			":method":    "GET",
 			":path":      "/get",
-			":authority": "httpbin.org",
+			":authority": domain,
 			":scheme":    "https",
 		},
 		Headers: map[string]string{
 			"User-Agent": "sectool-test",
 		},
-		TargetHostname: "httpbin.org",
+		TargetHostname: domain,
 		TargetPort:     443,
 		UsesHTTPS:      true,
 	}
 	response, err := client.SendHTTP2Request(t.Context(), params)
 	require.NoError(t, err)
 
-	t.Logf("HTTP/2 Response length: %d bytes", len(response))
-	t.Logf("HTTP/2 Response preview: %s", util.TruncateString(response, 500))
-
-	// Should have HTTP response
 	assert.Contains(t, response, "HTTP/")
+
+	waitFor("GET", "/get")
 }
 
 func TestBurpSendToIntruder(t *testing.T) {
@@ -360,8 +363,8 @@ func TestBurpSendToIntruder(t *testing.T) {
 
 	params := IntruderParams{
 		TabName:        "st-intruder-test",
-		Content:        "GET /get?param=FUZZ HTTP/1.1\r\nHost: httpbin.org\r\n\r\n",
-		TargetHostname: "httpbin.org",
+		Content:        "GET /get?param=FUZZ HTTP/1.1\r\nHost: example.com\r\n\r\n",
+		TargetHostname: "example.com",
 		TargetPort:     443,
 		UsesHTTPS:      true,
 	}

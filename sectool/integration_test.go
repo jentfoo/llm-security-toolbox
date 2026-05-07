@@ -774,20 +774,25 @@ func TestIntegration_RequestSend(t *testing.T) {
 		t.Helper()
 
 		t.Run("simple_get", func(t *testing.T) {
+			domain, waitFor := testutil.NewInteractsh(t)
+
 			resp, err := client.RequestSend(t.Context(), mcpclient.RequestSendOpts{
-				URL:    "https://httpbin.org/get",
+				URL:    "https://" + domain + "/get",
 				Method: "GET",
 			})
 			require.NoError(t, err)
 
 			assert.NotEmpty(t, resp.FlowID)
 			assert.Equal(t, 200, resp.Status)
-			t.Logf("request_send GET: status=%d duration=%s", resp.Status, resp.Duration)
+
+			waitFor("GET", "/get")
 		})
 
 		t.Run("with_headers", func(t *testing.T) {
+			domain, waitFor := testutil.NewInteractsh(t)
+
 			resp, err := client.RequestSend(t.Context(), mcpclient.RequestSendOpts{
-				URL:    "https://httpbin.org/headers",
+				URL:    "https://" + domain + "/headers",
 				Method: "GET",
 				Headers: []string{
 					"X-Custom-Header: integration-test",
@@ -796,20 +801,28 @@ func TestIntegration_RequestSend(t *testing.T) {
 			})
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.Status)
+
+			i := waitFor("GET", "/headers")
+			assert.Contains(t, i.RawRequest, "X-Custom-Header: integration-test")
 		})
 
 		t.Run("post_with_body", func(t *testing.T) {
+			domain, waitFor := testutil.NewInteractsh(t)
+
+			body := `{"test": "data", "integration": true}`
 			resp, err := client.RequestSend(t.Context(), mcpclient.RequestSendOpts{
-				URL:    "https://httpbin.org/post",
+				URL:    "https://" + domain + "/post",
 				Method: "POST",
 				Headers: []string{
 					"Content-Type: application/json",
 				},
-				Body: `{"test": "data", "integration": true}`,
+				Body: body,
 			})
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.Status)
-			t.Logf("request_send POST: status=%d", resp.Status)
+
+			i := waitFor("POST", "/post")
+			assert.Contains(t, i.RawRequest, body)
 		})
 	})
 }
