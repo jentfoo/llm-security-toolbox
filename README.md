@@ -121,7 +121,7 @@ sectool replay send --flow <flow_id> --add-header "X-Test: value"
 # Set up out-of-band interaction testing and check for callbacks
 sectool oast create
 sectool oast poll <oast_id>
-sectool oast get <oast_id> <event_id>
+sectool oast get <event_id>
 
 # Compare two flows, detect reflections, inspect JWTs
 sectool diff <flow_a> <flow_b> --scope response
