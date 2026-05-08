@@ -23,37 +23,22 @@ func (m *mcpServer) replaySendTool() mcp.Tool {
 Active proxy rules (proxy_rule_add) are applied before sending.
 
 Returns: flow_id, status, headers, response_preview. Full body via flow_get.
+Replayed requests appear in proxy_poll history alongside captured traffic.
 
-Edits:
-- method: override HTTP method (GET, POST, PUT, DELETE, etc.)
-- target: scheme+host[:port] (e.g., 'https://staging.example.com')
-- path/query: override path or entire query string
-- set_query/remove_query: selective query param edits
-- set_headers/remove_headers: header edits. Single entry replaces existing; multiple entries with the same name create duplicates
-- body: replace entire body
-- set_json/remove_json: selective JSON edits; requires body to be valid JSON
-- set_form/remove_form: selective form-field edits for application/x-www-form-urlencoded bodies (e.g. OAuth2 token requests); do NOT use set_json on form bodies
-
-JSON paths: dot notation with array brackets (e.g., "user.email", "items[0].id", "data.users[0].name").
-set_json object: {"user.email": "x", "items[0].id": 5}
-set_form object: {"grant_type": "password", "scope": "read"} (keys are form-field names; values are strings)
-Types auto-parsed: null/true/false/numbers/{}/[], else string.
-Processing: remove_* then set_*. Content-Length auto-updated when body is modified and CL not explicitly set.
-Validation: fix issues or use force=true for protocol testing.
-Replayed requests appear in proxy_poll history alongside captured traffic.`),
+Processing: remove_* is applied before set_*. Content-Length auto-updates on body changes unless explicitly set. force=true skips validation for protocol-level tests (smuggling, CRLF injection).`),
 		mcp.WithString("flow_id", mcp.Required(), mcp.Description("Flow ID to use as base request")),
 		mcp.WithString("method", mcp.Description("Override HTTP method (GET, POST, PUT, DELETE, PATCH, etc.)")),
-		mcp.WithString("body", mcp.Description("Request body content (replaces existing body)")),
-		mcp.WithString("target", mcp.Description("Override destination (scheme+host[:port]); keeps original path/query")),
-		mcp.WithArray("set_headers", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Headers to set (format: 'Name: Value')")),
+		mcp.WithString("body", mcp.Description("Replace entire request body")),
+		mcp.WithString("target", mcp.Description("Override destination scheme+host[:port]; keeps original path/query")),
+		mcp.WithArray("set_headers", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Headers to set (format: 'Name: Value'). A single entry replaces an existing header of the same name; multiple entries with the same name create duplicates.")),
 		mcp.WithArray("remove_headers", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Header names to remove")),
 		mcp.WithString("path", mcp.Description("Override request path (include leading '/')")),
 		mcp.WithString("query", mcp.Description("Override entire query string (no leading '?')")),
 		mcp.WithArray("set_query", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Query params to set (format: 'name=value')")),
 		mcp.WithArray("remove_query", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Query param names to remove")),
-		mcp.WithObject("set_json", mcp.Description("JSON fields to set as object: {\"path\": value} (e.g., {\"user.email\": \"x\", \"items[0].id\": 5})")),
-		mcp.WithArray("remove_json", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("JSON fields to remove (dot path: 'user.temp', 'items[2]')")),
-		mcp.WithObject("set_form", mcp.Description("Form fields to set as object: {\"field\": \"value\"}. For application/x-www-form-urlencoded bodies (e.g. OAuth2 grant_type, scope). Do NOT use on JSON bodies, use set_json.")),
+		mcp.WithObject("set_json", mcp.Description("JSON fields to set: {\"path\": value} using dot/bracket paths (e.g. {\"user.email\": \"x\", \"items[0].id\": 5}). Values auto-parse: null/true/false/numbers/{}/[], else string. Body must be valid JSON; for form-encoded bodies use set_form.")),
+		mcp.WithArray("remove_json", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("JSON fields to remove (same dot/bracket path syntax as set_json: 'user.temp', 'items[2]')")),
+		mcp.WithObject("set_form", mcp.Description("Form fields to set as object {\"field\": \"value\"} for application/x-www-form-urlencoded bodies (e.g. OAuth2 grant_type, scope). Keys are form-field names; values are strings. Do NOT use on JSON bodies, use set_json.")),
 		mcp.WithArray("remove_form", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Form field names to remove (form-encoded bodies only)")),
 		mcp.WithBoolean("follow_redirects", mcp.Description("Follow HTTP redirects (default: false)")),
 		mcp.WithBoolean("force", mcp.Description("Skip validation for protocol-level tests (smuggling, CRLF injection)")),

@@ -29,21 +29,19 @@ func (m *mcpServer) diffFlowTool() mcp.Tool {
 	return mcp.NewTool("diff_flow",
 		mcp.WithDescription(`Compare two captured flows, surfacing exactly what differs in requests and responses.
 
-Scope controls what is compared:
-- "request" — method, path, query, request headers, request body
-- "response" — status, response headers, response body
-- "request_headers" — method, path, query, request headers only (no body diff)
-- "response_headers" — status, response headers only (no body diff)
-- "request_body" — request body only
-- "response_body" — response body only
-
 Flows can come from any source (proxy, replay, crawl) and can be mixed.
 Sections where everything is identical are omitted. Returns {"same": true} when scoped sections are entirely identical.`),
 		mcp.WithString("flow_a", mcp.Required(), mcp.Description("Flow ID (from proxy_poll, replay_send, or crawl_poll)")),
 		mcp.WithString("flow_b", mcp.Required(), mcp.Description("Flow ID (from any source)")),
 		mcp.WithString("scope", mcp.Required(),
 			mcp.Enum("request", "response", "request_headers", "response_headers", "request_body", "response_body"),
-			mcp.Description("What to compare")),
+			mcp.Description(`What to compare:
+- "request" — method, path, query, request headers, request body
+- "response" — status, response headers, response body
+- "request_headers" — method, path, query, request headers only (no body diff)
+- "response_headers" — status, response headers only (no body diff)
+- "request_body" — request body only
+- "response_body" — response body only`)),
 		mcp.WithNumber("max_diff_lines", mcp.Description("Cap body diff output (default: 50 for text, 20 for JSON paths)")),
 	)
 }

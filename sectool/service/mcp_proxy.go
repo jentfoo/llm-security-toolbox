@@ -37,21 +37,19 @@ Output modes:
 - "summary" (default): Returns traffic grouped by (host, path, method, status). Use first to understand available traffic.
 - "flows": Returns individual flows with flow_id for use with flow_get or replay_send. Requires at least one filter or limit.
 
-Sources: Results include both proxy-captured traffic (source=proxy) and replay-sent traffic (source=replay) in chronological order.
-Filters: host/path/exclude_host/exclude_path use glob (*, ?). method/status are comma-separated (status supports ranges like 2XX).
-Search: search_header/search_body use regex; literal if invalid.
+Results include both proxy-captured traffic (source=proxy) and replay-sent traffic (source=replay) in chronological order.
 `+incremental),
 		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default) or 'flows'")),
 		mcp.WithString("source", mcp.Description("Filter by source: 'proxy', 'replay', or empty for both")),
-		mcp.WithString("host", mcp.Description("Filter by host glob. *.example.com = subdomains only; *example.com = domain + subdomains")),
-		mcp.WithString("path", mcp.Description("Filter by path+query (glob pattern, e.g., '/api/*')")),
+		mcp.WithString("host", mcp.Description("Filter by host glob (*, ?). *.example.com = subdomains only; *example.com = domain + subdomains")),
+		mcp.WithString("path", mcp.Description("Filter by path+query glob (*, ?), e.g. '/api/*'")),
 		mcp.WithString("method", mcp.Description("Filter by HTTP method(s), comma-separated (e.g., 'GET,POST')")),
-		mcp.WithString("status", mcp.Description("Filter by status code(s) or ranges (e.g., '200,302' or '2XX,4XX')")),
+		mcp.WithString("status", mcp.Description("Filter by status code(s) or ranges, comma-separated (e.g., '200,302' or '2XX,4XX')")),
 		mcp.WithString("search_header", mcp.Description("Search request/response headers by regex (RE2); literal if invalid")),
 		mcp.WithString("search_body", mcp.Description("Search request/response body by regex (RE2, use (?i) for case-insensitive); literal if invalid")),
 		mcp.WithString("since", mcp.Description(sinceDesc)),
-		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob pattern")),
-		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob pattern")),
+		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob (*, ?)")),
+		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob (*, ?)")),
 		mcp.WithNumber("limit", mcp.Description("Max results to return")),
 		mcp.WithNumber("offset", mcp.Description("Skip first N results (flows mode, applied after filtering)")),
 	)

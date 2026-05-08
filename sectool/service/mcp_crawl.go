@@ -208,19 +208,18 @@ Output modes:
 - "forms": Returns discovered forms with field information.
 - "errors": Returns errors encountered during crawling.
 
-Filters apply to summary and flows modes: host/path/exclude_host/exclude_path use glob (*, ?). method/status are comma-separated (status supports ranges like 2XX).
-Search: search_header/search_body use regex; literal if invalid.
+Filters apply to summary and flows modes only.
 `+incremental),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID or label")),
 		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default), 'flows', 'forms', or 'errors'")),
-		mcp.WithString("host", mcp.Description("Filter by host glob. *.example.com = subdomains only; *example.com = domain + subdomains")),
-		mcp.WithString("path", mcp.Description("Filter by path+query glob pattern (e.g., '/api/*')")),
-		mcp.WithString("method", mcp.Description("Filter by HTTP method (comma-separated)")),
-		mcp.WithString("status", mcp.Description("Filter by status codes or ranges (e.g., '200,404' or '2XX,4XX')")),
+		mcp.WithString("host", mcp.Description("Filter by host glob (*, ?). *.example.com = subdomains only; *example.com = domain + subdomains")),
+		mcp.WithString("path", mcp.Description("Filter by path+query glob (*, ?), e.g. '/api/*'")),
+		mcp.WithString("method", mcp.Description("Filter by HTTP method(s), comma-separated (e.g., 'GET,POST')")),
+		mcp.WithString("status", mcp.Description("Filter by status code(s) or ranges, comma-separated (e.g., '200,404' or '2XX,4XX')")),
 		mcp.WithString("search_header", mcp.Description("Search request/response headers by regex (RE2); literal if invalid")),
 		mcp.WithString("search_body", mcp.Description("Search request/response body by regex (RE2, use (?i) for case-insensitive); literal if invalid")),
-		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob pattern")),
-		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob pattern")),
+		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob (*, ?)")),
+		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob (*, ?)")),
 		mcp.WithString("since", mcp.Description(sinceDesc)),
 		mcp.WithNumber("limit", mcp.Description("Max results to return (default: 100 for flows/forms/errors)")),
 		mcp.WithNumber("offset", mcp.Description("Skip first N results for pagination (flows mode)")),

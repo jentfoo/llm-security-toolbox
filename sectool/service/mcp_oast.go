@@ -57,7 +57,6 @@ Options:
 - Custom: set wait (e.g., '60s', max 120s)
 - Immediate: set wait to '0s'
 `+incrementalBullet+`
-- Filter by type: dns, http, smtp, ftp, ldap, smb, responder
 
 Response includes events/aggregates and optional dropped_count.`),
 		mcp.WithString("oast_id", mcp.Required(), mcp.Description("OAST session ID, label, or domain")),
