@@ -4,84 +4,162 @@ import (
 	"bytes"
 	"log"
 	"net/http"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
-const nextOffsetKey = "proxy:history:_next"
+const (
+	historyKeyPrefix  = "proxy:history:f:"
+	historyPayloadSuf = ":p"
+)
 
-func historyMetaKey(offset uint32) string {
-	return "proxy:history:" + strconv.FormatUint(uint64(offset), 10)
+func historyMetaKey(flowID string) string {
+	return historyKeyPrefix + flowID
 }
 
-func historyPayloadKey(offset uint32) string {
-	return "proxy:history:" + strconv.FormatUint(uint64(offset), 10) + ":p"
+func historyPayloadKey(flowID string) string {
+	return historyKeyPrefix + flowID + historyPayloadSuf
+}
+
+// orderedFlow is the in-memory ordering record for a stored history entry.
+type orderedFlow struct {
+	flowID    string
+	timestamp time.Time
+}
+
+// lessOrder is the canonical (timestamp, flow_id) order. flow_id breaks ties so
+// same-instant captures sort deterministically across recovery and platform clock resolution.
+func lessOrder(aTime time.Time, aID string, bTime time.Time, bID string) bool {
+	if !aTime.Equal(bTime) {
+		return aTime.Before(bTime)
+	}
+	return aID < bID
 }
 
 // HistoryStore provides typed access to proxy history backed by store.Storage.
+// Entries are keyed by flow_id; merge ordering uses (Timestamp, FlowID).
 type HistoryStore struct {
-	mu            sync.RWMutex
-	storage       store.Storage
-	nextOffset    uint32
-	captureFilter atomic.Value // stores CaptureFilter
+	mu              sync.RWMutex
+	storage         store.Storage
+	flowOrder       []orderedFlow        // ordered by (timestamp, flowID) ascending
+	timestampByFlow map[string]time.Time // flow_id -> timestamp, for cursor resolution
+	captureFilter   atomic.Value         // stores CaptureFilter
 }
 
 // newHistoryStore creates a history store using the provided storage backend.
-// Recovers nextOffset from storage so the store is usable after a reload.
+// Recovers in-memory ordering by scanning meta keys.
 func newHistoryStore(storage store.Storage) *HistoryStore {
-	h := &HistoryStore{storage: storage}
-	if data, found, err := storage.Get(nextOffsetKey); err == nil && found {
-		if v, err := strconv.ParseUint(string(data), 10, 32); err == nil {
-			h.nextOffset = uint32(v)
-		}
+	h := &HistoryStore{
+		storage:         storage,
+		timestampByFlow: make(map[string]time.Time),
 	}
+	h.recover()
 	return h
 }
 
-// Store adds an entry and assigns the next offset.
-// Returns the assigned offset.
-func (h *HistoryStore) Store(entry *HistoryEntry) uint32 {
+// recover rebuilds in-memory order from persisted meta keys.
+func (h *HistoryStore) recover() {
+	for _, key := range h.storage.KeySet() {
+		if !strings.HasPrefix(key, historyKeyPrefix) || strings.HasSuffix(key, historyPayloadSuf) {
+			continue
+		}
+		data, found, err := h.storage.Get(key)
+		if err != nil || !found {
+			continue
+		}
+		var meta HistoryMeta
+		if err := store.Deserialize(data, &meta); err != nil {
+			log.Printf("proxy: history recover deserialize error %s: %v", key, err)
+			continue
+		}
+		if meta.FlowID == "" {
+			continue
+		}
+		ts := meta.Timestamp.UTC()
+		h.flowOrder = append(h.flowOrder, orderedFlow{flowID: meta.FlowID, timestamp: ts})
+		h.timestampByFlow[meta.FlowID] = ts
+	}
+	sort.Slice(h.flowOrder, func(i, j int) bool {
+		return lessOrder(h.flowOrder[i].timestamp, h.flowOrder[i].flowID,
+			h.flowOrder[j].timestamp, h.flowOrder[j].flowID)
+	})
+}
+
+// Store mints a flow_id, assigns it to entry, persists, and returns the flow_id. entry.Timestamp must be set by the caller.
+func (h *HistoryStore) Store(entry *HistoryEntry) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	offset := h.nextOffset
-	h.nextOffset++
+	flowID := h.mintUniqueFlowIDLocked()
+	entry.FlowID = flowID
+	ts := entry.Timestamp.UTC()
+	entry.Timestamp = ts
 
-	// Persist counter before entry so offset is never reused on reload
-	if err := h.storage.Set(nextOffsetKey, []byte(strconv.FormatUint(uint64(h.nextOffset), 10))); err != nil {
-		log.Printf("proxy: failed to persist next offset: %v", err)
-	}
-
-	entry.Offset = offset
-	h.writeEntry(entry)
-	return offset
+	h.writeEntryLocked(entry)
+	h.insertOrderLocked(orderedFlow{flowID: flowID, timestamp: ts})
+	h.timestampByFlow[flowID] = ts
+	return flowID
 }
 
-// writeEntry serializes and writes both meta and payload keys for an entry.
-func (h *HistoryStore) writeEntry(entry *HistoryEntry) {
+// mintUniqueFlowIDLocked generates a flow_id, retrying on collision. Caller must hold mu.
+func (h *HistoryStore) mintUniqueFlowIDLocked() string {
+	for {
+		candidate := ids.Generate(ids.DefaultLength)
+		if _, exists := h.timestampByFlow[candidate]; exists {
+			continue
+		} else if _, found, _ := h.storage.Get(historyMetaKey(candidate)); found {
+			continue
+		}
+		return candidate
+	}
+}
+
+// writeEntryLocked serializes and writes both payload and meta keys for an entry. Caller must hold mu.
+func (h *HistoryStore) writeEntryLocked(entry *HistoryEntry) {
 	meta := entry.extractMeta()
-	if metaData, err := store.Serialize(&meta); err != nil {
-		log.Printf("proxy: failed to serialize history meta %d: %v", entry.Offset, err)
-	} else if payloadData, err := store.Serialize(entry); err != nil {
-		log.Printf("proxy: failed to serialize history entry %d: %v", entry.Offset, err)
-	} else if err := h.storage.Set(historyMetaKey(entry.Offset), metaData); err != nil {
-		log.Printf("proxy: failed to save history meta %d: %v", entry.Offset, err)
-	} else if err := h.storage.Set(historyPayloadKey(entry.Offset), payloadData); err != nil {
-		log.Printf("proxy: failed to save history entry %d: %v", entry.Offset, err)
+	metaData, err := store.Serialize(&meta)
+	if err != nil {
+		log.Printf("proxy: serialize history meta %s: %v", entry.FlowID, err)
+		return
+	}
+	payloadData, err := store.Serialize(entry)
+	if err != nil {
+		log.Printf("proxy: serialize history entry %s: %v", entry.FlowID, err)
+		return
+	}
+	// payload first, meta second: torn write leaves invisible orphan payload
+	if err := h.storage.Set(historyPayloadKey(entry.FlowID), payloadData); err != nil {
+		log.Printf("proxy: save history payload %s: %v", entry.FlowID, err)
+		return
+	}
+	if err := h.storage.Set(historyMetaKey(entry.FlowID), metaData); err != nil {
+		log.Printf("proxy: save history meta %s: %v", entry.FlowID, err)
 	}
 }
 
-// Get retrieves an entry by offset.
-func (h *HistoryStore) Get(offset uint32) (*HistoryEntry, bool) {
-	data, found, err := h.storage.Get(historyPayloadKey(offset))
+// insertOrderLocked inserts e into flowOrder, preserving (timestamp, flowID) ascending order.
+// Caller must hold mu.
+func (h *HistoryStore) insertOrderLocked(e orderedFlow) {
+	idx := sort.Search(len(h.flowOrder), func(i int) bool {
+		return !lessOrder(h.flowOrder[i].timestamp, h.flowOrder[i].flowID, e.timestamp, e.flowID)
+	})
+	h.flowOrder = slices.Insert(h.flowOrder, idx, e)
+}
+
+// Get retrieves an entry by flow_id.
+func (h *HistoryStore) Get(flowID string) (*HistoryEntry, bool) {
+	data, found, err := h.storage.Get(historyPayloadKey(flowID))
 	if err != nil || !found {
 		return nil, false
 	}
-
 	var entry HistoryEntry
 	if err := store.Deserialize(data, &entry); err != nil {
 		return nil, false
@@ -91,13 +169,12 @@ func (h *HistoryStore) Get(offset uint32) (*HistoryEntry, bool) {
 	return &entry, true
 }
 
-// GetMeta retrieves lightweight metadata for an entry by offset.
-func (h *HistoryStore) GetMeta(offset uint32) (*HistoryMeta, bool) {
-	data, found, err := h.storage.Get(historyMetaKey(offset))
+// GetMeta retrieves lightweight metadata for an entry by flow_id.
+func (h *HistoryStore) GetMeta(flowID string) (*HistoryMeta, bool) {
+	data, found, err := h.storage.Get(historyMetaKey(flowID))
 	if err != nil || !found {
 		return nil, false
 	}
-
 	var meta HistoryMeta
 	if err := store.Deserialize(data, &meta); err != nil {
 		return nil, false
@@ -106,60 +183,111 @@ func (h *HistoryStore) GetMeta(offset uint32) (*HistoryMeta, bool) {
 	return &meta, true
 }
 
-// List returns entries starting from startOffset, up to count.
-// Returns entries in offset order.
-func (h *HistoryStore) List(count int, startOffset uint32) []*HistoryEntry {
-	h.mu.RLock()
-	maxOffset := h.nextOffset
-	h.mu.RUnlock()
-
-	var entries []*HistoryEntry
-	for offset := startOffset; offset < maxOffset && len(entries) < count; offset++ {
-		if entry, ok := h.Get(offset); ok {
-			entries = append(entries, entry)
+// Page returns up to count entries strictly after afterFlowID, ordered oldest-first.
+func (h *HistoryStore) Page(count int, afterFlowID string) []*HistoryEntry {
+	if count <= 0 {
+		return nil
+	}
+	flowIDs := h.pageFlowIDs(count, afterFlowID)
+	entries := make([]*HistoryEntry, 0, len(flowIDs))
+	for _, fid := range flowIDs {
+		if e, ok := h.Get(fid); ok {
+			entries = append(entries, e)
 		}
 	}
-
 	return entries
 }
 
-// ListMeta returns metadata for entries starting from startOffset, up to count.
-// Only deserializes lightweight metadata, skipping full request/response bodies.
-func (h *HistoryStore) ListMeta(count int, startOffset uint32) []HistoryMeta {
-	h.mu.RLock()
-	maxOffset := h.nextOffset
-	h.mu.RUnlock()
-
-	var metas []HistoryMeta
-	for offset := startOffset; offset < maxOffset && len(metas) < count; offset++ {
-		if meta, ok := h.GetMeta(offset); ok {
-			metas = append(metas, *meta)
+// PageMeta returns up to count meta entries strictly after afterFlowID, ordered oldest-first.
+func (h *HistoryStore) PageMeta(count int, afterFlowID string) []HistoryMeta {
+	if count <= 0 {
+		return nil
+	}
+	flowIDs := h.pageFlowIDs(count, afterFlowID)
+	metas := make([]HistoryMeta, 0, len(flowIDs))
+	for _, fid := range flowIDs {
+		if m, ok := h.GetMeta(fid); ok {
+			metas = append(metas, *m)
 		}
 	}
 	return metas
 }
 
-// Count returns total number of entries.
+// pageFlowIDs returns up to count flow IDs after afterFlowID, oldest-first.
+// Copies the slice while holding the lock so a concurrent Store cannot realloc the backing array.
+func (h *HistoryStore) pageFlowIDs(count int, afterFlowID string) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	var startIdx int
+	if afterFlowID != "" {
+		if ts, ok := h.timestampByFlow[afterFlowID]; ok {
+			startIdx = sort.Search(len(h.flowOrder), func(i int) bool {
+				return lessOrder(ts, afterFlowID, h.flowOrder[i].timestamp, h.flowOrder[i].flowID)
+			})
+		}
+	}
+	end := min(startIdx+count, len(h.flowOrder))
+	if startIdx >= end {
+		return nil
+	}
+	flowIDs := make([]string, 0, end-startIdx)
+	for i := startIdx; i < end; i++ {
+		flowIDs = append(flowIDs, h.flowOrder[i].flowID)
+	}
+	return flowIDs
+}
+
+// Count returns the number of entries currently stored.
 func (h *HistoryStore) Count() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	return int(h.nextOffset)
+	return len(h.flowOrder)
 }
 
 // Update persists changes to an existing entry.
-// The entry must have been previously stored (Offset must be valid).
+// entry.FlowID must be set (from a prior Store).
 func (h *HistoryStore) Update(entry *HistoryEntry) {
-	h.mu.RLock()
-	exists := entry.Offset < h.nextOffset
-	h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
-	if !exists {
-		log.Printf("proxy: cannot update non-existent history entry %d", entry.Offset)
+	if _, exists := h.timestampByFlow[entry.FlowID]; !exists {
+		log.Printf("proxy: cannot update unknown history entry %s", entry.FlowID)
 		return
 	}
+	h.writeEntryLocked(entry)
+}
 
-	h.writeEntry(entry)
+// Delete removes entries by flow_id. Idempotent; unknown ids are skipped.
+// Returns the number of entries actually removed.
+func (h *HistoryStore) Delete(flowIDs ...string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var deleted int
+	for _, fid := range flowIDs {
+		ts, ok := h.timestampByFlow[fid]
+		if !ok {
+			continue
+		}
+		if err := h.storage.Delete(historyMetaKey(fid)); err != nil {
+			log.Printf("proxy: delete history meta %s: %v", fid, err)
+			continue
+		}
+		if err := h.storage.Delete(historyPayloadKey(fid)); err != nil {
+			log.Printf("proxy: delete history payload %s: %v", fid, err)
+		}
+		delete(h.timestampByFlow, fid)
+		idx := sort.Search(len(h.flowOrder), func(i int) bool {
+			return !lessOrder(h.flowOrder[i].timestamp, h.flowOrder[i].flowID, ts, fid)
+		})
+		if idx < len(h.flowOrder) && h.flowOrder[idx].flowID == fid {
+			h.flowOrder = slices.Delete(h.flowOrder, idx, idx+1)
+		}
+		deleted++
+	}
+	return deleted
 }
 
 // Close closes the underlying storage.
@@ -170,7 +298,7 @@ func (h *HistoryStore) Close() {
 // extractMeta builds HistoryMeta from a HistoryEntry using existing accessor methods.
 func (e *HistoryEntry) extractMeta() HistoryMeta {
 	return HistoryMeta{
-		Offset:      e.Offset,
+		FlowID:      e.FlowID,
 		Protocol:    e.Protocol,
 		Method:      e.GetMethod(),
 		Host:        e.GetHost(),

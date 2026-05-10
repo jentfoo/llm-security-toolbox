@@ -369,6 +369,17 @@ func (t *TestMCPServer) ClearProxyHistory() {
 	t.proxyHistory = nil
 }
 
+// RemoveProxyEntry deletes the entry at the given index, simulating a Burp UI
+// mid-history delete that compacts later offsets down.
+func (t *TestMCPServer) RemoveProxyEntry(idx int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if idx < 0 || idx >= len(t.proxyHistory) {
+		return
+	}
+	t.proxyHistory = append(t.proxyHistory[:idx], t.proxyHistory[idx+1:]...)
+}
+
 // ToolCallLog returns a copy of the ordered tool call log.
 func (t *TestMCPServer) ToolCallLog() []string {
 	t.mu.Lock()

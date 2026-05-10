@@ -66,10 +66,11 @@ func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 
 	testutil.WaitForCount(t, func() int { return backend.server.History().Count() }, 1)
 
-	entries, err := backend.GetProxyHistory(t.Context(), 10, 0)
+	entries, err := backend.GetProxyHistory(t.Context(), 10, "")
 	require.NoError(t, err)
 
 	assert.Len(t, entries, 1)
+	assert.NotEmpty(t, entries[0].FlowID)
 	assert.Contains(t, entries[0].Request, "GET")
 	assert.Contains(t, entries[0].Response, "200")
 }
@@ -106,10 +107,12 @@ func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
 
 	testutil.WaitForCount(t, func() int { return backend.server.History().Count() }, 1)
 
-	metas, err := backend.GetProxyHistoryMeta(t.Context(), 10, 0)
+	metas, err := backend.GetProxyHistoryMeta(t.Context(), 10, "")
 	require.NoError(t, err)
 
 	assert.Len(t, metas, 1)
+	assert.NotEmpty(t, metas[0].FlowID)
+	assert.False(t, metas[0].Timestamp.IsZero())
 	assert.Equal(t, "GET", metas[0].Method)
 	assert.Equal(t, 200, metas[0].Status)
 	assert.Contains(t, metas[0].Path, "/test")

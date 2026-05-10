@@ -66,6 +66,13 @@ func (r ProxyPollResponse) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// HistoryDeleteResponse is the response for _internal_history_delete.
+type HistoryDeleteResponse struct {
+	DeletedProxy  int      `json:"deleted_proxy"`
+	DeletedReplay int      `json:"deleted_replay"`
+	Skipped       []string `json:"skipped,omitempty"`
+}
+
 // FlowGetResponse is the response for flow_get.
 type FlowGetResponse struct {
 	FlowID            string              `json:"flow_id"`

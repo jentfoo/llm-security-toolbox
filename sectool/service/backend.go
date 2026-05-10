@@ -17,6 +17,9 @@ var ErrLabelExists = errors.New("label already exists")
 // ErrNotFound is returned when a requested resource (rule, session, etc.) doesn't exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrNotSupported is returned when a backend cannot perform an operation.
+var ErrNotSupported = errors.New("not supported by backend")
+
 // Rule type constants for find/replace rules.
 const (
 	RuleTypeRequestHeader  = "request_header"
@@ -42,13 +45,21 @@ type HttpBackend interface {
 	// Close shuts down the HttpBackend.
 	Close() error
 
-	// GetProxyHistory retrieves proxy HTTP history entries.
-	// Returns up to count entries starting from offset.
-	GetProxyHistory(ctx context.Context, count int, offset uint32) ([]ProxyEntry, error)
+	// GetProxyHistory retrieves proxy HTTP history entries oldest-first.
+	// afterFlowID == "" starts from the beginning.
+	GetProxyHistory(ctx context.Context, count int, afterFlowID string) ([]ProxyEntry, error)
 
-	// GetProxyHistoryMeta retrieves lightweight metadata for proxy history entries.
-	// Returns up to count entries starting from offset.
-	GetProxyHistoryMeta(ctx context.Context, count int, offset uint32) ([]ProxyEntryMeta, error)
+	// GetProxyHistoryMeta retrieves lightweight metadata for proxy history entries oldest-first.
+	// afterFlowID == "" starts from the beginning.
+	GetProxyHistoryMeta(ctx context.Context, count int, afterFlowID string) ([]ProxyEntryMeta, error)
+
+	// GetProxyEntry returns a single entry by flow_id.
+	// Returns ErrNotFound if no entry exists for the flow_id.
+	GetProxyEntry(ctx context.Context, flowID string) (*ProxyEntry, error)
+
+	// DeleteProxyEntries removes proxy history entries by flow_id and returns the number actually deleted.
+	// Unknown flow_ids are silently ignored. Returns ErrNotSupported on backends without delete (Burp).
+	DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error)
 
 	// SendRequest sends an HTTP request and returns the response.
 	// The request is raw HTTP bytes. Response is returned as headers and body.
@@ -85,6 +96,8 @@ type ResponderBackend interface {
 // ProxyEntryMeta holds lightweight metadata for a proxy history entry.
 // Used by summary/list paths to avoid deserializing full request/response bodies.
 type ProxyEntryMeta struct {
+	FlowID      string
+	Timestamp   time.Time // capture-start for native; first observation for Burp
 	Method      string
 	Host        string
 	Path        string // includes query string
@@ -96,10 +109,12 @@ type ProxyEntryMeta struct {
 
 // ProxyEntry represents a single proxy history entry in HttpBackend-agnostic form.
 type ProxyEntry struct {
-	Request  string `json:"request"`  // Raw HTTP request
-	Response string `json:"response"` // Raw HTTP response
-	Notes    string `json:"notes"`    // User annotations
-	Protocol string `json:"protocol"` // "http/1.1" or "h2" (empty defaults to http/1.1)
+	FlowID    string    `json:"flow_id"`
+	Timestamp time.Time `json:"-"` // capture-start for native; first observation for Burp
+	Request   string    `json:"request"`
+	Response  string    `json:"response"`
+	Notes     string    `json:"notes"`
+	Protocol  string    `json:"protocol"` // "http/1.1" or "h2" (empty defaults to http/1.1)
 }
 
 // Target specifies the destination for a request.

@@ -123,6 +123,30 @@ func (c *Client) ProxyRuleDelete(ctx context.Context, ruleID string) error {
 	return err
 }
 
+// HistoryDeleteBatchSize bounds how many flow_ids are sent per delete call.
+const HistoryDeleteBatchSize = 1000
+
+// ClearHistory deletes the supplied proxy and replay flow_ids. Returns the number of entries
+// removed from each store and any subset of flow_ids retained because a note references them.
+func (c *Client) ClearHistory(ctx context.Context, flowIDs []string) (deletedProxy, deletedReplay int, skipped []string, err error) {
+	for i := 0; i < len(flowIDs); i += HistoryDeleteBatchSize {
+		end := i + HistoryDeleteBatchSize
+		if end > len(flowIDs) {
+			end = len(flowIDs)
+		}
+		var resp protocol.HistoryDeleteResponse
+		if err := c.CallToolJSON(ctx, "_internal_history_delete", map[string]interface{}{
+			"flow_ids": flowIDs[i:end],
+		}, &resp); err != nil {
+			return deletedProxy, deletedReplay, skipped, err
+		}
+		deletedProxy += resp.DeletedProxy
+		deletedReplay += resp.DeletedReplay
+		skipped = append(skipped, resp.Skipped...)
+	}
+	return deletedProxy, deletedReplay, skipped, nil
+}
+
 // CookieJar calls cookie_jar and returns extracted cookies.
 func (c *Client) CookieJar(ctx context.Context, opts CookieJarOpts) (*protocol.CookieJarResponse, error) {
 	args := make(map[string]interface{})

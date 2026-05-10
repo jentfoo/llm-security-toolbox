@@ -18,19 +18,17 @@ func TestReplayHistoryStore(t *testing.T) {
 		store := NewReplayHistoryStore(storage)
 
 		entry := &ReplayHistoryEntry{
-			FlowID:          "abc123",
-			ReferenceOffset: 10,
-			Method:          "POST",
-			Host:            "example.com",
-			Path:            "/api/test",
-			RespStatus:      200,
+			FlowID:     "abc123",
+			Method:     "POST",
+			Host:       "example.com",
+			Path:       "/api/test",
+			RespStatus: 200,
 		}
 		store.Store(entry)
 
 		got, ok := store.Get("abc123")
 		require.True(t, ok)
 		assert.Equal(t, "abc123", got.FlowID)
-		assert.Equal(t, uint32(10), got.ReferenceOffset)
 		assert.Equal(t, "POST", got.Method)
 		assert.Equal(t, "example.com", got.Host)
 		assert.Equal(t, "/api/test", got.Path)
@@ -94,85 +92,20 @@ func TestReplayHistoryStore(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("update_reference_offset_increasing", func(t *testing.T) {
+	t.Run("created_at_increases_in_store_order", func(t *testing.T) {
 		storage := NewMemStorage()
 		t.Cleanup(func() { _ = storage.Close() })
 		store := NewReplayHistoryStore(storage)
 
-		// Simulate increasing offsets
-		ref1, cleared1 := store.UpdateReferenceOffset(10)
-		assert.Equal(t, uint32(10), ref1)
-		assert.False(t, cleared1)
+		baseTime := time.Now()
+		store.Store(&ReplayHistoryEntry{FlowID: "first", CreatedAt: baseTime})
+		store.Store(&ReplayHistoryEntry{FlowID: "second", CreatedAt: baseTime.Add(time.Millisecond)})
 
-		ref2, cleared2 := store.UpdateReferenceOffset(20)
-		assert.Equal(t, uint32(20), ref2)
-		assert.False(t, cleared2)
-
-		ref3, cleared3 := store.UpdateReferenceOffset(30)
-		assert.Equal(t, uint32(30), ref3)
-		assert.False(t, cleared3)
-	})
-
-	t.Run("history_clear_detection", func(t *testing.T) {
-		storage := NewMemStorage()
-		t.Cleanup(func() { _ = storage.Close() })
-		store := NewReplayHistoryStore(storage)
-
-		// Simulate normal flow
-		_, cleared1 := store.UpdateReferenceOffset(100)
-		assert.False(t, cleared1)
-		store.Store(&ReplayHistoryEntry{FlowID: "before_clear", ReferenceOffset: 100})
-
-		// Simulate history clear (offset decreases)
-		_, cleared2 := store.UpdateReferenceOffset(5)
-		assert.True(t, cleared2)
-
-		// Existing entries should have ReferenceOffset=0
-		entry, ok := store.Get("before_clear")
+		first, ok := store.Get("first")
 		require.True(t, ok)
-		assert.Equal(t, uint32(0), entry.ReferenceOffset)
-	})
-
-	t.Run("history_clear_multiple_entries", func(t *testing.T) {
-		storage := NewMemStorage()
-		t.Cleanup(func() { _ = storage.Close() })
-		store := NewReplayHistoryStore(storage)
-
-		// Add entries at various reference points
-		ref1, _ := store.UpdateReferenceOffset(50)
-		store.Store(&ReplayHistoryEntry{FlowID: "e1", ReferenceOffset: ref1})
-
-		ref2, _ := store.UpdateReferenceOffset(100)
-		store.Store(&ReplayHistoryEntry{FlowID: "e2", ReferenceOffset: ref2})
-
-		ref3, _ := store.UpdateReferenceOffset(150)
-		store.Store(&ReplayHistoryEntry{FlowID: "e3", ReferenceOffset: ref3})
-
-		// Verify entries have their offsets
-		e1, ok := store.Get("e1")
+		second, ok := store.Get("second")
 		require.True(t, ok)
-		e2, ok := store.Get("e2")
-		require.True(t, ok)
-		e3, ok := store.Get("e3")
-		require.True(t, ok)
-		assert.Equal(t, uint32(50), e1.ReferenceOffset)
-		assert.Equal(t, uint32(100), e2.ReferenceOffset)
-		assert.Equal(t, uint32(150), e3.ReferenceOffset)
-
-		// Simulate history clear
-		_, cleared := store.UpdateReferenceOffset(10)
-		assert.True(t, cleared)
-
-		// All entries should now have ReferenceOffset=0
-		e1, ok = store.Get("e1")
-		require.True(t, ok)
-		e2, ok = store.Get("e2")
-		require.True(t, ok)
-		e3, ok = store.Get("e3")
-		require.True(t, ok)
-		assert.Equal(t, uint32(0), e1.ReferenceOffset)
-		assert.Equal(t, uint32(0), e2.ReferenceOffset)
-		assert.Equal(t, uint32(0), e3.ReferenceOffset)
+		assert.True(t, first.CreatedAt.Before(second.CreatedAt))
 	})
 
 	t.Run("auto_set_created_at", func(t *testing.T) {
@@ -325,6 +258,95 @@ func TestReplayHistoryPayloadIsolation(t *testing.T) {
 	assert.Equal(t, []byte("response body"), entry.RespBody)
 }
 
+func TestReplayHistoryDelete(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_input", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		store := NewReplayHistoryStore(storage)
+
+		store.Store(&ReplayHistoryEntry{FlowID: "a"})
+		assert.Equal(t, 0, store.Delete(nil))
+		assert.Equal(t, 0, store.Delete([]string{}))
+		assert.Equal(t, 1, store.Count())
+	})
+
+	t.Run("missing_only", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		store := NewReplayHistoryStore(storage)
+
+		store.Store(&ReplayHistoryEntry{FlowID: "a"})
+		assert.Equal(t, 0, store.Delete([]string{"x", "y", "z"}))
+		assert.Equal(t, 1, store.Count())
+	})
+
+	t.Run("single", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		store := NewReplayHistoryStore(storage)
+
+		store.Store(&ReplayHistoryEntry{FlowID: "a", RespBody: []byte("body")})
+
+		assert.Equal(t, 1, store.Delete([]string{"a"}))
+		assert.Equal(t, 0, store.Count())
+
+		_, ok := store.Get("a")
+		assert.False(t, ok)
+		// payload key should also be gone
+		_, found, _ := storage.Get("a" + replayPayloadSuffix)
+		assert.False(t, found)
+	})
+
+	t.Run("mixed_known_and_unknown", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		store := NewReplayHistoryStore(storage)
+
+		for _, id := range []string{"a", "b", "c", "d", "e"} {
+			store.Store(&ReplayHistoryEntry{FlowID: id})
+		}
+		assert.Equal(t, 5, store.Count())
+
+		assert.Equal(t, 2, store.Delete([]string{"a", "missing", "c"}))
+		assert.Equal(t, 3, store.Count())
+
+		_, okA := store.Get("a")
+		_, okB := store.Get("b")
+		_, okC := store.Get("c")
+		assert.False(t, okA)
+		assert.True(t, okB)
+		assert.False(t, okC)
+	})
+
+	t.Run("all", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		store := NewReplayHistoryStore(storage)
+
+		ids := []string{"a", "b", "c"}
+		for _, id := range ids {
+			store.Store(&ReplayHistoryEntry{FlowID: id})
+		}
+
+		assert.Equal(t, 3, store.Delete(ids))
+		assert.Equal(t, 0, store.Count())
+		assert.Empty(t, store.List())
+	})
+
+	t.Run("idempotent_double_delete", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		store := NewReplayHistoryStore(storage)
+
+		store.Store(&ReplayHistoryEntry{FlowID: "a"})
+		assert.Equal(t, 1, store.Delete([]string{"a"}))
+		assert.Equal(t, 0, store.Delete([]string{"a"}))
+		assert.Equal(t, 0, store.Count())
+	})
+}
+
 func TestReplayHistoryStoreConcurrency(t *testing.T) {
 	t.Parallel()
 
@@ -339,8 +361,7 @@ func TestReplayHistoryStoreConcurrency(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			store.Store(&ReplayHistoryEntry{
-				FlowID:          string(rune('a'+id%26)) + string(rune('0'+id)),
-				ReferenceOffset: uint32(id),
+				FlowID: string(rune('a'+id%26)) + string(rune('0'+id)),
 			})
 		}(i)
 	}
@@ -353,15 +374,6 @@ func TestReplayHistoryStoreConcurrency(t *testing.T) {
 			store.Count()
 			store.List()
 		}()
-	}
-
-	// Concurrent offset updates
-	for i := range 50 {
-		wg.Add(1)
-		go func(offset uint32) {
-			defer wg.Done()
-			_, _ = store.UpdateReferenceOffset(offset)
-		}(uint32(i * 10))
 	}
 
 	wg.Wait()

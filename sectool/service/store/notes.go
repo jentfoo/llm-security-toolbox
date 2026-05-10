@@ -73,7 +73,6 @@ func (s *NoteStore) Save(note *NoteMeta) error {
 		return err
 	}
 
-	// Update reverse index
 	s.updateReverseIndex(note.NoteID, oldFlowIDs, note.FlowIDs)
 
 	if isNew {
@@ -221,6 +220,20 @@ func (s *NoteStore) ForFlowIDs(flowIDs []string) map[string][]*NoteMeta {
 	}
 
 	return result
+}
+
+// SplitReferencedFlows splits the provided flows into referenced by at
+// least one note (left / first) and unknown or unreferenced (right).
+func (s *NoteStore) SplitReferencedFlows(flowIDs []string) ([]string, []string) {
+	if len(flowIDs) == 0 {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return bulk.SliceSplit(func(fid string) bool {
+		return len(s.reverseIndexLookup(fid)) > 0
+	}, flowIDs)
 }
 
 // Count returns the number of stored notes.

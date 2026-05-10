@@ -9,9 +9,11 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -48,6 +50,11 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 	opts := []server.ServerOption{
 		server.WithToolCapabilities(false),
 		server.WithLogging(),
+		server.WithToolFilter(func(_ context.Context, tools []mcp.Tool) []mcp.Tool {
+			return bulk.SliceFilterInPlace(func(t mcp.Tool) bool {
+				return !strings.HasPrefix(t.Name, InternalToolPrefix)
+			}, tools)
+		}),
 	}
 
 	// Add instructions based on workflow mode
@@ -215,6 +222,7 @@ func (m *mcpServer) addProxyTools() {
 	m.server.AddTool(m.proxyRuleListTool(), m.handleProxyRuleList)
 	m.server.AddTool(m.proxyRuleAddTool(), m.handleProxyRuleAdd)
 	m.server.AddTool(m.proxyRuleDeleteTool(), m.handleProxyRuleDelete)
+	m.server.AddTool(m.historyDeleteTool(), m.handleHistoryDelete)
 }
 
 func (m *mcpServer) addReplayTools() {
@@ -473,20 +481,15 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 			Duration:        entry.Duration,
 		}, nil
 	}
-	if offset, ok := m.service.proxyIndex.Offset(flowID); ok {
-		entries, err := m.service.httpBackend.GetProxyHistory(ctx, 1, offset)
-		if err != nil {
-			return nil, errorResultFromErr("failed to fetch flow: ", err)
-		}
-		if len(entries) == 0 {
-			return nil, errorResult("flow not found in proxy history")
-		}
+	if entry, err := m.service.httpBackend.GetProxyEntry(ctx, flowID); err == nil && entry != nil {
 		return &resolvedFlow{
-			RawRequest:  []byte(entries[0].Request),
-			RawResponse: []byte(entries[0].Response),
+			RawRequest:  []byte(entry.Request),
+			RawResponse: []byte(entry.Response),
 			Source:      SourceProxy,
-			Protocol:    entries[0].Protocol,
+			Protocol:    entry.Protocol,
 		}, nil
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, errorResultFromErr("failed to fetch flow: ", err)
 	}
 	if flow, err := m.service.crawlerBackend.GetFlow(ctx, flowID); err == nil && flow != nil {
 		return &resolvedFlow{

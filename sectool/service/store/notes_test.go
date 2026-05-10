@@ -272,3 +272,52 @@ func TestNoteStore(t *testing.T) {
 		assert.Equal(t, 1, ns.Count())
 	})
 }
+
+func TestNoteStoreSplitReferencedFlows(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty_input", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		ns := NewNoteStore(storage)
+
+		require.NoError(t, ns.Save(&NoteMeta{NoteID: "n1", FlowIDs: []string{"f1"}, Content: "x"}))
+		retained, other := ns.SplitReferencedFlows(nil)
+		assert.Empty(t, retained)
+		assert.Empty(t, other)
+	})
+
+	t.Run("none_referenced", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		ns := NewNoteStore(storage)
+
+		require.NoError(t, ns.Save(&NoteMeta{NoteID: "n1", FlowIDs: []string{"f1"}, Content: "x"}))
+		retained, other := ns.SplitReferencedFlows([]string{"other1", "other2"})
+		assert.Empty(t, retained)
+		assert.Equal(t, []string{"other1", "other2"}, other)
+	})
+
+	t.Run("partial", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		ns := NewNoteStore(storage)
+
+		require.NoError(t, ns.Save(&NoteMeta{NoteID: "n1", FlowIDs: []string{"f1", "f3"}, Content: "x"}))
+		retained, other := ns.SplitReferencedFlows([]string{"f1", "f2", "f3", "f4"})
+		assert.Equal(t, []string{"f1", "f3"}, retained)
+		assert.Equal(t, []string{"f2", "f4"}, other)
+	})
+
+	t.Run("all_referenced", func(t *testing.T) {
+		storage := NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		ns := NewNoteStore(storage)
+
+		require.NoError(t, ns.Save(&NoteMeta{NoteID: "n1", FlowIDs: []string{"f1", "f2"}, Content: "a"}))
+		require.NoError(t, ns.Save(&NoteMeta{NoteID: "n2", FlowIDs: []string{"f3"}, Content: "b"}))
+		referenced, other := ns.SplitReferencedFlows([]string{"f1", "f2", "f3"})
+		assert.Equal(t, []string{"f1", "f2", "f3"}, referenced)
+		assert.Empty(t, other)
+	})
+}

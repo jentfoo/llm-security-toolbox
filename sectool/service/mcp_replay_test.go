@@ -1057,17 +1057,15 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 	t.Run("replay_send_rejected", func(t *testing.T) {
 		t.Parallel()
 
-		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
 		})
 
-		mockHTTP.AddProxyEntry(
+		flowID := mockHTTP.AddProxyEntry(
 			"GET /page HTTP/1.1\r\nHost: blocked.test\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\nok",
 			"",
 		)
-
-		flowID := srv.proxyIndex.Register(0)
 
 		result := CallMCPTool(t, mcpClient, "replay_send", map[string]interface{}{
 			"flow_id": flowID,
@@ -1079,17 +1077,15 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 	t.Run("replay_send_force_still_rejected", func(t *testing.T) {
 		t.Parallel()
 
-		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
 		})
 
-		mockHTTP.AddProxyEntry(
+		flowID := mockHTTP.AddProxyEntry(
 			"GET /page HTTP/1.1\r\nHost: blocked.test\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\nok",
 			"",
 		)
-
-		flowID := srv.proxyIndex.Register(0)
 
 		result := CallMCPTool(t, mcpClient, "replay_send", map[string]interface{}{
 			"flow_id": flowID,

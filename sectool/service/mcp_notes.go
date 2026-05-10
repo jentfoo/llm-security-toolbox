@@ -171,7 +171,7 @@ func (m *mcpServer) validateFlowIDs(ctx context.Context, flowIDs []string) *mcp.
 func (m *mcpServer) flowExists(ctx context.Context, flowID string) bool {
 	if _, ok := m.service.replayHistoryStore.Get(flowID); ok {
 		return true
-	} else if _, ok = m.service.proxyIndex.Offset(flowID); ok {
+	} else if entry, err := m.service.httpBackend.GetProxyEntry(ctx, flowID); err == nil && entry != nil {
 		return true
 	} else if flow, err := m.service.crawlerBackend.GetFlow(ctx, flowID); err == nil && flow != nil {
 		return true

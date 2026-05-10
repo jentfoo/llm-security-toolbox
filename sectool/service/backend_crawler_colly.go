@@ -47,9 +47,9 @@ type CollyBackend struct {
 	maxBodyBytes int
 	closed       bool
 
-	// For resolving seed flows from proxy history
-	proxyIndex  *store.ProxyIndex
-	httpBackend HttpBackend
+	// For resolving seed flows from proxy or replay history
+	replayHistoryStore *store.ReplayHistoryStore
+	httpBackend        HttpBackend
 }
 
 // crawlSession holds the state for a single crawl session.
@@ -189,15 +189,29 @@ func readBodyLimited(r io.Reader, limit int) ([]byte, int, bool) {
 	return buf.Bytes(), totalSize, truncated
 }
 
+// fetchSeedRequest resolves a seed flow_id to its raw request bytes.
+// Tries proxy history first, then falls back to replay history.
+func (b *CollyBackend) fetchSeedRequest(ctx context.Context, flowID string) (string, error) {
+	entry, err := b.httpBackend.GetProxyEntry(ctx, flowID)
+	if err == nil && entry != nil {
+		return entry.Request, nil
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return "", fmt.Errorf("failed to fetch seed flow %q: %w", flowID, err)
+	} else if replay, ok := b.replayHistoryStore.Get(flowID); ok {
+		return string(replay.RawRequest), nil
+	}
+	return "", fmt.Errorf("seed flow %q not found in proxy or replay history", flowID)
+}
+
 // NewCollyBackend creates a new Colly-backed CrawlerBackend.
-func NewCollyBackend(cfg *config.Config, proxyIndex *store.ProxyIndex, httpBackend HttpBackend) *CollyBackend {
+func NewCollyBackend(cfg *config.Config, replayHistoryStore *store.ReplayHistoryStore, httpBackend HttpBackend) *CollyBackend {
 	return &CollyBackend{
-		sessions:     make(map[string]*crawlSession),
-		byLabel:      make(map[string]string),
-		config:       *cfg,
-		maxBodyBytes: cfg.MaxBodyBytes,
-		proxyIndex:   proxyIndex,
-		httpBackend:  httpBackend,
+		sessions:           make(map[string]*crawlSession),
+		byLabel:            make(map[string]string),
+		config:             *cfg,
+		maxBodyBytes:       cfg.MaxBodyBytes,
+		replayHistoryStore: replayHistoryStore,
+		httpBackend:        httpBackend,
 	}
 }
 
@@ -895,22 +909,13 @@ func (b *CollyBackend) resolveSeeds(ctx context.Context, seeds []CrawlSeed, expl
 		}
 
 		if seed.FlowID != "" {
-			offset, ok := b.proxyIndex.Offset(seed.FlowID)
-			if !ok {
-				return nil, nil, nil, fmt.Errorf("seed flow %q not found in proxy history", seed.FlowID)
-			}
-
-			// Fetch the proxy entry to get headers
-			proxyEntries, err := b.httpBackend.GetProxyHistory(ctx, 1, offset)
+			rawRequest, err := b.fetchSeedRequest(ctx, seed.FlowID)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("failed to fetch seed flow %q: %w", seed.FlowID, err)
-			}
-			if len(proxyEntries) == 0 {
-				return nil, nil, nil, fmt.Errorf("seed flow %q not found in proxy history", seed.FlowID)
+				return nil, nil, nil, err
 			}
 
 			// Extract URL and headers from the request
-			_, host, path := extractRequestMeta(proxyEntries[0].Request)
+			_, host, path := extractRequestMeta(rawRequest)
 			if host == "" {
 				return nil, nil, nil, fmt.Errorf("seed flow %q has no host header", seed.FlowID)
 			}
@@ -921,7 +926,7 @@ func (b *CollyBackend) resolveSeeds(ctx context.Context, seeds []CrawlSeed, expl
 			domainSet[strings.ToLower(strings.Split(host, ":")[0])] = true
 
 			// Extract headers for authenticated context
-			headerLines := extractHeaderLines(proxyEntries[0].Request)
+			headerLines := extractHeaderLines(rawRequest)
 			for _, line := range headerLines {
 				if idx := strings.Index(line, ":"); idx > 0 {
 					name := strings.TrimSpace(line[:idx])

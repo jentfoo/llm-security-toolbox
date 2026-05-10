@@ -99,18 +99,17 @@ func BenchmarkReplayHistoryStore_AddGetRemove(b *testing.B) {
 				// Add records
 				for j := 0; j < benchRecordCount; j++ {
 					store.Store(&ReplayHistoryEntry{
-						FlowID:          fmt.Sprintf("replay-%d", j),
-						CreatedAt:       time.Now().Add(-time.Hour * time.Duration(j)),
-						ReferenceOffset: uint32(j),
-						RawRequest:      rawRequest,
-						Method:          "GET",
-						Host:            "example.com",
-						Path:            "/",
-						Protocol:        "http/1.1",
-						RespHeaders:     respHeaders,
-						RespBody:        fakeBodyContent,
-						RespStatus:      200,
-						Duration:        time.Duration(20+j) * time.Millisecond,
+						FlowID:      fmt.Sprintf("replay-%d", j),
+						CreatedAt:   time.Now().Add(-time.Hour * time.Duration(j)),
+						RawRequest:  rawRequest,
+						Method:      "GET",
+						Host:        "example.com",
+						Path:        "/",
+						Protocol:    "http/1.1",
+						RespHeaders: respHeaders,
+						RespBody:    fakeBodyContent,
+						RespStatus:  200,
+						Duration:    time.Duration(20+j) * time.Millisecond,
 					})
 				}
 				for j := 0; j < benchRecordCount; j++ {
@@ -135,18 +134,17 @@ func BenchmarkReplayHistoryStore_List(b *testing.B) {
 			respHeaders := []byte("HTTP/1.1 200 OK\r\n\r\n")
 			for j := 0; j < benchRecordCount; j++ {
 				store.Store(&ReplayHistoryEntry{
-					FlowID:          fmt.Sprintf("replay-%d", j),
-					CreatedAt:       time.Now().Add(-time.Hour * time.Duration(j)),
-					ReferenceOffset: uint32(j),
-					RawRequest:      []byte("GET /path" + strconv.Itoa(j) + " HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-					Method:          "GET",
-					Host:            "example.com",
-					Path:            "/path" + strconv.Itoa(j),
-					Protocol:        "http/1.1",
-					RespHeaders:     respHeaders,
-					RespBody:        fakeBodyContent,
-					RespStatus:      200,
-					Duration:        time.Duration(20+j) * time.Millisecond,
+					FlowID:      fmt.Sprintf("replay-%d", j),
+					CreatedAt:   time.Now().Add(-time.Hour * time.Duration(j)),
+					RawRequest:  []byte("GET /path" + strconv.Itoa(j) + " HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+					Method:      "GET",
+					Host:        "example.com",
+					Path:        "/path" + strconv.Itoa(j),
+					Protocol:    "http/1.1",
+					RespHeaders: respHeaders,
+					RespBody:    fakeBodyContent,
+					RespStatus:  200,
+					Duration:    time.Duration(20+j) * time.Millisecond,
 				})
 			}
 			if s, ok := storage.(*spillStore); ok && s.fileSize > 32 {

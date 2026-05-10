@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/mcp"
+	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
 func TestFormatSectoolComment(t *testing.T) {
@@ -336,7 +337,9 @@ func newTestBurpBackend(t *testing.T) (*BurpBackend, *TestMCPServer) {
 	client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(0))
 	require.NoError(t, client.Connect(t.Context()))
 	t.Cleanup(func() { _ = client.Close() })
-	return NewBurpBackend(client), mockServer
+	storage := store.NewMemStorage()
+	t.Cleanup(func() { _ = storage.Close() })
+	return NewBurpBackend(client, storage), mockServer
 }
 
 func TestBurpBackendSendRequest(t *testing.T) {
@@ -422,6 +425,95 @@ func TestBurpBackendSendDomainShortening(t *testing.T) {
 	}
 }
 
+func TestBurpFlowIndexRegisterOrLookup(t *testing.T) {
+	t.Parallel()
+
+	t.Run("net_new_mints_flow_id", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		fid, ts := idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		assert.NotEmpty(t, fid)
+		assert.False(t, ts.IsZero())
+		assert.Equal(t, 1, idx.Count())
+	})
+
+	t.Run("same_offset_same_request_returns_cached", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		fid1, ts1 := idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		fid2, ts2 := idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		assert.Equal(t, fid1, fid2)
+		assert.Equal(t, ts1, ts2)
+	})
+
+	t.Run("drift_evicts_and_mints_new", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		oldFID, _ := idx.RegisterOrLookup(0, "GET /old HTTP/1.1\r\n\r\n")
+		newFID, _ := idx.RegisterOrLookup(0, "GET /new HTTP/1.1\r\n\r\n")
+		assert.NotEqual(t, oldFID, newFID)
+
+		_, ok := idx.OffsetFor(oldFID)
+		assert.False(t, ok)
+	})
+
+	t.Run("fingerprint_relocation_preserves_flow_id", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		// Initial state: offsets 0,1,2 with distinct content
+		_, _ = idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		f1, _ := idx.RegisterOrLookup(1, "GET /b HTTP/1.1\r\n\r\n")
+		f2, _ := idx.RegisterOrLookup(2, "GET /c HTTP/1.1\r\n\r\n")
+
+		// Simulate Burp UI delete of original offset 1: /c shifts down to slot 1
+		gotF1, _ := idx.RegisterOrLookup(1, "GET /c HTTP/1.1\r\n\r\n")
+		assert.Equal(t, f2, gotF1)
+
+		// f1's content is gone, so its flow_id is no longer in the cache
+		_, ok := idx.OffsetFor(f1)
+		assert.False(t, ok)
+	})
+}
+
+func TestBurpFlowIndexSweepTail(t *testing.T) {
+	t.Parallel()
+
+	t.Run("partial_tail", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		_, _ = idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		_, _ = idx.RegisterOrLookup(1, "GET /b HTTP/1.1\r\n\r\n")
+		f2, _ := idx.RegisterOrLookup(2, "GET /c HTTP/1.1\r\n\r\n")
+
+		idx.SweepTail(2) // live tail ends at offset 2 (only 0,1 remain)
+		assert.Equal(t, 2, idx.Count())
+		_, ok := idx.OffsetFor(f2)
+		assert.False(t, ok)
+	})
+
+	t.Run("full_clear", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		_, _ = idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		_, _ = idx.RegisterOrLookup(1, "GET /b HTTP/1.1\r\n\r\n")
+
+		idx.SweepTail(0)
+		assert.Equal(t, 0, idx.Count())
+	})
+}
+
 func TestBurpClientClosePrompt(t *testing.T) {
 	t.Parallel()
 
@@ -456,16 +548,17 @@ func TestBurpBackendGetProxyHistory(t *testing.T) {
 			"note2",
 		)
 
-		entries, err := backend.GetProxyHistory(t.Context(), 10, 0)
+		entries, err := backend.GetProxyHistory(t.Context(), 10, "")
 		require.NoError(t, err)
 		require.Len(t, entries, 2)
 		assert.Contains(t, entries[0].Request, "GET /one")
 		assert.Contains(t, entries[0].Response, "200 OK")
+		assert.NotEmpty(t, entries[0].FlowID)
 		assert.Contains(t, entries[1].Request, "POST /two")
 		assert.Equal(t, "note2", entries[1].Notes)
 	})
 
-	t.Run("offset_and_count", func(t *testing.T) {
+	t.Run("cursor_and_count", func(t *testing.T) {
 		backend, mockServer := newTestBurpBackend(t)
 		mockServer.AddProxyEntry(
 			"GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n",
@@ -478,7 +571,12 @@ func TestBurpBackendGetProxyHistory(t *testing.T) {
 			"",
 		)
 
-		entries, err := backend.GetProxyHistory(t.Context(), 1, 1)
+		first, err := backend.GetProxyHistory(t.Context(), 1, "")
+		require.NoError(t, err)
+		require.Len(t, first, 1)
+		assert.Contains(t, first[0].Request, "GET /a")
+
+		entries, err := backend.GetProxyHistory(t.Context(), 1, first[0].FlowID)
 		require.NoError(t, err)
 		require.Len(t, entries, 1)
 		assert.Contains(t, entries[0].Request, "GET /b")
@@ -487,7 +585,7 @@ func TestBurpBackendGetProxyHistory(t *testing.T) {
 	t.Run("empty_history", func(t *testing.T) {
 		backend, _ := newTestBurpBackend(t)
 
-		entries, err := backend.GetProxyHistory(t.Context(), 10, 0)
+		entries, err := backend.GetProxyHistory(t.Context(), 10, "")
 		require.NoError(t, err)
 		assert.Empty(t, entries)
 	})
@@ -505,7 +603,7 @@ func TestBurpBackendGetProxyHistory(t *testing.T) {
 			"",
 		)
 
-		metas, err := backend.GetProxyHistoryMeta(t.Context(), 10, 0)
+		metas, err := backend.GetProxyHistoryMeta(t.Context(), 10, "")
 		require.NoError(t, err)
 		require.Len(t, metas, 2)
 
@@ -519,6 +617,78 @@ func TestBurpBackendGetProxyHistory(t *testing.T) {
 		assert.Equal(t, "api.example.com", metas[1].Host)
 		assert.Equal(t, "/api", metas[1].Path)
 		assert.Equal(t, 201, metas[1].Status)
+	})
+
+	t.Run("relocates_on_mid_delete", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+
+		mockServer.AddProxyEntry("GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\nA", "")
+		mockServer.AddProxyEntry("GET /b HTTP/1.1\r\nHost: b.com\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\nB", "")
+		mockServer.AddProxyEntry("GET /c HTTP/1.1\r\nHost: c.com\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\nC", "")
+
+		entries, err := backend.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
+		require.Len(t, entries, 3)
+		fA, fC := entries[0].FlowID, entries[2].FlowID
+
+		// Burp UI deletes the middle entry. /c shifts into slot 1
+		mockServer.RemoveProxyEntry(1)
+
+		entries, err = backend.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
+		require.Len(t, entries, 2)
+
+		// /a and /c retain their original flow_ids; /b's flow_id is gone
+		gotIDs := []string{entries[0].FlowID, entries[1].FlowID}
+		assert.ElementsMatch(t, []string{fA, fC}, gotIDs)
+	})
+
+	t.Run("tail_probe_sweeps_stale", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+
+		mockServer.AddProxyEntry("GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\nA", "")
+		mockServer.AddProxyEntry("GET /b HTTP/1.1\r\nHost: b.com\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\nB", "")
+		mockServer.AddProxyEntry("GET /c HTTP/1.1\r\nHost: c.com\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\nC", "")
+
+		// Prime cache with all three offsets
+		entries, err := backend.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
+		require.Len(t, entries, 3)
+		fC := entries[2].FlowID
+		assert.Equal(t, 3, backend.flowIndex.Count())
+
+		// Burp UI deletes the tail entry; live history is now [/a, /b]
+		mockServer.RemoveProxyEntry(2)
+
+		// Re-fetch with count==live tail length. Without the +1 tail probe, the
+		// stale offset 2 would linger in cache; with it, we detect the shrink.
+		entries, err = backend.GetProxyHistory(t.Context(), 2, "")
+		require.NoError(t, err)
+		require.Len(t, entries, 2)
+		assert.Equal(t, 2, backend.flowIndex.Count())
+		_, ok := backend.flowIndex.OffsetFor(fC)
+		assert.False(t, ok)
+	})
+
+	t.Run("sweeps_all_on_clear", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+
+		mockServer.AddProxyEntry("GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\nA", "")
+		mockServer.AddProxyEntry("GET /b HTTP/1.1\r\nHost: b.com\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\nB", "")
+
+		entries, err := backend.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
+		require.Len(t, entries, 2)
+		cursor := entries[1].FlowID
+		assert.Equal(t, 2, backend.flowIndex.Count())
+
+		// Burp UI is fully cleared while the client holds a cursor
+		mockServer.ClearProxyHistory()
+
+		entries, err = backend.GetProxyHistory(t.Context(), 100, cursor)
+		require.NoError(t, err)
+		assert.Empty(t, entries)
+		assert.Equal(t, 0, backend.flowIndex.Count())
 	})
 }
 

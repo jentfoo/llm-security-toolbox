@@ -15,19 +15,18 @@ const replayPayloadSuffix = ":p"
 // ReplayHistoryMeta holds lightweight metadata for a replay entry.
 // Used by summary/list paths to avoid deserializing full request/response bodies.
 type ReplayHistoryMeta struct {
-	FlowID          string        `msgpack:"fid"`
-	Method          string        `msgpack:"m"`
-	Host            string        `msgpack:"h"`
-	Path            string        `msgpack:"p"`
-	Scheme          string        `msgpack:"sc,omitempty"` // "http" or "https"
-	Port            int           `msgpack:"po,omitempty"` // original port (0 = infer from scheme)
-	Protocol        string        `msgpack:"pr"`
-	SourceFlowID    string        `msgpack:"sf"`
-	CreatedAt       time.Time     `msgpack:"ca"`
-	ReferenceOffset uint32        `msgpack:"ro"`
-	RespStatus      int           `msgpack:"rs"`
-	RespLen         int           `msgpack:"rl"`
-	Duration        time.Duration `msgpack:"d"`
+	FlowID       string        `msgpack:"fid"`
+	Method       string        `msgpack:"m"`
+	Host         string        `msgpack:"h"`
+	Path         string        `msgpack:"p"`
+	Scheme       string        `msgpack:"sc,omitempty"` // "http" or "https"
+	Port         int           `msgpack:"po,omitempty"` // original port (0 = infer from scheme)
+	Protocol     string        `msgpack:"pr"`
+	SourceFlowID string        `msgpack:"sf"`
+	CreatedAt    time.Time     `msgpack:"ca"`
+	RespStatus   int           `msgpack:"rs"`
+	RespLen      int           `msgpack:"rl"`
+	Duration     time.Duration `msgpack:"d"`
 }
 
 // ReplayHistoryPayload holds the heavy request/response data for a replay entry.
@@ -40,9 +39,8 @@ type ReplayHistoryPayload struct {
 
 // ReplayHistoryEntry stores a replay request/response with positioning info.
 type ReplayHistoryEntry struct {
-	FlowID          string
-	CreatedAt       time.Time // When replay was executed
-	ReferenceOffset uint32    // Max proxy offset at time of replay (for ordering)
+	FlowID    string
+	CreatedAt time.Time // When replay was executed
 
 	// Request data (for display and export)
 	RawRequest      []byte // pre-rule request (base for replay)
@@ -66,10 +64,9 @@ type ReplayHistoryEntry struct {
 
 // ReplayHistoryStore manages replay entries with thread-safe access.
 type ReplayHistoryStore struct {
-	storage         Storage
-	mu              sync.RWMutex
-	count           int
-	lastKnownOffset uint32 // for history clear detection
+	storage Storage
+	mu      sync.RWMutex
+	count   int
 }
 
 // NewReplayHistoryStore creates a new ReplayHistoryStore backed by the given storage.
@@ -89,19 +86,18 @@ func (s *ReplayHistoryStore) Store(entry *ReplayHistoryEntry) {
 	}
 
 	meta := ReplayHistoryMeta{
-		FlowID:          entry.FlowID,
-		Method:          entry.Method,
-		Host:            entry.Host,
-		Path:            entry.Path,
-		Scheme:          entry.Scheme,
-		Port:            entry.Port,
-		Protocol:        entry.Protocol,
-		SourceFlowID:    entry.SourceFlowID,
-		CreatedAt:       entry.CreatedAt,
-		ReferenceOffset: entry.ReferenceOffset,
-		RespStatus:      entry.RespStatus,
-		RespLen:         len(entry.RespBody),
-		Duration:        entry.Duration,
+		FlowID:       entry.FlowID,
+		Method:       entry.Method,
+		Host:         entry.Host,
+		Path:         entry.Path,
+		Scheme:       entry.Scheme,
+		Port:         entry.Port,
+		Protocol:     entry.Protocol,
+		SourceFlowID: entry.SourceFlowID,
+		CreatedAt:    entry.CreatedAt,
+		RespStatus:   entry.RespStatus,
+		RespLen:      len(entry.RespBody),
+		Duration:     entry.Duration,
 	}
 	payload := ReplayHistoryPayload{
 		RawRequest:      entry.RawRequest,
@@ -160,7 +156,6 @@ func (s *ReplayHistoryStore) getLocked(flowID string) (*ReplayHistoryEntry, bool
 	return &ReplayHistoryEntry{
 		FlowID:          meta.FlowID,
 		CreatedAt:       meta.CreatedAt,
-		ReferenceOffset: meta.ReferenceOffset,
 		RawRequest:      payload.RawRequest,
 		ModifiedRequest: payload.ModifiedRequest,
 		Method:          meta.Method,
@@ -198,7 +193,10 @@ func (s *ReplayHistoryStore) List() []*ReplayHistoryEntry {
 	}
 
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
+		if !result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].CreatedAt.Before(result[j].CreatedAt)
+		}
+		return result[i].FlowID < result[j].FlowID
 	})
 	return result
 }
@@ -223,44 +221,12 @@ func (s *ReplayHistoryStore) ListMeta() []ReplayHistoryMeta {
 	}
 
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
+		if !result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].CreatedAt.Before(result[j].CreatedAt)
+		}
+		return result[i].FlowID < result[j].FlowID
 	})
 	return result
-}
-
-// UpdateReferenceOffset updates the max proxy offset and detects history clear.
-// If history was cleared (offset decreased), marks all existing entries with ref=0.
-// Returns the reference offset to use for new replay entries, and whether history was cleared.
-func (s *ReplayHistoryStore) UpdateReferenceOffset(currentMaxOffset uint32) (uint32, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Detect history clear: current max is less than what we've seen
-	var cleared bool
-	if currentMaxOffset < s.lastKnownOffset && s.lastKnownOffset > 0 {
-		// History was cleared - only iterate meta keys, rewrite only meta
-		for _, key := range s.metaKeys() {
-			data, found, err := s.storage.Get(key)
-			if err != nil || !found {
-				continue
-			}
-			var meta ReplayHistoryMeta
-			if err := Deserialize(data, &meta); err != nil {
-				continue
-			}
-			meta.ReferenceOffset = 0
-			if data, err = Serialize(&meta); err != nil {
-				log.Printf("replay history store serialize error: %v", err)
-				continue
-			} else if err := s.storage.Set(key, data); err != nil {
-				log.Printf("replay history store save error: %v", err)
-			}
-		}
-		cleared = true
-	}
-
-	s.lastKnownOffset = currentMaxOffset
-	return currentMaxOffset, cleared
 }
 
 // Count returns the number of stored replay entries.
@@ -276,11 +242,37 @@ func (s *ReplayHistoryStore) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.lastKnownOffset = 0
 	s.count = 0
 	if err := s.storage.DeleteAll(); err != nil {
 		log.Printf("replay history store clear error: %v", err)
 	}
+}
+
+// Delete removes replay entries by flow_id. Idempotent; unknown ids are skipped.
+// Returns the number of entries actually removed.
+func (s *ReplayHistoryStore) Delete(flowIDs []string) int {
+	if len(flowIDs) == 0 {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var deleted int
+	for _, fid := range flowIDs {
+		if _, found, err := s.storage.Get(fid); err != nil || !found {
+			continue
+		}
+		if err := s.storage.Delete(fid); err != nil {
+			log.Printf("replay history store delete meta %s: %v", fid, err)
+			continue
+		}
+		if err := s.storage.Delete(fid + replayPayloadSuffix); err != nil {
+			log.Printf("replay history store delete payload %s: %v", fid, err)
+		}
+		s.count--
+		deleted++
+	}
+	return deleted
 }
 
 func (s *ReplayHistoryStore) Close() error {

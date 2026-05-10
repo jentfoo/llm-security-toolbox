@@ -171,8 +171,8 @@ func (b *NativeProxyBackend) CACert() *x509.Certificate {
 	return b.server.CertManager().CACert()
 }
 
-func (b *NativeProxyBackend) GetProxyHistory(ctx context.Context, count int, offset uint32) ([]ProxyEntry, error) {
-	entries := b.server.History().List(count, offset)
+func (b *NativeProxyBackend) GetProxyHistory(ctx context.Context, count int, afterFlowID string) ([]ProxyEntry, error) {
+	entries := b.server.History().Page(count, afterFlowID)
 
 	var buf bytes.Buffer
 	result := make([]ProxyEntry, 0, len(entries))
@@ -181,20 +181,24 @@ func (b *NativeProxyBackend) GetProxyHistory(ctx context.Context, count int, off
 		reqStr := string(entry.FormatRequest(&buf))
 		respStr := string(entry.FormatResponse(&buf))
 		result = append(result, ProxyEntry{
-			Request:  reqStr,
-			Response: respStr,
-			Protocol: entry.Protocol,
+			FlowID:    entry.FlowID,
+			Timestamp: entry.Timestamp,
+			Request:   reqStr,
+			Response:  respStr,
+			Protocol:  entry.Protocol,
 		})
 	}
 
 	return result, nil
 }
 
-func (b *NativeProxyBackend) GetProxyHistoryMeta(ctx context.Context, count int, offset uint32) ([]ProxyEntryMeta, error) {
-	metas := b.server.History().ListMeta(count, offset)
+func (b *NativeProxyBackend) GetProxyHistoryMeta(ctx context.Context, count int, afterFlowID string) ([]ProxyEntryMeta, error) {
+	metas := b.server.History().PageMeta(count, afterFlowID)
 	result := make([]ProxyEntryMeta, len(metas))
 	for i, m := range metas {
 		result[i] = ProxyEntryMeta{
+			FlowID:      m.FlowID,
+			Timestamp:   m.Timestamp,
 			Method:      m.Method,
 			Host:        m.Host,
 			Path:        m.Path,
@@ -205,6 +209,33 @@ func (b *NativeProxyBackend) GetProxyHistoryMeta(ctx context.Context, count int,
 		}
 	}
 	return result, nil
+}
+
+func (b *NativeProxyBackend) GetProxyEntry(ctx context.Context, flowID string) (*ProxyEntry, error) {
+	entry, ok := b.server.History().Get(flowID)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	var buf bytes.Buffer
+	reqStr := string(entry.FormatRequest(&buf))
+	respStr := string(entry.FormatResponse(&buf))
+	return &ProxyEntry{
+		FlowID:    entry.FlowID,
+		Timestamp: entry.Timestamp,
+		Request:   reqStr,
+		Response:  respStr,
+		Protocol:  entry.Protocol,
+	}, nil
+}
+
+func (b *NativeProxyBackend) DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error) {
+	return b.server.History().Delete(flowIDs...), nil
+}
+
+// HistoryCount returns the current number of stored proxy history entries.
+// Used for the `flows` health metric.
+func (b *NativeProxyBackend) HistoryCount() int {
+	return b.server.History().Count()
 }
 
 func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req SendRequestInput) (*SendRequestResult, error) {
@@ -761,7 +792,7 @@ func replaceCaseInsensitive(input []byte, match, replace string) []byte {
 	matchLower := bytes.ToLower(matchBytes)
 
 	var result []byte
-	start := 0
+	var start int
 	for {
 		idx := bytes.Index(inputLower[start:], matchLower)
 		if idx < 0 {

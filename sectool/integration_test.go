@@ -69,7 +69,9 @@ func createBackend(t *testing.T, backendType httpBackendType) (service.HttpBacke
 	switch backendType {
 	case backendBurp:
 		burpClient := connectBurpOrSkip(t)
-		return service.NewBurpBackend(burpClient), config.DefaultBurpProxyAddr
+		burpIdx := store.NewMemStorage()
+		t.Cleanup(func() { _ = burpIdx.Close() })
+		return service.NewBurpBackend(burpClient, burpIdx), config.DefaultBurpProxyAddr
 
 	case backendNative:
 		backend, err := service.NewNativeProxyBackend(0, t.TempDir(), 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
@@ -126,7 +128,7 @@ func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.C
 		require.NoError(t, resp.Body.Close())
 
 		testutil.WaitForCount(t, func() int {
-			history, _ := nb.GetProxyHistory(t.Context(), 1, 0)
+			history, _ := nb.GetProxyHistory(t.Context(), 1, "")
 			return len(history)
 		}, 1)
 	}
@@ -515,6 +517,82 @@ func TestIntegration_ProxyRules(t *testing.T) {
 	test(t, client) // run directly so easily composed
 }
 
+func TestIntegration_ProxyClear_Native(t *testing.T) {
+	t.Parallel()
+
+	// Native backend only — Burp returns ErrNotSupported by contract.
+	client := setupIntegrationEnv(t, backendNative)
+
+	// Snapshot the seeded flow_ids in chronological order.
+	resp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+		OutputMode: "flows",
+		Source:     "proxy",
+		Limit:      1_000_000_000,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(resp.Flows), 4, "expected setupIntegrationEnv seeds")
+
+	initial := make([]string, len(resp.Flows))
+	for i, f := range resp.Flows {
+		initial[i] = f.FlowID
+	}
+
+	t.Run("delete_subset", func(t *testing.T) {
+		toDelete := initial[:2]
+		deletedProxy, deletedReplay, _, err := client.ClearHistory(t.Context(), toDelete)
+		require.NoError(t, err)
+		assert.Equal(t, 2, deletedProxy)
+		assert.Equal(t, 0, deletedReplay)
+
+		after, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Source:     "proxy",
+			Limit:      1_000_000_000,
+		})
+		require.NoError(t, err)
+		afterIDs := make([]string, len(after.Flows))
+		for i, f := range after.Flows {
+			afterIDs[i] = f.FlowID
+		}
+		for _, id := range toDelete {
+			assert.NotContains(t, afterIDs, id)
+		}
+		assert.Len(t, after.Flows, len(initial)-2)
+	})
+
+	t.Run("delete_unknown_is_idempotent", func(t *testing.T) {
+		dp, dr, _, err := client.ClearHistory(t.Context(), []string{"missing-id-xyz"})
+		require.NoError(t, err)
+		assert.Equal(t, 0, dp)
+		assert.Equal(t, 0, dr)
+	})
+
+	t.Run("delete_remaining_via_all", func(t *testing.T) {
+		remaining, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Source:     "proxy",
+			Limit:      1_000_000_000,
+		})
+		require.NoError(t, err)
+		ids := make([]string, len(remaining.Flows))
+		for i, f := range remaining.Flows {
+			ids[i] = f.FlowID
+		}
+
+		dp, _, _, err := client.ClearHistory(t.Context(), ids)
+		require.NoError(t, err)
+		assert.Equal(t, len(ids), dp)
+
+		final, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{
+			OutputMode: "flows",
+			Source:     "proxy",
+			Limit:      1_000_000_000,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, final.Flows)
+	})
+}
+
 func TestIntegration_Replay(t *testing.T) {
 	t.Parallel()
 
@@ -532,7 +610,7 @@ func TestIntegration_Replay(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 		testutil.WaitForCount(t, func() int {
-			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, "")
 			return len(history)
 		}, 1)
 
@@ -696,7 +774,7 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 	}
 
 	testutil.WaitForCount(t, func() int {
-		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		history, _ := backend.GetProxyHistory(t.Context(), 1, "")
 		return len(history)
 	}, 1)
 
@@ -984,7 +1062,7 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 	})
 
 	testutil.WaitForCount(t, func() int {
-		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		history, _ := backend.GetProxyHistory(t.Context(), 1, "")
 		return len(history)
 	}, 1)
 
@@ -1291,7 +1369,7 @@ func TestIntegration_ReplayBodyReplacement(t *testing.T) {
 		}
 
 		testutil.WaitForCount(t, func() int {
-			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, "")
 			return len(history)
 		}, 1)
 
@@ -1558,7 +1636,7 @@ func TestIntegration_ReplayFollowRedirects(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 
 		testutil.WaitForCount(t, func() int {
-			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, "")
 			return len(history)
 		}, 1)
 
@@ -1699,7 +1777,7 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 	})
 
 	testutil.WaitForCount(t, func() int {
-		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		history, _ := backend.GetProxyHistory(t.Context(), 1, "")
 		return len(history)
 	}, 1)
 
@@ -2053,7 +2131,7 @@ func TestIntegration_ChunkedEncoding(t *testing.T) {
 		})
 
 		testutil.WaitForCount(t, func() int {
-			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, "")
 			return len(history)
 		}, 1)
 
@@ -2109,7 +2187,7 @@ func TestIntegration_ForceFlag(t *testing.T) {
 
 	<-receivedRequests
 	testutil.WaitForCount(t, func() int {
-		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		history, _ := backend.GetProxyHistory(t.Context(), 1, "")
 		return len(history)
 	}, 1)
 
@@ -2216,7 +2294,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	testutil.WaitForCount(t, func() int {
-		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		history, _ := backend.GetProxyHistory(t.Context(), 1, "")
 		return len(history)
 	}, 1)
 
@@ -2442,7 +2520,7 @@ func TestIntegration_ContentLengthMismatch(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	testutil.WaitForCount(t, func() int {
-		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		history, _ := backend.GetProxyHistory(t.Context(), 1, "")
 		return len(history)
 	}, 1)
 
@@ -3128,7 +3206,7 @@ func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 
 		testutil.WaitForCount(t, func() int {
-			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, "")
 			return len(history)
 		}, 1)
 
@@ -3259,7 +3337,7 @@ func TestIntegration_CrossOriginRedirectAuthPreserved(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 
 		testutil.WaitForCount(t, func() int {
-			history, _ := env.backend.GetProxyHistory(t.Context(), 1, 0)
+			history, _ := env.backend.GetProxyHistory(t.Context(), 1, "")
 			return len(history)
 		}, 1)
 
@@ -3495,7 +3573,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 	<-receivedPath
 
 	testutil.WaitForCount(t, func() int {
-		history, _ := backend.GetProxyHistory(t.Context(), 1, 0)
+		history, _ := backend.GetProxyHistory(t.Context(), 1, "")
 		return len(history)
 	}, 1)
 

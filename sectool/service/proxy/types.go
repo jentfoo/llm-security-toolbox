@@ -228,8 +228,8 @@ func (r *RawHTTP1Response) SetBody(b []byte) {
 // Embeds the parsed types directly for memory efficiency.
 // The SerializeRaw() methods on Request/Response reconstruct wire bytes on demand.
 type HistoryEntry struct {
-	// Offset is the monotonic history index
-	Offset uint32 `json:"offset" msgpack:"o"`
+	// FlowID is the unique identifier for this entry, minted at Store time.
+	FlowID string `json:"flow_id" msgpack:"fid"`
 
 	// Protocol identifies the HTTP version: "http/1.1", "h2", or "websocket"
 	Protocol string `json:"protocol" msgpack:"pr"`
@@ -309,7 +309,7 @@ func (r *H2ResponseData) SetHeader(name, value string) { r.Headers.Set(name, val
 // HistoryMeta holds lightweight metadata extracted at store time.
 // Used by summary/list paths to avoid deserializing full request/response bodies.
 type HistoryMeta struct {
-	Offset      uint32        `msgpack:"o"`
+	FlowID      string        `msgpack:"fid"`
 	Protocol    string        `msgpack:"pr"`
 	Method      string        `msgpack:"m"`
 	Host        string        `msgpack:"h"`

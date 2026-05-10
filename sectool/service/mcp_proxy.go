@@ -163,13 +163,6 @@ func (m *mcpServer) handleCookieJar(ctx context.Context, req mcp.CallToolRequest
 			continue
 		}
 
-		var flowID string
-		if entry.flowID != "" {
-			flowID = entry.flowID
-		} else {
-			flowID = m.service.proxyIndex.Register(entry.offset)
-		}
-
 		for _, c := range cookies {
 			if nameFilter != "" && c.Name != nameFilter {
 				continue
@@ -229,7 +222,7 @@ func (m *mcpServer) handleCookieJar(ctx context.Context, req mcp.CallToolRequest
 				Expires:  expires,
 				Value:    value,
 				Decoded:  decoded,
-				FlowID:   flowID,
+				FlowID:   entry.flowID,
 			}
 		}
 	}
@@ -314,7 +307,7 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 	if outputMode == OutputModeFlows && listReq.Limit > 0 {
 		maxResults = listReq.Offset + listReq.Limit
 	}
-	filtered := applyProxyFilters(allEntries, listReq, m.service.proxyIndex, m.service.replayHistoryStore, lastFlowID, searchHeaderRe, searchBodyRe, maxResults)
+	filtered := applyProxyFilters(allEntries, listReq, lastFlowID, searchHeaderRe, searchBodyRe, maxResults)
 
 	switch outputMode {
 	case OutputModeFlows:
@@ -330,24 +323,8 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 			filtered = filtered[:listReq.Limit]
 		}
 
-		var maxOffset uint32
-		for _, e := range filtered {
-			if e.offset > maxOffset {
-				maxOffset = e.offset
-			}
-		}
-
 		flows := make([]protocol.FlowEntry, 0, len(filtered))
 		for _, entry := range filtered {
-			var flowID string
-			if entry.flowID != "" {
-				// Replay entry: use pre-assigned flowID (registered at send time)
-				flowID = entry.flowID
-			} else {
-				// Proxy entry: generate flowID based on offset
-				flowID = m.service.proxyIndex.Register(entry.offset)
-			}
-
 			scheme := entry.scheme
 			port := entry.port
 			if scheme == "" {
@@ -355,7 +332,7 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 			}
 
 			flows = append(flows, protocol.FlowEntry{
-				FlowID:         flowID,
+				FlowID:         entry.flowID,
 				Method:         entry.method,
 				Scheme:         scheme,
 				Host:           entry.host,
@@ -369,10 +346,6 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 		m.attachFlowNotes(flows)
 		log.Printf("proxy/poll: %d flows (host=%q path=%q method=%q status=%q)", len(flows), listReq.Host, listReq.Path, listReq.Method, listReq.Status)
 
-		// Update tracking for "since=last" cursor
-		if maxOffset > m.service.proxyLastOffset.Load() {
-			m.service.proxyLastOffset.Store(maxOffset)
-		}
 		if len(flows) > 0 {
 			m.service.lastFlowID.Store(flows[len(flows)-1].FlowID)
 		}
@@ -671,201 +644,146 @@ func (m *mcpServer) handleProxyRuleDelete(ctx context.Context, req mcp.CallToolR
 
 // flowEntry holds parsed metadata for a proxy or replay history entry.
 type flowEntry struct {
-	offset          uint32
-	referenceOffset uint32 // for replays: the proxy offset they follow
-	flowID          string // pre-assigned for replays, empty for proxy entries
-	method          string
-	host            string
-	path            string
-	scheme          string // "http" or "https" (empty = infer from host)
-	port            int    // original port (0 = infer from scheme)
-	status          int
-	respLen         int
-	request         string
-	response        string
-	source          string    // "proxy" or "replay"
-	timestamp       time.Time // for ordering replays with same reference
+	flowID    string
+	timestamp time.Time // primary sort key; flow_id breaks ties
+	method    string
+	host      string
+	path      string
+	scheme    string // "http" or "https" (empty = infer from host)
+	port      int    // original port (0 = infer from scheme)
+	status    int
+	respLen   int
+	request   string
+	response  string
+	source    string // "proxy" or "replay"
+}
+
+// drainProxyHistory pages all proxy history entries from the backend in fetchBatchSize chunks.
+// full=true loads request/response bodies via GetProxyHistory; full=false uses GetProxyHistoryMeta.
+func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]flowEntry, error) {
+	var out []flowEntry
+	var cursor string
+	for {
+		var page []flowEntry
+		if full {
+			entries, err := backend.GetProxyHistory(ctx, fetchBatchSize, cursor)
+			if err != nil {
+				return nil, err
+			}
+			page = make([]flowEntry, len(entries))
+			for i, entry := range entries {
+				method, host, path := extractRequestMeta(entry.Request)
+				status := readResponseStatusCode([]byte(entry.Response))
+				_, respBody := splitHeadersBody([]byte(entry.Response))
+				page[i] = flowEntry{
+					flowID:    entry.FlowID,
+					timestamp: entry.Timestamp,
+					method:    method,
+					host:      host,
+					path:      path,
+					status:    status,
+					respLen:   len(respBody),
+					request:   entry.Request,
+					response:  entry.Response,
+					source:    SourceProxy,
+				}
+			}
+		} else {
+			metas, err := backend.GetProxyHistoryMeta(ctx, fetchBatchSize, cursor)
+			if err != nil {
+				return nil, err
+			}
+			page = make([]flowEntry, len(metas))
+			for i, m := range metas {
+				page[i] = flowEntry{
+					flowID:    m.FlowID,
+					timestamp: m.Timestamp,
+					method:    m.Method,
+					host:      m.Host,
+					path:      m.Path,
+					status:    m.Status,
+					respLen:   m.RespLen,
+					source:    SourceProxy,
+				}
+			}
+		}
+		if len(page) == 0 {
+			break
+		}
+		out = append(out, page...)
+		if len(page) < fetchBatchSize {
+			break
+		}
+		cursor = page[len(page)-1].flowID
+	}
+	return out, nil
+}
+
+// collectReplayHistory returns all replay history entries.
+// full=true loads request/response bodies via List; full=false uses ListMeta.
+func collectReplayHistory(replayStore *store.ReplayHistoryStore, full bool) []flowEntry {
+	if full {
+		entries := replayStore.List()
+		out := make([]flowEntry, len(entries))
+		for i, re := range entries {
+			out[i] = flowEntry{
+				flowID:    re.FlowID,
+				timestamp: re.CreatedAt,
+				method:    re.Method,
+				host:      re.Host,
+				path:      re.Path,
+				scheme:    re.Scheme,
+				port:      re.Port,
+				status:    re.RespStatus,
+				respLen:   len(re.RespBody),
+				request:   string(re.RawRequest),
+				response:  string(re.RespHeaders) + string(re.RespBody),
+				source:    SourceReplay,
+			}
+		}
+		return out
+	}
+	metas := replayStore.ListMeta()
+	out := make([]flowEntry, len(metas))
+	for i, rm := range metas {
+		out[i] = flowEntry{
+			flowID:    rm.FlowID,
+			timestamp: rm.CreatedAt,
+			method:    rm.Method,
+			host:      rm.Host,
+			path:      rm.Path,
+			scheme:    rm.Scheme,
+			port:      rm.Port,
+			status:    rm.RespStatus,
+			respLen:   rm.RespLen,
+			source:    SourceReplay,
+		}
+	}
+	return out
 }
 
 // fetchAllProxyEntries retrieves all proxy history entries and replay entries, merged in chronological order.
 // When needsFullText is false, uses metadata-only APIs (avoids deserializing full request/response bodies).
 // When needsFullText is true, loads full entries for search_header/search_body filters.
 func (s *Server) fetchAllProxyEntries(ctx context.Context, needsFullText bool) ([]flowEntry, error) {
-	var allEntries []flowEntry
-	var maxProxyOffset uint32
-	var offset uint32
-
-	if needsFullText {
-		// Full-text path: need complete request/response for contains filters
-		for {
-			proxyEntries, err := s.httpBackend.GetProxyHistory(ctx, fetchBatchSize, offset)
-			if err != nil {
-				return nil, err
-			}
-			if len(proxyEntries) == 0 {
-				break
-			}
-
-			for i, entry := range proxyEntries {
-				entryOffset := offset + uint32(i)
-				if entryOffset > maxProxyOffset {
-					maxProxyOffset = entryOffset
-				}
-
-				method, host, path := extractRequestMeta(entry.Request)
-				status := readResponseStatusCode([]byte(entry.Response))
-				_, respBody := splitHeadersBody([]byte(entry.Response))
-
-				allEntries = append(allEntries, flowEntry{
-					offset:   entryOffset,
-					method:   method,
-					host:     host,
-					path:     path,
-					status:   status,
-					respLen:  len(respBody),
-					request:  entry.Request,
-					response: entry.Response,
-					source:   SourceProxy,
-				})
-			}
-
-			offset += uint32(len(proxyEntries))
-			if len(proxyEntries) < fetchBatchSize {
-				break
-			}
-		}
-	} else {
-		// Metadata-only path: skip full request/response bodies
-		for {
-			metas, err := s.httpBackend.GetProxyHistoryMeta(ctx, fetchBatchSize, offset)
-			if err != nil {
-				return nil, err
-			}
-			if len(metas) == 0 {
-				break
-			}
-
-			for i, m := range metas {
-				entryOffset := offset + uint32(i)
-				if entryOffset > maxProxyOffset {
-					maxProxyOffset = entryOffset
-				}
-
-				allEntries = append(allEntries, flowEntry{
-					offset:  entryOffset,
-					method:  m.Method,
-					host:    m.Host,
-					path:    m.Path,
-					status:  m.Status,
-					respLen: m.RespLen,
-					source:  SourceProxy,
-				})
-			}
-
-			offset += uint32(len(metas))
-			if len(metas) < fetchBatchSize {
-				break
-			}
-		}
+	proxyEntries, err := drainProxyHistory(ctx, s.httpBackend, needsFullText)
+	if err != nil {
+		return nil, err
 	}
-
-	// 2. Update replay store's reference tracking (detects history clear)
-	if _, cleared := s.replayHistoryStore.UpdateReferenceOffset(maxProxyOffset); cleared {
-		// Proxy history was cleared - invalidate stale proxy flow IDs
-		s.proxyIndex.Clear()
-	}
-
-	// 3. Fetch replay entries and convert to flowEntry
-	if needsFullText {
-		replayEntries := s.replayHistoryStore.List()
-		for _, re := range replayEntries {
-			allEntries = append(allEntries, flowEntry{
-				offset:          0, // not used for sorting replays
-				referenceOffset: re.ReferenceOffset,
-				flowID:          re.FlowID,
-				method:          re.Method,
-				host:            re.Host,
-				path:            re.Path,
-				scheme:          re.Scheme,
-				port:            re.Port,
-				status:          re.RespStatus,
-				respLen:         len(re.RespBody),
-				request:         string(re.RawRequest),
-				response:        formatReplayResponse(re.RespHeaders, re.RespBody),
-				source:          SourceReplay,
-				timestamp:       re.CreatedAt,
-			})
+	all := append(proxyEntries, collectReplayHistory(s.replayHistoryStore, needsFullText)...)
+	// Sort: (timestamp, flow_id) merges proxy and replay chronologically
+	sort.SliceStable(all, func(i, j int) bool {
+		if !all[i].timestamp.Equal(all[j].timestamp) {
+			return all[i].timestamp.Before(all[j].timestamp)
 		}
-	} else {
-		replayMetas := s.replayHistoryStore.ListMeta()
-		for _, rm := range replayMetas {
-			allEntries = append(allEntries, flowEntry{
-				offset:          0,
-				referenceOffset: rm.ReferenceOffset,
-				flowID:          rm.FlowID,
-				method:          rm.Method,
-				host:            rm.Host,
-				path:            rm.Path,
-				scheme:          rm.Scheme,
-				port:            rm.Port,
-				status:          rm.RespStatus,
-				respLen:         rm.RespLen,
-				source:          SourceReplay,
-				timestamp:       rm.CreatedAt,
-			})
-		}
-	}
-
-	// 4. Sort: merge proxy and replay in chronological order
-	sort.SliceStable(allEntries, func(i, j int) bool {
-		return compareFlowEntries(allEntries[i], allEntries[j])
+		return all[i].flowID < all[j].flowID
 	})
-
-	return allEntries, nil
-}
-
-// formatReplayResponse combines headers and body for consistent response format.
-func formatReplayResponse(headers, body []byte) string {
-	return string(headers) + string(body)
-}
-
-// compareFlowEntries determines ordering for merged proxy+replay list.
-// Proxy entries ordered by offset. Replay entries inserted after their reference offset.
-func compareFlowEntries(a, b flowEntry) bool {
-	posA := effectivePosition(a)
-	posB := effectivePosition(b)
-
-	if posA != posB {
-		return posA < posB
-	}
-
-	// Same position: proxy before replay, or replays by timestamp
-	if a.source != b.source {
-		return a.source == SourceProxy
-	}
-
-	// Both replays at same reference: order by creation time
-	if a.source == SourceReplay {
-		return a.timestamp.Before(b.timestamp)
-	}
-
-	// Both proxy at same offset (shouldn't happen): maintain order
-	return false
-}
-
-// effectivePosition returns sort position: proxy uses offset, replay uses referenceOffset+0.5.
-// The +0.5 ensures replays sort after the proxy entry at the same offset but before the next offset.
-// Multiple replays at the same reference offset then sort by timestamp in compareFlowEntries.
-func effectivePosition(e flowEntry) float64 {
-	if e.source == SourceProxy {
-		return float64(e.offset)
-	}
-	return float64(e.referenceOffset) + 0.5
+	return all, nil
 }
 
 // applyProxyFilters applies client-side filters to proxy history entries.
 // When maxResults > 0, stops after collecting that many matches (early termination for offset+limit).
-func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, proxyIndex *store.ProxyIndex, replayHistoryStore *store.ReplayHistoryStore, lastFlowID string, searchHeaderRe, searchBodyRe *regexp.Regexp, maxResults int) []flowEntry {
+func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID string, searchHeaderRe, searchBodyRe *regexp.Regexp, maxResults int) []flowEntry {
 	if !req.HasFilters() {
 		return entries
 	}
@@ -873,30 +791,18 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, proxyIndex *s
 	methods := parseCommaSeparated(req.Method)
 	statuses := parseStatusFilter(req.Status)
 
-	var sincePosition float64
-	var sinceTimestamp time.Time
-	var sinceIsReplay bool
-	var hasSince bool
+	// Resolve since cursor by linear scan to find the flow_id's index, then drop everything up to and including it
 	if req.Since != "" {
 		sinceFlowID := req.Since
-		if sinceFlowID == "last" && lastFlowID != "" {
+		if sinceFlowID == sinceLast {
 			sinceFlowID = lastFlowID
-		} else if sinceFlowID == "last" {
-			// No lastFlowID set, skip since filter
-			sinceFlowID = ""
 		}
-
 		if sinceFlowID != "" {
-			if replayEntry, ok := replayHistoryStore.Get(sinceFlowID); ok {
-				// Replay entry: get reference offset from replay history store
-				sincePosition = float64(replayEntry.ReferenceOffset) + 0.5
-				sinceTimestamp = replayEntry.CreatedAt
-				sinceIsReplay = true
-				hasSince = true
-			} else if offset, ok := proxyIndex.Offset(sinceFlowID); ok {
-				// Proxy entry: use offset
-				sincePosition = float64(offset)
-				hasSince = true
+			for i, e := range entries {
+				if e.flowID == sinceFlowID {
+					entries = entries[i+1:]
+					break
+				}
 			}
 		}
 	}
@@ -908,23 +814,6 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, proxyIndex *s
 		}
 		if req.Source != "" && req.Source != e.source {
 			continue
-		}
-		// Since filter: compare effective position for both proxy and replay
-		if hasSince {
-			ePos := effectivePosition(e)
-			if ePos < sincePosition {
-				continue
-			}
-			if ePos == sincePosition {
-				// Same position: replays at same ReferenceOffset use timestamp
-				if sinceIsReplay && e.source == SourceReplay {
-					if !e.timestamp.After(sinceTimestamp) {
-						continue
-					}
-				} else {
-					continue
-				}
-			}
 		}
 		if len(methods) > 0 && !slices.Contains(methods, e.method) {
 			continue

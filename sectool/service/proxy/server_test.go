@@ -48,8 +48,7 @@ func TestServe(t *testing.T) {
 
 		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 
-		entry, ok := proxy.History().Get(0)
-		require.True(t, ok)
+		entry := firstEntry(t, proxy.History())
 		assert.Equal(t, "http/1.1", entry.Protocol)
 		assert.Equal(t, "GET", entry.Request.Method)
 		assert.Equal(t, 200, entry.Response.StatusCode)
@@ -580,9 +579,9 @@ func TestHTTP11KeepAlive(t *testing.T) {
 		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 3)
 
 		// Verify each request was recorded correctly
-		for i := 0; i < 3; i++ {
-			entry, ok := proxy.History().Get(uint32(i))
-			require.True(t, ok)
+		entries := proxy.History().Page(3, "")
+		require.Len(t, entries, 3)
+		for _, entry := range entries {
 			assert.Equal(t, "GET", entry.Request.Method)
 			assert.Equal(t, 200, entry.Response.StatusCode)
 		}

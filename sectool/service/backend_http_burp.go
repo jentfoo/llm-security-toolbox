@@ -5,42 +5,285 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/mcp"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/store"
 )
+
+const burpFlowIndexKeyPrefix = "b:off:"
+
+// burpFlowRecord is the persisted form of a single offset's flow_id mapping.
+type burpFlowRecord struct {
+	FlowID     string    `msgpack:"f"`
+	ObservedAt time.Time `msgpack:"o"`
+	// Fingerprint is FNV-1a of the request bytes.
+	Fingerprint uint64 `msgpack:"fp"`
+}
 
 // ErrConfigEditDisabled is returned when a write operation fails because config editing is not enabled.
 var ErrConfigEditDisabled = errors.New("config editing disabled")
 
 // BurpBackend implements HttpBackend using Burp Suite via MCP.
 type BurpBackend struct {
-	client *mcp.BurpClient
+	client    *mcp.BurpClient
+	flowIndex *burpFlowIndex
 }
 
 // Compile-time check that BurpBackend implements HttpBackend
 var _ HttpBackend = (*BurpBackend)(nil)
 
 // ConnectBurpBackend creates a new Burp HttpBackend with the given MCP URL.
-func ConnectBurpBackend(ctx context.Context, url string, opts ...mcp.Option) (*BurpBackend, error) {
-	backend := NewBurpBackend(mcp.New(url, opts...))
+// storage backs the offset<->flow_id index for the lifetime of the backend.
+func ConnectBurpBackend(ctx context.Context, url string, storage store.Storage, opts ...mcp.Option) (*BurpBackend, error) {
+	backend := NewBurpBackend(mcp.New(url, opts...), storage)
 	return backend, backend.Connect(ctx)
 }
 
-// NewBurpBackend creates a new Burp HttpBackend with the given MCP client.
-func NewBurpBackend(client *mcp.BurpClient) *BurpBackend {
+// NewBurpBackend creates a new Burp HttpBackend with the given MCP client and index storage.
+func NewBurpBackend(client *mcp.BurpClient, storage store.Storage) *BurpBackend {
 	return &BurpBackend{
-		client: client,
+		client:    client,
+		flowIndex: newBurpFlowIndex(storage),
 	}
+}
+
+// burpFlowIndex maps Burp offsets, observation timestamps, and request fingerprints to flow_ids.
+// The fingerprint detects when a Burp UI delete shifts entries down into existing offsets so
+// flow_id identity is preserved across reshuffles via byFingerprint.
+type burpFlowIndex struct {
+	mu             sync.RWMutex
+	storage        store.Storage
+	byOffset       map[int]burpFlowEntry
+	byFlowID       map[string]int    // flow_id -> offset
+	byFingerprint  map[uint64]string // fp -> flow_id, used to relocate shifted entries
+	maxObservedOff int
+	hasObserved    bool
+}
+
+type burpFlowEntry struct {
+	flowID      string
+	observedAt  time.Time
+	fingerprint uint64
+}
+
+// newBurpFlowIndex constructs an index, recovering persisted state from storage.
+func newBurpFlowIndex(storage store.Storage) *burpFlowIndex {
+	idx := &burpFlowIndex{
+		storage:       storage,
+		byOffset:      make(map[int]burpFlowEntry),
+		byFlowID:      make(map[string]int),
+		byFingerprint: make(map[uint64]string),
+	}
+	idx.recover()
+	return idx
+}
+
+// recover rebuilds in-memory maps from persisted b:off:<offset> records.
+func (i *burpFlowIndex) recover() {
+	for _, key := range i.storage.KeySet() {
+		if !strings.HasPrefix(key, burpFlowIndexKeyPrefix) {
+			continue
+		}
+		offsetStr := key[len(burpFlowIndexKeyPrefix):]
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil {
+			continue
+		}
+		data, found, err := i.storage.Get(key)
+		if err != nil || !found {
+			continue
+		}
+		var rec burpFlowRecord
+		if err := store.Deserialize(data, &rec); err != nil {
+			log.Printf("burp index: recover deserialize %s: %v", key, err)
+			continue
+		}
+		if rec.FlowID == "" || rec.Fingerprint == 0 {
+			continue
+		}
+		i.byOffset[offset] = burpFlowEntry{
+			flowID:      rec.FlowID,
+			observedAt:  rec.ObservedAt.UTC(),
+			fingerprint: rec.Fingerprint,
+		}
+		i.byFlowID[rec.FlowID] = offset
+		i.byFingerprint[rec.Fingerprint] = rec.FlowID
+		if !i.hasObserved || offset > i.maxObservedOff {
+			i.maxObservedOff = offset
+			i.hasObserved = true
+		}
+	}
+}
+
+// RegisterOrLookup resolves the flow_id and observation timestamp for a Burp entry at offset and request bytes.
+// New content mints a fresh flow_id; matching content elsewhere relocates the existing flow_id.
+func (i *burpFlowIndex) RegisterOrLookup(offset int, request string) (flowID string, observedAt time.Time) {
+	fp := fnv1aHash(request)
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if e, ok := i.byOffset[offset]; ok {
+		if e.fingerprint == fp {
+			i.advanceMaxLocked(offset)
+			return e.flowID, e.observedAt
+		}
+		// drift, the cached entry's content no longer lives at this offset
+		i.evictOffsetLocked(offset)
+	}
+
+	// Same content may have shifted from another offset (mid-history delete)
+	if existingFlowID, ok := i.byFingerprint[fp]; ok {
+		oldOff, hasOld := i.byFlowID[existingFlowID]
+		var oldObservedAt time.Time
+		if hasOld {
+			if e, ok := i.byOffset[oldOff]; ok {
+				oldObservedAt = e.observedAt
+			}
+			// remove the offset's mapping without marking its flow_id stale; the flow_id is being moved to a new offset
+			delete(i.byOffset, offset)
+			if err := i.storage.Delete(burpFlowIndexKey(offset)); err != nil {
+				log.Printf("burp index: delete relocated record %d: %v", offset, err)
+			}
+		}
+		if oldObservedAt.IsZero() {
+			oldObservedAt = time.Now().UTC()
+		}
+		i.byOffset[offset] = burpFlowEntry{flowID: existingFlowID, observedAt: oldObservedAt, fingerprint: fp}
+		i.byFlowID[existingFlowID] = offset
+		i.persistRecordLocked(offset, existingFlowID, oldObservedAt, fp)
+		i.advanceMaxLocked(offset)
+		return existingFlowID, oldObservedAt
+	}
+
+	// new entry
+	for {
+		candidate := ids.Generate(ids.DefaultLength)
+		if _, exists := i.byFlowID[candidate]; !exists {
+			flowID = candidate
+			break
+		}
+	}
+	observedAt = time.Now().UTC()
+	i.byOffset[offset] = burpFlowEntry{flowID: flowID, observedAt: observedAt, fingerprint: fp}
+	i.byFlowID[flowID] = offset
+	i.byFingerprint[fp] = flowID
+	i.persistRecordLocked(offset, flowID, observedAt, fp)
+	i.advanceMaxLocked(offset)
+	return flowID, observedAt
+}
+
+// advanceMaxLocked bumps maxObservedOff if offset is higher. Caller must hold mu.
+func (i *burpFlowIndex) advanceMaxLocked(offset int) {
+	if !i.hasObserved || offset > i.maxObservedOff {
+		i.maxObservedOff = offset
+		i.hasObserved = true
+	}
+}
+
+// evictOffsetLocked drops every cache reference (and the storage record) for
+// the entry currently held at offset. Caller must hold mu.
+func (i *burpFlowIndex) evictOffsetLocked(offset int) {
+	e, ok := i.byOffset[offset]
+	if !ok {
+		return
+	}
+	delete(i.byOffset, offset)
+	if i.byFlowID[e.flowID] == offset {
+		delete(i.byFlowID, e.flowID)
+	}
+	if got, ok := i.byFingerprint[e.fingerprint]; ok && got == e.flowID {
+		delete(i.byFingerprint, e.fingerprint)
+	}
+	if err := i.storage.Delete(burpFlowIndexKey(offset)); err != nil {
+		log.Printf("burp index: delete record %d: %v", offset, err)
+	}
+}
+
+// persistRecordLocked writes the offset's record to storage. Caller must hold mu.
+func (i *burpFlowIndex) persistRecordLocked(offset int, flowID string, observedAt time.Time, fp uint64) {
+	rec := burpFlowRecord{FlowID: flowID, ObservedAt: observedAt, Fingerprint: fp}
+	data, err := store.Serialize(&rec)
+	if err != nil {
+		log.Printf("burp index: serialize record %d: %v", offset, err)
+		return
+	}
+	if err := i.storage.Set(burpFlowIndexKey(offset), data); err != nil {
+		log.Printf("burp index: persist record %d: %v", offset, err)
+	}
+}
+
+// SweepTail evicts every cached offset >= fromOffset. Called after a Burp fetch returns fewer entries than requested,
+// indicating the live history ends at fromOffset. Maintains maxObservedOff.
+func (i *burpFlowIndex) SweepTail(fromOffset int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	var toRemove []int
+	for off := range i.byOffset {
+		if off >= fromOffset {
+			toRemove = append(toRemove, off)
+		}
+	}
+	for _, off := range toRemove {
+		i.evictOffsetLocked(off)
+	}
+	if i.hasObserved && i.maxObservedOff >= fromOffset {
+		if fromOffset == 0 {
+			i.hasObserved = false
+			i.maxObservedOff = 0
+		} else {
+			i.maxObservedOff = fromOffset - 1
+		}
+	}
+}
+
+// fnv1aHash returns the 64-bit FNV-1a hash of s.
+func fnv1aHash(s string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	return h.Sum64()
+}
+
+// OffsetFor returns the burp offset for a flow_id, if known.
+func (i *burpFlowIndex) OffsetFor(flowID string) (int, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	off, ok := i.byFlowID[flowID]
+	return off, ok
+}
+
+// MaxObserved returns the highest offset registered, and whether anything has been observed.
+func (i *burpFlowIndex) MaxObserved() (int, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	return i.maxObservedOff, i.hasObserved
+}
+
+// Count returns the number of observed entries.
+func (i *burpFlowIndex) Count() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	return len(i.byOffset)
+}
+
+func burpFlowIndexKey(offset int) string {
+	return burpFlowIndexKeyPrefix + strconv.Itoa(offset)
 }
 
 func (b *BurpBackend) Connect(ctx context.Context) error {
@@ -57,43 +300,143 @@ func (b *BurpBackend) Close() error {
 	return b.client.Close()
 }
 
-func (b *BurpBackend) GetProxyHistory(ctx context.Context, count int, offset uint32) ([]ProxyEntry, error) {
-	entries, err := b.client.GetProxyHistory(ctx, count, int(offset))
+func (b *BurpBackend) GetProxyHistory(ctx context.Context, count int, afterFlowID string) ([]ProxyEntry, error) {
+	startOffset, err := b.resolveCursor(afterFlowID)
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]ProxyEntry, len(entries))
+	entries, fetchCount, err := b.fetchHistorySlice(ctx, count, startOffset)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ProxyEntry, 0, min(len(entries), count))
 	for i, e := range entries {
-		result[i] = ProxyEntry{
-			Request:  e.Request,
-			Response: e.Response,
-			Notes:    e.Notes,
+		flowID, observedAt := b.flowIndex.RegisterOrLookup(startOffset+i, e.Request)
+		if i >= count {
+			continue // tail probe entry; cache is updated, but not returned
 		}
+		result = append(result, ProxyEntry{
+			FlowID:    flowID,
+			Timestamp: observedAt,
+			Request:   e.Request,
+			Response:  e.Response,
+			Notes:     e.Notes,
+		})
+	}
+	if len(entries) < fetchCount {
+		// Burp returned fewer than requested: hit the live tail.
+		b.flowIndex.SweepTail(startOffset + len(entries))
 	}
 	return result, nil
 }
 
-func (b *BurpBackend) GetProxyHistoryMeta(ctx context.Context, count int, offset uint32) ([]ProxyEntryMeta, error) {
-	entries, err := b.GetProxyHistory(ctx, count, offset)
+func (b *BurpBackend) GetProxyHistoryMeta(ctx context.Context, count int, afterFlowID string) ([]ProxyEntryMeta, error) {
+	startOffset, err := b.resolveCursor(afterFlowID)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]ProxyEntryMeta, len(entries))
+	entries, fetchCount, err := b.fetchHistorySlice(ctx, count, startOffset)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ProxyEntryMeta, 0, min(len(entries), count))
 	for i, e := range entries {
+		flowID, observedAt := b.flowIndex.RegisterOrLookup(startOffset+i, e.Request)
+		if i >= count {
+			continue
+		}
 		method, host, path := extractRequestMeta(e.Request)
 		status := readResponseStatusCode([]byte(e.Response))
 		_, respBody := splitHeadersBody([]byte(e.Response))
-		result[i] = ProxyEntryMeta{
-			Method:   method,
-			Host:     host,
-			Path:     path,
-			Status:   status,
-			RespLen:  len(respBody),
-			Protocol: e.Protocol,
-		}
+		result = append(result, ProxyEntryMeta{
+			FlowID:    flowID,
+			Timestamp: observedAt,
+			Method:    method,
+			Host:      host,
+			Path:      path,
+			Status:    status,
+			RespLen:   len(respBody),
+		})
+	}
+	if len(entries) < fetchCount {
+		b.flowIndex.SweepTail(startOffset + len(entries))
 	}
 	return result, nil
+}
+
+// fetchHistorySlice retrieves up to `count` proxy history entries starting at `startOffset`.
+// It may request an extra entry to detect the live tail and handles full history clears.
+// Returns the fetched entries, the actual number requested, and any error.
+func (b *BurpBackend) fetchHistorySlice(ctx context.Context, count, startOffset int) ([]mcp.ProxyHistoryEntry, int, error) {
+	fetchCount := count
+	if maxOff, ok := b.flowIndex.MaxObserved(); ok && maxOff >= startOffset+count {
+		fetchCount = count + 1
+	}
+	entries, err := b.client.GetProxyHistory(ctx, fetchCount, startOffset)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(entries) == 0 && startOffset > 0 {
+		// Burp returned nothing past the cursor; cached offsets below the cursor may also be stale
+		probe, perr := b.client.GetProxyHistory(ctx, 1, 0) // Probe offset 0 to detect a full clear
+		if perr != nil {
+			return nil, 0, perr
+		}
+		if len(probe) == 0 {
+			b.flowIndex.SweepTail(0)
+		}
+	}
+	return entries, fetchCount, nil
+}
+
+func (b *BurpBackend) GetProxyEntry(ctx context.Context, flowID string) (*ProxyEntry, error) {
+	offset, ok := b.flowIndex.OffsetFor(flowID)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	entries, err := b.client.GetProxyHistory(ctx, 1, offset)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		// The slot is gone; this offset is past Burp's live tail
+		b.flowIndex.SweepTail(offset)
+		return nil, ErrNotFound
+	}
+	resolvedFlowID, observedAt := b.flowIndex.RegisterOrLookup(offset, entries[0].Request)
+	if resolvedFlowID != flowID {
+		// Drift detected at the cached offset; the requested flow_id is gone.
+		return nil, ErrNotFound
+	}
+	return &ProxyEntry{
+		FlowID:    flowID,
+		Timestamp: observedAt,
+		Request:   entries[0].Request,
+		Response:  entries[0].Response,
+		Notes:     entries[0].Notes,
+	}, nil
+}
+
+func (b *BurpBackend) DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error) {
+	return 0, ErrNotSupported
+}
+
+// HistoryCount returns the number of Burp entries the index has observed. Used for the `flows` health metric.
+func (b *BurpBackend) HistoryCount() int {
+	return b.flowIndex.Count()
+}
+
+// resolveCursor maps a flow_id cursor to the next burp offset to fetch.
+// Empty cursor or unknown flow_id starts at offset 0.
+func (b *BurpBackend) resolveCursor(afterFlowID string) (int, error) {
+	if afterFlowID == "" {
+		return 0, nil
+	}
+	offset, ok := b.flowIndex.OffsetFor(afterFlowID)
+	if !ok {
+		return 0, nil
+	}
+	return offset + 1, nil
 }
 
 func (b *BurpBackend) SendRequest(ctx context.Context, name string, req SendRequestInput) (*SendRequestResult, error) {

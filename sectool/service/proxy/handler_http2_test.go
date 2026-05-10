@@ -287,8 +287,7 @@ func TestStoreStreamInHistory(t *testing.T) {
 
 	assert.Equal(t, 1, history.Count())
 
-	entry, ok := history.Get(0)
-	require.True(t, ok)
+	entry := firstEntry(t, history)
 	assert.Equal(t, "h2", entry.Protocol)
 	assert.Equal(t, uint32(1), entry.H2StreamID)
 	require.NotNil(t, entry.H2Request)
@@ -572,8 +571,7 @@ func TestHTTP2ProxyEndToEnd(t *testing.T) {
 
 	testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 
-	entry, ok := proxy.History().Get(0)
-	require.True(t, ok)
+	entry := firstEntry(t, proxy.History())
 	assert.Equal(t, "h2", entry.Protocol)
 	require.NotNil(t, entry.H2Request)
 	assert.Equal(t, "GET", entry.H2Request.Method)

@@ -342,10 +342,8 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 
 	// Store in replay history for proxy_poll visibility
 	// RawRequest = pre-rule (base for future replays), ModifiedRequest = post-rule (for display)
-	refOffset, _ := m.service.replayHistoryStore.UpdateReferenceOffset(m.service.proxyLastOffset.Load())
 	m.service.replayHistoryStore.Store(&store.ReplayHistoryEntry{
 		FlowID:          replayID,
-		ReferenceOffset: refOffset,
 		RawRequest:      rawRequest,
 		ModifiedRequest: result.ModifiedRequest,
 		Method:          method,

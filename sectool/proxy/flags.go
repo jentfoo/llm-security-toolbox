@@ -10,7 +10,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/cliutil"
 )
 
-var proxySubcommands = []string{"summary", "list", "get", "cookies", "export", "rule", "help"}
+var proxySubcommands = []string{"summary", "list", "get", "cookies", "export", "rule", "clear", "help"}
 
 func Parse(args []string, mcpURL string) error {
 	if len(args) < 1 {
@@ -31,6 +31,8 @@ func Parse(args []string, mcpURL string) error {
 		return parseExport(args[1:], mcpURL)
 	case "rule":
 		return parseRule(args[1:], mcpURL)
+	case "clear":
+		return parseClear(args[1:], mcpURL)
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
@@ -156,6 +158,20 @@ proxy rule delete <rule_id>
 
   Delete a rule by ID or label.
   Searches both HTTP and WebSocket rules automatically.
+
+---
+
+proxy clear [options]
+
+  Remove flows from proxy and replay history. Exactly one mode is required.
+  Native proxy backend only; Burp should use the UI to remove proxy records.
+
+  Modes:
+    --flow <id>             delete a single flow
+    --before <id>           delete all flows before id (anchor kept)
+    --after <id>            delete all flows after id (anchor kept)
+    --from <id> --to <id>   inclusive range; either flag alone is open-ended
+    --all                   delete every flow
 `)
 }
 
@@ -511,4 +527,50 @@ Options:
 	}
 
 	return cookies(mcpURL, name, domain)
+}
+
+func parseClear(args []string, mcpURL string) error {
+	fs := pflag.NewFlagSet("proxy clear", pflag.ContinueOnError)
+	fs.SetInterspersed(true)
+	var opts clearOpts
+
+	fs.StringVar(&opts.flow, "flow", "", "delete a single flow by flow_id")
+	fs.StringVar(&opts.before, "before", "", "delete all flows before this flow_id (anchor kept)")
+	fs.StringVar(&opts.after, "after", "", "delete all flows after this flow_id (anchor kept)")
+	fs.StringVar(&opts.from, "from", "", "lower bound flow_id for inclusive range (pair with --to; either alone is open-ended)")
+	fs.StringVar(&opts.to, "to", "", "upper bound flow_id for inclusive range")
+	fs.BoolVar(&opts.all, "all", false, "delete all proxy and replay history")
+
+	fs.Usage = func() {
+		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool proxy clear [options]
+
+Remove flows from proxy and replay history. Exactly one mode is required.
+Native proxy backend only; Burp returns an actionable error.
+
+Modes:
+  --flow <id>             delete a single flow
+  --before <id>           delete all flows before id (id itself kept)
+  --after <id>            delete all flows after id (id itself kept)
+  --from <id> --to <id>   inclusive range; either flag alone is open-ended
+  --all                   delete every flow
+`)
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	switch opts.modeCount() {
+	case 0:
+		fs.Usage()
+		return errors.New("a clear mode is required (--flow, --before, --after, --from/--to, or --all)")
+	case 1:
+		// ok
+	default:
+		fs.Usage()
+		return errors.New("clear modes are mutually exclusive")
+	}
+
+	return clear(mcpURL, opts)
 }

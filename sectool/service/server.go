@@ -18,6 +18,11 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
+// historyCounter is implemented by HttpBackends that expose their entry count for the `flows` metric.
+type historyCounter interface {
+	HistoryCount() int
+}
+
 const (
 	caCertFile = "ca.pem" // CA certificate filename in config directory
 )
@@ -55,9 +60,6 @@ type Server struct {
 	// Storage temp directory (shared by all spill stores)
 	storageTempDir string
 
-	// Flow ID mapping (ephemeral)
-	proxyIndex *store.ProxyIndex
-
 	// Replay history store (shared by both backends)
 	replayHistoryStore *store.ReplayHistoryStore
 
@@ -71,10 +73,8 @@ type Server struct {
 	ruleStorage store.Storage
 	// Responder storage (passed to native proxy backend)
 	responderStorage store.Storage
-
-	// proxyLastOffset tracks the highest offset seen across all proxy list queries.
-	// Enables "since=last" to show only new traffic since the last query.
-	proxyLastOffset atomic.Uint32
+	// Burp flow index storage (allocated lazily when burp backend is selected)
+	burpIdxStorage store.Storage
 
 	// lastFlowID tracks the last flow_id returned from proxy_poll flows mode.
 	// Used for "since=last" cursor to support both proxy and replay entries.
@@ -97,14 +97,10 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 	}
 
 	// Create per-store spill instances sharing the same temp directory
-	defaults := store.DefaultSpillStoreConfig()
-	defaults.Dir = storageTempDir
-	storeNames := []string{"pidx", "replay", "hist", "rule", "notes", "resp"}
+	storeNames := []string{"replay", "hist", "rule", "notes", "resp"}
 	stores := make([]store.Storage, len(storeNames))
 	for i, name := range storeNames {
-		cfg := defaults
-		cfg.FilePrefix = name
-		stores[i], err = store.NewSpillStore(cfg)
+		stores[i], err = newSpillStore(storageTempDir, name)
 		if err != nil {
 			// Close already-created stores
 			for j := 0; j < i; j++ {
@@ -114,7 +110,7 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 			return nil, fmt.Errorf("create %s storage: %w", name, err)
 		}
 	}
-	proxyIndexStorage, replayStorage, historyStorage, ruleStorage, notesStorage, responderStorage := stores[0], stores[1], stores[2], stores[3], stores[4], stores[5]
+	replayStorage, historyStorage, ruleStorage, notesStorage, responderStorage := stores[0], stores[1], stores[2], stores[3], stores[4]
 
 	s := &Server{
 		flagBurpMCPURL:     flags.BurpMCPURL,
@@ -128,7 +124,6 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 		started:            make(chan struct{}),
 		shutdownCh:         make(chan struct{}),
 		storageTempDir:     storageTempDir,
-		proxyIndex:         store.NewProxyIndex(proxyIndexStorage),
 		replayHistoryStore: store.NewReplayHistoryStore(replayStorage),
 		historyStorage:     historyStorage,
 		ruleStorage:        ruleStorage,
@@ -139,8 +134,6 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 		crawlerBackend:     cb,
 	}
 
-	// Register health metrics for store counts
-	s.RegisterHealthMetric("flows", func() string { return strconv.Itoa(s.proxyIndex.Count()) })
 	s.RegisterHealthMetric("replay_history", func() string { return strconv.Itoa(s.replayHistoryStore.Count()) })
 	s.RegisterHealthMetric("notes", func() string { return strconv.Itoa(s.noteStore.Count()) })
 
@@ -182,6 +175,9 @@ func (s *Server) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to setup HTTP backend: %w", err)
 		}
 	}
+	if hc, ok := s.httpBackend.(historyCounter); ok {
+		s.RegisterHealthMetric("flows", func() string { return strconv.Itoa(hc.HistoryCount()) })
+	}
 	if s.oastBackend == nil {
 		token := s.cfg.InteractshAuthToken
 		if token == "" {
@@ -192,7 +188,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.oastBackend = ib
 	}
 	if s.crawlerBackend == nil {
-		s.crawlerBackend = NewCollyBackend(s.cfg, s.proxyIndex, s.httpBackend)
+		s.crawlerBackend = NewCollyBackend(s.cfg, s.replayHistoryStore, s.httpBackend)
 	}
 
 	s.mcpServer = newMCPServer(s, s.mcpWorkflowMode)
@@ -236,11 +232,13 @@ func (s *Server) shutdown() error {
 	closeAsync("HttpBackend", s.httpBackend.Close)
 	closeAsync("OastBackend", s.oastBackend.Close)
 	closeAsync("CrawlerBackend", s.crawlerBackend.Close)
-	closeAsync("ProxyIndex", s.proxyIndex.Close)
 	closeAsync("ReplayHistoryStore", s.replayHistoryStore.Close)
 	closeAsync("NoteStore", s.noteStore.Close)
 	closeAsync("HistoryStorage", s.historyStorage.Close)
 	closeAsync("RuleStorage", s.ruleStorage.Close)
+	if s.burpIdxStorage != nil {
+		closeAsync("BurpIdxStorage", s.burpIdxStorage.Close)
+	}
 
 	wg.Wait()
 
@@ -265,6 +263,28 @@ func (s *Server) RequestShutdown() {
 	default:
 		close(s.shutdownCh)
 	}
+}
+
+// DeleteProxyHistory removes the supplied flow_ids from the proxy backend and the replay store.
+// Flow_ids referenced by any saved note are retained and returned in skippedNoted.
+// Each store silently ignores ids it doesn't own, so callers don't need to pre-route by source.
+func (s *Server) DeleteProxyHistory(ctx context.Context, flowIDs []string) (int, int, []string, error) {
+	if len(flowIDs) == 0 {
+		return 0, 0, nil, nil
+	}
+	skipped, candidates := s.noteStore.SplitReferencedFlows(flowIDs)
+	if len(candidates) == 0 {
+		return 0, 0, skipped, nil
+	}
+
+	// Proxy delete first: if the backend can't delete
+	// we don't want a half-applied state in the replay store
+	deletedProxy, err := s.httpBackend.DeleteProxyEntries(ctx, candidates)
+	if err != nil {
+		return 0, 0, skipped, err
+	}
+	deletedReplay := s.replayHistoryStore.Delete(candidates)
+	return deletedProxy, deletedReplay, skipped, nil
 }
 
 // loadOrCreateConfig loads config and applies CLI flag overrides.
@@ -336,16 +356,34 @@ func (s *Server) setupHttpBackend(ctx context.Context) error {
 	return nil
 }
 
-// connectBurpMCP establishes the connection to Burp MCP.
+// newSpillStore creates a per-store spill instance under the shared temp directory.
+func newSpillStore(tempDir, name string) (store.Storage, error) {
+	cfg := store.DefaultSpillStoreConfig()
+	cfg.Dir = tempDir
+	cfg.FilePrefix = name
+	return store.NewSpillStore(cfg)
+}
+
+// connectBurpMCP prepares burp storage and establishes the connection to Burp MCP.
 func (s *Server) connectBurpMCP(ctx context.Context) error {
 	burpURL := s.flagBurpMCPURL
 	if burpURL == "" {
 		burpURL = config.DefaultBurpMCPURL
 	}
 
-	var err error
-	s.httpBackend, err = ConnectBurpBackend(ctx, burpURL)
-	return err
+	burpIdx, err := newSpillStore(s.storageTempDir, "burp_idx")
+	if err != nil {
+		return fmt.Errorf("create burp_idx storage: %w", err)
+	}
+
+	backend, err := ConnectBurpBackend(ctx, burpURL, burpIdx)
+	if err != nil {
+		_ = burpIdx.Close()
+		return err
+	}
+	s.httpBackend = backend
+	s.burpIdxStorage = burpIdx
+	return nil
 }
 
 // startBuiltinProxy starts the native built-in proxy.

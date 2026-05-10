@@ -141,6 +141,11 @@ func TestMCP_ListTools(t *testing.T) {
 	for _, expected := range expectedTools {
 		assert.Contains(t, toolNames, expected)
 	}
+
+	// Internal/CLI-only tools must not appear in tools/list
+	for _, name := range toolNames {
+		assert.NotContains(t, name, InternalToolPrefix, "internal tool %s leaked into tools/list", name)
+	}
 }
 
 func TestMCP_MultiWorkflowHidesLastCursor(t *testing.T) {
@@ -191,24 +196,20 @@ func newMockHttpBackend() *mockHttpBackend {
 
 func (b *mockHttpBackend) Close() error { return nil }
 
-func (b *mockHttpBackend) GetProxyHistory(ctx context.Context, count int, offset uint32) ([]ProxyEntry, error) {
+func (b *mockHttpBackend) GetProxyHistory(ctx context.Context, count int, afterFlowID string) ([]ProxyEntry, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if int(offset) >= len(b.entries) {
+	startIdx := b.indexAfter(afterFlowID)
+	end := min(startIdx+count, len(b.entries))
+	if startIdx >= end {
 		return nil, nil
 	}
-	end := int(offset) + count
-	if end > len(b.entries) {
-		end = len(b.entries)
-	}
-	// Return copies to avoid mutation
-	result := slices.Clone(b.entries[offset:end])
-	return result, nil
+	return slices.Clone(b.entries[startIdx:end]), nil
 }
 
-func (b *mockHttpBackend) GetProxyHistoryMeta(ctx context.Context, count int, offset uint32) ([]ProxyEntryMeta, error) {
-	entries, err := b.GetProxyHistory(ctx, count, offset)
+func (b *mockHttpBackend) GetProxyHistoryMeta(ctx context.Context, count int, afterFlowID string) ([]ProxyEntryMeta, error) {
+	entries, err := b.GetProxyHistory(ctx, count, afterFlowID)
 	if err != nil {
 		return nil, err
 	}
@@ -218,15 +219,59 @@ func (b *mockHttpBackend) GetProxyHistoryMeta(ctx context.Context, count int, of
 		status := readResponseStatusCode([]byte(e.Response))
 		_, respBody := splitHeadersBody([]byte(e.Response))
 		result[i] = ProxyEntryMeta{
-			Method:   method,
-			Host:     host,
-			Path:     path,
-			Status:   status,
-			RespLen:  len(respBody),
-			Protocol: e.Protocol,
+			FlowID:    e.FlowID,
+			Timestamp: e.Timestamp,
+			Method:    method,
+			Host:      host,
+			Path:      path,
+			Status:    status,
+			RespLen:   len(respBody),
+			Protocol:  e.Protocol,
 		}
 	}
 	return result, nil
+}
+
+func (b *mockHttpBackend) GetProxyEntry(ctx context.Context, flowID string) (*ProxyEntry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for _, e := range b.entries {
+		if e.FlowID == flowID {
+			cp := e
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (b *mockHttpBackend) DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	wanted := make(map[string]bool, len(flowIDs))
+	for _, id := range flowIDs {
+		wanted[id] = true
+	}
+	before := len(b.entries)
+	b.entries = slices.DeleteFunc(b.entries, func(e ProxyEntry) bool {
+		return wanted[e.FlowID]
+	})
+	return before - len(b.entries), nil
+}
+
+// indexAfter returns the next index strictly after the given flow_id, or 0 if not found / empty.
+// Caller must hold b.mu.
+func (b *mockHttpBackend) indexAfter(afterFlowID string) int {
+	if afterFlowID == "" {
+		return 0
+	}
+	for i, e := range b.entries {
+		if e.FlowID == afterFlowID {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 func (b *mockHttpBackend) SendRequest(ctx context.Context, name string, req SendRequestInput) (*SendRequestResult, error) {
@@ -345,15 +390,19 @@ func (b *mockHttpBackend) ListResponders(ctx context.Context) ([]protocol.Respon
 
 // Test helper methods
 
-// AddProxyEntry adds an entry to the mock proxy history.
-func (b *mockHttpBackend) AddProxyEntry(request, response, notes string) {
+// AddProxyEntry adds an entry to the mock proxy history. Returns the minted flow_id.
+func (b *mockHttpBackend) AddProxyEntry(request, response, notes string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	flowID := ids.Generate(ids.DefaultLength)
 	b.entries = append(b.entries, ProxyEntry{
-		Request:  request,
-		Response: response,
-		Notes:    notes,
+		FlowID:    flowID,
+		Timestamp: time.Now().UTC(),
+		Request:   request,
+		Response:  response,
+		Notes:     notes,
 	})
+	return flowID
 }
 
 // SetSendResult queues a response for the next SendRequest call.
@@ -376,13 +425,6 @@ func (b *mockHttpBackend) LastSentRequest() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return string(b.lastSentReq)
-}
-
-// ClearProxyHistory clears all proxy history entries.
-func (b *mockHttpBackend) ClearProxyHistory() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.entries = nil
 }
 
 type mockOastBackend struct {
@@ -438,7 +480,7 @@ func (b *mockOastBackend) PollSession(ctx context.Context, idOrDomain string, si
 		return &OastPollResultInfo{Events: nil}, nil
 	}
 
-	start := 0
+	var start int
 	if since != "" && since != sinceLast {
 		for i, e := range events {
 			if e.ID == since {
