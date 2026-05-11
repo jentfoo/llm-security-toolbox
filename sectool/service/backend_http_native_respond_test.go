@@ -14,7 +14,7 @@ import (
 func TestNativeProxyBackend_AddResponder(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -39,7 +39,7 @@ func TestNativeProxyBackend_AddResponder(t *testing.T) {
 func TestNativeProxyBackend_AddResponder_DefaultStatus(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -54,7 +54,7 @@ func TestNativeProxyBackend_AddResponder_DefaultStatus(t *testing.T) {
 func TestNativeProxyBackend_DeleteResponder(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -88,7 +88,7 @@ func TestNativeProxyBackend_DeleteResponder(t *testing.T) {
 func TestNativeProxyBackend_ListResponders(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -118,7 +118,7 @@ func TestNativeProxyBackend_ListResponders(t *testing.T) {
 func TestNativeProxyBackend_InterceptRequest(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -175,7 +175,7 @@ func TestNativeProxyBackend_InterceptRequest(t *testing.T) {
 func TestNativeProxyBackend_InterceptRequest_AllMethods(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -198,8 +198,9 @@ func TestNativeProxyBackend_Responder_Persistence(t *testing.T) {
 	t.Parallel()
 
 	respStorage := store.NewMemStorage()
+	provider := sharedMemProvider("resp", respStorage)
 
-	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), respStorage, proxy.TimeoutConfig{})
+	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 
 	_, err = backend1.AddResponder(t.Context(), protocol.ResponderEntry{
@@ -211,8 +212,8 @@ func TestNativeProxyBackend_Responder_Persistence(t *testing.T) {
 	require.NoError(t, err)
 	_ = backend1.Close()
 
-	// Create new backend with same storage
-	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), respStorage, proxy.TimeoutConfig{})
+	// New backend over the same responder storage should load persisted responders.
+	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend2.Close() })
 
@@ -231,7 +232,7 @@ func TestNativeProxyBackend_Responder_Persistence(t *testing.T) {
 func TestNativeProxyBackend_Responder_LabelUniqueness(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -66,12 +67,28 @@ var _ ResponderBackend = (*NativeProxyBackend)(nil)
 
 // NewNativeProxyBackend creates a new native proxy backend.
 // Does NOT start serving - call Serve() separately (typically in a goroutine).
-// historyStorage is the storage backend for proxy history entries.
-// ruleStorage is the storage backend for persisting find/replace rules.
-// responderStorage is the storage backend for persisting proxy responders.
-func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, historyStorage store.Storage, ruleStorage store.Storage, responderStorage store.Storage, timeouts proxy.TimeoutConfig) (*NativeProxyBackend, error) {
+func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, storage store.Provider, timeouts proxy.TimeoutConfig) (*NativeProxyBackend, error) {
+	historyStorage, err := storage("hist")
+	if err != nil {
+		return nil, fmt.Errorf("history storage: %w", err)
+	}
+	ruleStorage, err := storage("rule")
+	if err != nil {
+		_ = historyStorage.Close()
+		return nil, fmt.Errorf("rule storage: %w", err)
+	}
+	responderStorage, err := storage("resp")
+	if err != nil {
+		_ = historyStorage.Close()
+		_ = ruleStorage.Close()
+		return nil, fmt.Errorf("responder storage: %w", err)
+	}
+
 	server, err := proxy.NewProxyServer(port, configDir, maxBodyBytes, historyStorage, timeouts)
 	if err != nil {
+		_ = historyStorage.Close()
+		_ = ruleStorage.Close()
+		_ = responderStorage.Close()
 		return nil, fmt.Errorf("create proxy server: %w", err)
 	}
 
@@ -82,15 +99,16 @@ func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, history
 		responderStorage: responderStorage,
 	}
 
-	// Load persisted rules
 	if b.httpRules, err = b.loadRuleList(ruleKeyHTTP); err != nil {
+		_ = b.Close()
 		return nil, fmt.Errorf("load HTTP rules: %w", err)
 	} else if b.wsRules, err = b.loadRuleList(ruleKeyWS); err != nil {
+		_ = b.Close()
 		return nil, fmt.Errorf("load WebSocket rules: %w", err)
 	}
 
-	// Load persisted responders
 	if b.responders, err = b.loadResponders(); err != nil {
+		_ = b.Close()
 		return nil, fmt.Errorf("load responders: %w", err)
 	}
 
@@ -163,7 +181,11 @@ func (b *NativeProxyBackend) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	return b.server.Shutdown(ctx)
+	return errors.Join(
+		b.server.Shutdown(ctx),
+		b.ruleStorage.Close(),
+		b.responderStorage.Close(),
+	)
 }
 
 // CACert returns the CA certificate used for MITM TLS interception.

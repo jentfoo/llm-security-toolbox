@@ -336,10 +336,10 @@ func newTestBurpBackend(t *testing.T) (*BurpBackend, *TestMCPServer) {
 	mockServer := NewTestMCPServer(t)
 	client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(0))
 	require.NoError(t, client.Connect(t.Context()))
-	t.Cleanup(func() { _ = client.Close() })
-	storage := store.NewMemStorage()
-	t.Cleanup(func() { _ = storage.Close() })
-	return NewBurpBackend(client, storage), mockServer
+	backend, err := NewBurpBackend(client, store.MemProvider)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+	return backend, mockServer
 }
 
 func TestBurpBackendSendRequest(t *testing.T) {

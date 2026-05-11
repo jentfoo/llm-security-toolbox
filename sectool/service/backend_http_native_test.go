@@ -21,10 +21,25 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/testutil"
 )
 
+// sharedMemProvider returns a Provider that returns the shared stoarage for `name`, and fresh storages for others.
+// Used by persistence tests that load a second backend against the same storage.
+func sharedMemProvider(name string, shared store.Storage) store.Provider {
+	return func(key string) (store.Storage, error) {
+		if key == name {
+			return nonClosingStorage{Storage: shared}, nil
+		}
+		return store.NewMemStorage(), nil
+	}
+}
+
+type nonClosingStorage struct{ store.Storage }
+
+func (nonClosingStorage) Close() error { return nil }
+
 func TestNativeProxyBackend_CreateAndServe(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 
 	go func() { _ = backend.Serve() }()
@@ -46,7 +61,7 @@ func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	// Start native proxy backend
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	go func() { _ = backend.Serve() }()
 	t.Cleanup(func() { _ = backend.Close() })
@@ -87,7 +102,7 @@ func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	// Start native proxy backend
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	go func() { _ = backend.Serve() }()
 	t.Cleanup(func() { _ = backend.Close() })
@@ -123,7 +138,7 @@ func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
 func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -159,9 +174,9 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 	t.Parallel()
 
 	ruleStorage := store.NewMemStorage()
+	provider := sharedMemProvider("rule", ruleStorage)
 
-	// Create backend and add rules
-	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), ruleStorage, store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 
 	_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
@@ -184,8 +199,8 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 
 	require.NoError(t, backend1.Close())
 
-	// Create new backend with same ruleStorage - rules should be loaded
-	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), ruleStorage, store.NewMemStorage(), proxy.TimeoutConfig{})
+	// New backend over the same rule storage should load persisted rules.
+	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend2.Close() })
 
@@ -210,8 +225,9 @@ func TestNativeProxyBackend_Rules_DeletePersists(t *testing.T) {
 	t.Parallel()
 
 	ruleStorage := store.NewMemStorage()
+	provider := sharedMemProvider("rule", ruleStorage)
 
-	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), ruleStorage, store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 
 	_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
@@ -230,7 +246,7 @@ func TestNativeProxyBackend_Rules_DeletePersists(t *testing.T) {
 	require.NoError(t, backend1.Close())
 
 	// New backend should only see the surviving rule
-	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), ruleStorage, store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend2.Close() })
 
@@ -243,7 +259,7 @@ func TestNativeProxyBackend_Rules_DeletePersists(t *testing.T) {
 func TestNativeProxyBackend_Rules_LabelUniqueness(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -272,7 +288,7 @@ func TestNativeProxyBackend_Rules_LabelUniqueness(t *testing.T) {
 func TestNativeProxyBackend_Rules_InvalidType(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -289,7 +305,7 @@ func TestNativeProxyBackend_Rules_InvalidType(t *testing.T) {
 func TestNativeProxyBackend_Rules_Regex(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -330,7 +346,7 @@ func TestNativeProxyBackend_SendRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create backend (doesn't need to serve for SendRequest)
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -371,7 +387,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		serverURL, err := url.Parse(testServer.URL)
 		require.NoError(t, err)
 
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -410,7 +426,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		serverURL, err := url.Parse(testServer.URL)
 		require.NoError(t, err)
 
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -442,7 +458,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		serverURL, err := url.Parse(testServer.URL)
 		require.NoError(t, err)
 
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -473,7 +489,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 func TestNativeProxyBackend_Close(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	go func() { _ = backend.Serve() }()
 	require.NoError(t, backend.WaitReady(t.Context()))
@@ -499,7 +515,7 @@ func TestNativeProxyBackend_HTTPS_Proxy(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	// Start native proxy backend
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	go func() { _ = backend.Serve() }()
 	t.Cleanup(func() { _ = backend.Close() })
@@ -550,7 +566,7 @@ func TestApplyRequestRules(t *testing.T) {
 	configDir := t.TempDir() // shared so CA cert is generated once
 
 	t.Run("header_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -579,7 +595,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("header_regex", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -608,7 +624,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("body_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -640,7 +656,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("no_matching_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -669,7 +685,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("strips_unsupported_accept_encoding", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -698,7 +714,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("preserves_accept_encoding", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -726,7 +742,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("multiple_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -765,7 +781,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("empty_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -795,7 +811,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("compressed_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -841,7 +857,7 @@ func TestApplyResponseRules(t *testing.T) {
 	configDir := t.TempDir() // shared so CA cert is generated once
 
 	t.Run("header_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -870,7 +886,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("body_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -901,7 +917,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("compressed_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -939,7 +955,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("brotli_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -975,7 +991,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("invalid_brotli_skips_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1009,7 +1025,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("multiple_encoding_skips_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1050,7 +1066,7 @@ func TestApplyWSRules(t *testing.T) {
 	configDir := t.TempDir() // shared so CA cert is generated once
 
 	t.Run("to_server", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1076,7 +1092,7 @@ func TestApplyWSRules(t *testing.T) {
 	})
 
 	t.Run("to_client", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1102,7 +1118,7 @@ func TestApplyWSRules(t *testing.T) {
 	})
 
 	t.Run("both_directions", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1127,7 +1143,7 @@ func TestApplyWSRules(t *testing.T) {
 	})
 
 	t.Run("regex", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1273,7 +1289,7 @@ func TestApplyRequestBodyOnlyRules(t *testing.T) {
 	configDir := t.TempDir() // shared so CA cert is generated once
 
 	t.Run("compression", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1306,7 +1322,7 @@ func TestApplyRequestBodyOnlyRules(t *testing.T) {
 	})
 
 	t.Run("invalid_compressed", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
@@ -1333,7 +1349,7 @@ func TestApplyRequestBodyOnlyRules(t *testing.T) {
 	})
 
 	t.Run("no_encoding", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 

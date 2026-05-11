@@ -50,21 +50,15 @@ type Server struct {
 	// Storage temp directory (shared by all spill stores)
 	storageTempDir string
 
-	// Replay history store (shared by both backends)
+	// storageProvider allocates per-backend Storage instances under storageTempDir.
+	storageProvider store.Provider
+
+	// Replay history store (shared across backends and tool handlers)
 	replayHistoryStore *store.ReplayHistoryStore
 
 	// Notes store
 	noteStore    *store.NoteStore
 	notesEnabled bool
-
-	// Proxy history storage (passed to native proxy backend)
-	historyStorage store.Storage
-	// Rule storage (passed to native proxy backend)
-	ruleStorage store.Storage
-	// Responder storage (passed to native proxy backend)
-	responderStorage store.Storage
-	// Burp flow index storage (allocated lazily when burp backend is selected)
-	burpIdxStorage store.Storage
 
 	// lastFlowID tracks the last flow_id returned from proxy_poll flows mode.
 	// Used for "since=last" cursor to support both proxy and replay entries.
@@ -80,27 +74,26 @@ type Server struct {
 // NewServer creates a new MCP server instance with optional backends.
 // If a backend is nil, Run initializes the default implementation.
 func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerBackend) (*Server, error) {
-	// Create shared temp directory for all spill stores
 	storageTempDir, err := os.MkdirTemp("", "sectool-spill-*")
 	if err != nil {
 		return nil, fmt.Errorf("create storage temp dir: %w", err)
 	}
-
-	// Create per-store spill instances sharing the same temp directory
-	storeNames := []string{"replay", "hist", "rule", "notes", "resp"}
-	stores := make([]store.Storage, len(storeNames))
-	for i, name := range storeNames {
-		stores[i], err = newSpillStore(storageTempDir, name)
-		if err != nil {
-			// Close already-created stores
-			for j := 0; j < i; j++ {
-				_ = stores[j].Close()
-			}
-			_ = os.RemoveAll(storageTempDir)
-			return nil, fmt.Errorf("create %s storage: %w", name, err)
-		}
+	storageProvider := func(name string) (store.Storage, error) {
+		return newSpillStore(storageTempDir, name)
 	}
-	replayStorage, historyStorage, ruleStorage, notesStorage, responderStorage := stores[0], stores[1], stores[2], stores[3], stores[4]
+
+	// Cross-cutting stores allocated
+	replayStorage, err := storageProvider("replay")
+	if err != nil {
+		_ = os.RemoveAll(storageTempDir)
+		return nil, fmt.Errorf("create replay storage: %w", err)
+	}
+	notesStorage, err := storageProvider("notes")
+	if err != nil {
+		_ = replayStorage.Close()
+		_ = os.RemoveAll(storageTempDir)
+		return nil, fmt.Errorf("create notes storage: %w", err)
+	}
 
 	s := &Server{
 		flagBurpMCPURL:     flags.BurpMCPURL,
@@ -113,10 +106,8 @@ func NewServer(flags MCPServerFlags, hb HttpBackend, ob OastBackend, cb CrawlerB
 		started:            make(chan struct{}),
 		shutdownCh:         make(chan struct{}),
 		storageTempDir:     storageTempDir,
+		storageProvider:    storageProvider,
 		replayHistoryStore: store.NewReplayHistoryStore(replayStorage),
-		historyStorage:     historyStorage,
-		ruleStorage:        ruleStorage,
-		responderStorage:   responderStorage,
 		noteStore:          store.NewNoteStore(notesStorage),
 		httpBackend:        hb,
 		oastBackend:        ob,
@@ -217,11 +208,6 @@ func (s *Server) shutdown() error {
 	closeAsync("CrawlerBackend", s.crawlerBackend.Close)
 	closeAsync("ReplayHistoryStore", s.replayHistoryStore.Close)
 	closeAsync("NoteStore", s.noteStore.Close)
-	closeAsync("HistoryStorage", s.historyStorage.Close)
-	closeAsync("RuleStorage", s.ruleStorage.Close)
-	if s.burpIdxStorage != nil {
-		closeAsync("BurpIdxStorage", s.burpIdxStorage.Close)
-	}
 
 	wg.Wait()
 
@@ -340,25 +326,18 @@ func newSpillStore(tempDir, name string) (store.Storage, error) {
 	return store.NewSpillStore(cfg)
 }
 
-// connectBurpMCP prepares burp storage and establishes the connection to Burp MCP.
+// connectBurpMCP establishes the connection to Burp MCP.
 func (s *Server) connectBurpMCP(ctx context.Context) error {
 	burpURL := s.flagBurpMCPURL
 	if burpURL == "" {
 		burpURL = config.DefaultBurpMCPURL
 	}
 
-	burpIdx, err := newSpillStore(s.storageTempDir, "burp_idx")
+	backend, err := ConnectBurpBackend(ctx, burpURL, s.storageProvider)
 	if err != nil {
-		return fmt.Errorf("create burp_idx storage: %w", err)
-	}
-
-	backend, err := ConnectBurpBackend(ctx, burpURL, burpIdx)
-	if err != nil {
-		_ = burpIdx.Close()
 		return err
 	}
 	s.httpBackend = backend
-	s.burpIdxStorage = burpIdx
 	return nil
 }
 
@@ -371,7 +350,7 @@ func (s *Server) startBuiltinProxy() error {
 		WriteTimeout: time.Duration(s.cfg.Proxy.WriteTimeoutSecs) * time.Second,
 	}
 
-	backend, err := NewNativeProxyBackend(s.proxyPort, configDir, s.cfg.MaxBodyBytes, s.historyStorage, s.ruleStorage, s.responderStorage, timeouts)
+	backend, err := NewNativeProxyBackend(s.proxyPort, configDir, s.cfg.MaxBodyBytes, s.storageProvider, timeouts)
 	if err != nil {
 		return fmt.Errorf("start built-in proxy: %w", err)
 	}

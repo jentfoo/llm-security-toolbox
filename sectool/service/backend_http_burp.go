@@ -37,26 +37,38 @@ var ErrConfigEditDisabled = errors.New("config editing disabled")
 
 // BurpBackend implements HttpBackend using Burp Suite via MCP.
 type BurpBackend struct {
-	client    *mcp.BurpClient
-	flowIndex *burpFlowIndex
+	client     *mcp.BurpClient
+	flowIndex  *burpFlowIndex
+	idxStorage store.Storage
 }
 
 // Compile-time check that BurpBackend implements HttpBackend
 var _ HttpBackend = (*BurpBackend)(nil)
 
 // ConnectBurpBackend creates a new Burp HttpBackend with the given MCP URL.
-// storage backs the offset<->flow_id index for the lifetime of the backend.
-func ConnectBurpBackend(ctx context.Context, url string, storage store.Storage, opts ...mcp.Option) (*BurpBackend, error) {
-	backend := NewBurpBackend(mcp.New(url, opts...), storage)
-	return backend, backend.Connect(ctx)
+func ConnectBurpBackend(ctx context.Context, url string, storage store.Provider, opts ...mcp.Option) (*BurpBackend, error) {
+	backend, err := NewBurpBackend(mcp.New(url, opts...), storage)
+	if err != nil {
+		return nil, err
+	}
+	if err := backend.Connect(ctx); err != nil {
+		_ = backend.Close()
+		return nil, err
+	}
+	return backend, nil
 }
 
-// NewBurpBackend creates a new Burp HttpBackend with the given MCP client and index storage.
-func NewBurpBackend(client *mcp.BurpClient, storage store.Storage) *BurpBackend {
-	return &BurpBackend{
-		client:    client,
-		flowIndex: newBurpFlowIndex(storage),
+// NewBurpBackend creates a new Burp HttpBackend with the given MCP client.
+func NewBurpBackend(client *mcp.BurpClient, storage store.Provider) (*BurpBackend, error) {
+	idx, err := storage("burp_idx")
+	if err != nil {
+		return nil, fmt.Errorf("burp index storage: %w", err)
 	}
+	return &BurpBackend{
+		client:     client,
+		flowIndex:  newBurpFlowIndex(idx),
+		idxStorage: idx,
+	}, nil
 }
 
 // burpFlowIndex maps Burp offsets, observation timestamps, and request fingerprints to flow_ids.
@@ -297,7 +309,7 @@ func (b *BurpBackend) Connect(ctx context.Context) error {
 }
 
 func (b *BurpBackend) Close() error {
-	return b.client.Close()
+	return errors.Join(b.client.Close(), b.idxStorage.Close())
 }
 
 func (b *BurpBackend) GetProxyHistory(ctx context.Context, count int, afterFlowID string) ([]ProxyEntry, error) {

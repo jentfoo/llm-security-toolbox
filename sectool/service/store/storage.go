@@ -18,6 +18,15 @@ type Storage interface {
 	Close() error
 }
 
+// Provider allocates a named Storage instance.
+// Backends call this in their constructor and own Close on returned stores.
+type Provider func(name string) (Storage, error)
+
+// MemProvider returns a fresh in-memory Storage for every name.
+func MemProvider(string) (Storage, error) {
+	return NewMemStorage(), nil
+}
+
 type memStorage struct {
 	mu   sync.Mutex
 	data map[string][]byte

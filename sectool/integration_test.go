@@ -69,12 +69,13 @@ func createBackend(t *testing.T, backendType httpBackendType) (service.HttpBacke
 	switch backendType {
 	case backendBurp:
 		burpClient := connectBurpOrSkip(t)
-		burpIdx := store.NewMemStorage()
-		t.Cleanup(func() { _ = burpIdx.Close() })
-		return service.NewBurpBackend(burpClient, burpIdx), config.DefaultBurpProxyAddr
+		backend, err := service.NewBurpBackend(burpClient, store.MemProvider)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+		return backend, config.DefaultBurpProxyAddr
 
 	case backendNative:
-		backend, err := service.NewNativeProxyBackend(0, t.TempDir(), 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := service.NewNativeProxyBackend(0, t.TempDir(), 0, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 		go func() { _ = backend.Serve() }()
@@ -749,7 +750,7 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 
 	// Setup native backend
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 	// Start proxy server in background
@@ -1017,7 +1018,7 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 
 	// Setup native backend
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -1713,7 +1714,7 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -1853,7 +1854,7 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -2031,7 +2032,7 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -2169,7 +2170,7 @@ func TestIntegration_ForceFlag(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -2277,7 +2278,7 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 	t.Cleanup(normalServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -2502,7 +2503,7 @@ func TestIntegration_ContentLengthMismatch(t *testing.T) {
 	t.Cleanup(normalServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -2714,7 +2715,7 @@ func TestIntegration_ConnectionErrors(t *testing.T) {
 	t.Parallel()
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -2763,7 +2764,7 @@ func TestIntegration_TimeoutHandling(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -3028,7 +3029,7 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -3428,7 +3429,7 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -3542,7 +3543,7 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -3702,7 +3703,7 @@ func TestIntegration_WebSocketBinaryFrames(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -3822,7 +3823,7 @@ func TestIntegration_WebSocketPingPong(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	configDir := t.TempDir()
-	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+	backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
 
@@ -3954,7 +3955,7 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 	// Only test with native backend (Burp may handle compression differently)
 	t.Run("native", func(t *testing.T) {
 		configDir := t.TempDir()
-		backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.NewMemStorage(), store.NewMemStorage(), store.NewMemStorage(), proxy.TimeoutConfig{})
+		backend, err := service.NewNativeProxyBackend(0, configDir, 0, store.MemProvider, proxy.TimeoutConfig{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close() })
 
