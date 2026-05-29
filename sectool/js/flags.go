@@ -11,9 +11,13 @@ import (
 // Parse handles the "sectool js" command.
 func Parse(args []string, mcpURL string) error {
 	fs := pflag.NewFlagSet("js", pflag.ContinueOnError)
+	origin := fs.String("origin", "same-origin",
+		`endpoint scope: "same-origin", "summary", "full", or a comma-separated host set`)
+	includeAssets := fs.Bool("include-assets", false,
+		"include static-asset references (.js/.css/fonts/images) dropped by default")
 
 	fs.Usage = func() {
-		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool js <flow_id>
+		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool js [--origin MODE] <flow_id>
 
 Extract the API surface from a JavaScript or HTML response flow.
 
@@ -25,8 +29,16 @@ recent matching proxy flow when one exists.
 Arguments:
   <flow_id>    Flow ID (from proxy, replay, or crawl)
 
+Flags:
+  --origin           Endpoint scope (default "same-origin"): "same-origin",
+                     "summary", "full", or a comma-separated host set
+  --include-assets   Include static-asset references (.js/.css/fonts/images)
+                     that are dropped by default
+
 Examples:
   sectool js f7k2x
+  sectool js --origin summary f7k2x
+  sectool js --include-assets f7k2x
 `)
 	}
 
@@ -40,5 +52,5 @@ Examples:
 		return errors.New("flow_id required: sectool js <flow_id>")
 	}
 
-	return run(mcpURL, posArgs[0])
+	return run(mcpURL, posArgs[0], *origin, *includeAssets)
 }

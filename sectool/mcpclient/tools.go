@@ -493,9 +493,17 @@ func (c *Client) FindReflected(ctx context.Context, flowID string) (*protocol.Fi
 	return &resp, nil
 }
 
-// JSAnalyze calls js_analyze and returns the extracted JS/HTML API surface.
-func (c *Client) JSAnalyze(ctx context.Context, flowID string) (*protocol.JSAnalyzeResponse, error) {
+// JSAnalyze calls js_analyze and returns the extracted JS/HTML API surface. origin selects
+// the endpoint scope ("same-origin" (default), "summary", "full", or a host set).
+// includeAssets keeps static-asset references that are otherwise dropped as noise.
+func (c *Client) JSAnalyze(ctx context.Context, flowID, origin string, includeAssets bool) (*protocol.JSAnalyzeResponse, error) {
 	args := map[string]interface{}{"flow_id": flowID}
+	if origin != "" {
+		args["origin"] = origin
+	}
+	if includeAssets {
+		args["include_assets"] = true
+	}
 	var resp protocol.JSAnalyzeResponse
 	if err := c.CallToolJSON(ctx, "js_analyze", args, &resp); err != nil {
 		return nil, err

@@ -47,14 +47,11 @@ func TestScanStringLiterals(t *testing.T) {
 		assert.Contains(t, got, "plain")
 	})
 
-	t.Run("interpolated_template_parts_skipped", func(t *testing.T) {
-		// Only StringToken / TemplateToken (whole-template) are captured; the
-		// Start/Middle/End fragments of an interpolated template are emitted as
-		// different token types and intentionally ignored — the AST visitor
-		// reconstructs them with ${...} placeholders.
+	t.Run("interpolated_template_reconstructed", func(t *testing.T) {
+		// Interpolated templates are reconstructed with ${...} markers so the
+		// value matches the AST's staticString output and dedupes against it.
 		got := scanStringLiterals([]byte("var s = `pre${x}post`;"))
-		assert.NotContains(t, got, "pre")
-		assert.NotContains(t, got, "post")
+		assert.Contains(t, got, "pre${...}post")
 	})
 
 	t.Run("ignores_numeric_and_identifiers", func(t *testing.T) {

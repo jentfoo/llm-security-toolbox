@@ -1,5 +1,3 @@
-// Package js extracts API surface (endpoints, routes, WebSocket URLs, URL literals)
-// from JavaScript and HTML responses using the tdewolff/parse JS parser.
 package js
 
 import (
@@ -24,24 +22,58 @@ func parseSource(src []byte) parseResult {
 	return parseResult{ast: ast, err: err}
 }
 
-// scanStringLiterals returns every string and template literal value in src.
-// Used as a tolerant fallback when AST parsing fails.
+// maxScanResumes bounds how many times scanStringLiterals restarts after a lexer
+// error, guarding against O(n²) work on pathological (e.g. binary) input.
+const maxScanResumes = 1024
+
+// scanStringLiterals returns the decoded value of every string and template literal
+// in src. Used both for secret detection and as the source for URL extraction; only
+// lexer-identified strings are returned, so regex literals, division, and comments are
+// excluded by construction. Template interpolation fragments are included so
+// `${x}/api/y` contributes its literal pieces. The lexer halts at the first malformed
+// or truncated token, so on error the scan skips the offending byte and resumes.
 func scanStringLiterals(src []byte) []string {
-	l := js.NewLexer(parse.NewInputBytes(src))
 	var out []string
-	for {
-		tt, data := l.Next()
-		switch tt {
-		case js.ErrorToken:
-			return out
-		case js.StringToken, js.TemplateToken:
-			// TemplateToken covers every template-literal fragment; unquote
-			// handles each delimiter shape (`...`, `...${, }...${, }...`).
-			if s, ok := unquote(data); ok {
-				out = append(out, s)
+	for resumes := 0; len(src) > 0; resumes++ {
+		l := js.NewLexer(parse.NewInputBytes(src))
+		var consumed int
+		var tmpl []string // stack of in-progress interpolated-template buffers
+		for {
+			tt, data := l.Next()
+			if tt == js.ErrorToken {
+				break
 			}
+			switch tt {
+			case js.StringToken, js.TemplateToken:
+				// unquote handles each delimiter shape (`...`, `...${, }...${, }...`)
+				if s, ok := unquote(data); ok {
+					out = append(out, s)
+				}
+			case js.TemplateStartToken:
+				s, _ := unquote(data)
+				tmpl = append(tmpl, s+"${...}")
+			case js.TemplateMiddleToken:
+				if n := len(tmpl); n > 0 {
+					s, _ := unquote(data)
+					tmpl[n-1] += s + "${...}"
+				}
+			case js.TemplateEndToken:
+				// Reconstruct the full interpolated template with ${...} markers,
+				// matching the AST's staticString output so the two dedupe.
+				if n := len(tmpl); n > 0 {
+					s, _ := unquote(data)
+					out = append(out, tmpl[n-1]+s)
+					tmpl = tmpl[:n-1]
+				}
+			}
+			consumed += len(data)
 		}
+		if consumed >= len(src) || resumes >= maxScanResumes {
+			break // clean EOF, or give up after too many malformed tokens
+		}
+		src = src[consumed+1:] // skip the byte that stalled the lexer, then resume
 	}
+	return out
 }
 
 // unquote strips delimiters from a string or template-literal token's raw data.

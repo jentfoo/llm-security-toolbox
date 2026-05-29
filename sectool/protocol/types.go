@@ -523,31 +523,40 @@ type Reflection struct {
 
 // JSAnalyzeResponse is the response for js_analyze.
 type JSAnalyzeResponse struct {
-	Source          string              `json:"source"` // "javascript" | "html-inline" | "html"
-	Stats           JSAnalyzeStats      `json:"stats"`
-	Endpoints       []ExtractedEndpoint `json:"endpoints,omitempty"`
-	Routes          []ExtractedRoute    `json:"routes,omitempty"`
-	Secrets         []ExtractedSecret   `json:"secrets,omitempty"`
-	ExternalScripts []string            `json:"external_scripts,omitempty"`
-	SourceMaps      []string            `json:"source_maps,omitempty"`
-	Warnings        []string            `json:"warnings,omitempty"`
+	Source        string              `json:"source"` // "javascript" | "html-inline" | "html"
+	Stats         JSAnalyzeStats      `json:"stats"`
+	Endpoints     []ExtractedEndpoint `json:"endpoints,omitempty"`
+	Routes        []ExtractedRoute    `json:"routes,omitempty"`
+	Secrets       []ExtractedSecret   `json:"secrets,omitempty"`
+	ScriptSrc     []string            `json:"script_src,omitempty"`
+	SourceMaps    []string            `json:"source_maps,omitempty"`
+	OriginSummary []OriginCount       `json:"origin_summary,omitempty"`
+	Warnings      []string            `json:"warnings,omitempty"`
 }
 
-// JSAnalyzeStats summarizes parse-time metrics.
+// OriginCount is a per-host endpoint tally, used by the "summary" origin mode to
+// guide which origins to request in follow-up calls.
+type OriginCount struct {
+	Origin string `json:"origin"`
+	Count  int    `json:"count"`
+}
+
+// JSAnalyzeStats summarizes extraction metrics.
 type JSAnalyzeStats struct {
 	InputBytes   int `json:"input_bytes"`
 	ScriptBlocks int `json:"script_blocks,omitempty"`
-	ParseErrors  int `json:"parse_errors,omitempty"`
 }
 
-// ExtractedEndpoint is a URL referenced by JS code: a call site, a WebSocket
-// argument, or a bare URL-shaped literal. Library names the origin and doubles
-// as a confidence signal, where "literal" is the weakest.
+// ExtractedEndpoint is a URL referenced by JS code: a call site, a WebSocket argument, or a bare URL-shaped literal.
 type ExtractedEndpoint struct {
-	Method   string `json:"method,omitempty"`    // GET/POST/... if statically determinable
-	URL      string `json:"url"`                 // template form; preserves ${...} placeholders
-	Library  string `json:"library,omitempty"`   // "fetch" | "xhr" | "axios" | "jquery" | "navigation" | "websocket" | "eventsource" | "beacon" | "import" | "literal"
-	LastFlow string `json:"last_flow,omitempty"` // most recent proxy flow_id matching the URL
+	Method string `json:"method,omitempty"` // GET/POST/... if statically determinable
+	URL    string `json:"url"`              // template form; preserves ${...} placeholders
+	// Library provides the endpoint discovery point name and doubles as a confidence signal. Possible options are
+	// "fetch" | "xhr" | "axios" | "jquery" | "navigation" | "websocket" | "eventsource" | "beacon" | "import" | "literal",
+	// where "literal" (not tied to a known sink) is the weakest.
+	Library string `json:"library,omitempty"`
+	// LastFlow is the most recent proxy flow_id matching the URL.
+	LastFlow string `json:"last_flow,omitempty"`
 }
 
 // ExtractedRoute is a client-side route definition.

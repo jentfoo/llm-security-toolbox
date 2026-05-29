@@ -13,7 +13,7 @@ func TestAnalyzeJS(t *testing.T) {
 		cases := []struct {
 			name string
 			src  string
-			// "<library> <method> <url>" for endpoints (method "" elided after space split).
+			// "<library> <method> <url>" for endpoints (method "" elided after space split)
 			endpoints []string
 			routes    []string
 		}{
@@ -99,10 +99,11 @@ xhr.open('POST', '/api/p');
 			},
 			{
 				name: "open_without_xhr_binding",
-				src:  `cache.open('GET', '/api/x');`,
+				// Not bound to XMLHttpRequest, so not "xhr"; but ("GET", url) is a
+				// confident method+URL shape, captured as a generic request.
+				src: `cache.open('GET', '/api/x');`,
 				endpoints: []string{
-					// /api/x is still picked up as a URL-shaped literal, but not as xhr.
-					"literal  /api/x",
+					"request GET /api/x",
 				},
 			},
 			{
@@ -112,7 +113,7 @@ let xhr = somethingElse();
 xhr.open('GET', '/api/x');
 `,
 				endpoints: []string{
-					"literal  /api/x",
+					"request GET /api/x",
 				},
 			},
 			{
@@ -187,7 +188,7 @@ xhr.open('GET', '/api/x');
 				name: "string_replace_not_navigation",
 				src:  `var s = 'a'; s.replace('/x/y', 'z');`,
 				endpoints: []string{
-					// receiver is not a location object: /x/y is only a URL-shaped literal.
+					// receiver is not a location object: /x/y is only a URL-shaped literal
 					"literal  /x/y",
 				},
 			},
@@ -348,7 +349,7 @@ router.push('/users');
 				name: "bare_history_push_rejected",
 				src:  `history.push('/login');`,
 				endpoints: []string{
-					// Without router-library evidence, the path is only a URL-shaped literal.
+					// Without router-library evidence, the path is only a URL-shaped literal
 					"literal  /login",
 				},
 			},
@@ -440,12 +441,26 @@ fetch('/api/modern');
 		src := `fetch('/api/before'); function (`
 		r := AnalyzeJS([]byte(src))
 		assert.Positive(t, r.ParseErrors)
-		assert.NotEmpty(t, r.Warnings)
 		urls := make([]string, 0, len(r.Endpoints))
 		for _, e := range r.Endpoints {
 			urls = append(urls, e.URL)
 		}
 		assert.Contains(t, urls, "/api/before")
+	})
+
+	t.Run("recovers_on_truncated_body", func(t *testing.T) {
+		// Body truncation halts the lexer. The scan recovers the literals lexed before the corruption;
+		// an unterminated string shifts quote pairing for everything after it, so trailing paths may be lost.
+		src := `fetch("/api/login"); var ok="/api/ready"; var bad="https://x.com/` + "\n" +
+			`q"}; var u="/api/users";`
+		r := AnalyzeJS([]byte(src))
+		assert.Positive(t, r.ParseErrors)
+		urls := make([]string, 0, len(r.Endpoints))
+		for _, e := range r.Endpoints {
+			urls = append(urls, e.URL)
+		}
+		assert.Contains(t, urls, "/api/login")
+		assert.Contains(t, urls, "/api/ready")
 	})
 
 	t.Run("dedupes_endpoints", func(t *testing.T) {
@@ -570,7 +585,7 @@ func TestAnalyzeHTML(t *testing.T) {
 
 		r := AnalyzeHTML([]byte(src))
 		assert.Equal(t, SourceHTMLInline, r.Source)
-		assert.Equal(t, []string{"https://cdn.example/app.js"}, r.ExternalScripts)
+		assert.Equal(t, []string{"https://cdn.example/app.js"}, r.ScriptSrc)
 
 		var fetched, socketed []string
 		for _, e := range r.Endpoints {
@@ -595,14 +610,14 @@ func TestAnalyzeHTML(t *testing.T) {
 </head></html>`
 		r := AnalyzeHTML([]byte(src))
 		assert.Equal(t, SourceHTML, r.Source)
-		assert.Equal(t, []string{"/a.js", "/b.js"}, r.ExternalScripts)
+		assert.Equal(t, []string{"/a.js", "/b.js"}, r.ScriptSrc)
 		assert.Empty(t, r.Endpoints)
 	})
 
 	t.Run("no_scripts", func(t *testing.T) {
 		r := AnalyzeHTML([]byte(`<html><body><p>hi</p></body></html>`))
 		assert.Equal(t, SourceHTML, r.Source)
-		assert.Empty(t, r.ExternalScripts)
+		assert.Empty(t, r.ScriptSrc)
 		assert.Empty(t, r.Endpoints)
 	})
 

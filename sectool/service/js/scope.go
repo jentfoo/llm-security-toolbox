@@ -12,6 +12,7 @@ import (
 type scope struct {
 	xhrReceivers    map[string]struct{}
 	routerReceivers map[string]string // identifier to framework label
+	stringVars      map[string]string // identifier to statically-resolved URL value
 }
 
 // routerProducerCalls lists hook and factory names that return a router instance
@@ -27,8 +28,7 @@ var routerProducerCalls = map[string]struct{}{
 	"createMemoryRouter":  {},
 }
 
-// routerConstructors lists classes that produce a router instance via `new`
-// when imported from a recognized router library.
+// routerConstructors lists classes that produce a router instance via `new` when imported from a router library.
 var routerConstructors = map[string]struct{}{
 	"VueRouter": {},
 }
@@ -38,6 +38,7 @@ func buildScope(ast *js.AST) *scope {
 	s := &scope{
 		xhrReceivers:    make(map[string]struct{}),
 		routerReceivers: make(map[string]string),
+		stringVars:      make(map[string]string),
 	}
 	if ast == nil {
 		return s
@@ -113,6 +114,15 @@ func (v *scopeVisitor) visitVarDecl(d *js.VarDecl) {
 			continue
 		}
 		v.classifyBinding(name, el.Default)
+		v.recordStringVar(name, el.Default)
+	}
+}
+
+// recordStringVar maps name to a statically-resolved URL value, so a sink that
+// receives the variable (e.g. fetch(n, {method})) can still attach a method.
+func (v *scopeVisitor) recordStringVar(name string, expr js.IExpr) {
+	if s, ok := staticString(expr); ok && looksLikeURL(s) {
+		v.s.stringVars[name] = s
 	}
 }
 
@@ -127,6 +137,7 @@ func (v *scopeVisitor) visitAssign(b *js.BinaryExpr) {
 		return
 	}
 	v.classifyBinding(name, b.Y)
+	v.recordStringVar(name, b.Y)
 }
 
 // classifyBinding records name in scope when expr matches a known XHR or router shape.

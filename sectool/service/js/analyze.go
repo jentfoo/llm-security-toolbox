@@ -1,6 +1,8 @@
 package js
 
-import "github.com/go-appsec/toolbox/sectool/protocol"
+import (
+	"github.com/go-appsec/toolbox/sectool/protocol"
+)
 
 // Source labels for the response.
 const (
@@ -11,15 +13,15 @@ const (
 
 // Result is the deduplicated extraction plus parse-state metadata.
 type Result struct {
-	Source          string
-	ScriptBlocks    int
-	ParseErrors     int
-	Endpoints       []protocol.ExtractedEndpoint
-	Routes          []protocol.ExtractedRoute
-	Secrets         []protocol.ExtractedSecret
-	ExternalScripts []string
-	SourceMaps      []string
-	Warnings        []string
+	Source       string
+	ScriptBlocks int
+	ParseErrors  int
+	Endpoints    []protocol.ExtractedEndpoint
+	Routes       []protocol.ExtractedRoute
+	Secrets      []protocol.ExtractedSecret
+	ScriptSrc    []string
+	SourceMaps   []string
+	Warnings     []string
 }
 
 // AnalyzeJS analyzes a JavaScript bundle body.
@@ -33,7 +35,7 @@ func AnalyzeJS(src []byte) Result {
 func AnalyzeHTML(src []byte) Result {
 	scripts := ParseHTMLScripts(src)
 	res := analyzeBlocks(scripts.Inline)
-	res.ExternalScripts = append(res.ExternalScripts, scripts.External...)
+	res.ScriptSrc = append(res.ScriptSrc, scripts.External...)
 	if len(scripts.Inline) > 0 {
 		res.Source = SourceHTMLInline
 	} else {
@@ -46,7 +48,7 @@ func analyzeBlocks(blocks [][]byte) Result {
 	var (
 		merged     Extracted
 		secrets    []protocol.ExtractedSecret
-		errors     int
+		parseErrs  int
 		blocksUsed int
 	)
 
@@ -58,7 +60,10 @@ func analyzeBlocks(blocks [][]byte) Result {
 		blocksUsed++
 		pr := parseSource(src)
 		if pr.err != nil {
-			errors++
+			// tdewolff fails on most real minified bundles; this is expected and
+			// not surfaced to the agent. The raw-byte URL scan in extractFromSource
+			// is the primary extractor; the AST only enriches when it succeeds.
+			parseErrs++
 		}
 		ext, literals := extractFromSource(src, pr.ast)
 		merged.Endpoints = append(merged.Endpoints, ext.Endpoints...)
@@ -69,16 +74,12 @@ func analyzeBlocks(blocks [][]byte) Result {
 
 	d := dedupeExtracted(merged)
 
-	r := Result{
+	return Result{
 		ScriptBlocks: blocksUsed,
-		ParseErrors:  errors,
+		ParseErrors:  parseErrs,
 		Endpoints:    d.Endpoints,
 		Routes:       d.Routes,
 		Secrets:      dedupeSecrets(secrets),
 		SourceMaps:   d.SourceMaps,
 	}
-	if errors > 0 {
-		r.Warnings = append(r.Warnings, "JS parser reported errors; extraction may be incomplete")
-	}
-	return r
 }

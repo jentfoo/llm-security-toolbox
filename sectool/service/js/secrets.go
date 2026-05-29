@@ -59,9 +59,9 @@ var literalSecretPatterns = []secretPattern{
 	{"sentry_dsn", regexp.MustCompile(`^https://[a-f0-9]{32}@[a-z0-9.\-]+/[0-9]+$`)},
 }
 
-// pemPrivateKeyRe matches a PEM private-key armor header.
-// Scanned against the raw body since PEM blocks may span template literals or byte arrays.
-var pemPrivateKeyRe = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)
+// pemPrivateKeyRe matches a PEM private-key header followed by base64 key data.
+// The separator between banner and body allows newlines, escaped "\n", or quotes.
+var pemPrivateKeyRe = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[^A-Za-z0-9]{0,8}[A-Za-z0-9+/]{32,}`)
 
 // extractSecrets returns credential matches from literals and PEM matches from src.
 func extractSecrets(src []byte, literals []string) []protocol.ExtractedSecret {

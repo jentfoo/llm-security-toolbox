@@ -22,7 +22,12 @@ const (
 	libBeacon      = "beacon"
 	libImport      = "import"
 	libLiteral     = "literal"
+	libRequest     = "request"
 )
+
+var httpMethods = map[string]struct{}{
+	"GET": {}, "POST": {}, "PUT": {}, "DELETE": {}, "PATCH": {}, "HEAD": {}, "OPTIONS": {},
+}
 
 // Frameworks recognized for route extraction.
 const (
@@ -56,6 +61,44 @@ var urlLiteralRe = regexp.MustCompile(
 // sourceMapRe captures the URL from a sourceMappingURL comment.
 var sourceMapRe = regexp.MustCompile(`(?m)//[#@]\s*sourceMappingURL=(\S+)`)
 
+// urlSegChars are the characters allowed inside a path/host segment by the raw scanner.
+// ${ } are included so template placeholders survive.
+const urlSegChars = `\w~%.${}\-`
+
+// assetDropExts are static bundler-asset extensions (scripts, styles, fonts, images).
+// Data formats (json/xml/html) are excluded as they may be API responses.
+const assetDropExts = `js|mjs|cjs|css|map|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|webp|avif|ico|wasm`
+
+// assetExts are the file extensions that qualify a bare relative path as an asset reference rather than a MIME type or i18n key.
+const assetExts = assetDropExts + `|json|html?|xml`
+
+// assetExtRe matches a known asset extension at the end of a path (allowing a trailing query/fragment).
+var assetExtRe = regexp.MustCompile(`\.(?:` + assetExts + `)(?:[?#]|$)`)
+
+// assetDropRe matches static bundler-asset extensions (scripts, styles, fonts, images).
+var assetDropRe = regexp.MustCompile(`\.(?:` + assetDropExts + `)(?:[?#]|$)`)
+
+// IsAsset reports whether u points at a static bundler asset rather than an API endpoint.
+func IsAsset(u string) bool {
+	return assetDropRe.MatchString(u)
+}
+
+// urlScanRe finds URL/path candidate substrings in decoded string literals: absolute
+// and protocol-relative URLs, rooted paths with >=2 segments, quote-anchored rooted
+// paths (group 1), and bare relative paths ending in an asset extension.
+var urlScanRe = regexp.MustCompile(
+	`(?:https?:|wss?:)?//[^\s"'` + "`" + `<>,;()]+` +
+		`|\.{0,2}/[` + urlSegChars + `]+(?:/[` + urlSegChars + `]*)+` +
+		`|["'` + "`" + `](\.{0,2}/[` + urlSegChars + `]+(?:/[` + urlSegChars + `]*)*)` +
+		`|[` + urlSegChars + `]+(?:/[` + urlSegChars + `]+)+\.(?:` + assetExts + `)`)
+
+// placeholderRe matches a ${...} or {...} interpolation placeholder.
+var placeholderRe = regexp.MustCompile(`\$?\{[^}]*\}`)
+
+// hostnameRe matches a plausible hostname (alphanumeric, no leading/trailing dot or
+// hyphen, no regex metachars), used to reject bogus hosts like ".+", ".test", "api.".
+var hostnameRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.\-]*[A-Za-z0-9])?$`)
+
 // looksLikeURL reports whether s is acceptable as an endpoint URL.
 // Template-literal expansions containing `${...}` placeholders are always accepted.
 func looksLikeURL(s string) bool {
@@ -75,7 +118,7 @@ type Extracted struct {
 }
 
 // extractFromSource returns the extracted API surface and the raw string literals from src.
-// The literals are reused by secret detection.
+// The literals are reused by secret detection. AST sinks (when ast != nil) supply method/library/route labels.
 func extractFromSource(src []byte, ast *js.AST) (Extracted, []string) {
 	var out Extracted
 
@@ -87,27 +130,48 @@ func extractFromSource(src []byte, ast *js.AST) (Extracted, []string) {
 
 	literals := scanStringLiterals(src)
 
-	// Token-stream scan catches URL-shaped literals outside known sinks.
-	// Seed the seen set so literals don't duplicate already-classified entries.
+	// Seed the seen set with AST-derived URLs/routes so the raw scan only contributes links the AST could not resolve
 	knownURLs := make(map[string]struct{}, len(out.Endpoints)+len(out.Routes))
+	seedKnown := func(u string) {
+		n := normalizeURL(u)
+		knownURLs[n] = struct{}{}
+		// A sink URL with a dynamic placeholder base (`${...}/api/x`) would otherwise
+		// be re-listed by the literal scan as a bare `/api/x`; seed that path tail too.
+		if rest, ok := stripPlaceholderPrefix(n); ok {
+			if c := acceptCandidate(rest); c != "" {
+				knownURLs[c] = struct{}{}
+			}
+		}
+	}
 	for _, e := range out.Endpoints {
-		knownURLs[e.URL] = struct{}{}
+		seedKnown(e.URL)
 	}
 	for _, r := range out.Routes {
-		knownURLs[r.Path] = struct{}{}
+		seedKnown(r.Path)
 	}
-	for _, lit := range literals {
-		if !urlLiteralRe.MatchString(lit) {
-			continue
-		} else if _, seen := knownURLs[lit]; seen {
-			continue
-		}
-		knownURLs[lit] = struct{}{}
 
+	addCandidate := func(raw string) {
+		u := acceptCandidate(raw)
+		if u == "" {
+			return
+		} else if _, seen := knownURLs[u]; seen {
+			return
+		}
+		knownURLs[u] = struct{}{}
 		out.Endpoints = append(out.Endpoints, protocol.ExtractedEndpoint{
-			URL:     lit,
+			URL:     u,
 			Library: libLiteral,
 		})
+	}
+
+	// Scan only lexer-identified string content, so regex literals, division, and comments cannot be mistaken for URLs.
+	// The whole literal catches single-segment paths and absolute URLs; the substring scan catches paths behind
+	// a placeholder prefix (e.g. "/api/org" inside "%s/api/org").
+	for _, lit := range literals {
+		addCandidate(lit)
+		for _, c := range scanURLCandidates([]byte(lit)) {
+			addCandidate(c)
+		}
 	}
 
 	for _, m := range sourceMapRe.FindAllSubmatch(src, -1) {
@@ -115,6 +179,211 @@ func extractFromSource(src []byte, ast *js.AST) (Extracted, []string) {
 	}
 
 	return out, literals
+}
+
+// maxURLCandidateLen bounds an accepted URL/path length.
+const maxURLCandidateLen = 1000
+
+// urlShaped reports whether s resembles a URL/path rather than code.
+func urlShaped(s string) bool {
+	s = placeholderRe.ReplaceAllString(s, "")
+	return !strings.ContainsAny(s, " \t\r\n\"'`(){}$;\\^<>|")
+}
+
+// scanURLCandidates returns the raw URL/path candidate substrings found in b.
+func scanURLCandidates(b []byte) []string {
+	ms := urlScanRe.FindAllSubmatch(b, -1)
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		c := m[0]
+		if len(m[1]) > 0 {
+			c = m[1]
+		}
+		out = append(out, string(c))
+	}
+	return out
+}
+
+// acceptCandidate validates and normalizes a raw URL/path candidate, returning "" to reject non-URL strings.
+func acceptCandidate(raw string) string {
+	s := decodeJSEscapes(raw)
+	if len(s) > maxURLCandidateLen || !urlShaped(s) {
+		return "" // length/shape bound: rejects swallowed code and minified blobs
+	}
+	if host, path, ok := splitHostPath(s); ok {
+		if hostname := stripPort(host); strings.Contains(hostname, ".") && hostnameRe.MatchString(hostname) {
+			return normalizeURL(s)
+		}
+		if countSegments(path) >= 2 && !hasEntropySegment(path) {
+			return normalizeURL(path)
+		}
+		return ""
+	}
+	// Strip a leading placeholder/base prefix so a single-segment path built as
+	// `${host}/methods` or "%s/methods" exposes its "/methods" path.
+	if rest, ok := stripPlaceholderPrefix(s); ok {
+		s = rest
+	}
+	if hasEntropySegment(s) {
+		return ""
+	}
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") {
+		if countSegments(s) == 0 || looksLikeRegexLiteral(s) || regexMethodTailRe.MatchString(s) {
+			return "" // bare "/", a regex literal (/~1/g), or a /regex/.test() call
+		}
+		// CSS-in-JS property lists carry both ',' and ':' in the path; real paths
+		// have at most one (comma-list or gRPC resource:method), never both.
+		if p := StripQuery(s); strings.ContainsRune(p, ',') && strings.ContainsRune(p, ':') {
+			return ""
+		}
+		// A single-segment path must be word-like to exclude noise such as /g
+		// (regex flag), /2 (fraction), or /${...} (display template).
+		if countSegments(s) == 1 && !wordLikeSegment(s) {
+			return ""
+		}
+		return normalizeURL(s)
+	}
+	// Bare relative: only accept real asset references, not word/word shapes (MIME types, i18n keys)
+	if !assetExtRe.MatchString(s) {
+		return ""
+	}
+	return normalizeURL(s)
+}
+
+// stripPlaceholderPrefix returns the rooted path of s after a leading dynamic base
+// (e.g. "${host}", "%s"), or (s, false) when there is none.
+func stripPlaceholderPrefix(s string) (string, bool) {
+	i := strings.IndexByte(s, '/')
+	if i <= 0 {
+		return s, false
+	}
+	if !strings.ContainsAny(s[:i], "${}%") {
+		return s, false
+	}
+	return s[i:], true
+}
+
+// regexLiteralRe matches a /pattern/flags shape.
+var regexLiteralRe = regexp.MustCompile(`^/(.+)/[gimsuy]{1,6}$`)
+
+// regexMethodTailRe matches a /regex/.method() call mistaken for a path (e.g. /Android/.test).
+var regexMethodTailRe = regexp.MustCompile(`/[gimsuy]*\.(?:test|exec|match|matchAll|replace|replaceAll|split|search)$`)
+
+// resourceExtRe matches a fetchable file extension, used to accept slash-less
+// sink args like "config.json"; TLD-like endings (.com) are excluded by omission.
+var resourceExtRe = regexp.MustCompile(`(?i)\.(?:json|txt|csv|xml|html?|js|mjs|cjs|css|map|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|eot|wasm|pdf|md|ya?ml)(?:[?#]|$)`)
+
+// isURLArg reports whether a definite-sink argument (fetch/axios/...) is a recordable
+// request target. The sink establishes it is a URL, so a slash-less relative file like
+// "foo.txt" is kept, but a bare i18n key ("translation.key") or host ("www.google.com")
+// is not. Base64 alphabets and error-message templates are also rejected.
+func isURLArg(s string) bool {
+	if len(s) > maxURLCandidateLen || !urlShaped(s) || hasEntropySegment(s) {
+		return false
+	}
+	return looksLikeURL(s) || resourceExtRe.MatchString(s)
+}
+
+// looksLikeRegexLiteral reports whether s is a regex literal (e.g. /~1/g) rather than a path.
+func looksLikeRegexLiteral(s string) bool {
+	m := regexLiteralRe.FindStringSubmatch(s)
+	if m == nil {
+		return false
+	}
+	return strings.ContainsAny(m[1], `.^$[]*+?\~(){}|`)
+}
+
+// wordLikeSegment reports whether the last path segment of s looks like a real name.
+func wordLikeSegment(s string) bool {
+	seg := s
+	if i := strings.LastIndexByte(seg, '/'); i >= 0 {
+		seg = seg[i+1:]
+	}
+	seg = placeholderRe.ReplaceAllString(seg, "") // ignore ${...} placeholder content
+	if len(seg) < 2 {
+		return false
+	}
+	for _, r := range seg {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
+// splitHostPath splits a scheme-relative or absolute URL into host and path.
+// ok is false when s is not URL-shaped (no "//" that follows a scheme colon).
+func splitHostPath(s string) (host, path string, ok bool) {
+	i := strings.Index(s, "//")
+	if i < 0 || (i > 0 && s[i-1] != ':') {
+		return "", "", false
+	}
+	rest := s[i+2:]
+	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+		return rest[:j], rest[j:], true
+	}
+	return rest, "", true
+}
+
+// stripPort returns host with ":port" removed, to validate against hostnameRe. host must be an authority with no path;
+// only a digits-after-colon suffix is treated as a port, leaving other colons in place.
+func stripPort(host string) string {
+	i := strings.LastIndexByte(host, ':')
+	if i < 0 || i == len(host)-1 {
+		return host
+	}
+	for _, r := range host[i+1:] {
+		if r < '0' || r > '9' {
+			return host
+		}
+	}
+	return host[:i]
+}
+
+// countSegments counts non-empty "/"-delimited segments in path.
+func countSegments(path string) int {
+	var n int
+	for _, seg := range strings.Split(path, "/") {
+		if seg != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// hasEntropySegment reports whether any segment looks like a base64/random token.
+func hasEntropySegment(s string) bool {
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "" || strings.ContainsAny(seg, "${}") {
+			continue
+		} else if len(seg) < 8 || strings.ContainsAny(seg, "-_.") {
+			continue
+		}
+		var up, lo, dig bool
+		for _, r := range seg {
+			switch {
+			case r >= 'A' && r <= 'Z':
+				up = true
+			case r >= 'a' && r <= 'z':
+				lo = true
+			case r >= '0' && r <= '9':
+				dig = true
+			}
+		}
+		if up && lo && dig {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeURL collapses ${...}/{...} interpolation placeholders to a canonical
+// ${...} so raw matches dedupe against AST-reconstructed template URLs.
+func normalizeURL(s string) string {
+	if !strings.ContainsAny(s, "${") {
+		return s
+	}
+	return placeholderRe.ReplaceAllString(s, "${...}")
 }
 
 // sinkVisitor walks AST nodes collecting sink-arg endpoints, routes, and sockets.
@@ -139,17 +408,62 @@ func (v *sinkVisitor) Enter(n js.INode) js.IVisitor {
 
 // visitCall inspects a call expression's callee shape to identify sinks.
 func (v *sinkVisitor) visitCall(c *js.CallExpr) {
-	if isImportCallee(c.X) {
+	switch {
+	case isImportCallee(c.X):
 		v.captureDynamicImport(c)
-		return
-	}
-	if name, ok := dotObjectName(c.X); ok {
+	case isIdentCallee(c.X):
+		name, _ := dotObjectName(c.X)
 		v.visitIdentCall(name, c)
+	default:
+		if d, ok := c.X.(*js.DotExpr); ok {
+			v.visitMemberCall(d, c)
+		}
+	}
+	// Generic request wrapper: f(METHOD, url, ...). Runs after specific sinks so an
+	// already-classified call (e.g. xhr.open) wins dedupe on (method, url).
+	v.captureMethodWrapper(c)
+}
+
+// isIdentCallee reports whether the callee is a bare identifier (not a member access).
+func isIdentCallee(expr js.IExpr) bool {
+	switch e := expr.(type) {
+	case *js.Var:
+		return true
+	case *js.LiteralExpr:
+		return e.TokenType == js.IdentifierToken
+	case js.LiteralExpr:
+		return e.TokenType == js.IdentifierToken
+	}
+	return false
+}
+
+// captureMethodWrapper handles request wrappers whose first argument is a static HTTP
+// method literal and whose second argument resolves to a URL (e.g. superagent's
+// request("POST", url) / buildRequest("GET", url)). The method literal is the
+// confident signal, so the URL need not be the first argument.
+func (v *sinkVisitor) captureMethodWrapper(c *js.CallExpr) {
+	if len(c.Args.List) < 2 {
 		return
 	}
-	if d, ok := c.X.(*js.DotExpr); ok {
-		v.visitMemberCall(d, c)
+	m, ok := staticString(c.Args.List[0].Value)
+	if !ok {
+		return
 	}
+	method := strings.ToUpper(m)
+	if _, ok := httpMethods[method]; !ok {
+		return
+	}
+	u, ok := v.resolveURLArg(c.Args.List[1].Value)
+	// Heuristic sink (any f(METHOD, x)): require a path/scheme so non-URL args like
+	// "state-${id}" don't match a generic wrapper called with every verb.
+	if !ok || !isURLArg(u) || !strings.Contains(u, "/") {
+		return
+	}
+	v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+		Method:  method,
+		URL:     u,
+		Library: libRequest,
+	})
 }
 
 // visitIdentCall handles fetch, router factories, and call-form router navigation.
@@ -180,13 +494,28 @@ func (v *sinkVisitor) visitIdentCall(name string, c *js.CallExpr) {
 	}
 }
 
+// resolveURLArg returns the static string value of expr, resolving a bare
+// identifier through scope.stringVars so a variable-held URL still yields its
+// value (light intra-bundle constant propagation).
+func (v *sinkVisitor) resolveURLArg(expr js.IExpr) (string, bool) {
+	if s, ok := staticString(expr); ok {
+		return s, true
+	}
+	if name, ok := dotObjectName(expr); ok {
+		if s, ok := v.scope.stringVars[name]; ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
 // captureFetch appends an endpoint for a `fetch(url, [opts])` call.
 func (v *sinkVisitor) captureFetch(c *js.CallExpr) {
 	if len(c.Args.List) == 0 {
 		return
 	}
-	url, ok := staticString(c.Args.List[0].Value)
-	if !ok || !looksLikeURL(url) {
+	url, ok := v.resolveURLArg(c.Args.List[0].Value)
+	if !ok || !isURLArg(url) {
 		return
 	}
 	ep := protocol.ExtractedEndpoint{
@@ -206,8 +535,8 @@ func (v *sinkVisitor) captureAxiosCall(c *js.CallExpr) {
 		return
 	}
 	first := c.Args.List[0].Value
-	if u, ok := staticString(first); ok {
-		if !looksLikeURL(u) {
+	if u, ok := v.resolveURLArg(first); ok {
+		if !isURLArg(u) {
 			return
 		}
 		ep := protocol.ExtractedEndpoint{URL: u, Library: libAxios}
@@ -219,7 +548,7 @@ func (v *sinkVisitor) captureAxiosCall(c *js.CallExpr) {
 	}
 	if obj, ok := first.(*js.ObjectExpr); ok {
 		u := stringProp(obj, "url")
-		if u == "" || !looksLikeURL(u) {
+		if u == "" || !isURLArg(u) {
 			return
 		}
 		v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
@@ -236,7 +565,7 @@ func (v *sinkVisitor) captureDynamicImport(c *js.CallExpr) {
 	if len(c.Args.List) == 0 {
 		return
 	}
-	if u, ok := staticString(c.Args.List[0].Value); ok && importSpecifierIsPath(u) {
+	if u, ok := v.resolveURLArg(c.Args.List[0].Value); ok && importSpecifierIsPath(u) {
 		v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
 			URL:     u,
 			Library: libImport,
@@ -292,9 +621,9 @@ func (v *sinkVisitor) visitMemberCall(d *js.DotExpr, c *js.CallExpr) {
 		v.captureNavURL(c)
 	}
 
-	// navigator.sendBeacon(url, data) — always a POST
+	// navigator.sendBeacon(url, data) - always a POST
 	if objName == "navigator" && prop == "sendBeacon" && len(c.Args.List) >= 1 {
-		if u, ok := staticString(c.Args.List[0].Value); ok && looksLikeURL(u) {
+		if u, ok := v.resolveURLArg(c.Args.List[0].Value); ok && isURLArg(u) {
 			v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
 				Method:  "POST",
 				URL:     u,
@@ -307,7 +636,7 @@ func (v *sinkVisitor) visitMemberCall(d *js.DotExpr, c *js.CallExpr) {
 	if prop == "open" && len(c.Args.List) >= 2 {
 		if _, isXHR := v.scope.xhrReceivers[objName]; isXHR {
 			if m, mok := staticString(c.Args.List[0].Value); mok {
-				if u, uok := staticString(c.Args.List[1].Value); uok && looksLikeURL(u) {
+				if u, uok := v.resolveURLArg(c.Args.List[1].Value); uok && isURLArg(u) {
 					v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
 						Method:  strings.ToUpper(m),
 						URL:     u,
@@ -330,8 +659,8 @@ func (v *sinkVisitor) visitMemberCall(d *js.DotExpr, c *js.CallExpr) {
 		}
 	}
 
-	// Vue Router constructor `new VueRouter({routes: [...]})` is handled by visitNew.
-	// Angular RouterModule.forRoot([...]) / forChild([...]).
+	// Vue Router constructor `new VueRouter({routes: [...]})` is handled by visitNew
+	// Angular RouterModule.forRoot([...]) / forChild([...])
 	if objName == "RouterModule" && (prop == "forRoot" || prop == "forChild") && len(c.Args.List) >= 1 {
 		v.captureRouteArray(c.Args.List[0].Value, frameworkAngularRouter)
 	}
@@ -348,8 +677,8 @@ func (v *sinkVisitor) visitAxiosCall(method string, c *js.CallExpr) {
 	if len(c.Args.List) == 0 {
 		return
 	}
-	u, ok := staticString(c.Args.List[0].Value)
-	if !ok || !looksLikeURL(u) {
+	u, ok := v.resolveURLArg(c.Args.List[0].Value)
+	if !ok || !isURLArg(u) {
 		return
 	}
 	v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
@@ -371,10 +700,10 @@ func (v *sinkVisitor) visitJQueryCall(method string, c *js.CallExpr) {
 	switch strings.ToLower(method) {
 	case "get", "getjson":
 		m = "GET"
-		url, ok = staticString(c.Args.List[0].Value)
+		url, ok = v.resolveURLArg(c.Args.List[0].Value)
 	case "post":
 		m = "POST"
-		url, ok = staticString(c.Args.List[0].Value)
+		url, ok = v.resolveURLArg(c.Args.List[0].Value)
 	case "ajax":
 		if obj, isObj := c.Args.List[0].Value.(*js.ObjectExpr); isObj {
 			url = stringProp(obj, "url")
@@ -387,7 +716,7 @@ func (v *sinkVisitor) visitJQueryCall(method string, c *js.CallExpr) {
 	default:
 		return
 	}
-	if !ok || !looksLikeURL(url) {
+	if !ok || !isURLArg(url) {
 		return
 	}
 	v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
@@ -408,7 +737,7 @@ func (v *sinkVisitor) visitNew(n *js.NewExpr) {
 		if n.Args == nil || len(n.Args.List) == 0 {
 			return
 		}
-		if u, ok := staticString(n.Args.List[0].Value); ok && looksLikeWebSocketURL(u) {
+		if u, ok := v.resolveURLArg(n.Args.List[0].Value); ok && looksLikeWebSocketURL(u) {
 			v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
 				URL:     u,
 				Library: libWebSocket,
@@ -418,7 +747,7 @@ func (v *sinkVisitor) visitNew(n *js.NewExpr) {
 		if n.Args == nil || len(n.Args.List) == 0 {
 			return
 		}
-		if u, ok := staticString(n.Args.List[0].Value); ok && looksLikeURL(u) {
+		if u, ok := v.resolveURLArg(n.Args.List[0].Value); ok && isURLArg(u) {
 			v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
 				URL:     u,
 				Library: libEventSource,
@@ -438,7 +767,7 @@ func (v *sinkVisitor) visitAssign(b *js.BinaryExpr) {
 	} else if !isLocationLHS(b.X) {
 		return
 	}
-	if u, ok := staticString(b.Y); ok && looksLikeURL(u) {
+	if u, ok := v.resolveURLArg(b.Y); ok && isURLArg(u) {
 		v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
 			URL:     u,
 			Library: libNavigation,
@@ -492,7 +821,7 @@ func (v *sinkVisitor) captureNavURL(c *js.CallExpr) {
 	if len(c.Args.List) == 0 {
 		return
 	}
-	if u, ok := staticString(c.Args.List[0].Value); ok && looksLikeURL(u) {
+	if u, ok := v.resolveURLArg(c.Args.List[0].Value); ok && isURLArg(u) {
 		v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
 			URL:     u,
 			Library: libNavigation,
@@ -505,8 +834,7 @@ func isGlobalThisName(name string) bool {
 	return name == globalWindow || name == globalSelf || name == globalGlobalThis
 }
 
-// isImportCallee reports whether a call expression's callee is the `import` keyword,
-// i.e. a dynamic import() expression.
+// isImportCallee reports whether a call expression's callee is the `import` keyword, i.e. a dynamic import() expression.
 func isImportCallee(expr js.IExpr) bool {
 	switch e := expr.(type) {
 	case *js.LiteralExpr:

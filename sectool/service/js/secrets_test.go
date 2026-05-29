@@ -67,8 +67,15 @@ KUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQJAIJLixBy2qpFoS4DSmoEm
 		assert.Equal(t, "private_key", got[0].Kind)
 	})
 
+	t.Run("pem_banner_only_rejected", func(t *testing.T) {
+		// node-forge embeds the bare banner with no key material — not a secret
+		body := []byte(`var begin="-----BEGIN PRIVATE KEY-----",end="-----END PRIVATE KEY-----";`)
+		got := extractSecrets(body, nil)
+		assert.Empty(t, got)
+	})
+
 	t.Run("no_dedupe_within_pass", func(t *testing.T) {
-		// One record per matched literal; collapsing duplicates is dedupeSecrets's job.
+		// One record per matched literal; collapsing duplicates is dedupeSecrets's job
 		lit := "AKIAIOSFODNN7EXAMPLE"
 		got := extractSecrets(nil, []string{lit, lit})
 		assert.Len(t, got, 2)
