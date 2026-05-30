@@ -3,11 +3,13 @@ package js
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 
 	"github.com/go-appsec/toolbox/sectool/cliutil"
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 func run(mcpURL, flowID, origin string, includeAssets bool) error {
@@ -21,7 +23,7 @@ func run(mcpURL, flowID, origin string, includeAssets bool) error {
 
 	resp, err := client.JSAnalyze(ctx, flowID, origin, includeAssets)
 	if err != nil {
-		return fmt.Errorf("js_analyze failed: %w", err)
+		return fmt.Errorf("js_surface failed: %w", err)
 	}
 
 	_, _ = fmt.Printf("%s\n\n", cliutil.Bold("JS Analyze"))
@@ -49,9 +51,9 @@ func run(mcpURL, flowID, origin string, includeAssets bool) error {
 	if len(resp.Endpoints) > 0 {
 		_, _ = fmt.Println(cliutil.Bold("Endpoints"))
 		t := cliutil.NewTable(nil)
-		t.AppendHeader(table.Row{"Method", "URL", "Lib", "Last Flow"})
+		t.AppendHeader(table.Row{"Method", "URL", "Lib", "Last Flow", "ID"})
 		for _, e := range resp.Endpoints {
-			t.AppendRow(table.Row{e.Method, e.URL, e.Library, e.LastFlow})
+			t.AppendRow(table.Row{e.Method, e.URL, e.Library, e.LastFlow, e.EndpointID})
 		}
 		t.Render()
 		_, _ = fmt.Println()
@@ -100,4 +102,76 @@ func run(mcpURL, flowID, origin string, includeAssets bool) error {
 	}
 
 	return nil
+}
+
+func runDetail(mcpURL, flowID, endpointID string) error {
+	ctx := context.Background()
+
+	client, err := mcpclient.Connect(ctx, mcpURL)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	resp, err := client.JSEndpoint(ctx, flowID, endpointID)
+	if err != nil {
+		return fmt.Errorf("js_endpoint failed: %w", err)
+	}
+
+	_, _ = fmt.Printf("%s\n\n", cliutil.Bold("JS Endpoint"))
+	_, _ = fmt.Printf("Flow %s, endpoint %s\n", cliutil.ID(flowID), cliutil.ID(resp.EndpointID))
+	_, _ = fmt.Printf("%s %s\n", resp.Method, resp.URL)
+	if resp.LastFlow != "" {
+		_, _ = fmt.Printf("Last flow: %s\n", cliutil.ID(resp.LastFlow))
+	}
+	_, _ = fmt.Println()
+
+	for i, cs := range resp.CallSites {
+		_, _ = fmt.Printf("%s\n", cliutil.Bold(fmt.Sprintf("Call site %d", i+1)))
+		if cs.Library != "" {
+			_, _ = fmt.Printf("  lib: %s\n", cs.Library)
+		}
+		if cs.Call != "" {
+			_, _ = fmt.Printf("  %s\n", cs.Call)
+		}
+		if len(cs.PathParams) > 0 {
+			_, _ = fmt.Printf("  path params: %s\n", strings.Join(cs.PathParams, ", "))
+		}
+		if cs.Body != nil {
+			printBody(cs.Body)
+		}
+		printFields("Headers", cs.Headers)
+		printFields("Query", cs.Query)
+		_, _ = fmt.Println()
+	}
+
+	return nil
+}
+
+func printBody(b *protocol.JSRequestBody) {
+	label := "Body"
+	if b.ContentType != "" {
+		label = "Body (" + b.ContentType + ")"
+	}
+	_, _ = fmt.Printf("  %s\n", cliutil.Bold(label))
+	if b.Raw != "" {
+		_, _ = fmt.Printf("    %s\n", b.Raw)
+	}
+	printFields("", b.Fields)
+}
+
+func printFields(label string, fields []protocol.JSField) {
+	if len(fields) == 0 {
+		return
+	}
+	if label != "" {
+		_, _ = fmt.Printf("  %s\n", cliutil.Bold(label))
+	}
+	for _, f := range fields {
+		if f.Value == "" {
+			_, _ = fmt.Printf("    %s\n", f.Name)
+		} else {
+			_, _ = fmt.Printf("    %s = %s\n", f.Name, f.Value)
+		}
+	}
 }

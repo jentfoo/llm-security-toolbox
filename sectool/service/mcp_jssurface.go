@@ -43,7 +43,7 @@ func (m *mcpServer) addJSAnalyzeTools() {
 }
 
 func (m *mcpServer) jsAnalyzeTool() mcp.Tool {
-	return mcp.NewTool("js_analyze",
+	return mcp.NewTool("js_surface",
 		mcp.WithDescription(`Extract the API surface from a JavaScript or HTML response flow.
 
 Returns a deduplicated map of:
@@ -54,6 +54,8 @@ Returns a deduplicated map of:
 - source_maps: sourceMappingURL hints from the body.
 
 For HTML responses, inline <script> blocks are parsed independently. When present an included "last_flow" field provides the most recent matching proxy flow_id.
+
+An endpoint with an "endpoint_id" field carries extractable request-shape detail (body fields, headers, or path-parameter names): expand it with js_endpoint using "<flow_id>.<endpoint_id>" to get everything needed to craft a request without an example flow.
 
 The "origin" parameter controls endpoint volume and focus:
 - "same-origin" (default): same-origin endpoints only.
@@ -76,27 +78,16 @@ func (m *mcpServer) handleJSAnalyze(ctx context.Context, req mcp.CallToolRequest
 		return errorResult("flow_id is required"), nil
 	}
 
-	flow, errResult := m.resolveFlow(ctx, flowID)
+	body, headerStr, isHTML, flow, errResult := m.decodeJSFlowBody(ctx, flowID)
 	if errResult != nil {
 		return errResult, nil
 	}
 
-	respHeaders, respBody := splitHeadersBody(flow.RawResponse)
-	headerStr := string(respHeaders)
-	body, _ := decompressForDisplay(respBody, headerStr)
-
-	contentType := extractHeader(headerStr, "Content-Type")
-	mediaType, _, _ := mime.ParseMediaType(contentType)
-	mediaType = strings.ToLower(mediaType)
-
 	var result js.Result
-	switch {
-	case isHTMLMediaType(mediaType):
+	if isHTML {
 		result = js.AnalyzeHTML(body)
-	case isJSMediaType(mediaType), mediaType == "" && looksLikeJS(body):
+	} else {
 		result = js.AnalyzeJS(body)
-	default:
-		return errorResult("flow response is not JavaScript or HTML (Content-Type: " + contentType + ")"), nil
 	}
 
 	_, bundleHost, bundlePath := extractRequestMeta(string(flow.DisplayRequest()))
@@ -130,10 +121,37 @@ func (m *mcpServer) handleJSAnalyze(ctx context.Context, req mcp.CallToolRequest
 		Warnings:      result.Warnings,
 	}
 
-	log.Printf("js_analyze: flow=%s source=%s origin=%s endpoints=%d routes=%d secrets=%d parse_errors=%d",
+	log.Printf("js_surface: flow=%s source=%s origin=%s endpoints=%d routes=%d secrets=%d parse_errors=%d",
 		flowID, resp.Source, mode,
 		len(result.Endpoints), len(resp.Routes), len(resp.Secrets), result.ParseErrors)
 	return jsonResult(resp)
+}
+
+// decodeJSFlowBody resolves a flow and returns its decompressed response body and whether it
+// is HTML (otherwise JavaScript). errResult is non-nil when the flow can't be resolved or is
+// neither JavaScript nor HTML; callers should return it to the agent unchanged.
+func (m *mcpServer) decodeJSFlowBody(ctx context.Context, flowID string) (body []byte, headerStr string, isHTML bool, flow *resolvedFlow, errResult *mcp.CallToolResult) {
+	flow, errResult = m.resolveFlow(ctx, flowID)
+	if errResult != nil {
+		return nil, "", false, nil, errResult
+	}
+
+	respHeaders, respBody := splitHeadersBody(flow.RawResponse)
+	headerStr = string(respHeaders)
+	body, _ = decompressForDisplay(respBody, headerStr)
+
+	contentType := extractHeader(headerStr, "Content-Type")
+	mediaType, _, _ := mime.ParseMediaType(contentType)
+	mediaType = strings.ToLower(mediaType)
+
+	switch {
+	case isHTMLMediaType(mediaType):
+		return body, headerStr, true, flow, nil
+	case isJSMediaType(mediaType), mediaType == "" && looksLikeJS(body):
+		return body, headerStr, false, flow, nil
+	default:
+		return nil, "", false, flow, errorResult("flow response is not JavaScript or HTML (Content-Type: " + contentType + ")")
+	}
 }
 
 // isHTMLMediaType reports whether the media type denotes an HTML response.

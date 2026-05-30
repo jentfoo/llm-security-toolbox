@@ -29,7 +29,11 @@ func dedupeEndpoints(eps []protocol.ExtractedEndpoint) []protocol.ExtractedEndpo
 		k := key{e.Method, e.URL}
 		if idx, ok := seen[k]; ok {
 			if out[idx].Library == libLiteral && e.Library != libLiteral {
+				e.EndpointID = cmp.Or(e.EndpointID, out[idx].EndpointID)
 				out[idx] = e
+			} else if out[idx].EndpointID == "" {
+				// a structured call site keeps the group queryable even if seen later
+				out[idx].EndpointID = e.EndpointID
 			}
 			continue
 		}

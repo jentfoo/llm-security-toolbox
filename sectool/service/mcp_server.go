@@ -183,7 +183,7 @@ func (m *mcpServer) registerTools() {
 		m.addCrawlTools()
 		m.addDiffTools()
 		m.addReflectionTools()
-		m.addJSAnalyzeTools()
+		m.addJSTools()
 	case protocol.WorkflowModeTestReport:
 		m.addProxyTools()
 		m.addReplayTools()
@@ -194,7 +194,7 @@ func (m *mcpServer) registerTools() {
 		m.addJWTTools()
 		m.addDiffTools()
 		m.addReflectionTools()
-		m.addJSAnalyzeTools()
+		m.addJSTools()
 		// crawl tools excluded
 	default: // Empty (default) workflowMode: require workflow tool call first, all tools registered
 		m.server.AddTool(m.workflowTool(), m.handleWorkflow)
@@ -208,7 +208,7 @@ func (m *mcpServer) registerTools() {
 		m.addCrawlTools()
 		m.addDiffTools()
 		m.addReflectionTools()
-		m.addJSAnalyzeTools()
+		m.addJSTools()
 	}
 
 	// Register responder tools only when native proxy backend is used
@@ -272,6 +272,11 @@ func (m *mcpServer) addCrawlTools() {
 
 func (m *mcpServer) addDiffTools() {
 	m.server.AddTool(m.diffFlowTool(), m.handleDiffFlow)
+}
+
+func (m *mcpServer) addJSTools() {
+	m.addJSAnalyzeTools()
+	m.addJSEndpointTools()
 }
 
 const workflowNotInitializedError = "call workflow first with the relevant task, use 'explore' if there is no better fit"

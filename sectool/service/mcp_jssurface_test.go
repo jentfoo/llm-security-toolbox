@@ -37,7 +37,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 
-		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID})
 
 		assert.Equal(t, "javascript", resp.Source)
@@ -77,7 +77,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 
-		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": flowID})
 
 		assert.Equal(t, "html-inline", resp.Source)
@@ -115,7 +115,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 					"",
 				)
 
-				resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+				resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 					map[string]interface{}{"flow_id": bundleFlowID})
 
 				idx := slices.IndexFunc(resp.Endpoints, func(e protocol.ExtractedEndpoint) bool {
@@ -142,7 +142,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 
-		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID})
 
 		idx := slices.IndexFunc(resp.Endpoints, func(e protocol.ExtractedEndpoint) bool {
@@ -166,7 +166,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 
-		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID})
 
 		idx := slices.IndexFunc(resp.Endpoints, func(e protocol.ExtractedEndpoint) bool {
@@ -191,7 +191,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 
-		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID, "include_assets": true})
 
 		idx := slices.IndexFunc(resp.Endpoints, func(e protocol.ExtractedEndpoint) bool {
@@ -218,7 +218,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 
-		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID, "include_assets": true})
 
 		idx := slices.IndexFunc(resp.Endpoints, func(e protocol.ExtractedEndpoint) bool {
@@ -242,7 +242,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 
-		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID})
 
 		idx := slices.IndexFunc(resp.Endpoints, func(e protocol.ExtractedEndpoint) bool {
@@ -267,7 +267,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 		)
 
 		// Cross-host endpoint: requires origin=full (filtered under same-origin default)
-		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		resp := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID, "origin": "full"})
 
 		idx := slices.IndexFunc(resp.Endpoints, func(e protocol.ExtractedEndpoint) bool {
@@ -292,7 +292,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			return slices.ContainsFunc(eps, func(e protocol.ExtractedEndpoint) bool { return e.URL == u })
 		}
 
-		def := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		def := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID})
 		assert.True(t, hasURL(def.Endpoints, "/api/real"))
 		assert.False(t, hasURL(def.Endpoints, "assets/index-BMaEmbqv.js"))
@@ -300,7 +300,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 		// script_blocks is omitted for pure JS
 		assert.Zero(t, def.Stats.ScriptBlocks)
 
-		withAssets := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+		withAssets := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": bundleFlowID, "include_assets": true})
 		assert.True(t, hasURL(withAssets.Endpoints, "assets/index-BMaEmbqv.js"))
 	})
@@ -317,7 +317,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 		call := func(origin string) protocol.JSAnalyzeResponse {
-			return CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_analyze",
+			return CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, mcpClient, "js_surface",
 				map[string]interface{}{"flow_id": bundleFlowID, "origin": origin})
 		}
 		hasURL := func(eps []protocol.ExtractedEndpoint, u string) bool {
@@ -363,7 +363,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 			"",
 		)
 
-		result := CallMCPTool(t, mcpClient, "js_analyze",
+		result := CallMCPTool(t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": flowID})
 		require.True(t, result.IsError)
 	})
@@ -371,7 +371,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	t.Run("unknown_flow", func(t *testing.T) {
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
 
-		result := CallMCPTool(t, mcpClient, "js_analyze",
+		result := CallMCPTool(t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": "no-such-flow"})
 		require.True(t, result.IsError)
 	})

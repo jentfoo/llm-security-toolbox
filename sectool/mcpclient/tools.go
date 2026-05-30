@@ -493,7 +493,7 @@ func (c *Client) FindReflected(ctx context.Context, flowID string) (*protocol.Fi
 	return &resp, nil
 }
 
-// JSAnalyze calls js_analyze and returns the extracted JS/HTML API surface. origin selects
+// JSAnalyze calls js_surface and returns the extracted JS/HTML API surface. origin selects
 // the endpoint scope ("same-origin" (default), "summary", "full", or a host set).
 // includeAssets keeps static-asset references that are otherwise dropped as noise.
 func (c *Client) JSAnalyze(ctx context.Context, flowID, origin string, includeAssets bool) (*protocol.JSAnalyzeResponse, error) {
@@ -505,7 +505,18 @@ func (c *Client) JSAnalyze(ctx context.Context, flowID, origin string, includeAs
 		args["include_assets"] = true
 	}
 	var resp protocol.JSAnalyzeResponse
-	if err := c.CallToolJSON(ctx, "js_analyze", args, &resp); err != nil {
+	if err := c.CallToolJSON(ctx, "js_surface", args, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// JSEndpoint calls js_endpoint and returns the full per-call-site request shape for the
+// endpoint identified by endpointID (from a js_surface endpoint's endpoint_id) within flowID.
+func (c *Client) JSEndpoint(ctx context.Context, flowID, endpointID string) (*protocol.JSEndpointResponse, error) {
+	args := map[string]interface{}{"endpoint": flowID + "." + endpointID}
+	var resp protocol.JSEndpointResponse
+	if err := c.CallToolJSON(ctx, "js_endpoint", args, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

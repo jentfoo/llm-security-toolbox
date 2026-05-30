@@ -31,6 +31,37 @@ func TestDedupeEndpoints(t *testing.T) {
 		assert.Equal(t, libFetch, out[0].Library)
 	})
 
+	t.Run("id_propagates_structured_first", func(t *testing.T) {
+		in := []protocol.ExtractedEndpoint{
+			{URL: "/api/x", Method: "POST", Library: libFetch, EndpointID: "abc123"},
+			{URL: "/api/x", Method: "POST", Library: libFetch},
+		}
+		out := dedupeEndpoints(in)
+		assert.Len(t, out, 1)
+		assert.Equal(t, "abc123", out[0].EndpointID)
+	})
+
+	t.Run("id_propagates_structured_last", func(t *testing.T) {
+		in := []protocol.ExtractedEndpoint{
+			{URL: "/api/x", Method: "POST", Library: libFetch},
+			{URL: "/api/x", Method: "POST", Library: libFetch, EndpointID: "abc123"},
+		}
+		out := dedupeEndpoints(in)
+		assert.Len(t, out, 1)
+		assert.Equal(t, "abc123", out[0].EndpointID)
+	})
+
+	t.Run("id_propagates_over_literal", func(t *testing.T) {
+		in := []protocol.ExtractedEndpoint{
+			{URL: "/api/x", Library: libLiteral},
+			{URL: "/api/x", Library: libFetch, EndpointID: "abc123"},
+		}
+		out := dedupeEndpoints(in)
+		assert.Len(t, out, 1)
+		assert.Equal(t, libFetch, out[0].Library)
+		assert.Equal(t, "abc123", out[0].EndpointID)
+	})
+
 	t.Run("method_distinguishes", func(t *testing.T) {
 		in := []protocol.ExtractedEndpoint{
 			{URL: "/api/x", Method: "GET", Library: libAxios},

@@ -387,12 +387,41 @@ func normalizeURL(s string) string {
 }
 
 // sinkVisitor walks AST nodes collecting sink-arg endpoints, routes, and sockets.
+// When details is non-nil, each sink's full per-call-site request shape is collected.
 type sinkVisitor struct {
-	out   *Extracted
-	scope *scope
+	out     *Extracted
+	scope   *scope
+	details *[]callDetail
 }
 
 func (v *sinkVisitor) Exit(_ js.INode) {}
+
+// addEndpoint records an endpoint, deriving its EndpointID when the call site carries
+// request-shape detail (body/headers/path params) and collecting that detail when enabled.
+// node renders the call expression; urlArg supplies path params; ex carries options detail.
+func (v *sinkVisitor) addEndpoint(ep protocol.ExtractedEndpoint, node js.INode, urlArg js.IExpr, ex detailExtras) {
+	d := callDetail{
+		Method:     ep.Method,
+		URL:        ep.URL,
+		Library:    ep.Library,
+		Body:       ex.body,
+		Headers:    ex.headers,
+		Query:      append(queryFromURL(ep.URL), ex.query...),
+		PathParams: pathParamsFromArg(urlArg),
+	}
+	// Param-sourced query (e.g. axios {params:{...}}) is extra detail not visible in the
+	// list URL, so it makes the endpoint queryable; URL-embedded query does not.
+	if d.structured() || len(ex.query) > 0 {
+		ep.EndpointID = EndpointID(ep.Method, ep.URL)
+	}
+	v.out.Endpoints = append(v.out.Endpoints, ep)
+	if v.details != nil {
+		if node != nil {
+			d.Call = node.String()
+		}
+		*v.details = append(*v.details, d)
+	}
+}
 
 func (v *sinkVisitor) Enter(n js.INode) js.IVisitor {
 	switch node := n.(type) {
@@ -459,11 +488,11 @@ func (v *sinkVisitor) captureMethodWrapper(c *js.CallExpr) {
 	if !ok || !isURLArg(u) || !strings.Contains(u, "/") {
 		return
 	}
-	v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+	v.addEndpoint(protocol.ExtractedEndpoint{
 		Method:  method,
 		URL:     u,
 		Library: libRequest,
-	})
+	}, c, c.Args.List[1].Value, detailExtras{})
 }
 
 // visitIdentCall handles fetch, router factories, and call-form router navigation.
@@ -522,10 +551,12 @@ func (v *sinkVisitor) captureFetch(c *js.CallExpr) {
 		URL:     url,
 		Library: libFetch,
 	}
+	var opts *js.ObjectExpr
 	if len(c.Args.List) >= 2 {
 		ep.Method = methodFromOptionsArg(c.Args.List[1].Value)
+		opts = objArg(c, 1)
 	}
-	v.out.Endpoints = append(v.out.Endpoints, ep)
+	v.addEndpoint(ep, c, c.Args.List[0].Value, configExtras(libFetch, opts))
 }
 
 // captureAxiosCall handles the axios(url[, opts]) and axios({url, method}) direct-call forms.
@@ -540,10 +571,12 @@ func (v *sinkVisitor) captureAxiosCall(c *js.CallExpr) {
 			return
 		}
 		ep := protocol.ExtractedEndpoint{URL: u, Library: libAxios}
+		var opts *js.ObjectExpr
 		if len(c.Args.List) >= 2 {
 			ep.Method = methodFromOptionsArg(c.Args.List[1].Value)
+			opts = objArg(c, 1)
 		}
-		v.out.Endpoints = append(v.out.Endpoints, ep)
+		v.addEndpoint(ep, c, first, configExtras(libAxios, opts))
 		return
 	}
 	if obj, ok := first.(*js.ObjectExpr); ok {
@@ -551,11 +584,11 @@ func (v *sinkVisitor) captureAxiosCall(c *js.CallExpr) {
 		if u == "" || !isURLArg(u) {
 			return
 		}
-		v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+		v.addEndpoint(protocol.ExtractedEndpoint{
 			Method:  strings.ToUpper(stringProp(obj, "method")),
 			URL:     u,
 			Library: libAxios,
-		})
+		}, c, propValue(obj, "url"), configExtras(libAxios, obj))
 	}
 }
 
@@ -566,10 +599,10 @@ func (v *sinkVisitor) captureDynamicImport(c *js.CallExpr) {
 		return
 	}
 	if u, ok := v.resolveURLArg(c.Args.List[0].Value); ok && importSpecifierIsPath(u) {
-		v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+		v.addEndpoint(protocol.ExtractedEndpoint{
 			URL:     u,
 			Library: libImport,
-		})
+		}, c, c.Args.List[0].Value, detailExtras{})
 	}
 }
 
@@ -578,10 +611,10 @@ func (v *sinkVisitor) captureDynamicImport(c *js.CallExpr) {
 func (v *sinkVisitor) captureImportScripts(c *js.CallExpr) {
 	for _, arg := range c.Args.List {
 		if u, ok := staticString(arg.Value); ok && u != "" {
-			v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+			v.addEndpoint(protocol.ExtractedEndpoint{
 				URL:     u,
 				Library: libImport,
-			})
+			}, c, arg.Value, detailExtras{})
 		}
 	}
 }
@@ -624,11 +657,11 @@ func (v *sinkVisitor) visitMemberCall(d *js.DotExpr, c *js.CallExpr) {
 	// navigator.sendBeacon(url, data) - always a POST
 	if objName == "navigator" && prop == "sendBeacon" && len(c.Args.List) >= 1 {
 		if u, ok := v.resolveURLArg(c.Args.List[0].Value); ok && isURLArg(u) {
-			v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+			v.addEndpoint(protocol.ExtractedEndpoint{
 				Method:  "POST",
 				URL:     u,
 				Library: libBeacon,
-			})
+			}, c, c.Args.List[0].Value, detailExtras{})
 		}
 	}
 
@@ -637,11 +670,11 @@ func (v *sinkVisitor) visitMemberCall(d *js.DotExpr, c *js.CallExpr) {
 		if _, isXHR := v.scope.xhrReceivers[objName]; isXHR {
 			if m, mok := staticString(c.Args.List[0].Value); mok {
 				if u, uok := v.resolveURLArg(c.Args.List[1].Value); uok && isURLArg(u) {
-					v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+					v.addEndpoint(protocol.ExtractedEndpoint{
 						Method:  strings.ToUpper(m),
 						URL:     u,
 						Library: libXHR,
-					})
+					}, c, c.Args.List[1].Value, detailExtras{})
 				}
 			}
 		}
@@ -681,11 +714,22 @@ func (v *sinkVisitor) visitAxiosCall(method string, c *js.CallExpr) {
 	if !ok || !isURLArg(u) {
 		return
 	}
-	v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+	// axios.post/put/patch(url, data[, config]); axios.get/delete(url[, config]).
+	var ex detailExtras
+	switch upper {
+	case "POST", "PUT", "PATCH":
+		if len(c.Args.List) >= 2 {
+			ex = configExtras(libAxios, objArg(c, 2))
+			ex.body = bodyFromValue(c.Args.List[1].Value)
+		}
+	default:
+		ex = configExtras(libAxios, objArg(c, 1))
+	}
+	v.addEndpoint(protocol.ExtractedEndpoint{
 		Method:  upper,
 		URL:     u,
 		Library: libAxios,
-	})
+	}, c, c.Args.List[0].Value, ex)
 }
 
 // visitJQueryCall handles $.ajax / $.get / $.post / $.getJSON.
@@ -696,22 +740,29 @@ func (v *sinkVisitor) visitJQueryCall(method string, c *js.CallExpr) {
 	var url string
 	var ok bool
 	var m string
+	urlArg := c.Args.List[0].Value
+	var ex detailExtras
 
 	switch strings.ToLower(method) {
 	case "get", "getjson":
 		m = "GET"
-		url, ok = v.resolveURLArg(c.Args.List[0].Value)
+		url, ok = v.resolveURLArg(urlArg)
 	case "post":
 		m = "POST"
-		url, ok = v.resolveURLArg(c.Args.List[0].Value)
+		url, ok = v.resolveURLArg(urlArg)
+		if len(c.Args.List) >= 2 {
+			ex.body = bodyFromValue(c.Args.List[1].Value)
+		}
 	case "ajax":
-		if obj, isObj := c.Args.List[0].Value.(*js.ObjectExpr); isObj {
+		if obj, isObj := urlArg.(*js.ObjectExpr); isObj {
 			url = stringProp(obj, "url")
 			m = strings.ToUpper(stringProp(obj, "method"))
 			if m == "" {
 				m = strings.ToUpper(stringProp(obj, "type"))
 			}
 			ok = url != ""
+			urlArg = propValue(obj, "url")
+			ex = configExtras(libJQuery, obj)
 		}
 	default:
 		return
@@ -719,11 +770,11 @@ func (v *sinkVisitor) visitJQueryCall(method string, c *js.CallExpr) {
 	if !ok || !isURLArg(url) {
 		return
 	}
-	v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+	v.addEndpoint(protocol.ExtractedEndpoint{
 		Method:  m,
 		URL:     url,
 		Library: libJQuery,
-	})
+	}, c, urlArg, ex)
 }
 
 // visitNew handles `new WebSocket(url, ...)` and `new VueRouter({routes:[...]})`.
@@ -738,20 +789,20 @@ func (v *sinkVisitor) visitNew(n *js.NewExpr) {
 			return
 		}
 		if u, ok := v.resolveURLArg(n.Args.List[0].Value); ok && looksLikeWebSocketURL(u) {
-			v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+			v.addEndpoint(protocol.ExtractedEndpoint{
 				URL:     u,
 				Library: libWebSocket,
-			})
+			}, n, n.Args.List[0].Value, detailExtras{})
 		}
 	case "EventSource":
 		if n.Args == nil || len(n.Args.List) == 0 {
 			return
 		}
 		if u, ok := v.resolveURLArg(n.Args.List[0].Value); ok && isURLArg(u) {
-			v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+			v.addEndpoint(protocol.ExtractedEndpoint{
 				URL:     u,
 				Library: libEventSource,
-			})
+			}, n, n.Args.List[0].Value, detailExtras{})
 		}
 	case "VueRouter":
 		if n.Args != nil && len(n.Args.List) >= 1 {
@@ -768,10 +819,10 @@ func (v *sinkVisitor) visitAssign(b *js.BinaryExpr) {
 		return
 	}
 	if u, ok := v.resolveURLArg(b.Y); ok && isURLArg(u) {
-		v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+		v.addEndpoint(protocol.ExtractedEndpoint{
 			URL:     u,
 			Library: libNavigation,
-		})
+		}, b, b.Y, detailExtras{})
 	}
 }
 
@@ -822,10 +873,10 @@ func (v *sinkVisitor) captureNavURL(c *js.CallExpr) {
 		return
 	}
 	if u, ok := v.resolveURLArg(c.Args.List[0].Value); ok && isURLArg(u) {
-		v.out.Endpoints = append(v.out.Endpoints, protocol.ExtractedEndpoint{
+		v.addEndpoint(protocol.ExtractedEndpoint{
 			URL:     u,
 			Library: libNavigation,
-		})
+		}, c, c.Args.List[0].Value, detailExtras{})
 	}
 }
 

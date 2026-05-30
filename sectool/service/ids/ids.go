@@ -2,7 +2,9 @@ package ids
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"math/big"
+	"strings"
 )
 
 const DefaultLength = 6
@@ -16,7 +18,6 @@ const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 var maxVal = big.NewInt(int64(len(base62)))
 
 // Generate returns a cryptographically random base62 ID of the specified length.
-// If length is 0, uses DefaultLength (6).
 func Generate(length int) string {
 	if length <= 0 {
 		length = DefaultLength
@@ -31,6 +32,22 @@ func Generate(length int) string {
 		result[i] = base62[n.Int64()]
 	}
 
+	return string(result)
+}
+
+// Derive returns a deterministic base62 ID of the given length from the joined parts.
+func Derive(length int, parts ...string) string {
+	if length <= 0 {
+		length = DefaultLength
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	n := new(big.Int).SetBytes(sum[:])
+	result := make([]byte, length)
+	rem := new(big.Int)
+	for i := range length {
+		n.QuoRem(n, maxVal, rem)
+		result[i] = base62[rem.Int64()]
+	}
 	return string(result)
 }
 

@@ -55,7 +55,9 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/mcp_diff.go` - Diff tool handler (structured flow comparison)
 - `sectool/service/mcp_reflection.go` - Reflection tool handler (parameter reflection detection)
 - `sectool/service/mcp_jsanalyze.go` - JS analyze tool handler (extract API surface from JS/HTML responses)
+- `sectool/service/mcp_jsendpoint.go` - JS endpoint detail tool handler (per-call-site request shape by deterministic id)
 - `sectool/service/js/` - JS bundle parser and extractors (tdewolff/parse/v2/js)
+- `sectool/service/js/detail.go` - per-call-site request-shape extraction (body/headers/query/path params) and deterministic EndpointID
 - `sectool/service/mcp_notes.go` - Notes tool handlers (save, list) and flow listing attachment
 - `sectool/service/mcp_respond.go` - Proxy responder tool handlers (respond_add, respond_delete, respond_list); native backend only
 - `sectool/service/flags.go` - MCP server flag parsing (`--port`, `--workflow`, `--config`, `--notes`)
@@ -233,7 +235,8 @@ Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body place
 - `jwt_decode` - decode and inspect JWT tokens
 - `diff_flow` - compare two captured flows with structured, content-type-aware diffing
 - `find_reflected` - detect request parameter values reflected in the response
-- `js_analyze` - extract API surface from a JavaScript or HTML flow (endpoints, routes, sockets, URL literals, external scripts)
+- `js_surface` - extract API surface from a JavaScript or HTML flow (endpoints, routes, sockets, URL literals, external scripts); endpoints with extractable request shape carry an `endpoint_id`
+- `js_endpoint` - expand one `js_surface` endpoint into its full per-call-site request shape (body fields, headers, query, path params); addressed as `<flow_id>.<endpoint_id>`
 - `notes_save` - create, update, or delete notes/findings linked to flows (requires `--notes`)
 - `notes_list` - list saved notes with filters (requires `--notes`)
 
@@ -251,7 +254,7 @@ CLI requires a running MCP server. Maps to MCP tools via `sectool <module> <sub>
 - `jwt`: decode JWT tokens
 - `diff`: `<flow_a> <flow_b> --scope <scope>`
 - `reflected`: `<flow_id>`
-- `js`: `<flow_id>`
+- `js`: `<flow_id>` (list) or `<flow_id>.<endpoint_id>` (per-endpoint request shape)
 - `version`
 
 ## Development Guidelines

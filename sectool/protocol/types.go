@@ -521,7 +521,7 @@ type Reflection struct {
 // JS Analyze Types
 // =============================================================================
 
-// JSAnalyzeResponse is the response for js_analyze.
+// JSAnalyzeResponse is the response for js_surface.
 type JSAnalyzeResponse struct {
 	Source        string              `json:"source"` // "javascript" | "html-inline" | "html"
 	Stats         JSAnalyzeStats      `json:"stats"`
@@ -557,6 +557,41 @@ type ExtractedEndpoint struct {
 	Library string `json:"library,omitempty"`
 	// LastFlow is the most recent proxy flow_id matching the URL.
 	LastFlow string `json:"last_flow,omitempty"`
+	// EndpointID is a deterministic handle (hash of method+url) for js_endpoint detail lookup, queried
+	// as "<flow_id>.<endpoint_id>". Present only when the call site has extractable request shape.
+	EndpointID string `json:"endpoint_id,omitempty"`
+}
+
+// JSEndpointResponse is the response for js_endpoint: full per-call-site request shape for one endpoint.
+type JSEndpointResponse struct {
+	EndpointID string       `json:"endpoint_id"`
+	Method     string       `json:"method,omitempty"`
+	URL        string       `json:"url"` // template form; preserves ${...} placeholders
+	LastFlow   string       `json:"last_flow,omitempty"`
+	CallSites  []JSCallSite `json:"call_sites"`
+}
+
+// JSCallSite is one usage location of an endpoint.
+type JSCallSite struct {
+	Library    string         `json:"library,omitempty"`
+	Call       string         `json:"call"` // rendered call expression, e.g. fetch("/x", {...})
+	Body       *JSRequestBody `json:"body,omitempty"`
+	Headers    []JSField      `json:"headers,omitempty"`
+	Query      []JSField      `json:"query,omitempty"`
+	PathParams []string       `json:"path_params,omitempty"` // template variable names behind ${...}
+}
+
+// JSRequestBody is the statically-determined request body shape.
+type JSRequestBody struct {
+	ContentType string    `json:"content_type,omitempty"` // "json" for JSON.stringify/object-literal bodies
+	Fields      []JSField `json:"fields,omitempty"`
+	Raw         string    `json:"raw,omitempty"` // rendered body expression when not an object
+}
+
+// JSField is a name/value pair. Value is the static literal when resolvable, otherwise the JS source expression.
+type JSField struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
 }
 
 // ExtractedRoute is a client-side route definition.

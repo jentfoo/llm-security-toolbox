@@ -40,7 +40,7 @@ func TestGenerate(t *testing.T) {
 
 	t.Run("uniqueness", func(t *testing.T) {
 		seen := make(map[string]bool)
-		count := 10000
+		const count = 10000
 
 		for range count {
 			id := Generate(DefaultLength)
@@ -51,6 +51,39 @@ func TestGenerate(t *testing.T) {
 		}
 
 		assert.Len(t, seen, count)
+	})
+}
+
+func TestDerive(t *testing.T) {
+	t.Parallel()
+
+	t.Run("deterministic", func(t *testing.T) {
+		a := Derive(6, "POST", "/api/users")
+		b := Derive(6, "POST", "/api/users")
+		assert.Equal(t, a, b)
+	})
+
+	t.Run("custom_length", func(t *testing.T) {
+		for _, length := range []int{4, 6, 8, 16} {
+			assert.Len(t, Derive(length, "GET", "/x"), length)
+		}
+	})
+
+	t.Run("zero_length_uses_default", func(t *testing.T) {
+		assert.Len(t, Derive(0, "GET", "/x"), DefaultLength)
+	})
+
+	t.Run("only_base62_characters", func(t *testing.T) {
+		assert.True(t, IsValid(Derive(6, "DELETE", "/api/items/${id}")))
+	})
+
+	t.Run("distinct_inputs_differ", func(t *testing.T) {
+		assert.NotEqual(t, Derive(6, "GET", "/a"), Derive(6, "POST", "/a"))
+		assert.NotEqual(t, Derive(6, "GET", "/a"), Derive(6, "GET", "/b"))
+	})
+
+	t.Run("part_boundary_distinct", func(t *testing.T) {
+		assert.NotEqual(t, Derive(6, "GET", "ab", "c"), Derive(6, "GET", "a", "bc"))
 	})
 }
 
