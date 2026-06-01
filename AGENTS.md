@@ -45,6 +45,7 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/server.go` - MCP server lifecycle and backend coordination
 - `sectool/service/mcp_server.go` - MCP server setup, tool registration, workflow handling
 - `sectool/service/mcp_proxy.go` - Proxy and flow_get tool handlers (poll, flow_get, cookie_jar, rules)
+- `sectool/service/mcp_proxy_internal.go` - Internal MCP proxy tool (`_internal_history_delete`)
 - `sectool/service/mcp_replay.go` - Replay tool handlers (send, request_send)
 - `sectool/service/mcp_crawl.go` - Crawl tool handlers (create, seed, status, poll, sessions, stop)
 - `sectool/service/mcp_oast.go` - OAST tool handlers (create, poll, get, list, delete)
@@ -54,10 +55,17 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/mcp_jwt.go` - JWT decode tool handler
 - `sectool/service/mcp_diff.go` - Diff tool handler (structured flow comparison)
 - `sectool/service/mcp_reflection.go` - Reflection tool handler (parameter reflection detection)
-- `sectool/service/mcp_jsanalyze.go` - JS analyze tool handler (extract API surface from JS/HTML responses)
+- `sectool/service/mcp_jssurface.go` - JS analyze tool handler (extract API surface from JS/HTML responses)
 - `sectool/service/mcp_jsendpoint.go` - JS endpoint detail tool handler (per-call-site request shape by deterministic id)
 - `sectool/service/js/` - JS bundle parser and extractors (tdewolff/parse/v2/js)
+- `sectool/service/js/analyze.go` - main JS bundle analyzer
+- `sectool/service/js/dedupe.go` - deduplication logic
 - `sectool/service/js/detail.go` - per-call-site request-shape extraction (body/headers/query/path params) and deterministic EndpointID
+- `sectool/service/js/extract.go` - extraction logic
+- `sectool/service/js/html.go` - HTML-specific handling
+- `sectool/service/js/parse.go` - parsing logic
+- `sectool/service/js/scope.go` - scoping logic
+- `sectool/service/js/secrets.go` - secrets detection
 - `sectool/service/mcp_notes.go` - Notes tool handlers (save, list) and flow listing attachment
 - `sectool/service/mcp_respond.go` - Proxy responder tool handlers (respond_add, respond_delete, respond_list); native backend only
 - `sectool/service/flags.go` - MCP server flag parsing (`--port`, `--workflow`, `--config`, `--notes`)
@@ -69,6 +77,7 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/smtputil.go` - SMTP email header parsing utilities
 - `sectool/service/backend_crawler_colly.go` - Colly-based crawler implementation
 - `sectool/service/capture_filter.go` - BuildCaptureFilter: compiles proxy exclusion patterns from config
+- `sectool/service/formutil.go` - Form parsing utilities
 - `sectool/service/search.go` - RE2 pattern compilation with LLM-friendly double-escape correction; flow content matching
 - `sectool/service/httputil.go` - HTTP request/response parsing utilities
 - `sectool/service/jsonutil.go` - JSON field modification utilities
@@ -110,14 +119,15 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 
 ### CLI Commands
 
-- `sectool/proxy/flags.go` - Subcommand parsing (summary/list/cookies/export/rule)
-- `sectool/proxy/list.go` - List/summary command implementation
+- `sectool/proxy/flags.go` - Subcommand parsing (summary/list/get/cookies/export/rule/clear)
+- `sectool/proxy/clear.go` - Clear command implementation (remove flows from history)
+- `sectool/proxy/list.go` - List/summary/get command implementation
 - `sectool/proxy/cookies.go` - Cookies command implementation
 - `sectool/proxy/export.go` - Export command implementation
 - `sectool/proxy/rule.go` - Rule CRUD command implementations
 - `sectool/crawl/flags.go` - Crawl subcommand parsing
 - `sectool/crawl/crawl.go` - Crawl command implementations
-- `sectool/replay/flags.go` - Subcommand parsing (send/get)
+- `sectool/replay/flags.go` - Subcommand parsing (send/get/create)
 - `sectool/replay/replay.go` - Command implementations
 - `sectool/oast/flags.go` - Subcommand parsing (create/poll/list/delete)
 - `sectool/oast/oast.go` - Command implementations
@@ -150,7 +160,9 @@ Global config at `~/.sectool/config.json` (auto-created with defaults):
 
 ```json
 {
+  "version": "<auto-set schema version>",
   "mcp_port": 9119,
+  "proxy_port": 8080,
   "burp_required": false,
   "max_body_bytes": 10485760,
   "include_subdomains": true,
@@ -159,6 +171,9 @@ Global config at `~/.sectool/config.json` (auto-created with defaults):
   "interactsh_server_url": "",
   "interactsh_auth_token": "",
   "proxy": {
+    "dial_timeout_secs": 20,
+    "read_timeout_secs": 240,
+    "write_timeout_secs": 60,
     "exclude_extensions": "<RE2 alternation, see DefaultExcludeExtensions>"
   },
   "crawler": {
@@ -242,20 +257,7 @@ Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body place
 
 ## CLI Commands
 
-CLI requires a running MCP server. Maps to MCP tools via `sectool <module> <sub>` pattern.
-
-- `proxy`: `summary`, `list`, `cookies`, `export`, `rule {add,delete,list}`
-- `crawl`: `create`, `seed`, `status`, `summary`, `list`, `export`, `sessions`, `stop`
-- `replay`: `send`, `get`
-- `oast`: `create`, `summary`, `poll`, `get`, `list`, `delete`
-- `encode`: `url`, `base64`, `html`
-- `decode`: `url`, `base64`, `html`
-- `hash`: compute hash digests
-- `jwt`: decode JWT tokens
-- `diff`: `<flow_a> <flow_b> --scope <scope>`
-- `reflected`: `<flow_id>`
-- `js`: `<flow_id>` (list) or `<flow_id>.<endpoint_id>` (per-endpoint request shape)
-- `version`
+CLI subcommands (`sectool <module> <sub>`) generally provide access to the MCP tools above, with presentation tweaks for human use (tables, color, `--limit`, local export bundles). A running MCP server is required; the few extras beyond the MCP surface are `proxy export`, `crawl export`, and `version`.
 
 ## Development Guidelines
 
