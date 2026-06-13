@@ -219,14 +219,15 @@ func (b *mockHttpBackend) GetProxyHistoryMeta(ctx context.Context, count int, af
 		status := readResponseStatusCode([]byte(e.Response))
 		_, respBody := splitHeadersBody([]byte(e.Response))
 		result[i] = ProxyEntryMeta{
-			FlowID:    e.FlowID,
-			Timestamp: e.Timestamp,
-			Method:    method,
-			Host:      host,
-			Path:      path,
-			Status:    status,
-			RespLen:   len(respBody),
-			Protocol:  e.Protocol,
+			FlowID:      e.FlowID,
+			Timestamp:   e.Timestamp,
+			Method:      method,
+			Host:        host,
+			Path:        path,
+			Status:      status,
+			RespLen:     len(respBody),
+			Protocol:    e.Protocol,
+			Placeholder: e.Placeholder,
 		}
 	}
 	return result, nil
@@ -403,6 +404,13 @@ func (b *mockHttpBackend) AddProxyEntry(request, response, notes string) string 
 		Notes:     notes,
 	})
 	return flowID
+}
+
+// AddProxyPlaceholder appends an unparseable placeholder entry (no flow_id), mirroring a corrupt Burp line.
+func (b *mockHttpBackend) AddProxyPlaceholder() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.entries = append(b.entries, ProxyEntry{Placeholder: true})
 }
 
 // SetSendResult queues a response for the next SendRequest call.

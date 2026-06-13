@@ -105,6 +105,8 @@ type ProxyEntryMeta struct {
 	RespLen     int
 	Protocol    string
 	ContentType string
+	// Placeholder marks an unparseable Burp entry that preserves offset contiguity; skipped for display.
+	Placeholder bool
 }
 
 // ProxyEntry represents a single proxy history entry in HttpBackend-agnostic form.
@@ -117,6 +119,8 @@ type ProxyEntry struct {
 	InterimResponses []string `json:"interim_responses,omitempty"`
 	Notes            string   `json:"notes"`
 	Protocol         string   `json:"protocol"` // "http/1.1" or "h2" (empty defaults to http/1.1)
+	// Placeholder marks an unparseable Burp entry that preserves offset contiguity; skipped for display.
+	Placeholder bool `json:"-"`
 }
 
 // Target specifies the destination for a request.

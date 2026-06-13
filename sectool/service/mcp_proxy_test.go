@@ -1323,3 +1323,51 @@ func TestMCP_FlowGetWithCrawlScope(t *testing.T) {
 		assert.NotContains(t, raw, "response_body")
 	})
 }
+
+func TestDrainProxyHistory(t *testing.T) {
+	t.Parallel()
+
+	// Spans two fetchBatchSize pages with a placeholder mid-first-page: a single
+	// dropped entry must not truncate paging (the finding-2 regression).
+	const total = fetchBatchSize + 100
+	const placeholderIdx = 250
+
+	run := func(t *testing.T, full bool) {
+		t.Helper()
+		backend := newMockHttpBackend()
+		var wantOrder []string
+		for i := range total {
+			if i == placeholderIdx {
+				backend.AddProxyPlaceholder()
+				continue
+			}
+			fid := backend.AddProxyEntry("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "")
+			wantOrder = append(wantOrder, fid)
+		}
+
+		out, err := drainProxyHistory(t.Context(), backend, full)
+		require.NoError(t, err)
+
+		gotOrder := make([]string, len(out))
+		for i, fe := range out {
+			gotOrder[i] = fe.flowID
+		}
+		assert.Equal(t, wantOrder, gotOrder) // all real entries, in order, placeholder filtered
+	}
+
+	t.Run("full", func(t *testing.T) { run(t, true) })
+	t.Run("meta", func(t *testing.T) { run(t, false) })
+
+	t.Run("full_placeholder_page_stops", func(t *testing.T) {
+		// A full page with no resolvable cursor halts paging (can't advance past it).
+		backend := newMockHttpBackend()
+		for range fetchBatchSize {
+			backend.AddProxyPlaceholder()
+		}
+		backend.AddProxyEntry("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "")
+
+		out, err := drainProxyHistory(t.Context(), backend, true)
+		require.NoError(t, err)
+		assert.Empty(t, out)
+	})
+}

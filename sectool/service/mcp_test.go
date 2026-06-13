@@ -92,6 +92,22 @@ type testProxyEntry struct {
 	Request  string `json:"request"`
 	Response string `json:"response"`
 	Notes    string `json:"notes"`
+	Raw      string `json:"-"` // when set, emitted verbatim as the NDJSON line (simulates a corrupt Burp entry)
+}
+
+// renderHistoryNDJSON formats entries as NDJSON, emitting Raw verbatim when present.
+func renderHistoryNDJSON(entries []testProxyEntry) string {
+	var sb strings.Builder
+	for _, entry := range entries {
+		if entry.Raw != "" {
+			sb.WriteString(entry.Raw)
+		} else {
+			line, _ := json.Marshal(entry)
+			sb.Write(line)
+		}
+		sb.WriteByte('\n')
+	}
+	return sb.String()
 }
 
 // NewTestMCPServer creates a mock MCP server for testing.
@@ -128,13 +144,7 @@ func NewTestMCPServer(t *testing.T) *TestMCPServer {
 			}
 
 			// Return NDJSON format like real Burp
-			var sb strings.Builder
-			for _, entry := range ts.proxyHistory[offset:end] {
-				line, _ := json.Marshal(entry)
-				sb.Write(line)
-				sb.WriteByte('\n')
-			}
-			return mcp.NewToolResultText(sb.String()), nil
+			return mcp.NewToolResultText(renderHistoryNDJSON(ts.proxyHistory[offset:end])), nil
 		},
 	)
 
@@ -164,13 +174,7 @@ func NewTestMCPServer(t *testing.T) *TestMCPServer {
 				end = len(ts.proxyHistory)
 			}
 
-			var sb strings.Builder
-			for _, entry := range ts.proxyHistory[offset:end] {
-				line, _ := json.Marshal(entry)
-				sb.Write(line)
-				sb.WriteByte('\n')
-			}
-			return mcp.NewToolResultText(sb.String()), nil
+			return mcp.NewToolResultText(renderHistoryNDJSON(ts.proxyHistory[offset:end])), nil
 		},
 	)
 

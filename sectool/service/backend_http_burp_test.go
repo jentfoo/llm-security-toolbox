@@ -481,6 +481,32 @@ func TestBurpFlowIndexRegisterOrLookup(t *testing.T) {
 		_, ok := idx.OffsetFor(f1)
 		assert.False(t, ok)
 	})
+
+	t.Run("relocation_clears_old_offset_mapping", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		_, _ = idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		_, _ = idx.RegisterOrLookup(1, "GET /b HTTP/1.1\r\n\r\n")
+		f2, _ := idx.RegisterOrLookup(2, "GET /c HTTP/1.1\r\n\r\n")
+
+		// Burp UI delete shifts /c down from offset 2 to offset 1
+		gotF2, _ := idx.RegisterOrLookup(1, "GET /c HTTP/1.1\r\n\r\n")
+		require.Equal(t, f2, gotF2)
+		off, ok := idx.OffsetFor(f2)
+		require.True(t, ok)
+		assert.Equal(t, 1, off)
+		assert.Equal(t, 2, idx.Count()) // no orphan left at old offset 2
+
+		// Fresh content lands on the vacated offset 2; must not evict the live /c fingerprint
+		f3, _ := idx.RegisterOrLookup(2, "GET /d HTTP/1.1\r\n\r\n")
+		assert.NotEqual(t, f2, f3)
+
+		// Re-poll /c at offset 1: identity must be stable, not a freshly minted id
+		reF2, _ := idx.RegisterOrLookup(1, "GET /c HTTP/1.1\r\n\r\n")
+		assert.Equal(t, f2, reF2)
+	})
 }
 
 func TestBurpFlowIndexSweepTail(t *testing.T) {
@@ -689,6 +715,36 @@ func TestBurpBackendGetProxyHistory(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, entries)
 		assert.Equal(t, 0, backend.flowIndex.Count())
+	})
+
+	t.Run("corrupt_middle_line_keeps_offsets", func(t *testing.T) {
+		backend, mockServer := newTestBurpBackend(t)
+
+		mockServer.AddProxyEntries(
+			testProxyEntry{Request: "GET /a HTTP/1.1\r\nHost: a.com\r\n\r\n", Response: "HTTP/1.1 200 OK\r\n\r\nA"},
+			testProxyEntry{Raw: "{this is not json at all"}, // corrupt entry at true offset 1
+			testProxyEntry{Request: "GET /c HTTP/1.1\r\nHost: c.com\r\n\r\n", Response: "HTTP/1.1 200 OK\r\n\r\nC"},
+		)
+
+		entries, err := backend.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
+		require.Len(t, entries, 3)
+		assert.False(t, entries[0].Placeholder)
+		assert.True(t, entries[1].Placeholder)
+		assert.False(t, entries[2].Placeholder)
+		fC := entries[2].FlowID
+
+		// /c registered at its TRUE offset 2, not shifted down by the dropped line
+		off, ok := backend.flowIndex.OffsetFor(fC)
+		require.True(t, ok)
+		assert.Equal(t, 2, off)
+		assert.Equal(t, 2, backend.flowIndex.Count()) // placeholder not registered
+
+		// Re-poll: identities stable, no eviction/churn from the corrupt offset
+		entries, err = backend.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
+		require.Len(t, entries, 3)
+		assert.Equal(t, fC, entries[2].FlowID)
 	})
 }
 

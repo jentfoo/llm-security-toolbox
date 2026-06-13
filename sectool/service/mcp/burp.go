@@ -425,6 +425,7 @@ func parseHistoryNDJSON(text string) ([]ProxyHistoryEntry, error) {
 				continue
 			}
 			log.Printf("mcp: skipping unparseable history entry at line %d: %v", lineNum, err)
+			entries = append(entries, ProxyHistoryEntry{Placeholder: true})
 			continue
 		}
 		entries = append(entries, entry)

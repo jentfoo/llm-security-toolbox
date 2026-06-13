@@ -211,10 +211,11 @@ func TestParseHistoryNDJSON(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		input   string
-		want    int
-		wantErr bool
+		name         string
+		input        string
+		want         int
+		placeholders []bool // optional: expected Placeholder flag per entry
+		wantErr      bool
 	}{
 		{
 			name:  "empty",
@@ -255,7 +256,8 @@ Reached end of items`,
 			name: "with non-JSON prefix lines",
 			input: `Some header text
 {"request":"GET /","response":"HTTP/1.1 200","notes":""}`,
-			want: 1,
+			want:         1,
+			placeholders: []bool{false}, // prefix line consumes no offset, not a placeholder
 		},
 		{
 			name:  "corrupted separator dot before notes",
@@ -268,10 +270,11 @@ Reached end of items`,
 			want:  1,
 		},
 		{
-			name: "skip unparseable line keep good lines",
+			name: "placeholder for unparseable entry",
 			input: `{"request":"GET /a","response":"200","notes":""}
 {this is not json at all`,
-			want: 1,
+			want:         2,
+			placeholders: []bool{false, true}, // entry-shaped corrupt line kept as placeholder
 		},
 	}
 
@@ -284,6 +287,12 @@ Reached end of items`,
 			}
 			require.NoError(t, err)
 			assert.Len(t, entries, tt.want)
+			if tt.placeholders != nil {
+				require.Len(t, entries, len(tt.placeholders))
+				for i, want := range tt.placeholders {
+					assert.Equal(t, want, entries[i].Placeholder)
+				}
+			}
 		})
 	}
 }

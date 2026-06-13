@@ -668,17 +668,21 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 	var cursor string
 	for {
 		var page []flowEntry
+		var fetched int // entries returned (incl. placeholders) for paging/termination
 		if full {
 			entries, err := backend.GetProxyHistory(ctx, fetchBatchSize, cursor)
 			if err != nil {
 				return nil, err
 			}
-			page = make([]flowEntry, len(entries))
-			for i, entry := range entries {
+			fetched = len(entries)
+			for _, entry := range entries {
+				if entry.Placeholder {
+					continue
+				}
 				method, host, path := extractRequestMeta(entry.Request)
 				status := readResponseStatusCode([]byte(entry.Response))
 				_, respBody := splitHeadersBody([]byte(entry.Response))
-				page[i] = flowEntry{
+				page = append(page, flowEntry{
 					flowID:    entry.FlowID,
 					timestamp: entry.Timestamp,
 					method:    method,
@@ -689,16 +693,19 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 					request:   entry.Request,
 					response:  entry.Response,
 					source:    SourceProxy,
-				}
+				})
 			}
 		} else {
 			metas, err := backend.GetProxyHistoryMeta(ctx, fetchBatchSize, cursor)
 			if err != nil {
 				return nil, err
 			}
-			page = make([]flowEntry, len(metas))
-			for i, m := range metas {
-				page[i] = flowEntry{
+			fetched = len(metas)
+			for _, m := range metas {
+				if m.Placeholder {
+					continue
+				}
+				page = append(page, flowEntry{
 					flowID:    m.FlowID,
 					timestamp: m.Timestamp,
 					method:    m.Method,
@@ -707,14 +714,19 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 					status:    m.Status,
 					respLen:   m.RespLen,
 					source:    SourceProxy,
-				}
+				})
 			}
 		}
-		if len(page) == 0 {
+		if fetched == 0 {
 			break
 		}
 		out = append(out, page...)
-		if len(page) < fetchBatchSize {
+		if fetched < fetchBatchSize {
+			break
+		}
+		if len(page) == 0 {
+			// full page was entirely placeholders: no flow_id to advance past, so paging cannot continue
+			log.Printf("proxy history: full page of %d unparseable entries at cursor %q; stopping paging", fetched, cursor)
 			break
 		}
 		cursor = page[len(page)-1].flowID

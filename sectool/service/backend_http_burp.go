@@ -164,10 +164,10 @@ func (i *burpFlowIndex) RegisterOrLookup(offset int, request string) (flowID str
 			if e, ok := i.byOffset[oldOff]; ok {
 				oldObservedAt = e.observedAt
 			}
-			// remove the offset's mapping without marking its flow_id stale; the flow_id is being moved to a new offset
-			delete(i.byOffset, offset)
-			if err := i.storage.Delete(burpFlowIndexKey(offset)); err != nil {
-				log.Printf("burp index: delete relocated record %d: %v", offset, err)
+			// remove the old offset's mapping without marking its flow_id stale; the flow_id is being moved to a new offset
+			delete(i.byOffset, oldOff)
+			if err := i.storage.Delete(burpFlowIndexKey(oldOff)); err != nil {
+				log.Printf("burp index: delete relocated record %d: %v", oldOff, err)
 			}
 		}
 		if oldObservedAt.IsZero() {
@@ -323,10 +323,18 @@ func (b *BurpBackend) GetProxyHistory(ctx context.Context, count int, afterFlowI
 	}
 	result := make([]ProxyEntry, 0, min(len(entries), count))
 	for i, e := range entries {
-		flowID, observedAt := b.flowIndex.RegisterOrLookup(startOffset+i, e.Request)
 		if i >= count {
-			continue // tail probe entry; cache is updated, but not returned
+			if !e.Placeholder {
+				b.flowIndex.RegisterOrLookup(startOffset+i, e.Request) // tail probe; cache updated, not returned
+			}
+			continue
 		}
+		if e.Placeholder {
+			// occupies offset startOffset+i; not registered, carried through for paging fidelity
+			result = append(result, ProxyEntry{Placeholder: true})
+			continue
+		}
+		flowID, observedAt := b.flowIndex.RegisterOrLookup(startOffset+i, e.Request)
 		result = append(result, ProxyEntry{
 			FlowID:    flowID,
 			Timestamp: observedAt,
@@ -353,10 +361,18 @@ func (b *BurpBackend) GetProxyHistoryMeta(ctx context.Context, count int, afterF
 	}
 	result := make([]ProxyEntryMeta, 0, min(len(entries), count))
 	for i, e := range entries {
-		flowID, observedAt := b.flowIndex.RegisterOrLookup(startOffset+i, e.Request)
 		if i >= count {
+			if !e.Placeholder {
+				b.flowIndex.RegisterOrLookup(startOffset+i, e.Request) // tail probe; cache updated, not returned
+			}
 			continue
 		}
+		if e.Placeholder {
+			// occupies offset startOffset+i; not registered, carried through for paging fidelity
+			result = append(result, ProxyEntryMeta{Placeholder: true})
+			continue
+		}
+		flowID, observedAt := b.flowIndex.RegisterOrLookup(startOffset+i, e.Request)
 		method, host, path := extractRequestMeta(e.Request)
 		status := readResponseStatusCode([]byte(e.Response))
 		_, respBody := splitHeadersBody([]byte(e.Response))
@@ -413,6 +429,12 @@ func (b *BurpBackend) GetProxyEntry(ctx context.Context, flowID string) (*ProxyE
 	if len(entries) == 0 {
 		// The slot is gone; this offset is past Burp's live tail
 		b.flowIndex.SweepTail(offset)
+		return nil, ErrNotFound
+	}
+	if entries[0].Placeholder {
+		// Offset now unparseable. Leave the index alone: evicting the fingerprint would
+		// mint a new flow_id if this flow relocated and is re-observed later. The stale
+		// mapping is harmless and self-heals via the relocation path on the next poll.
 		return nil, ErrNotFound
 	}
 	resolvedFlowID, observedAt := b.flowIndex.RegisterOrLookup(offset, entries[0].Request)

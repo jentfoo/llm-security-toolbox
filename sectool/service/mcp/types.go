@@ -5,6 +5,9 @@ type ProxyHistoryEntry struct {
 	Request  string `json:"request"`
 	Response string `json:"response"`
 	Notes    string `json:"notes"`
+	// Placeholder marks an entry-shaped line that occupies a real Burp offset but
+	// could not be parsed; it preserves offset contiguity and is skipped for display.
+	Placeholder bool `json:"-"`
 }
 
 // SendRequestParams are the parameters for send_http1_request.
