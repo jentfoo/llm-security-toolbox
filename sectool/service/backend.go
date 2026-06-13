@@ -113,8 +113,10 @@ type ProxyEntry struct {
 	Timestamp time.Time `json:"-"` // capture-start for native; first observation for Burp
 	Request   string    `json:"request"`
 	Response  string    `json:"response"`
-	Notes     string    `json:"notes"`
-	Protocol  string    `json:"protocol"` // "http/1.1" or "h2" (empty defaults to http/1.1)
+	// InterimResponses holds wire-formatted 1xx responses that preceded Response.
+	InterimResponses []string `json:"interim_responses,omitempty"`
+	Notes            string   `json:"notes"`
+	Protocol         string   `json:"protocol"` // "http/1.1" or "h2" (empty defaults to http/1.1)
 }
 
 // Target specifies the destination for a request.

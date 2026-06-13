@@ -927,6 +927,125 @@ func TestRawHTTP1Request_Serialize(t *testing.T) {
 	})
 }
 
+func TestReadFinalResponse(t *testing.T) {
+	t.Parallel()
+
+	newReader := func(s string) *bufio.Reader { return bufio.NewReader(strings.NewReader(s)) }
+
+	t.Run("100_continue_then_200", func(t *testing.T) {
+		br := newReader("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello")
+		var forwarded []*RawHTTP1Response
+		interim, final, err := readFinalResponse(br, "POST", func(ir *RawHTTP1Response) error {
+			forwarded = append(forwarded, ir)
+			return nil
+		})
+		require.NoError(t, err)
+		require.Len(t, interim, 1)
+		assert.Equal(t, 100, interim[0].StatusCode)
+		assert.Equal(t, 200, final.StatusCode)
+		assert.Equal(t, []byte("Hello"), final.Body)
+		assert.Equal(t, interim, forwarded)
+	})
+
+	t.Run("103_early_hints_then_200", func(t *testing.T) {
+		br := newReader("HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+		interim, final, err := readFinalResponse(br, "GET", nil)
+		require.NoError(t, err)
+		require.Len(t, interim, 1)
+		assert.Equal(t, 103, interim[0].StatusCode)
+		assert.Equal(t, "</style.css>; rel=preload", interim[0].GetHeader("Link"))
+		assert.Equal(t, 200, final.StatusCode)
+	})
+
+	t.Run("multiple_interim_then_final", func(t *testing.T) {
+		br := newReader("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n")
+		interim, final, err := readFinalResponse(br, "GET", nil)
+		require.NoError(t, err)
+		require.Len(t, interim, 2)
+		assert.Equal(t, 100, interim[0].StatusCode)
+		assert.Equal(t, 103, interim[1].StatusCode)
+		assert.Equal(t, 204, final.StatusCode)
+	})
+
+	t.Run("101_is_terminal", func(t *testing.T) {
+		br := newReader("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n")
+		interim, final, err := readFinalResponse(br, "GET", nil)
+		require.NoError(t, err)
+		assert.Empty(t, interim)
+		assert.Equal(t, 101, final.StatusCode)
+	})
+
+	t.Run("plain_200_no_interim", func(t *testing.T) {
+		br := newReader("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello")
+		interim, final, err := readFinalResponse(br, "GET", nil)
+		require.NoError(t, err)
+		assert.Empty(t, interim)
+		assert.Equal(t, 200, final.StatusCode)
+	})
+
+	t.Run("on_interim_error_propagates", func(t *testing.T) {
+		br := newReader("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\n")
+		sentinel := errors.New("write failed")
+		interim, final, err := readFinalResponse(br, "GET", func(*RawHTTP1Response) error {
+			return sentinel
+		})
+		require.ErrorIs(t, err, sentinel)
+		assert.Nil(t, final)
+		assert.Empty(t, interim)
+	})
+
+	t.Run("keep_alive_no_off_by_one", func(t *testing.T) {
+		// One reader carrying an interim 1xx, the first response, then a second
+		// response. Both reads must pair correctly with no shift.
+		br := newReader("HTTP/1.1 100 Continue\r\n\r\n" +
+			"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nfir1" +
+			"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nsec2")
+		interim1, final1, err := readFinalResponse(br, "GET", nil)
+		require.NoError(t, err)
+		require.Len(t, interim1, 1)
+		assert.Equal(t, []byte("fir1"), final1.Body)
+
+		interim2, final2, err := readFinalResponse(br, "GET", nil)
+		require.NoError(t, err)
+		assert.Empty(t, interim2)
+		assert.Equal(t, []byte("sec2"), final2.Body)
+	})
+}
+
+func TestParseResponseBoundedBody(t *testing.T) {
+	t.Parallel()
+
+	t.Run("oversized_content_length_short_body", func(t *testing.T) {
+		// Declared length is huge but only a few bytes arrive then EOF; must read
+		// what actually arrives without pre-allocating the declared size.
+		input := "HTTP/1.1 200 OK\r\nContent-Length: 9999999999\r\n\r\nShort"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		assert.Equal(t, []byte("Short"), resp.Body)
+	})
+
+	t.Run("oversized_content_length_no_body", func(t *testing.T) {
+		input := "HTTP/1.1 200 OK\r\nContent-Length: 9999999999\r\n\r\n"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		assert.Empty(t, resp.Body)
+	})
+
+	t.Run("oversized_chunk_size_short_data", func(t *testing.T) {
+		input := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFF\r\npartial"
+		resp, err := parseResponse(strings.NewReader(input), "GET")
+		require.NoError(t, err)
+		assert.Equal(t, []byte("partial"), resp.Body)
+	})
+
+	t.Run("request_oversized_content_length", func(t *testing.T) {
+		input := "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 9999999999\r\n\r\nhi"
+		req, err := ParseRequest(strings.NewReader(input))
+		require.NoError(t, err)
+		assert.Equal(t, []byte("hi"), req.Body)
+	})
+}
+
 func TestRawHTTP1Response_Serialize(t *testing.T) {
 	t.Parallel()
 

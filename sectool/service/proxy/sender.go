@@ -324,7 +324,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 	if s.Timeouts.ReadTimeout > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(s.Timeouts.ReadTimeout))
 	}
-	resp, err := parseResponse(bufio.NewReader(conn), req.Method)
+	_, resp, err := readFinalResponse(bufio.NewReader(conn), req.Method, nil)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -452,7 +452,7 @@ func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*RawHTTP
 	if s.Timeouts.ReadTimeout > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(s.Timeouts.ReadTimeout))
 	}
-	resp, err := parseResponse(bufio.NewReader(conn), method)
+	_, resp, err := readFinalResponse(bufio.NewReader(conn), method, nil)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

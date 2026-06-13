@@ -90,7 +90,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
 				req.SetBody(req.Body[:h.maxBodyBytes])
 			}
-			h.storeEntry(req, resp, startTime)
+			h.storeEntry(req, resp, nil, startTime)
 			return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
 		}
 	}
@@ -115,7 +115,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		} else {
 			h.sendError(clientConn, 502, "Bad Gateway: connection refused")
 		}
-		h.storeEntry(req, nil, startTime)
+		h.storeEntry(req, nil, nil, startTime)
 		return false
 	}
 	defer func() { _ = upstreamConn.Close() }()
@@ -131,7 +131,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		} else {
 			h.sendError(clientConn, 502, "Bad Gateway: failed to send request")
 		}
-		h.storeEntry(req, nil, startTime)
+		h.storeEntry(req, nil, nil, startTime)
 		return false
 	}
 
@@ -140,15 +140,20 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	}
 
 	upstreamReader := bufio.NewReader(upstreamConn)
-	resp, err := parseResponse(upstreamReader, req.Method)
+	interim, resp, err := readFinalResponse(upstreamReader, req.Method, func(ir *RawHTTP1Response) error {
+		return h.forwardInterim(clientConn, ir)
+	})
 	if err != nil {
 		log.Printf("proxy: failed to parse response from %s: %v", upstreamAddr, err)
-		if isTimeoutError(err) {
-			h.sendError(clientConn, 504, "Gateway Timeout: read timeout")
-		} else {
-			h.sendError(clientConn, 502, "Bad Gateway: malformed response")
+		// Skip the synthetic error if interim responses already started the wire stream
+		if len(interim) == 0 {
+			if isTimeoutError(err) {
+				h.sendError(clientConn, 504, "Gateway Timeout: read timeout")
+			} else {
+				h.sendError(clientConn, 502, "Bad Gateway: malformed response")
+			}
 		}
-		h.storeEntry(req, nil, startTime)
+		h.storeEntry(req, nil, interim, startTime)
 		return false
 	}
 
@@ -169,7 +174,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 
 	// Store before forwarding so history is visible by the time the client sees the response
 	// Avoids a race with query history after the response arrives but before storeEntry
-	h.storeEntry(req, resp, startTime)
+	h.storeEntry(req, resp, interim, startTime)
 
 	// Forward response to client
 	if h.timeouts.WriteTimeout > 0 {
@@ -284,14 +289,25 @@ func (h *http1Handler) sendError(conn net.Conn, code int, message string) {
 	_, _ = conn.Write(resp.SerializeRaw(bytes.NewBuffer(nil)))
 }
 
-// storeEntry saves the request/response pair to history.
-func (h *http1Handler) storeEntry(req *RawHTTP1Request, resp *RawHTTP1Response, startTime time.Time) {
+// forwardInterim writes an interim 1xx response to the client as-is (no rules applied).
+func (h *http1Handler) forwardInterim(clientConn net.Conn, ir *RawHTTP1Response) error {
+	var buf bytes.Buffer
+	if h.timeouts.WriteTimeout > 0 {
+		_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
+	}
+	_, err := clientConn.Write(ir.SerializeRaw(&buf))
+	return err
+}
+
+// storeEntry saves the request/response pair, plus any interim 1xx responses, to history.
+func (h *http1Handler) storeEntry(req *RawHTTP1Request, resp *RawHTTP1Response, interim []*RawHTTP1Response, startTime time.Time) {
 	entry := &HistoryEntry{
-		Protocol:  protocolHTTP11,
-		Request:   req,
-		Response:  resp,
-		Timestamp: startTime,
-		Duration:  time.Since(startTime),
+		Protocol:         protocolHTTP11,
+		Request:          req,
+		Response:         resp,
+		InterimResponses: interim,
+		Timestamp:        startTime,
+		Duration:         time.Since(startTime),
 	}
 	if !h.history.ShouldCapture(entry) {
 		return
@@ -356,7 +372,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
 				req.SetBody(req.Body[:h.maxBodyBytes])
 			}
-			h.storeEntry(req, resp, startTime)
+			h.storeEntry(req, resp, nil, startTime)
 			return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
 		}
 	}
@@ -383,7 +399,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		} else {
 			h.sendError(clientConn, 502, "Bad Gateway: failed to send request")
 		}
-		h.storeEntry(req, nil, startTime)
+		h.storeEntry(req, nil, nil, startTime)
 		return false
 	}
 
@@ -391,15 +407,20 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		_ = upstreamConn.SetReadDeadline(time.Now().Add(h.timeouts.ReadTimeout))
 	}
 
-	resp, err := parseResponse(upstreamReader, req.Method)
+	interim, resp, err := readFinalResponse(upstreamReader, req.Method, func(ir *RawHTTP1Response) error {
+		return h.forwardInterim(clientConn, ir)
+	})
 	if err != nil {
 		log.Printf("proxy: failed to parse TLS response: %v", err)
-		if isTimeoutError(err) {
-			h.sendError(clientConn, 504, "Gateway Timeout: read timeout")
-		} else {
-			h.sendError(clientConn, 502, "Bad Gateway: malformed response")
+		// Skip the synthetic error if interim responses already started the wire stream
+		if len(interim) == 0 {
+			if isTimeoutError(err) {
+				h.sendError(clientConn, 504, "Gateway Timeout: read timeout")
+			} else {
+				h.sendError(clientConn, 502, "Bad Gateway: malformed response")
+			}
 		}
-		h.storeEntry(req, nil, startTime)
+		h.storeEntry(req, nil, interim, startTime)
 		return false
 	}
 
@@ -425,7 +446,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		resp.SetBody(resp.Body[:h.maxBodyBytes])
 	}
 
-	h.storeEntry(req, resp, startTime)
+	h.storeEntry(req, resp, interim, startTime)
 
 	connHeader := strings.ToLower(resp.GetHeader("Connection"))
 	return connHeader != connectionClose

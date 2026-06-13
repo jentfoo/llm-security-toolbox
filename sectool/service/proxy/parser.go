@@ -17,6 +17,10 @@ var (
 	ErrInvalidResponse = errors.New("invalid status line")
 )
 
+// initialBodyAlloc caps the up-front buffer reserved before reading a body of
+// declared length; the buffer grows on demand as bytes arrive.
+const initialBodyAlloc = 8192
+
 // ParseRequest parses an HTTP/1.1 request from the reader.
 // Returns error only for truly unparseable input.
 func ParseRequest(r io.Reader) (*RawHTTP1Request, error) {
@@ -151,6 +155,27 @@ func parseResponse(r io.Reader, requestMethod string) (*RawHTTP1Response, error)
 	}
 
 	return resp, nil
+}
+
+// readFinalResponse reads responses from br until a final (>=200) one, returning any
+// preceding interim 1xx responses and the final response. 101 is treated as final.
+// onInterim, when non-nil, is called for each interim response as it is read.
+// The same *bufio.Reader must be reused across calls so buffered bytes are not dropped.
+func readFinalResponse(br *bufio.Reader, requestMethod string, onInterim func(*RawHTTP1Response) error) (interim []*RawHTTP1Response, final *RawHTTP1Response, err error) {
+	for {
+		resp, perr := parseResponse(br, requestMethod)
+		if perr != nil {
+			return interim, nil, perr
+		} else if resp.StatusCode < 100 || resp.StatusCode >= 200 || resp.StatusCode == 101 {
+			return interim, resp, nil
+		}
+		if onInterim != nil {
+			if werr := onInterim(resp); werr != nil {
+				return interim, nil, werr
+			}
+		}
+		interim = append(interim, resp)
+	}
 }
 
 func readLineWithEnding(br *bufio.Reader) (content []byte, ending LineEnding, err error) {
@@ -333,9 +358,9 @@ func readRequestBodyWithWire(br *bufio.Reader, req *RawHTTP1Request) (body, trai
 		if err != nil || cl <= 0 {
 			return nil, nil, false, nil, false, false, nil
 		}
-		body = make([]byte, cl)
-		_, err = io.ReadFull(br, body)
-		return body, nil, false, nil, false, false, err
+		buf := bytes.NewBuffer(make([]byte, 0, min(cl, int64(initialBodyAlloc))))
+		_, err = io.Copy(buf, io.LimitReader(br, cl))
+		return buf.Bytes(), nil, false, nil, false, false, err
 	}
 
 	// No body indicator for requests
@@ -361,9 +386,9 @@ func readResponseBodyWithWire(br *bufio.Reader, resp *RawHTTP1Response) (body, t
 		} else if cl == 0 {
 			return nil, nil, false, nil, false, false, nil
 		}
-		body = make([]byte, cl)
-		_, err = io.ReadFull(br, body)
-		return body, nil, false, nil, false, false, err
+		buf := bytes.NewBuffer(make([]byte, 0, min(cl, int64(initialBodyAlloc))))
+		_, err = io.Copy(buf, io.LimitReader(br, cl))
+		return buf.Bytes(), nil, false, nil, false, false, err
 	}
 
 	// No Content-Length or chunked: read until EOF
@@ -417,11 +442,9 @@ func readChunkedBody(br *bufio.Reader) (body, trailers []byte, chunks []ChunkFra
 			return bodyBuf.Bytes(), trailers, chunks, trailersBareLF, trailersBareCR, nil
 		}
 
-		chunk := make([]byte, size)
-		if _, err = io.ReadFull(br, chunk); err != nil {
+		if _, err = io.CopyN(&bodyBuf, br, size); err != nil {
 			return bodyBuf.Bytes(), nil, chunks, trailersBareLF, trailersBareCR, err
 		}
-		bodyBuf.Write(chunk)
 
 		// Trailing terminator after chunk data
 		_, dataEnding, _ := readLineWithEnding(br)

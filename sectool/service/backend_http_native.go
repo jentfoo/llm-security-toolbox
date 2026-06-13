@@ -241,12 +241,17 @@ func (b *NativeProxyBackend) GetProxyEntry(ctx context.Context, flowID string) (
 	var buf bytes.Buffer
 	reqStr := string(entry.FormatRequest(&buf))
 	respStr := string(entry.FormatResponse(&buf))
+	var interim []string
+	for _, ir := range entry.InterimResponses {
+		interim = append(interim, string(ir.SerializeRaw(&buf)))
+	}
 	return &ProxyEntry{
-		FlowID:    entry.FlowID,
-		Timestamp: entry.Timestamp,
-		Request:   reqStr,
-		Response:  respStr,
-		Protocol:  entry.Protocol,
+		FlowID:           entry.FlowID,
+		Timestamp:        entry.Timestamp,
+		Request:          reqStr,
+		Response:         respStr,
+		InterimResponses: interim,
+		Protocol:         entry.Protocol,
 	}, nil
 }
 

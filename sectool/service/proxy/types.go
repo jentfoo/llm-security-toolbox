@@ -248,6 +248,10 @@ type HistoryEntry struct {
 	Request  *RawHTTP1Request  `json:"request,omitempty" msgpack:"rq,omitempty"`
 	Response *RawHTTP1Response `json:"response,omitempty" msgpack:"rs,omitempty"`
 
+	// InterimResponses holds 1xx responses (e.g. 100 Continue, 103 Early Hints)
+	// received before the final Response.
+	InterimResponses []*RawHTTP1Response `json:"interim_responses,omitempty" msgpack:"ir,omitempty"`
+
 	// HTTP/2 request/response (nil for HTTP/1.1)
 	H2Request  *H2RequestData  `json:"h2_request,omitempty" msgpack:"h2q,omitempty"`
 	H2Response *H2ResponseData `json:"h2_response,omitempty" msgpack:"h2r,omitempty"`

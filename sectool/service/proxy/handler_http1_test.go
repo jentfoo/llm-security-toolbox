@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"bufio"
+	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -566,7 +569,7 @@ func TestStoreEntry(t *testing.T) {
 		}
 		startTime := time.Now()
 
-		h.storeEntry(req, resp, startTime)
+		h.storeEntry(req, resp, nil, startTime)
 
 		// Verify entry was stored
 		assert.Equal(t, 1, h.history.Count())
@@ -588,11 +591,63 @@ func TestStoreEntry(t *testing.T) {
 		}
 		startTime := time.Now()
 
-		h.storeEntry(req, nil, startTime)
+		h.storeEntry(req, nil, nil, startTime)
 
 		assert.Equal(t, 1, h.history.Count())
 
 		entry := firstEntry(t, h.history)
 		assert.Nil(t, entry.Response)
 	})
+}
+
+func TestHandleSinglePlainHTTPInterim(t *testing.T) {
+	t.Parallel()
+
+	// Upstream that emits a 103 interim response before the final 200.
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = upstream.Close() })
+
+	go func() {
+		conn, aerr := upstream.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		br := bufio.NewReader(conn)
+		for { // drain request headers
+			line, rerr := br.ReadString('\n')
+			if rerr != nil || line == "\r\n" {
+				break
+			}
+		}
+		_, _ = conn.Write([]byte("HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\n"))
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"))
+	}()
+
+	h := newTestHTTP1Handler(t)
+	clientConn, proxyConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	go func() {
+		h.handleSinglePlainHTTP(t.Context(), proxyConn, bufio.NewReader(proxyConn))
+		_ = proxyConn.Close()
+	}()
+
+	_, err = clientConn.Write([]byte("GET / HTTP/1.1\r\nHost: " + upstream.Addr().String() + "\r\n\r\n"))
+	require.NoError(t, err)
+
+	respData, err := io.ReadAll(clientConn)
+	require.NoError(t, err)
+	respStr := string(respData)
+	assert.Contains(t, respStr, "103 Early Hints")
+	assert.Contains(t, respStr, "200 OK")
+	assert.Less(t, strings.Index(respStr, "103"), strings.Index(respStr, "200 OK"))
+
+	require.Equal(t, 1, h.history.Count())
+	entry := firstEntry(t, h.history)
+	require.NotNil(t, entry.Response)
+	assert.Equal(t, 200, entry.Response.StatusCode)
+	require.Len(t, entry.InterimResponses, 1)
+	assert.Equal(t, 103, entry.InterimResponses[0].StatusCode)
 }

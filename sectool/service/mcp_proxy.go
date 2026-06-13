@@ -469,6 +469,9 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 	if resolved.Truncated {
 		result["truncated"] = true
 	}
+	if len(resolved.InterimResponses) > 0 {
+		result["interim_responses"] = resolved.InterimResponses
+	}
 
 	if patternRe != nil {
 		// Pattern mode: grep-like context output

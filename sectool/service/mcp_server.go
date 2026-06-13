@@ -460,17 +460,18 @@ func translateTimeoutError(err error) string {
 
 // resolvedFlow holds the raw request and response bytes for a resolved flow.
 type resolvedFlow struct {
-	RawRequest      []byte
-	ModifiedRequest []byte // post-rule request for display; nil if no rules applied
-	RawResponse     []byte
-	Source          string        // "proxy", "replay", "crawl"
-	Scheme          string        // "http" or "https" (empty = infer from host)
-	Port            int           // original port (0 = infer from scheme)
-	Protocol        string        // "http/1.1", "h2", or empty (defaults to http/1.1)
-	Duration        time.Duration // replay, crawl (zero = not available)
-	FoundOn         string        // crawl only
-	Depth           int           // crawl only
-	Truncated       bool          // crawl only
+	RawRequest       []byte
+	ModifiedRequest  []byte // post-rule request for display; nil if no rules applied
+	RawResponse      []byte
+	InterimResponses []string      // wire-formatted 1xx responses preceding RawResponse (proxy only)
+	Source           string        // "proxy", "replay", "crawl"
+	Scheme           string        // "http" or "https" (empty = infer from host)
+	Port             int           // original port (0 = infer from scheme)
+	Protocol         string        // "http/1.1", "h2", or empty (defaults to http/1.1)
+	Duration         time.Duration // replay, crawl (zero = not available)
+	FoundOn          string        // crawl only
+	Depth            int           // crawl only
+	Truncated        bool          // crawl only
 }
 
 // DisplayRequest returns the request as shown when retrieved.
@@ -498,10 +499,11 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 	}
 	if entry, err := m.service.httpBackend.GetProxyEntry(ctx, flowID); err == nil && entry != nil {
 		return &resolvedFlow{
-			RawRequest:  []byte(entry.Request),
-			RawResponse: []byte(entry.Response),
-			Source:      SourceProxy,
-			Protocol:    entry.Protocol,
+			RawRequest:       []byte(entry.Request),
+			RawResponse:      []byte(entry.Response),
+			InterimResponses: entry.InterimResponses,
+			Source:           SourceProxy,
+			Protocol:         entry.Protocol,
 		}, nil
 	} else if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, errorResultFromErr("failed to fetch flow: ", err)
