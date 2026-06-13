@@ -484,6 +484,53 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		// Rules exist but didn't match - ModifiedRequest should be nil
 		assert.Nil(t, result.ModifiedRequest)
 	})
+
+	t.Run("redirect_request_header_rule_no_accumulation", func(t *testing.T) {
+		t.Parallel()
+
+		var hopCounts []int
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hopCounts = append(hopCounts, len(r.Header.Values("X-Rule-Added")))
+			if r.URL.Path == "/start" {
+				w.Header().Set("Location", "/final")
+				w.WriteHeader(302)
+				return
+			}
+			w.WriteHeader(200)
+		}))
+		t.Cleanup(testServer.Close)
+
+		serverURL, err := url.Parse(testServer.URL)
+		require.NoError(t, err)
+
+		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close() })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Type:    RuleTypeRequestHeader,
+			Replace: "X-Rule-Added: from-rule\r\n",
+		})
+		require.NoError(t, err)
+
+		rawReq := []byte("GET /start HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
+			RawRequest:      rawReq,
+			FollowRedirects: true,
+			Target: Target{
+				Hostname:  serverURL.Hostname(),
+				Port:      mustParsePort(t, serverURL.Port()),
+				UsesHTTPS: false,
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, hopCounts, 2)
+		for _, c := range hopCounts {
+			assert.Equal(t, 1, c) // exactly one appended header per hop, no accumulation
+		}
+		require.NotNil(t, result.ModifiedRequest)
+		assert.Contains(t, string(result.ModifiedRequest), "X-Rule-Added: from-rule")
+	})
 }
 
 func TestNativeProxyBackend_Close(t *testing.T) {
@@ -1215,11 +1262,72 @@ func TestApplyMatchReplaceRule(t *testing.T) {
 			caseInsensitive: true,
 			want:            "Content-Type: text/plain\r\nX-Added: value\r\n",
 		},
+		{
+			name:            "ci_ascii_basic",
+			rule:            nativeStoredRule{Find: "x-test", Replace: "X-Done"},
+			input:           "X-TEST: a\r\n",
+			caseInsensitive: true,
+			want:            "X-Done: a\r\n",
+		},
+		{
+			name:            "ci_kelvin_before_match",
+			rule:            nativeStoredRule{Find: "foo", Replace: "bar"},
+			input:           "X-K: K foo\r\n",
+			caseInsensitive: true,
+			want:            "X-K: K bar\r\n",
+		},
+		{
+			name:            "ci_latin_a_stroke_before_match",
+			rule:            nativeStoredRule{Find: "foo", Replace: "bar"},
+			input:           "X-A: Ⱥ foo\r\n",
+			caseInsensitive: true,
+			want:            "X-A: Ⱥ bar\r\n",
+		},
+		{
+			name:            "ci_match_text_nonascii_no_lower_match",
+			rule:            nativeStoredRule{Find: "Ⱥ", Replace: "x"},
+			input:           "aⱥb",
+			caseInsensitive: true,
+			want:            "aⱥb",
+		},
+		{
+			name:            "ci_match_text_nonascii_exact_match",
+			rule:            nativeStoredRule{Find: "Ⱥ", Replace: "x"},
+			input:           "aȺb",
+			caseInsensitive: true,
+			want:            "axb",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, string(applyMatchReplaceRule([]byte(tt.input), tt.rule, tt.caseInsensitive)))
+		})
+	}
+}
+
+func TestReplaceCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		match   string
+		replace string
+		want    string
+	}{
+		{name: "empty_match", input: "abc", match: "", replace: "x", want: "abc"},
+		{name: "ascii_fold", input: "Foo FOO foo", match: "foo", replace: "bar", want: "bar bar bar"},
+		{name: "multi_occurrence_grow", input: "AaAa", match: "a", replace: "bb", want: "bbbbbbbb"},
+		{name: "kelvin_before_match", input: "K foo", match: "foo", replace: "x", want: "K x"},
+		{name: "latin_a_stroke_before_match", input: "Ⱥ foo", match: "foo", replace: "x", want: "Ⱥ x"},
+		{name: "nonascii_case_sensitive", input: "ⱥ", match: "Ⱥ", replace: "x", want: "ⱥ"},
+		{name: "no_match", input: "hello", match: "xyz", replace: "q", want: "hello"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, string(replaceCaseInsensitive([]byte(tt.input), tt.match, tt.replace)))
 		})
 	}
 }

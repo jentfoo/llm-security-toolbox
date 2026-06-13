@@ -70,6 +70,10 @@ type Modifications struct {
 type SendResult struct {
 	Response *RawHTTP1Response
 	Duration time.Duration
+
+	// ModifiedRequest holds the first hop's post-rule request bytes, set only when rules
+	// changed the request. nil when no RequestRuleApplier ran or it made no change.
+	ModifiedRequest []byte
 }
 
 // prepareRequest parses raw request bytes, applies modifications, and optionally validates.
@@ -148,21 +152,36 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*SendResult, error) {
 	start := time.Now()
 
-	req, err := s.prepareRequest(opts.RawRequest, opts.Modifications, opts.Force)
+	// currentBase is the pristine request (modifications applied, but NOT find/replace rules).
+	// Each hop is built from it so append rules can't accumulate across redirects.
+	currentBase, err := s.prepareRequest(opts.RawRequest, opts.Modifications, opts.Force)
 	if err != nil {
 		return nil, err
 	}
 
-	currentReq := req
 	currentTarget := opts.Target
-	currentPath := req.Path
+	currentPath := currentBase.Path
 	currentProtocol := opts.Protocol
-	if req.Query != "" {
-		currentPath = req.Path + "?" + req.Query
+	if currentBase.Query != "" {
+		currentPath = currentBase.Path + "?" + currentBase.Query
 	}
 
+	var modifiedRequest []byte // first hop's post-rule bytes, set once when rules change it
+
 	for i := 0; i < maxRedirects; i++ {
-		resp, err := s.sendRequestWithProtocol(ctx, currentReq, currentTarget, currentProtocol)
+		// Apply rules to a clone so currentBase stays pristine for the next hop
+		sendReq := currentBase
+		if s.RequestRuleApplier != nil {
+			sendReq = s.RequestRuleApplier(currentBase.Clone())
+			if i == 0 {
+				var preBuf, postBuf bytes.Buffer
+				if pre, post := currentBase.SerializeRaw(&preBuf), sendReq.SerializeRaw(&postBuf); !bytes.Equal(pre, post) {
+					modifiedRequest = slices.Clone(post)
+				}
+			}
+		}
+
+		resp, err := s.sendRequestWithProtocol(ctx, sendReq, currentTarget, currentProtocol)
 		if err != nil {
 			return nil, err
 		}
@@ -170,32 +189,31 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 		// Check for redirect
 		if resp.StatusCode < 300 || resp.StatusCode >= 400 {
 			return &SendResult{
-				Response: resp,
-				Duration: time.Since(start),
+				Response:        resp,
+				Duration:        time.Since(start),
+				ModifiedRequest: modifiedRequest,
 			}, nil
 		}
 
 		location := resp.GetHeader("Location")
 		if location == "" {
 			return &SendResult{
-				Response: resp,
-				Duration: time.Since(start),
+				Response:        resp,
+				Duration:        time.Since(start),
+				ModifiedRequest: modifiedRequest,
 			}, nil
 		}
 
-		// Build redirect request
+		// Build the next hop from the pristine base, not the rule-applied sendReq
 		var newTarget Target
-		currentReq, newTarget, currentPath, err = buildRedirectRequest(currentReq, location, currentTarget, currentPath, resp.StatusCode)
+		currentBase, newTarget, currentPath, err = buildRedirectRequest(currentBase, location, currentTarget, currentPath, resp.StatusCode)
 		if err != nil {
 			// Can't follow redirect, return current response
 			return &SendResult{
-				Response: resp,
-				Duration: time.Since(start),
+				Response:        resp,
+				Duration:        time.Since(start),
+				ModifiedRequest: modifiedRequest,
 			}, nil
-		}
-
-		if s.RequestRuleApplier != nil {
-			currentReq = s.RequestRuleApplier(currentReq)
 		}
 
 		// Check for cross-origin redirect (different scheme, host, or port).

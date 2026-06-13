@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -207,6 +208,15 @@ func (r *RawHTTP1Request) RemoveHeader(name string) { r.Headers.Remove(name) }
 func (r *RawHTTP1Request) SetBody(b []byte) {
 	r.Body = b
 	r.Chunks = nil
+}
+
+// Clone returns a copy safe to mutate without affecting the receiver. Headers are deep-copied
+// because in-place rule application mutates header elements; Body/Trailers/Chunks/Wire are
+// reassigned wholesale by callers (never mutated in place), so sharing them is safe.
+func (r *RawHTTP1Request) Clone() *RawHTTP1Request {
+	c := *r
+	c.Headers = slices.Clone(r.Headers)
+	return &c
 }
 
 // GetHeader returns the first header value with the given name (case-insensitive).

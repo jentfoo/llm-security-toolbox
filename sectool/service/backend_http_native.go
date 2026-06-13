@@ -261,15 +261,17 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 	}
 
 	rawRequest := req.RawRequest
+	var modifiedRequest []byte
 
-	// Apply request rules: parse -> apply -> re-serialize
-	// If parse fails (intentionally malformed request), skip rules silently
-	if b.hasRequestRules() {
+	// Non-redirect path pre-applies rules here (Send ignores RequestRuleApplier). Redirect path
+	// leaves rawRequest pristine; the sender applies rules per hop. Malformed requests skip rules.
+	if b.hasRequestRules() && !req.FollowRedirects {
 		if parsed, parseErr := proxy.ParseRequest(bytes.NewReader(rawRequest)); parseErr == nil {
 			var buf bytes.Buffer
 			modified := b.ApplyRequestRules(parsed).SerializeRaw(&buf)
 			if !bytes.Equal(rawRequest, modified) {
-				rawRequest = modified
+				rawRequest = slices.Clone(modified)
+				modifiedRequest = rawRequest
 			}
 		}
 	}
@@ -297,6 +299,9 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 	var err error
 	if req.FollowRedirects {
 		result, err = sender.SendWithRedirects(ctx, opts)
+		if err == nil {
+			modifiedRequest = result.ModifiedRequest
+		}
 	} else {
 		result, err = sender.Send(ctx, opts)
 	}
@@ -306,11 +311,6 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 
 	// Response rules are NOT applied here, they modify browser-bound proxy traffic,
 	// not programmatic send results where the caller needs raw server responses
-
-	var modifiedRequest []byte
-	if !bytes.Equal(req.RawRequest, rawRequest) {
-		modifiedRequest = rawRequest
-	}
 
 	var buf bytes.Buffer
 	return &SendRequestResult{
@@ -796,30 +796,48 @@ func applyMatchReplaceRule(input []byte, rule nativeStoredRule, caseInsensitive 
 	return re.ReplaceAll(input, []byte(rule.Replace))
 }
 
-// replaceCaseInsensitive replaces all occurrences of match in input, case-insensitively.
+// toLowerASCII maps ASCII A-Z to a-z; all other bytes (including multibyte UTF-8) pass through.
+func toLowerASCII(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+// equalFoldASCIIAt reports whether input[pos:pos+len(match)] equals match under ASCII case folding.
+// Caller guarantees pos+len(match) <= len(input).
+func equalFoldASCIIAt(input []byte, pos int, match string) bool {
+	for i := 0; i < len(match); i++ {
+		if toLowerASCII(input[pos+i]) != toLowerASCII(match[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// replaceCaseInsensitive replaces all occurrences of match in input using ASCII-only case folding.
+// Scanning the original buffer (not a Unicode-lowercased copy) keeps match length identical in both
+// spaces, so indices can't drift or run past the input. Non-ASCII bytes fold case-sensitively, which
+// is correct for HTTP headers.
 func replaceCaseInsensitive(input []byte, match, replace string) []byte {
 	if match == "" {
 		return input
 	}
 
-	matchBytes := []byte(match)
 	replaceBytes := []byte(replace)
-	inputLower := bytes.ToLower(input)
-	matchLower := bytes.ToLower(matchBytes)
-
 	var result []byte
-	var start int
-	for {
-		idx := bytes.Index(inputLower[start:], matchLower)
-		if idx < 0 {
-			result = append(result, input[start:]...)
-			break
+	start := 0
+	for i := 0; i+len(match) <= len(input); {
+		if toLowerASCII(input[i]) == toLowerASCII(match[0]) && equalFoldASCIIAt(input, i, match) {
+			result = append(result, input[start:i]...)
+			result = append(result, replaceBytes...)
+			i += len(match)
+			start = i
+		} else {
+			i++
 		}
-		result = append(result, input[start:start+idx]...)
-		result = append(result, replaceBytes...)
-		start = start + idx + len(matchBytes)
 	}
-	return result
+	return append(result, input[start:]...)
 }
 
 // parseHeadersFromText parses "Name: Value\r\n" lines into Header slice.

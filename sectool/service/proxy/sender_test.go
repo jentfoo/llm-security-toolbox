@@ -885,10 +885,80 @@ func TestSender_SendWithRedirects(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 200, result.Response.StatusCode)
 		require.Len(t, receivedHeaders, 2)
-		// Initial request is sent as-is (caller applies rules before SendWithRedirects)
-		assert.Empty(t, receivedHeaders[0])
-		// Redirect hop gets rules applied
+		// Every hop including the first gets rules applied
+		assert.Equal(t, "rule-applied", receivedHeaders[0])
 		assert.Equal(t, "rule-applied", receivedHeaders[1])
+		assert.Contains(t, string(result.ModifiedRequest), "X-Injected: rule-applied")
+	})
+
+	t.Run("append_rule_no_accumulation", func(t *testing.T) {
+		var hopCounts []int
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hopCounts = append(hopCounts, len(r.Header.Values("X-Injected")))
+			switch r.URL.Path {
+			case "/a":
+				w.Header().Set("Location", "/b")
+				w.WriteHeader(302)
+			case "/b":
+				w.Header().Set("Location", "/c")
+				w.WriteHeader(302)
+			default:
+				w.WriteHeader(200)
+			}
+		}))
+		t.Cleanup(testServer.Close)
+
+		serverURL, _ := url.Parse(testServer.URL)
+		port, _ := strconv.Atoi(serverURL.Port())
+
+		sender := &Sender{
+			RequestRuleApplier: func(req *RawHTTP1Request) *RawHTTP1Request {
+				req.Headers = append(req.Headers, Header{Name: "X-Injected", Value: "once"})
+				return req
+			},
+		}
+
+		rawReq := []byte("GET /a HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := sender.SendWithRedirects(t.Context(), SendOptions{
+			RawRequest: rawReq,
+			Target:     Target{Hostname: serverURL.Hostname(), Port: port},
+			Force:      true,
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, 200, result.Response.StatusCode)
+		require.Len(t, hopCounts, 3)
+		for _, c := range hopCounts {
+			assert.Equal(t, 1, c)
+		}
+	})
+
+	t.Run("nil_applier_no_modified_request", func(t *testing.T) {
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/hop" {
+				w.Header().Set("Location", "/final")
+				w.WriteHeader(302)
+				return
+			}
+			w.WriteHeader(200)
+		}))
+		t.Cleanup(testServer.Close)
+
+		serverURL, _ := url.Parse(testServer.URL)
+		port, _ := strconv.Atoi(serverURL.Port())
+
+		sender := &Sender{}
+
+		rawReq := []byte("GET /hop HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := sender.SendWithRedirects(t.Context(), SendOptions{
+			RawRequest: rawReq,
+			Target:     Target{Hostname: serverURL.Hostname(), Port: port},
+			Force:      true,
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, 200, result.Response.StatusCode)
+		assert.Nil(t, result.ModifiedRequest)
 	})
 
 	t.Run("h2_preserves_protocol", func(t *testing.T) {
