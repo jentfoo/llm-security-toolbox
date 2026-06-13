@@ -206,7 +206,7 @@ func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls
 	// Close connections when context is cancelled to unblock blocking reads.
 	// ReadFrame doesn't accept context, so closing is the only way to interrupt it.
 	go func() {
-		<-ctx.Done()
+		<-proxyCtx.Done()
 		_ = clientConn.Close()
 		_ = upstreamConn.Close()
 	}()

@@ -35,20 +35,23 @@ type http1Handler struct {
 // Handle processes HTTP/1.1 proxy requests with keep-alive support.
 // Each request may target a different upstream server (proxy-form URLs).
 func (h *http1Handler) Handle(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader) {
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Close connection when context is cancelled to unblock blocking reads
 	go func() {
-		<-ctx.Done()
+		<-connCtx.Done()
 		_ = clientConn.Close()
 	}()
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-connCtx.Done():
 			return
 		default:
 		}
 
-		if !h.handleSinglePlainHTTP(ctx, clientConn, clientReader) {
+		if !h.handleSinglePlainHTTP(connCtx, clientConn, clientReader) {
 			return
 		}
 	}
@@ -320,22 +323,25 @@ func (h *http1Handler) storeEntry(req *RawHTTP1Request, resp *RawHTTP1Response, 
 // Loops handling request/response pairs until connection closes.
 // target is needed for WebSocket upgrade detection (wss://).
 func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader *bufio.Reader, upstreamReader *bufio.Reader, target *Target) {
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Close connections when context is cancelled to unblock blocking reads
 	// parseRequest doesn't accept context, so closing is the only way to interrupt it
 	go func() {
-		<-ctx.Done()
+		<-connCtx.Done()
 		_ = clientConn.Close()
 		_ = upstreamConn.Close()
 	}()
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-connCtx.Done():
 			return
 		default:
 		}
 
-		if !h.handleSingleTLS(ctx, clientConn, upstreamConn, clientReader, upstreamReader, target) {
+		if !h.handleSingleTLS(connCtx, clientConn, upstreamConn, clientReader, upstreamReader, target) {
 			return
 		}
 	}

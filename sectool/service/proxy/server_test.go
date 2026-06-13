@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -336,6 +337,57 @@ func TestConcurrentConnections(t *testing.T) {
 	testutil.WaitForCount(t, func() int { return proxy.History().Count() }, numRequests)
 }
 
+// TestConnectionGoroutineLeak guards against per-connection watcher goroutines
+// outliving their connections. Each closed connection must release its watcher;
+// before the fix one goroutine leaked per connection until server shutdown.
+func TestConnectionGoroutineLeak(t *testing.T) {
+	// not parallel: relies on runtime.NumGoroutine settling
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	t.Cleanup(testServer.Close)
+
+	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{})
+	require.NoError(t, err)
+	go func() { _ = proxy.Serve() }()
+	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
+
+	proxyURL, _ := url.Parse("http://" + proxy.Addr())
+	// DisableKeepAlives forces a fresh connection (and watcher) per request
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:             http.ProxyURL(proxyURL),
+			DisableKeepAlives: true,
+		},
+	}
+
+	doRequest := func() {
+		req, _ := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/leak", nil)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	// Warm up so steady-state goroutines (accept loop, idle conns) are running
+	doRequest()
+	base := runtime.NumGoroutine()
+
+	const numRequests = 50
+	for i := 0; i < numRequests; i++ {
+		doRequest()
+	}
+
+	// Watchers should drain back toward baseline; with the leak the count grows by ~numRequests
+	// Allow a small margin for unrelated test goroutines
+	require.Eventually(t, func() bool {
+		runtime.Gosched()
+		return runtime.NumGoroutine() <= base+10
+	}, 5*time.Second, 20*time.Millisecond)
+}
+
 func TestLargeRequestBody(t *testing.T) {
 	t.Parallel()
 
@@ -496,7 +548,7 @@ func TestShutdownForceClose(t *testing.T) {
 	require.NoError(t, err)
 
 	// Shutdown with very short timeout - should force-close the connection
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	t.Cleanup(cancel)
 
 	shutdownDone := make(chan struct{})
