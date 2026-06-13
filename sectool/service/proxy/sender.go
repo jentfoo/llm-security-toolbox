@@ -912,6 +912,7 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 	// Header block accumulator for HEADERS + CONTINUATION reassembly
 	// HPACK requires decoding the complete block, not individual fragments
 	var headerBlock bytes.Buffer
+	var headerBlockStream uint32
 	var headersEndStream bool
 
 	// Index into buffered frames
@@ -930,9 +931,16 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 	// processHeaderBlock decodes the accumulated header block when END_HEADERS is set
 	// Returns a response if stream is complete, nil otherwise
 	processHeaderBlock := func() (*RawHTTP1Response, error) {
+		// Always decode to keep the HPACK dynamic table synchronized; skipping a
+		// block (even for another stream) corrupts every later decode
 		pseudos, hdrs, err := h2c.decodeHeaders(headerBlock.Bytes())
 		if err != nil {
 			return nil, fmt.Errorf("decode headers: %w", err)
+		}
+
+		// Only the target stream's headers contribute to the response
+		if headerBlockStream != streamID {
+			return nil, nil
 		}
 
 		if !gotInitialHeaders {
@@ -964,13 +972,11 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 
 		switch f := frame.(type) {
 		case *http2.HeadersFrame:
-			if f.StreamID != streamID {
-				continue
-			}
-
-			// Start accumulating header block
+			// Start accumulating header block. Accumulate for any stream so the
+			// HPACK table stays synced; processHeaderBlock discards non-target blocks
 			headerBlock.Reset()
 			headerBlock.Write(f.HeaderBlockFragment())
+			headerBlockStream = f.StreamID
 			headersEndStream = f.StreamEnded()
 
 			// Decode when END_HEADERS is set (no CONTINUATION follows)
@@ -983,11 +989,8 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 			}
 
 		case *http2.ContinuationFrame:
-			if f.StreamID != streamID {
-				continue
-			}
-
-			// Accumulate continuation fragment
+			// Continues the in-progress block (RFC 9113 §4.3 forbids interleaving),
+			// so it belongs to headerBlockStream regardless of target match
 			headerBlock.Write(f.HeaderBlockFragment())
 
 			// Decode when END_HEADERS is set
@@ -1004,8 +1007,10 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 				continue
 			}
 
-			// Consume receive window (track how much data we've received)
-			dataLen := len(f.Data())
+			// Consume receive window. Flow control counts the full frame payload
+			// including padding and pad-length octet (RFC 9113 §6.9.1), which
+			// f.Data() strips; use Header().Length for the window math.
+			dataLen := int(f.Header().Length)
 			if dataLen > 0 {
 				if err := h2c.consumeRecvWindow(streamID, dataLen); err != nil {
 					return nil, fmt.Errorf("flow control error: %w", err)

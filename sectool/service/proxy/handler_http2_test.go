@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -625,6 +628,99 @@ func TestHTTP2ProxyHeaderRules(t *testing.T) {
 	assert.Equal(t, "rule-applied", receivedHeader)
 
 	assert.Equal(t, 2, resp.ProtoMajor)
+}
+
+func TestHTTP2ProxyBidirectionalLargeBody(t *testing.T) {
+	t.Parallel()
+
+	// Echo the upload back incrementally so large bodies flow in both directions at
+	// once - the scenario that deadlocked the old inline-write path and silently
+	// truncated on flow-control timeout.
+	testServer := newHTTP2TestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		flusher, _ := w.(http.Flusher)
+		chunk := make([]byte, 32*1024)
+		for {
+			n, readErr := r.Body.Read(chunk)
+			if n > 0 {
+				_, _ = w.Write(chunk[:n])
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if readErr != nil {
+				break
+			}
+		}
+	})
+	t.Cleanup(testServer.Close)
+
+	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{})
+	require.NoError(t, err)
+	go func() { _ = proxy.Serve() }()
+	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AddCert(proxy.CertManager().CACert())
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
+		TLSClientConfig: &tls.Config{
+			RootCAs:            caCertPool,
+			InsecureSkipVerify: true,
+		},
+		ForceAttemptHTTP2: true,
+	}
+	client := &http.Client{Transport: transport}
+
+	const size = 4 * 1024 * 1024
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	// Bound runtime so a regression that reintroduces the stall fails fast
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	req, err := http.NewRequestWithContext(ctx, "POST", testServer.URL+"/echo", bytes.NewReader(payload))
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, 200, resp.StatusCode)
+	// Full delivery both ways - no silent truncation
+	assert.Len(t, got, size)
+	assert.Equal(t, sha256.Sum256(payload), sha256.Sum256(got))
+}
+
+func TestPumpDataFrame(t *testing.T) {
+	t.Parallel()
+
+	newProxy := func(t *testing.T) (*h2Proxy, *h2Conn) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+		c, _ := net.Pipe()
+		t.Cleanup(func() { _ = c.Close() })
+		return &h2Proxy{ctx: ctx, cancel: cancel, streams: newStreamTracker()}, newH2Conn(c)
+	}
+
+	t.Run("emits_data_frame", func(t *testing.T) {
+		p, dst := newProxy(t)
+		p.pumpDataFrame(&bytes.Buffer{}, dst, nil,
+			h2WorkItem{kind: wiData, streamID: 1, data: []byte("hello"), endStream: true})
+		assert.Len(t, dst.writeCh, 1)
+	})
+
+	t.Run("aborted_stream_skipped", func(t *testing.T) {
+		p, dst := newProxy(t)
+		dst.markStreamAborted(1)
+		p.pumpDataFrame(&bytes.Buffer{}, dst, nil,
+			h2WorkItem{kind: wiData, streamID: 1, data: []byte("hello"), endStream: true})
+		assert.Empty(t, dst.writeCh)
+	})
 }
 
 func newHTTP2TestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {

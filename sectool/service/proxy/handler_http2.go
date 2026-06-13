@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,23 @@ const (
 	cleanupInterval   = 1 * time.Minute
 	h2Preface         = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 )
+
+// h2WorkKind discriminates write-pump work items.
+type h2WorkKind int
+
+const (
+	wiRaw  h2WorkKind = iota // pre-framed bytes, written as-is
+	wiData                   // raw body bytes; pump chunks and flow-control-gates them
+)
+
+// h2WorkItem is one ordered emission for a destination's write pump.
+type h2WorkItem struct {
+	kind      h2WorkKind
+	streamID  uint32
+	data      []byte
+	endStream bool
+	replenish bool // replenish src receive window after sending (streaming passthrough)
+}
 
 // streamState represents the state of an HTTP/2 stream
 type streamState int
@@ -245,12 +263,16 @@ func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls
 		return
 	}
 
-	// Start frame processing goroutines
-	proxy.wg.Add(4)
+	// Start frame processing goroutines. Each direction has a reader, a socket
+	// writer, and a write pump. The pump owns flow-control waiting and replenishes
+	// the paired source's receive window after sending (src is where the data came from).
+	proxy.wg.Add(6)
 	go proxy.readFrames(true) // read from client
 	go proxy.writeFrames(proxy.client, clientConn)
-	go proxy.readFrames(false) // read from upstream
+	go proxy.writePump(proxy.upstream, proxy.client) // client -> upstream DATA
+	go proxy.readFrames(false)                       // read from upstream
 	go proxy.writeFrames(proxy.upstream, upstreamConn)
+	go proxy.writePump(proxy.client, proxy.upstream) // upstream -> client DATA
 
 	// Start cleanup goroutine
 	go proxy.cleanupStaleStreams()
@@ -676,7 +698,7 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 					p.cleanupStream(streamID)
 					return
 				}
-				p.writeDataFrame(buf, dst, streamID, body, false) // trailers carry END_STREAM, not DATA
+				p.enqueueData(dst, streamID, body, false, false) // trailers carry END_STREAM, not DATA
 				stream.mu.Lock()
 				p.updateHistoryWithModifiedBodyLocked(stream, body, fromClient)
 			}
@@ -713,8 +735,10 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 	data := f.Data()
 	endStream := f.StreamEnded()
 
-	// Consume receive window; check for flow control violations per RFC 9113 section 6.9
-	dataLen := len(data)
+	// Consume receive window; check for flow control violations per RFC 9113 section 6.9.
+	// Flow control counts the full frame payload including padding and the pad-length
+	// octet, which f.Data() strips; use Header().Length for the window math.
+	dataLen := int(f.Header().Length)
 	if err := src.consumeRecvWindow(streamID, dataLen); err != nil {
 		var fcErr *flowControlError
 		if errors.As(err, &fcErr) {
@@ -736,16 +760,10 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 		return
 	}
 
-	// Check if we need to send WINDOW_UPDATE back to sender to keep data flowing
-	// This is critical when buffering for body rules - sender needs window credits
-	if connUpdate, streamUpdate := src.needsWindowUpdate(streamID); connUpdate > 0 || streamUpdate > 0 {
-		p.sendWindowUpdates(buf, src, streamID, connUpdate, streamUpdate)
-	}
-
 	stream, exists := p.streams.get(streamID)
 	if !exists {
-		// Unknown stream, forward anyway
-		p.writeDataFrame(buf, dst, streamID, data, endStream)
+		// Unknown stream, forward anyway; pump replenishes after sending
+		p.enqueueData(dst, streamID, data, endStream, true)
 		return
 	}
 
@@ -770,9 +788,14 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 	// Capture data needed outside the lock for write operations
 	var writeData, flushBuffered, bodyForRules []byte
 	var writeEndStream, applyRules bool
+	// Eager receive-window replenishment increments (buffering mode only); streaming
+	// defers replenishment to the pump so in-flight data stays bounded.
+	var eagerConnUpd, eagerStreamUpd uint32
 
 	if hasBodyRules && !isOverflow {
-		// Buffer mode: accumulate full body for rule application
+		// Buffer mode: accumulate full body for rule application. Replenish eagerly so
+		// the sender can deliver the whole body (bounded by maxBodyBytes) up front.
+		eagerConnUpd, eagerStreamUpd = src.needsWindowUpdate(streamID)
 		overflow := p.copyToFullBufferLocked(stream, data, fromClient)
 
 		if overflow {
@@ -814,9 +837,15 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 	}
 	stream.mu.Unlock()
 
-	// Perform write operations outside the lock
+	// Eager replenishment for buffering mode happens here (outside the stream lock)
+	if eagerConnUpd > 0 || eagerStreamUpd > 0 {
+		p.sendWindowUpdates(buf, src, streamID, eagerConnUpd, eagerStreamUpd)
+	}
+
+	// Perform write operations outside the lock. Buffered data was already replenished eagerly (replenish=false)
+	// streaming passthrough defers to the pump (replenish=true)
 	if len(flushBuffered) > 0 {
-		p.writeDataFrame(buf, dst, streamID, flushBuffered, false)
+		p.enqueueData(dst, streamID, flushBuffered, false, false)
 	}
 
 	if applyRules {
@@ -836,9 +865,9 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 		stream.mu.Unlock()
 
 		// Send modified body
-		p.writeDataFrame(buf, dst, streamID, body, true)
+		p.enqueueData(dst, streamID, body, true, false)
 	} else if writeData != nil {
-		p.writeDataFrame(buf, dst, streamID, writeData, writeEndStream)
+		p.enqueueData(dst, streamID, writeData, writeEndStream, true)
 	}
 
 	if isStreamClosed {
@@ -1073,6 +1102,10 @@ func (p *h2Proxy) handleGoAwayFrame(buf *bytes.Buffer, f *http2.GoAwayFrame, dst
 
 // handleRSTStreamFrame forwards RST_STREAM and cleans up stream.
 func (p *h2Proxy) handleRSTStreamFrame(buf *bytes.Buffer, f *http2.RSTStreamFrame, dst *h2Conn) {
+	// Reset is bidirectional: drop any DATA still queued for either pump
+	p.client.markStreamAborted(f.StreamID)
+	p.upstream.markStreamAborted(f.StreamID)
+
 	buf.Reset()
 	framer := http2.NewFramer(buf, nil)
 	_ = framer.WriteRSTStream(f.StreamID, f.ErrCode)
@@ -1242,68 +1275,124 @@ func (p *h2Proxy) writeHeadersFrame(buf *bytes.Buffer, dst *h2Conn, streamID uin
 		}
 	}
 
-	// Enqueue entire sequence atomically to prevent interleaving
-	dst.enqueueWrite(p.ctx, buf.Bytes())
+	// Enqueue through the pump so HEADERS stay ordered before this stream's DATA
+	p.enqueueRaw(dst, buf.Bytes())
 }
 
-// flowControlTimeout is the maximum time to wait for flow control to unblock
+// flowControlTimeout bounds the pump's wait for a WINDOW_UPDATE. The bidirectional
+// deadlock is structurally gone (readers no longer block on the send window), so
+// this is only a sanity guard against a dead/misbehaving peer that never credits.
 const flowControlTimeout = 30 * time.Second
 
-// writeDataFrame writes a DATA frame, splitting if necessary.
-// Uses the destination h2Conn's max frame size setting and respects flow control.
-// Waits for WINDOW_UPDATE when flow control is blocked (never truncates data).
-func (p *h2Proxy) writeDataFrame(buf *bytes.Buffer, dst *h2Conn, streamID uint32, data []byte, endStream bool) {
-	maxFrame := int(dst.getMaxFrameSize())
-	if maxFrame == 0 {
-		maxFrame = 16384 // HTTP/2 default
-	}
+// enqueueRaw queues pre-framed bytes for ordered emission to dst.
+func (p *h2Proxy) enqueueRaw(dst *h2Conn, data []byte) {
+	dst.pushWork(h2WorkItem{kind: wiRaw, data: slices.Clone(data)})
+}
 
-	// Initialize stream send window if needed
-	dst.initStreamSendWindow(streamID)
+// enqueueData queues raw body bytes for the pump to chunk and flow-control-gate.
+// replenish credits the source's receive window after sending (streaming passthrough);
+// callers that already replenished eagerly (body-rule buffering) pass false.
+func (p *h2Proxy) enqueueData(dst *h2Conn, streamID uint32, data []byte, endStream, replenish bool) {
+	dst.pushWork(h2WorkItem{kind: wiData, streamID: streamID, data: slices.Clone(data), endStream: endStream, replenish: replenish})
+}
 
-	// Set up timeout for flow control waiting
-	timeout := time.NewTimer(flowControlTimeout)
-	defer timeout.Stop()
+// writePump drains dst's ordered work queue. It is the only place that waits on
+// dst's send window, so the reader goroutines stay free to process WINDOW_UPDATEs.
+// src is the paired connection the data flowed from, whose receive window the pump
+// replenishes once data has been sent (gating in-flight bytes to the advertised window).
+func (p *h2Proxy) writePump(dst, src *h2Conn) {
+	// TODO - a single pump per destination serializes all streams, so one stream blocked
+	// on its send window head-of-line-blocks the others until its window opens or the
+	// flow-control timeout fires. Multiplexed throughput degrades to "slowest stream gates
+	// the connection." Per-stream scheduling (skip/re-queue a blocked stream and service
+	// others) would restore fairness.
+	defer p.wg.Done()
+	defer p.cancel()
 
-	for len(data) > 0 || endStream {
-		// Check available send window
-		available := dst.getAvailableSendWindow(streamID)
-
-		// If blocked on flow control, wait for WINDOW_UPDATE (never truncate)
-		if available == 0 && len(data) > 0 {
-			// Get channel that will be signaled when window updates
-			flowCh := dst.flowCtrlWait()
-
+	var buf bytes.Buffer
+	var batch []h2WorkItem
+	for {
+		batch = dst.drainWork(batch[:0])
+		if len(batch) == 0 {
 			select {
 			case <-p.ctx.Done():
 				return
 			case <-dst.closeCh:
 				return
+			case <-dst.pumpSignal:
+			}
+			continue
+		}
+
+		for _, item := range batch {
+			switch item.kind {
+			case wiRaw:
+				dst.enqueueWrite(p.ctx, item.data)
+			case wiData:
+				p.pumpDataFrame(&buf, dst, src, item)
+			}
+		}
+	}
+}
+
+// pumpDataFrame emits one body, splitting by max frame size and waiting on the send
+// window. On send-window stall it resets the stream rather than dropping data silently.
+func (p *h2Proxy) pumpDataFrame(buf *bytes.Buffer, dst, src *h2Conn, item h2WorkItem) {
+	streamID := item.streamID
+	data := item.data
+	endStream := item.endStream
+
+	maxFrame := int(dst.getMaxFrameSize())
+	if maxFrame == 0 {
+		maxFrame = 16384 // HTTP/2 default
+	}
+	dst.initStreamSendWindow(streamID)
+
+	// Idle stall timeout: reset on each successful chunk so a slow-but-progressing
+	// transfer is not capped at flowControlTimeout total.
+	timeout := time.NewTimer(flowControlTimeout)
+	defer timeout.Stop()
+
+	for len(data) > 0 || endStream {
+		if dst.isStreamAborted(streamID) {
+			return
+		}
+
+		available := dst.getAvailableSendWindow(streamID)
+		if available == 0 && len(data) > 0 {
+			flowCh := dst.flowCtrlWait()
+			select {
+			case <-p.ctx.Done():
+				log.Printf("h2: shutdown with %d bytes undelivered on stream %d", len(data), streamID)
+				return
+			case <-dst.closeCh:
+				log.Printf("h2: connection closed with %d bytes undelivered on stream %d", len(data), streamID)
+				return
 			case <-timeout.C:
-				log.Printf("h2: flow control timeout for stream %d after %v, %d bytes remaining",
+				log.Printf("h2: flow control stall on stream %d after %v idle, %d bytes undelivered; resetting stream",
 					streamID, flowControlTimeout, len(data))
+				// Reset both directions: the stream is dead, so stop the reverse pump too
+				dst.markStreamAborted(streamID)
+				src.markStreamAborted(streamID)
+				p.sendRSTStream(buf, dst, streamID, http2.ErrCodeFlowControl)
+				p.sendRSTStream(buf, src, streamID, http2.ErrCodeFlowControl)
 				return
 			case <-flowCh:
-				// Window updated, loop back to check available window
 				continue
 			}
 		}
 
 		chunk := data
-		// Limit by frame size
 		if len(chunk) > maxFrame {
 			chunk = data[:maxFrame]
 		}
-		// Limit by flow control window
 		if len(chunk) > available {
 			chunk = data[:available]
 		}
 
-		// Atomically consume send window - if this fails (window changed between
-		// getAvailableSendWindow and now), loop back and retry
+		// Atomically consume send window; retry if a concurrent send raced us
 		if len(chunk) > 0 {
 			if !dst.consumeSendWindow(streamID, len(chunk)) {
-				// Window was consumed by concurrent operation, retry
 				continue
 			}
 		}
@@ -1312,13 +1401,28 @@ func (p *h2Proxy) writeDataFrame(buf *bytes.Buffer, dst *h2Conn, streamID uint32
 
 		buf.Reset()
 		framer := http2.NewFramer(buf, nil)
-
 		isLast := len(data) == 0 && endStream
 		_ = framer.WriteData(streamID, isLast, chunk)
 		dst.enqueueWrite(p.ctx, buf.Bytes())
 
 		if isLast {
 			break
+		}
+
+		// Progress made; re-arm the idle timeout
+		if !timeout.Stop() {
+			select {
+			case <-timeout.C:
+			default:
+			}
+		}
+		timeout.Reset(flowControlTimeout)
+	}
+
+	// Replenish the source now that data has drained; gates the sender on our progress
+	if item.replenish {
+		if connUpdate, streamUpdate := src.needsWindowUpdate(streamID); connUpdate > 0 || streamUpdate > 0 {
+			p.sendWindowUpdates(buf, src, streamID, connUpdate, streamUpdate)
 		}
 	}
 }
@@ -1395,7 +1499,8 @@ func (p *h2Proxy) sendInterceptedH2Response(buf *bytes.Buffer, stream *h2Stream,
 	p.writeHeadersFrame(buf, src, streamID, encoded, !hasBody)
 
 	if hasBody {
-		p.writeDataFrame(buf, src, streamID, intercepted.Body, true)
+		// Proxy-generated body consumed no receive window, so no replenishment
+		p.enqueueData(src, streamID, intercepted.Body, true, false)
 	}
 
 	p.storeStreamInHistory(stream)

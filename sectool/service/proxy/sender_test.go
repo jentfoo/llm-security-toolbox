@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
 )
 
 func TestSender_Send(t *testing.T) {
@@ -1775,5 +1778,102 @@ func TestApplyModifications(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, "new-value", req.GetHeader("X-Old"))
+	})
+}
+
+// buildHeadersFrame serializes and re-reads a HEADERS frame so its
+// HeaderBlockFragment doesn't alias another frame's framer buffer
+func buildHeadersFrame(t *testing.T, streamID uint32, block []byte, endStream bool) *http2.HeadersFrame {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, http2.NewFramer(&buf, nil).WriteHeaders(http2.HeadersFrameParam{
+		StreamID:      streamID,
+		BlockFragment: block,
+		EndHeaders:    true,
+		EndStream:     endStream,
+	}))
+	f, err := http2.NewFramer(nil, &buf).ReadFrame()
+	require.NoError(t, err)
+	hf, ok := f.(*http2.HeadersFrame)
+	require.True(t, ok)
+	return hf
+}
+
+func newTestH2Conn(t *testing.T) *h2Conn {
+	t.Helper()
+	c, _ := net.Pipe()
+	t.Cleanup(func() { _ = c.Close() })
+	return newH2Conn(c)
+}
+
+func TestReadH2Response(t *testing.T) {
+	t.Parallel()
+
+	discardFramer := func() *http2.Framer { return http2.NewFramer(io.Discard, bytes.NewReader(nil)) }
+
+	t.Run("hpack_sync_across_streams", func(t *testing.T) {
+		// upstream's single HPACK encoder
+		enc := newTestH2Conn(t)
+
+		// first block seeds the dynamic table on a non-target stream; the target
+		// stream's block references the same header by index, so it only decodes
+		// if the first block was decoded too
+		hdrs := Headers{{Name: "x-shared", Value: "dyn-table-value"}}
+		block1, err := enc.encodeHeaders(map[string]string{":status": "200"}, hdrs)
+		require.NoError(t, err)
+		block2, err := enc.encodeHeaders(map[string]string{":status": "200"}, hdrs)
+		require.NoError(t, err)
+		assert.Less(t, len(block2), len(block1)) // confirms indexed reference
+
+		frames := []http2.Frame{
+			buildHeadersFrame(t, 3, block1, true),
+			buildHeadersFrame(t, 1, block2, true),
+		}
+
+		s := &Sender{}
+		resp, err := s.readH2Response(discardFramer(), newTestH2Conn(t), 1, frames)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.Equal(t, "dyn-table-value", resp.GetHeader("x-shared"))
+	})
+
+	t.Run("hpack_decode_error_surfaces", func(t *testing.T) {
+		// corrupt block on a non-target stream must error now that we always decode
+		frames := []http2.Frame{buildHeadersFrame(t, 3, []byte{0x40, 0x05}, true)}
+
+		s := &Sender{}
+		resp, err := s.readH2Response(discardFramer(), newTestH2Conn(t), 1, frames)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+	})
+
+	t.Run("padding_counts_full_payload", func(t *testing.T) {
+		enc := newTestH2Conn(t)
+		statusBlock, err := enc.encodeHeaders(map[string]string{":status": "200"}, nil)
+		require.NoError(t, err)
+
+		body := []byte("padded-body")
+		var dataBuf bytes.Buffer
+		require.NoError(t, http2.NewFramer(&dataBuf, nil).WriteDataPadded(1, true, body, make([]byte, 40)))
+		f, err := http2.NewFramer(nil, &dataBuf).ReadFrame()
+		require.NoError(t, err)
+		df, ok := f.(*http2.DataFrame)
+		require.True(t, ok)
+		// full payload (pad-length octet + data + padding) exceeds unpadded data
+		wantConsumed := int32(df.Header().Length)
+		assert.Greater(t, int(wantConsumed), len(df.Data()))
+
+		frames := []http2.Frame{buildHeadersFrame(t, 1, statusBlock, false), df}
+
+		dec := newTestH2Conn(t)
+		s := &Sender{}
+		resp, err := s.readH2Response(discardFramer(), dec, 1, frames)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, body, resp.Body)
+		// receive window charged the full padded payload, not just len(Data())
+		assert.Equal(t, localInitialWindow-wantConsumed, dec.recvWindowConn)
+		assert.Equal(t, localInitialWindow-wantConsumed, dec.recvWindowStream[1])
 	})
 }

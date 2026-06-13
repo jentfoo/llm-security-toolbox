@@ -81,6 +81,21 @@ type h2Conn struct {
 	flowCtrlCh chan struct{}
 
 	flowMu sync.Mutex // protects all flow control state including flowCtrlCh
+
+	// Ordered write queue drained by the per-destination write pump. Carries all
+	// frame emission so per-stream HEADERS->DATA->trailer ordering is preserved and
+	// flow-control waiting never blocks a reader. Unbounded by design: pushWork never
+	// blocks, so a reader stays free to process WINDOW_UPDATEs regardless of framing.
+	// Memory stays bounded because receive-window gating caps in-flight DATA at the
+	// advertised window, and over-window senders are torn down for a flow-control violation.
+	pumpMu     sync.Mutex
+	pumpQueue  []h2WorkItem
+	pumpSignal chan struct{} // buffered(1) wake for the pump
+
+	// Streams the pump must skip (reset or flow-control-timed-out). Persists for the
+	// connection lifetime; entries accrue only on RST/timeout, which are abnormal.
+	abortedStreams map[uint32]struct{}
+	abortMu        sync.Mutex
 }
 
 // newH2Conn creates a new HTTP/2 connection wrapper.
@@ -103,6 +118,8 @@ func newH2Conn(conn net.Conn) *h2Conn {
 		sendWindowConn:       65535, // HTTP/2 default (peer's receive window)
 		sendWindowStream:     make(map[uint32]int32),
 		flowCtrlCh:           make(chan struct{}),
+		pumpSignal:           make(chan struct{}, 1),
+		abortedStreams:       make(map[uint32]struct{}),
 	}
 
 	h.hpackDec = hpack.NewDecoder(hpackDynamicTableSize, nil)
@@ -334,6 +351,45 @@ func (h *h2Conn) removeStreamWindow(streamID uint32) {
 	defer h.flowMu.Unlock()
 	delete(h.recvWindowStream, streamID)
 	delete(h.sendWindowStream, streamID)
+}
+
+// pushWork appends an item to the pump queue and wakes the pump. Never blocks.
+func (h *h2Conn) pushWork(item h2WorkItem) {
+	h.pumpMu.Lock()
+	h.pumpQueue = append(h.pumpQueue, item)
+	h.pumpMu.Unlock()
+	select {
+	case h.pumpSignal <- struct{}{}:
+	default:
+	}
+}
+
+// drainWork moves all queued items into dst, resetting the queue for reuse.
+// Returns the items in FIFO order, or nil if empty.
+func (h *h2Conn) drainWork(dst []h2WorkItem) []h2WorkItem {
+	h.pumpMu.Lock()
+	defer h.pumpMu.Unlock()
+
+	dst = append(dst, h.pumpQueue...)
+	h.pumpQueue = h.pumpQueue[:0]
+	return dst
+}
+
+// markStreamAborted records a stream the write pump must stop emitting DATA for.
+func (h *h2Conn) markStreamAborted(streamID uint32) {
+	h.abortMu.Lock()
+	defer h.abortMu.Unlock()
+
+	h.abortedStreams[streamID] = struct{}{}
+}
+
+// isStreamAborted reports whether the stream was reset or timed out.
+func (h *h2Conn) isStreamAborted(streamID uint32) bool {
+	h.abortMu.Lock()
+	defer h.abortMu.Unlock()
+
+	_, ok := h.abortedStreams[streamID]
+	return ok
 }
 
 // updateSendWindow updates send window when receiving WINDOW_UPDATE from peer.
