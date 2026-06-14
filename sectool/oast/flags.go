@@ -54,6 +54,7 @@ oast create [options]
 
   Options:
     --label <str>      optional unique label for easier reference
+    --redirect <url>   optional redirect target for 307 responses; server-dependent
 
 ---
 
