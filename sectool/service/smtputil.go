@@ -1,6 +1,9 @@
 package service
 
-import "strings"
+import (
+	"net/mail"
+	"strings"
+)
 
 // extractEmailTo extracts addresses from the "To:" email header, handling folded lines.
 // Returns nil if no To header is found.
@@ -30,6 +33,16 @@ func extractEmailTo(headers string) []string {
 		return nil
 	}
 
+	// Prefer RFC 5322 parsing so quoted display names with commas stay intact
+	if parsed, err := mail.ParseAddressList(toValue); err == nil {
+		addrs := make([]string, 0, len(parsed))
+		for _, a := range parsed {
+			addrs = append(addrs, a.Address)
+		}
+		return addrs
+	}
+
+	// Fallback: tolerant comma split for malformed headers
 	parts := strings.Split(toValue, ",")
 	var addrs []string
 	for _, part := range parts {

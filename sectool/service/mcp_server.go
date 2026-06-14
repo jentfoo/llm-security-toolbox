@@ -518,6 +518,8 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 			Depth:       flow.Depth,
 			Truncated:   flow.Truncated,
 		}, nil
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, errorResultFromErr("failed to fetch flow: ", err)
 	}
 	return nil, errorResult("flow_id not found: run proxy_poll or crawl_poll to see available flows")
 }

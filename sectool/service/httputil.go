@@ -170,10 +170,18 @@ func extractRequestMeta(raw string) (method, host, path string) {
 // splitHeadersBody splits raw HTTP at the blank line boundary.
 // Handles both CRLF (\r\n\r\n) and bare-LF (\n\n) terminators.
 func splitHeadersBody(raw []byte) (headers, body []byte) {
-	if idx := bytes.Index(raw, []byte("\r\n\r\n")); idx >= 0 {
-		return raw[:idx+4], raw[idx+4:]
-	} else if idx = bytes.Index(raw, []byte("\n\n")); idx >= 0 {
-		return raw[:idx+2], raw[idx+2:]
+	crlf := bytes.Index(raw, []byte("\r\n\r\n"))
+	lf := bytes.Index(raw, []byte("\n\n"))
+	// Split at whichever blank-line terminator comes first, matching how the
+	// tolerant proxy parser frames the message (first empty line ends headers).
+	// A normal CRLF message has no bare \n\n, so lf is -1 or sits in the body
+	// (lf > crlf) and CRLF wins; lf < crlf only for a genuine bare-LF terminator
+	// before the CRLF.
+	switch {
+	case crlf >= 0 && (lf < 0 || lf >= crlf):
+		return raw[:crlf+4], raw[crlf+4:]
+	case lf >= 0:
+		return raw[:lf+2], raw[lf+2:]
 	}
 	return raw, nil
 }
@@ -1083,13 +1091,21 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget Tar
 	}
 
 	var body []byte
+	var dropTE bool
 	if preserveBody {
-		_, body = splitHeadersBody(originalReq)
+		// De-chunk a chunked original so the rebuilt request carries a correct
+		// Content-Length and no Transfer-Encoding (avoids ambiguous TE+CL framing)
+		if parsed, err := proxy.ParseRequest(bytes.NewReader(originalReq)); err == nil && parsed.Wire != nil && parsed.Wire.WasChunked {
+			body = parsed.Body
+			dropTE = true
+		} else {
+			_, body = splitHeadersBody(originalReq)
+		}
 	}
 
 	var buf bytes.Buffer
 	_, _ = fmt.Fprintf(&buf, "%s %s HTTP/1.1\r\n", method, newPath)
-	copyHeadersForRedirect(originalReq, &buf, newTarget, preserveBody)
+	copyHeadersForRedirect(originalReq, &buf, newTarget, preserveBody, dropTE)
 
 	if len(body) > 0 {
 		_, _ = fmt.Fprintf(&buf, "Content-Length: %d\r\n", len(body))
@@ -1140,7 +1156,7 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 
 // copyHeadersForRedirect copies headers from original request to buffer,
 // applying redirect-appropriate modifications.
-func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Target, preserveBody bool) {
+func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Target, preserveBody, dropTE bool) {
 	headers, _ := splitHeadersBody(originalReq)
 
 	newHost := newTarget.Hostname
@@ -1156,21 +1172,22 @@ func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Tar
 		skipHeaders["content-type"] = true
 		skipHeaders["content-encoding"] = true
 		skipHeaders["transfer-encoding"] = true
+	} else if dropTE {
+		skipHeaders["transfer-encoding"] = true
 	}
 
 	_, _ = fmt.Fprintf(buf, "Host: %s\r\n", newHost)
 
+	var seenRequestLine bool
 	for _, line := range bytes.Split(headers, []byte(detectLineEnding(headers))) {
 		if len(line) == 0 {
 			continue
 		}
 
-		// Skip request line
-		if bytes.HasPrefix(line, []byte("GET ")) || bytes.HasPrefix(line, []byte("POST ")) ||
-			bytes.HasPrefix(line, []byte("PUT ")) || bytes.HasPrefix(line, []byte("DELETE ")) ||
-			bytes.HasPrefix(line, []byte("PATCH ")) || bytes.HasPrefix(line, []byte("HEAD ")) ||
-			bytes.HasPrefix(line, []byte("OPTIONS ")) || bytes.HasPrefix(line, []byte("TRACE ")) ||
-			bytes.HasPrefix(line, []byte("CONNECT ")) {
+		// Skip the request line (always the first non-empty line); avoids
+		// leaking a custom-method request-target containing a colon as a header
+		if !seenRequestLine {
+			seenRequestLine = true
 			continue
 		}
 

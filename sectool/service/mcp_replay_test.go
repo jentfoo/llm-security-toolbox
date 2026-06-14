@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -1140,4 +1141,101 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 		})
 		assert.NotEmpty(t, resp.FlowID)
 	})
+}
+
+func argRequest(args map[string]interface{}) mcp.CallToolRequest {
+	return mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: args}}
+}
+
+func TestGetJSONArg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args map[string]interface{}
+		want map[string]interface{}
+	}{
+		{
+			name: "object",
+			args: map[string]interface{}{"set_json": map[string]interface{}{"user.id": float64(5)}},
+			want: map[string]interface{}{"user.id": float64(5)},
+		},
+		{
+			name: "string_encoded_object",
+			args: map[string]interface{}{"set_json": `{"user.id": 5}`},
+			want: map[string]interface{}{"user.id": float64(5)},
+		},
+		{
+			name: "garbage_string",
+			args: map[string]interface{}{"set_json": "not json"},
+			want: nil,
+		},
+		{
+			name: "missing",
+			args: map[string]interface{}{},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, getJSONArg(argRequest(tt.args)))
+		})
+	}
+}
+
+func TestGetFormArg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args map[string]interface{}
+		want map[string]string
+	}{
+		{
+			name: "object",
+			args: map[string]interface{}{"set_form": map[string]interface{}{"a": "1"}},
+			want: map[string]string{"a": "1"},
+		},
+		{
+			name: "string_encoded_object",
+			args: map[string]interface{}{"set_form": `{"a": "1", "b": 2}`},
+			want: map[string]string{"a": "1", "b": "2"},
+		},
+		{
+			name: "garbage_string",
+			args: map[string]interface{}{"set_form": "not json"},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, getFormArg(argRequest(tt.args)))
+		})
+	}
+}
+
+func TestRebuildReplayTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		host   string
+		scheme string
+		port   int
+		want   string
+	}{
+		{"plain_default_port", "example.com", schemeHTTPS, 443, "https://example.com"},
+		{"plain_custom_port", "example.com:8080", schemeHTTP, 8080, "http://example.com:8080"},
+		{"ipv6_bare_default_port", "[::1]", schemeHTTP, 80, "http://[::1]"},
+		{"ipv6_with_port", "[::1]:8443", schemeHTTPS, 8443, "https://[::1]:8443"},
+		{"ipv6_bare_custom_port", "[fe80::1]", schemeHTTPS, 8443, "https://[fe80::1]:8443"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, rebuildReplayTarget(tt.host, tt.scheme, tt.port))
+		})
+	}
 }

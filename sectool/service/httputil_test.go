@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"compress/gzip"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -342,6 +343,26 @@ func TestSplitHeadersBody(t *testing.T) {
 			wantHeaders: "POST / HTTP/1.1\nHost: x\n\n",
 			wantBody:    "",
 		},
+		{
+			name:        "lf_headers_crlf_in_body",
+			raw:         "POST / HTTP/1.1\nHost: x\n\nbody\r\n\r\nmore",
+			wantHeaders: "POST / HTTP/1.1\nHost: x\n\n",
+			wantBody:    "body\r\n\r\nmore",
+		},
+		{
+			name:        "crlf_headers_lf_in_body",
+			raw:         "POST / HTTP/1.1\r\nHost: x\r\n\r\nbody\n\nmore",
+			wantHeaders: "POST / HTTP/1.1\r\nHost: x\r\n\r\n",
+			wantBody:    "body\n\nmore",
+		},
+		{
+			// Bare \n\n before the CRLF terminator ends headers early, matching
+			// the proxy parser's first-blank-line framing.
+			name:        "embedded_lf_truncates_headers",
+			raw:         "POST / HTTP/1.1\r\nBad: x\n\nHost: y\r\n\r\nbody",
+			wantHeaders: "POST / HTTP/1.1\r\nBad: x\n\n",
+			wantBody:    "Host: y\r\n\r\nbody",
+		},
 	}
 
 	for _, tt := range tests {
@@ -351,6 +372,44 @@ func TestSplitHeadersBody(t *testing.T) {
 			assert.Equal(t, tt.wantBody, string(body))
 		})
 	}
+}
+
+func TestBuildRedirectRequest(t *testing.T) {
+	t.Parallel()
+
+	target := Target{Hostname: "a.example.com", Port: 443, UsesHTTPS: true}
+
+	t.Run("chunked_307_dechunked", func(t *testing.T) {
+		orig := []byte("POST /upload HTTP/1.1\r\nHost: a.example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+		out, _, _, err := buildRedirectRequest(orig, "/next", target, "/upload", 307)
+		require.NoError(t, err)
+		s := string(out)
+		assert.Contains(t, s, "POST /next HTTP/1.1\r\n")
+		assert.Contains(t, s, "Content-Length: 5\r\n")
+		assert.NotContains(t, strings.ToLower(s), "transfer-encoding")
+		assert.NotContains(t, s, "chunked")
+		assert.True(t, bytes.HasSuffix(out, []byte("\r\n\r\nhello")))
+	})
+
+	t.Run("custom_method_no_requestline_leak", func(t *testing.T) {
+		orig := []byte("FOO /a:b HTTP/1.1\r\nHost: a.example.com\r\nX-Test: 1\r\n\r\n")
+		out, _, _, err := buildRedirectRequest(orig, "/next", target, "/a:b", 307)
+		require.NoError(t, err)
+		s := string(out)
+		assert.Contains(t, s, "FOO /next HTTP/1.1\r\n")
+		assert.NotContains(t, s, "/a:b")
+		assert.Contains(t, s, "X-Test: 1\r\n")
+	})
+
+	t.Run("get_302_drops_body", func(t *testing.T) {
+		orig := []byte("POST /form HTTP/1.1\r\nHost: a.example.com\r\nContent-Type: application/json\r\nContent-Length: 4\r\n\r\nbody")
+		out, _, _, err := buildRedirectRequest(orig, "/next", target, "/form", 302)
+		require.NoError(t, err)
+		s := string(out)
+		assert.Contains(t, s, "GET /next HTTP/1.1\r\n")
+		assert.NotContains(t, strings.ToLower(s), "content-type")
+		assert.True(t, bytes.HasSuffix(out, []byte("\r\n\r\n")))
+	})
 }
 
 func TestReadResponseStatusCode(t *testing.T) {

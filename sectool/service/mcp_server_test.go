@@ -176,6 +176,31 @@ func TestMCP_MultiWorkflowHidesLastCursor(t *testing.T) {
 	assert.Contains(t, noneTexts, "'last'")
 }
 
+func TestResolveFlow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("crawler_error_propagated", func(t *testing.T) {
+		_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+		mockCrawler.getFlowErr = errors.New("storage boom")
+
+		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": "nonexistent",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "failed to fetch flow")
+	})
+
+	t.Run("not_found", func(t *testing.T) {
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+
+		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": "nonexistent",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "not found")
+	})
+}
+
 // mockHttpBackend implements HttpBackend at the Go interface level for handler tests.
 type mockHttpBackend struct {
 	mu          sync.Mutex
@@ -574,12 +599,13 @@ func (b *mockOastBackend) resolveID(idOrDomain string) (string, error) {
 }
 
 type mockCrawlerBackend struct {
-	sessions map[string]*CrawlSessionInfo
-	byLabel  map[string]string
-	status   map[string]*CrawlStatus
-	flows    map[string]*CrawlFlow
-	forms    map[string][]protocol.CrawlForm
-	errors   map[string][]protocol.CrawlError
+	sessions   map[string]*CrawlSessionInfo
+	byLabel    map[string]string
+	status     map[string]*CrawlStatus
+	flows      map[string]*CrawlFlow
+	forms      map[string][]protocol.CrawlForm
+	errors     map[string][]protocol.CrawlError
+	getFlowErr error
 }
 
 func newMockCrawlerBackend() *mockCrawlerBackend {
@@ -706,6 +732,9 @@ func (b *mockCrawlerBackend) ListErrors(ctx context.Context, sessionID string, l
 }
 
 func (b *mockCrawlerBackend) GetFlow(ctx context.Context, flowID string) (*CrawlFlow, error) {
+	if b.getFlowErr != nil {
+		return nil, b.getFlowErr
+	}
 	flow, ok := b.flows[flowID]
 	if !ok {
 		return nil, ErrNotFound

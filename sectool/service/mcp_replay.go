@@ -3,8 +3,10 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"strings"
 
@@ -111,19 +113,7 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	// replaying an HTTP flow doesn't incorrectly default to HTTPS
 	if target == "" && resolved.Scheme != "" {
 		_, host, _ := extractRequestMeta(string(rawRequest))
-		// Strip any existing port from host before rebuilding
-		if idx := strings.LastIndex(host, ":"); idx > 0 {
-			if _, err := fmt.Sscanf(host[idx+1:], "%d", new(int)); err == nil {
-				host = host[:idx]
-			}
-		}
-		// Omit default ports to avoid Host: example.com:80 pollution
-		if (resolved.Scheme == schemeHTTP && resolved.Port == 80) ||
-			(resolved.Scheme == schemeHTTPS && resolved.Port == 443) {
-			target = fmt.Sprintf("%s://%s", resolved.Scheme, host)
-		} else {
-			target = fmt.Sprintf("%s://%s:%d", resolved.Scheme, host, resolved.Port)
-		}
+		target = rebuildReplayTarget(host, resolved.Scheme, resolved.Port)
 	}
 
 	mods := sendModifications{
@@ -382,12 +372,47 @@ func getHeaderArg(req mcp.CallToolRequest, name string) []string {
 	return nil
 }
 
+// rebuildReplayTarget builds a scheme://host[:port] target from a stored Host
+// header value, stripping any existing port and re-wrapping bare IPv6 addresses.
+func rebuildReplayTarget(host, scheme string, port int) string {
+	// SplitHostPort handles IPv6 brackets and errors (leaving host untouched)
+	// when no port is present
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	// Re-wrap bare IPv6 so the rebuilt URL parses
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	// Omit default ports to avoid Host: example.com:80 pollution
+	if (scheme == schemeHTTP && port == 80) || (scheme == schemeHTTPS && port == 443) {
+		return fmt.Sprintf("%s://%s", scheme, host)
+	}
+	return fmt.Sprintf("%s://%s:%d", scheme, host, port)
+}
+
 // getJSONArg extracts set_json as a map from an MCP request.
 func getJSONArg(req mcp.CallToolRequest) map[string]interface{} {
 	if args := req.GetArguments(); args != nil {
 		if raw, ok := args["set_json"]; ok && raw != nil {
-			if jsonMap, ok := raw.(map[string]interface{}); ok {
-				return jsonMap
+			return jsonObjectArg(raw)
+		}
+	}
+	return nil
+}
+
+// jsonObjectArg coerces an MCP argument to a JSON object, decoding agents that
+// pass a string-encoded object literal (matching parseHeaderArg's leniency).
+func jsonObjectArg(raw interface{}) map[string]interface{} {
+	switch v := raw.(type) {
+	case map[string]interface{}:
+		return v
+	case string:
+		s := strings.TrimSpace(v)
+		if len(s) >= 2 && s[0] == '{' {
+			var obj map[string]interface{}
+			if json.Unmarshal([]byte(s), &obj) == nil {
+				return obj
 			}
 		}
 	}
@@ -404,8 +429,8 @@ func getFormArg(req mcp.CallToolRequest) map[string]string {
 	if !ok || raw == nil {
 		return nil
 	}
-	rawMap, ok := raw.(map[string]interface{})
-	if !ok || len(rawMap) == 0 {
+	rawMap := jsonObjectArg(raw)
+	if len(rawMap) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(rawMap))

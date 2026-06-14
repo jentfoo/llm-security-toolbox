@@ -51,6 +51,12 @@ func TestExtractEmailTo(t *testing.T) {
 		assert.Equal(t, []string{"recipient@example.com"}, got)
 	})
 
+	t.Run("quoted_display_name_with_comma", func(t *testing.T) {
+		headers := "To: \"Doe, Jane\" <jane@example.com>, bob@example.com\r\nSubject: test"
+		got := extractEmailTo(headers)
+		assert.Equal(t, []string{"jane@example.com", "bob@example.com"}, got)
+	})
+
 	t.Run("empty_headers", func(t *testing.T) {
 		got := extractEmailTo("")
 		assert.Nil(t, got)
