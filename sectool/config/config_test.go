@@ -12,7 +12,8 @@ import (
 func TestLoadSaveRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "config.json")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
 
 	original := &Config{
 		Version: Version,
@@ -24,6 +25,11 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 
 	_, err = os.Stat(path)
 	require.NoError(t, err)
+
+	// Atomic save must not leave a temp file behind
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
 
 	loaded, err := loadConfig(path)
 	require.NoError(t, err)

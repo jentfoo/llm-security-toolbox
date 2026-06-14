@@ -48,7 +48,7 @@ func main() {
 			}
 		}()
 
-		os.Exit(runServiceMode(args[1:]))
+		os.Exit(runServiceMode(args[1:], globalFlags.ConfigPath))
 	case "encode":
 		err = encoding.ParseEncode(args[1:])
 	case "decode":
@@ -103,11 +103,14 @@ func main() {
 	}
 }
 
-func runServiceMode(args []string) int {
+func runServiceMode(args []string, globalConfigPath string) int {
 	flags, err := service.ParseMCPServerFlags(args)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Error parsing service flags: %v\n", err)
 		return 1
+	}
+	if flags.ConfigPath == "" && globalConfigPath != "" {
+		flags.ConfigPath = globalConfigPath
 	}
 
 	if srv, err := service.NewServer(flags, nil, nil, nil); err != nil {
@@ -137,7 +140,7 @@ Commands:
   hash       Compute hash digests (md5, sha1, sha256, sha512)
   jwt        Decode and inspect JWT tokens
 
-Global Options:
+Global Options (must precede the command, e.g. sectool --config <path> proxy ...):
   --config <path>    Config file path (default: ~/.sectool/config.json)
   --mcp-url <url>    MCP server URL (default: http://127.0.0.1:<port from config>/mcp)
 
@@ -151,11 +154,14 @@ type globalFlags struct {
 	MCPURL     string
 }
 
-// parseGlobalFlags extracts global flags from args, returning remaining args.
+// parseGlobalFlags extracts global flags appearing before the subcommand,
+// returning the captured flags and the remaining args (subcommand onward).
+// Scanning stops at the first token that is not a recognized global flag, so
+// flags after the subcommand are left untouched for the subcommand to parse.
 func parseGlobalFlags(args []string) (globalFlags, []string) {
 	var flags globalFlags
-	remaining := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
+	i := 0
+	for ; i < len(args); i++ {
 		arg := args[i]
 
 		// --config <path> or --config=<path>
@@ -178,10 +184,10 @@ func parseGlobalFlags(args []string) (globalFlags, []string) {
 			continue
 		}
 
-		remaining = append(remaining, arg)
+		break // first non-global token is the subcommand
 	}
 
-	return flags, remaining
+	return flags, args[i:]
 }
 
 // getMCPURL returns the MCP server URL from flags or config.

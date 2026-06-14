@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+
+	"github.com/go-appsec/toolbox/sectool/service/fileutil"
 )
 
 const (
@@ -189,7 +191,7 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Save writes config to path, creating parent directory if needed.
+// Save writes config to path atomically, creating parent directory if needed.
 func (c *Config) Save(path string) error {
 	if c == nil {
 		return errors.New("config is nil")
@@ -201,7 +203,7 @@ func (c *Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	return fileutil.AtomicWriteFile(path, data, 0600)
 }
 
 // LoadOrCreatePath loads config from path, creating with defaults if missing.

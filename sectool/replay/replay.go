@@ -17,6 +17,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/cliutil"
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
 	"github.com/go-appsec/toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/service/ids"
 )
 
 // rejectModificationFlags returns an error if any modification-only flags are
@@ -253,8 +254,8 @@ func create(urlArg, method string, headers []string, bodyPath string) error {
 		_, _ = fmt.Fprintf(&reqBuilder, "Content-Length: %d\r\n", len(bodyBytes))
 	}
 
-	// Generate a bundle ID
-	bundleID := fmt.Sprintf("new_%d", time.Now().UnixNano()%1000000)
+	// Generate a time-sortable bundle ID with a random suffix to avoid collisions
+	bundleID := fmt.Sprintf("new_%d_%s", time.Now().UnixNano(), ids.Generate(ids.DefaultLength/2))
 
 	// Write bundle to disk
 	bundlePath, err := bundle.Write(bundleID,

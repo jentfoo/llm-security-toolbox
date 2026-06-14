@@ -93,6 +93,21 @@ func TestWrite(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(metaBytes), `"body_is_utf8": false`)
 	})
+
+	t.Run("accepts_new_prefix_id", func(t *testing.T) {
+		_, err := Write("new_123_aB", "https://example.com/", "GET",
+			"GET / HTTP/1.1\r\nHost: example.com\r\n", []byte{}, "", nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("rejects_traversal_flow_id", func(t *testing.T) {
+		for _, id := range []string{"", ".", "..", "../../etc/passwd", "a/b", `a\b`, "a.b"} {
+			_, err := Write(id, "https://example.com/", "GET",
+				"GET / HTTP/1.1\r\nHost: example.com\r\n", []byte{}, "", nil)
+			require.Error(t, err, "flow id %q should be rejected", id)
+			assert.Contains(t, err.Error(), "invalid flow id")
+		}
+	})
 }
 
 func TestRead(t *testing.T) {
@@ -127,6 +142,23 @@ func TestRead(t *testing.T) {
 		assert.Equal(t, "https://example.com/api", meta.URL)
 		assert.True(t, meta.BodyIsUTF8)
 		assert.Equal(t, 17, meta.BodySize)
+	})
+
+	t.Run("strips_body_placeholder", func(t *testing.T) {
+		bundleDir, err := Write(
+			"flow-placeholder-strip",
+			"https://example.com/",
+			"GET",
+			"GET / HTTP/1.1\r\nHost: example.com\r\n",
+			[]byte{},
+			"",
+			nil,
+		)
+		require.NoError(t, err)
+
+		headers, _, _, err := Read(bundleDir)
+		require.NoError(t, err)
+		assert.NotContains(t, string(headers), BodyPlaceholder)
 	})
 
 	t.Run("handles_missing_body_file", func(t *testing.T) {

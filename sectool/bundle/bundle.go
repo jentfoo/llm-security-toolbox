@@ -27,8 +27,12 @@ type Meta struct {
 }
 
 // Write writes a request bundle to ./sectool-requests/<flowID>/.
-// Uses restrictive permissions (0700 dirs, 0600 files) and rejects symlinks.
+// Uses restrictive permissions (0700 dirs, 0600 files), rejects symlinks, and
+// rejects a flowID containing path separators or other traversal characters.
 func Write(flowID, url, method, reqHeaders string, reqBody []byte, respHeaders string, respBody []byte) (string, error) {
+	if !validFlowID(flowID) {
+		return "", fmt.Errorf("invalid flow id %q", flowID)
+	}
 	bundleDir := filepath.Join(DefaultDir, flowID)
 
 	if err := mkdirAllSafe(bundleDir, 0700); err != nil {
@@ -129,6 +133,24 @@ func writeFileSafe(path string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(path, data, perm)
 }
 
+// validFlowID reports whether id is safe to use as a bundle directory name.
+// Bundle ids are base62 plus the "new_" prefix used by replay create; only
+// [A-Za-z0-9_-] are allowed, which excludes '.', '/' and '\' and thus traversal.
+func validFlowID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, c := range id {
+		isDigit := c >= '0' && c <= '9'
+		isUpper := c >= 'A' && c <= 'Z'
+		isLower := c >= 'a' && c <= 'z'
+		if !isDigit && !isUpper && !isLower && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 // splitPath splits a path into its components.
 func splitPath(path string) []string {
 	var parts []string
@@ -161,6 +183,7 @@ func Read(bundleDir string) (headers, body []byte, meta *Meta, err error) {
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("read request: %w", err)
 	}
+	headers = bytes.Replace(headers, []byte(BodyPlaceholder+"\n"), nil, 1)
 
 	body, err = os.ReadFile(filepath.Join(bundleDir, "body"))
 	if err != nil && !os.IsNotExist(err) {
