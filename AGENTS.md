@@ -72,7 +72,7 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/backend.go` - HttpBackend, ResponderBackend, OastBackend, CrawlerBackend interfaces
 - `sectool/service/backend_http_native.go` - Native built-in proxy implementation of HttpBackend
 - `sectool/service/backend_http_native_respond.go` - Native backend implementation of ResponderBackend
-- `sectool/service/backend_http_burp.go` - Burp MCP implementation of HttpBackend
+- `sectool/service/backend_http_burp.go` - Burp MCP implementation of HttpBackend; hosts `burpFlowIndex` (flow_id ↔ Burp offset mapping)
 - `sectool/service/backend_oast_interactsh.go` - Interactsh implementation of OastBackend
 - `sectool/service/smtputil.go` - SMTP email header parsing utilities
 - `sectool/service/backend_crawler_colly.go` - Colly-based crawler implementation
@@ -112,7 +112,6 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/store/storage.go` - Storage interface and in-memory implementation
 - `sectool/service/store/spill.go` - SpillStore: disk-paging Storage with LRU eviction, encryption, and compaction
 - `sectool/service/store/serialize.go` - Msgpack serialization helpers
-- `sectool/service/store/proxy_index.go` - Bidirectional flow_id ↔ proxy offset mapping
 - `sectool/service/store/replay_history.go` - Replay request/response storage with meta/payload split
 - `sectool/service/store/notes.go` - Note storage with reverse flow index
 - `sectool/service/ids/ids.go` - Base62 random IDs using crypto/rand
@@ -212,7 +211,6 @@ Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body place
 
 **Store (`sectool/service/store/`):**
 - `Storage` - key-value blob interface (`memStorage`, `SpillStore` disk-paging)
-- `ProxyIndex` - bidirectional flow_id ↔ proxy offset mapping
 - `ReplayHistoryStore` - replay storage with meta/payload split
 - `NoteStore` - note storage with reverse flow_id index
 
