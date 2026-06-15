@@ -300,6 +300,8 @@ func (e *HistoryEntry) extractMeta() HistoryMeta {
 	return HistoryMeta{
 		FlowID:      e.FlowID,
 		Protocol:    e.Protocol,
+		Scheme:      e.Scheme,
+		Port:        e.Port,
 		Method:      e.GetMethod(),
 		Host:        e.GetHost(),
 		Path:        e.getFullPath(),

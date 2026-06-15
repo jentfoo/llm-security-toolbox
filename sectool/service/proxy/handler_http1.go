@@ -93,7 +93,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
 				req.SetBody(req.Body[:h.maxBodyBytes])
 			}
-			h.storeEntry(req, resp, nil, startTime)
+			h.storeEntry(target, req, resp, nil, startTime)
 			return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
 		}
 	}
@@ -118,7 +118,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		} else {
 			h.sendError(clientConn, 502, "Bad Gateway: connection refused")
 		}
-		h.storeEntry(req, nil, nil, startTime)
+		h.storeEntry(target, req, nil, nil, startTime)
 		return false
 	}
 	defer func() { _ = upstreamConn.Close() }()
@@ -134,7 +134,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		} else {
 			h.sendError(clientConn, 502, "Bad Gateway: failed to send request")
 		}
-		h.storeEntry(req, nil, nil, startTime)
+		h.storeEntry(target, req, nil, nil, startTime)
 		return false
 	}
 
@@ -156,7 +156,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 				h.sendError(clientConn, 502, "Bad Gateway: malformed response")
 			}
 		}
-		h.storeEntry(req, nil, interim, startTime)
+		h.storeEntry(target, req, nil, interim, startTime)
 		return false
 	}
 
@@ -177,7 +177,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 
 	// Store before forwarding so history is visible by the time the client sees the response
 	// Avoids a race with query history after the response arrives but before storeEntry
-	h.storeEntry(req, resp, interim, startTime)
+	h.storeEntry(target, req, resp, interim, startTime)
 
 	// Forward response to client
 	if h.timeouts.WriteTimeout > 0 {
@@ -303,9 +303,11 @@ func (h *http1Handler) forwardInterim(clientConn net.Conn, ir *RawHTTP1Response)
 }
 
 // storeEntry saves the request/response pair, plus any interim 1xx responses, to history.
-func (h *http1Handler) storeEntry(req *RawHTTP1Request, resp *RawHTTP1Response, interim []*RawHTTP1Response, startTime time.Time) {
+func (h *http1Handler) storeEntry(target *Target, req *RawHTTP1Request, resp *RawHTTP1Response, interim []*RawHTTP1Response, startTime time.Time) {
 	entry := &HistoryEntry{
 		Protocol:         protocolHTTP11,
+		Scheme:           target.Scheme(),
+		Port:             target.Port,
 		Request:          req,
 		Response:         resp,
 		InterimResponses: interim,
@@ -378,7 +380,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
 				req.SetBody(req.Body[:h.maxBodyBytes])
 			}
-			h.storeEntry(req, resp, nil, startTime)
+			h.storeEntry(target, req, resp, nil, startTime)
 			return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
 		}
 	}
@@ -390,7 +392,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 
 	if h.wsHandler != nil && isWebSocketUpgrade(req) {
 		// Reuse existing upstream connection to avoid race window
-		h.wsHandler.HandleTLSWithUpstream(ctx, clientConn, clientReader, upstreamConn, upstreamReader, req)
+		h.wsHandler.HandleTLSWithUpstream(ctx, clientConn, clientReader, upstreamConn, upstreamReader, req, target)
 		return false // WebSocket takes over, don't continue loop
 	}
 
@@ -405,7 +407,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		} else {
 			h.sendError(clientConn, 502, "Bad Gateway: failed to send request")
 		}
-		h.storeEntry(req, nil, nil, startTime)
+		h.storeEntry(target, req, nil, nil, startTime)
 		return false
 	}
 
@@ -426,7 +428,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 				h.sendError(clientConn, 502, "Bad Gateway: malformed response")
 			}
 		}
-		h.storeEntry(req, nil, interim, startTime)
+		h.storeEntry(target, req, nil, interim, startTime)
 		return false
 	}
 
@@ -452,7 +454,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		resp.SetBody(resp.Body[:h.maxBodyBytes])
 	}
 
-	h.storeEntry(req, resp, interim, startTime)
+	h.storeEntry(target, req, resp, interim, startTime)
 
 	connHeader := strings.ToLower(resp.GetHeader("Connection"))
 	return connHeader != connectionClose

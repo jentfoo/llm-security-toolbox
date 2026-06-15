@@ -71,7 +71,7 @@ func (h *webSocketHandler) Handle(
 		return
 	}
 
-	h.proxyWebSocket(ctx, clientConn, clientReader, upstreamConn, req, startTime)
+	h.proxyWebSocket(ctx, target.Scheme(), target.Port, clientConn, clientReader, upstreamConn, req, startTime)
 }
 
 // HandleTLS proxies a WebSocket connection over TLS by creating a new upstream connection.
@@ -103,7 +103,7 @@ func (h *webSocketHandler) HandleTLS(
 		return
 	}
 
-	h.proxyWebSocket(ctx, clientConn, clientReader, upstreamConn, req, startTime)
+	h.proxyWebSocket(ctx, target.Scheme(), target.Port, clientConn, clientReader, upstreamConn, req, startTime)
 }
 
 // HandleTLSWithUpstream proxies a WebSocket connection using an existing upstream TLS connection.
@@ -115,18 +115,21 @@ func (h *webSocketHandler) HandleTLSWithUpstream(
 	upstreamConn net.Conn,
 	upstreamReader *bufio.Reader,
 	req *RawHTTP1Request,
+	target *Target,
 ) {
 	startTime := time.Now()
 
 	h.stripExtensions(req)
 
-	h.proxyWebSocketWithReader(ctx, clientConn, clientReader, upstreamConn, upstreamReader, req, startTime)
+	h.proxyWebSocketWithReader(ctx, target.Scheme(), target.Port, clientConn, clientReader, upstreamConn, upstreamReader, req, startTime)
 }
 
 // proxyWebSocket handles the WebSocket upgrade and frame proxying.
 // Creates its own upstream reader.
 func (h *webSocketHandler) proxyWebSocket(
 	ctx context.Context,
+	scheme string,
+	port int,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
 	upstreamConn net.Conn,
@@ -134,12 +137,14 @@ func (h *webSocketHandler) proxyWebSocket(
 	startTime time.Time,
 ) {
 	upstreamReader := bufio.NewReader(upstreamConn)
-	h.proxyWebSocketWithReader(ctx, clientConn, clientReader, upstreamConn, upstreamReader, req, startTime)
+	h.proxyWebSocketWithReader(ctx, scheme, port, clientConn, clientReader, upstreamConn, upstreamReader, req, startTime)
 }
 
 // proxyWebSocketWithReader handles WebSocket upgrade and frame proxying with existing readers.
 func (h *webSocketHandler) proxyWebSocketWithReader(
 	ctx context.Context,
+	scheme string,
+	port int,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
 	upstreamConn net.Conn,
@@ -177,7 +182,7 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 			log.Printf("proxy: failed to send websocket error response: %v", err)
 		}
 		// Store failed upgrade in history
-		h.storeHandshake(req, resp, startTime)
+		h.storeHandshake(scheme, port, req, resp, startTime)
 		return
 	}
 
@@ -190,7 +195,7 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 	h.stripResponseExtensions(resp)
 
 	// Store upgrade handshake in history and get reference for frame storage
-	historyEntry := h.storeHandshake(req, resp, startTime)
+	historyEntry := h.storeHandshake(scheme, port, req, resp, startTime)
 
 	// Send 101 to client
 	if _, err := clientConn.Write(resp.SerializeRaw(&buf)); err != nil {
@@ -240,9 +245,11 @@ func (h *webSocketHandler) sendError(conn net.Conn, code int, message string) {
 
 // storeHandshake stores the WebSocket upgrade handshake in history.
 // Returns the entry so frames can be appended to it, or nil if filtered.
-func (h *webSocketHandler) storeHandshake(req *RawHTTP1Request, resp *RawHTTP1Response, startTime time.Time) *HistoryEntry {
+func (h *webSocketHandler) storeHandshake(scheme string, port int, req *RawHTTP1Request, resp *RawHTTP1Response, startTime time.Time) *HistoryEntry {
 	entry := &HistoryEntry{
 		Protocol:  "websocket",
+		Scheme:    scheme,
+		Port:      port,
 		Request:   req,
 		Response:  resp,
 		Timestamp: startTime,

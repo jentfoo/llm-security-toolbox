@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -232,6 +233,9 @@ func TestHandle(t *testing.T) {
 		assert.Equal(t, "GET", entry.Request.Method)
 		assert.Equal(t, 200, entry.Response.StatusCode)
 		assert.Contains(t, string(entry.Response.Body), "Hello from HTTPS server")
+		assert.Equal(t, "https", entry.Scheme)
+		wantPort, _ := strconv.Atoi(mustParseURL(t, testServer.URL).Port())
+		assert.Equal(t, wantPort, entry.Port)
 	})
 
 	t.Run("headers_preserved", func(t *testing.T) {

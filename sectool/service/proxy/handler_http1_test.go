@@ -569,7 +569,7 @@ func TestStoreEntry(t *testing.T) {
 		}
 		startTime := time.Now()
 
-		h.storeEntry(req, resp, nil, startTime)
+		h.storeEntry(&Target{Hostname: "example.com", Port: 80}, req, resp, nil, startTime)
 
 		// Verify entry was stored
 		assert.Equal(t, 1, h.history.Count())
@@ -578,6 +578,26 @@ func TestStoreEntry(t *testing.T) {
 		assert.Equal(t, "http/1.1", entry.Protocol)
 		assert.Equal(t, "GET", entry.Request.Method)
 		assert.Equal(t, 200, entry.Response.StatusCode)
+		assert.Equal(t, "http", entry.Scheme)
+		assert.Equal(t, 80, entry.Port)
+	})
+
+	t.Run("records_https_scheme", func(t *testing.T) {
+		h := newTestHTTP1Handler(t)
+
+		req := &RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []Header{{Name: "Host", Value: "example.com"}},
+		}
+		startTime := time.Now()
+
+		h.storeEntry(&Target{Hostname: "example.com", Port: 8443, UsesHTTPS: true}, req, nil, nil, startTime)
+
+		entry := firstEntry(t, h.history)
+		assert.Equal(t, "https", entry.Scheme)
+		assert.Equal(t, 8443, entry.Port)
 	})
 
 	t.Run("stores_entry_with_nil_response", func(t *testing.T) {
@@ -591,7 +611,7 @@ func TestStoreEntry(t *testing.T) {
 		}
 		startTime := time.Now()
 
-		h.storeEntry(req, nil, nil, startTime)
+		h.storeEntry(&Target{Hostname: "example.com", Port: 80}, req, nil, nil, startTime)
 
 		assert.Equal(t, 1, h.history.Count())
 

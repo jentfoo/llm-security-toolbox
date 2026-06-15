@@ -88,6 +88,17 @@ func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 	assert.NotEmpty(t, entries[0].FlowID)
 	assert.Contains(t, entries[0].Request, "GET")
 	assert.Contains(t, entries[0].Response, "200")
+
+	// Plaintext upstream on a non-80 port must be recorded as http, not inferred https
+	assert.Equal(t, "http", entries[0].Scheme)
+	testURL, _ := url.Parse(testServer.URL)
+	wantPort, _ := strconv.Atoi(testURL.Port())
+	assert.Equal(t, wantPort, entries[0].Port)
+
+	entry, err := backend.GetProxyEntry(t.Context(), entries[0].FlowID)
+	require.NoError(t, err)
+	assert.Equal(t, "http", entry.Scheme)
+	assert.Equal(t, wantPort, entry.Port)
 }
 
 func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
@@ -133,6 +144,7 @@ func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
 	assert.Contains(t, metas[0].Path, "/test")
 	assert.NotEmpty(t, metas[0].Host)
 	assert.Equal(t, "http/1.1", metas[0].Protocol)
+	assert.Equal(t, "http", metas[0].Scheme)
 }
 
 func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {

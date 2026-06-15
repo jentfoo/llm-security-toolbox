@@ -208,6 +208,8 @@ func (b *NativeProxyBackend) GetProxyHistory(ctx context.Context, count int, aft
 			Request:   reqStr,
 			Response:  respStr,
 			Protocol:  entry.Protocol,
+			Scheme:    entry.Scheme,
+			Port:      entry.Port,
 		})
 	}
 
@@ -227,6 +229,8 @@ func (b *NativeProxyBackend) GetProxyHistoryMeta(ctx context.Context, count int,
 			Status:      m.Status,
 			RespLen:     m.RespLen,
 			Protocol:    m.Protocol,
+			Scheme:      m.Scheme,
+			Port:        m.Port,
 			ContentType: m.ContentType,
 		}
 	}
@@ -252,6 +256,8 @@ func (b *NativeProxyBackend) GetProxyEntry(ctx context.Context, flowID string) (
 		Response:         respStr,
 		InterimResponses: interim,
 		Protocol:         entry.Protocol,
+		Scheme:           entry.Scheme,
+		Port:             entry.Port,
 	}, nil
 }
 

@@ -1447,8 +1447,15 @@ func (p *h2Proxy) sendRSTStream(buf *bytes.Buffer, dst *h2Conn, streamID uint32,
 func (p *h2Proxy) storeStreamInHistory(stream *h2Stream) {
 	// Lock stream while reading all data for history
 	stream.mu.Lock()
+	scheme := stream.scheme
+	if scheme == "" {
+		scheme = schemeHTTPS // h2 is always tunneled over TLS via CONNECT
+	}
+	_, port := ParseAuthority(stream.authority, scheme)
 	entry := &HistoryEntry{
 		Protocol:   protocolH2,
+		Scheme:     scheme,
+		Port:       port,
 		H2StreamID: stream.id,
 		H2Request: &H2RequestData{
 			Method:    stream.method,

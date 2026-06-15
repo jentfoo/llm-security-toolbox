@@ -244,6 +244,11 @@ type HistoryEntry struct {
 	// Protocol identifies the HTTP version: "http/1.1", "h2", or "websocket"
 	Protocol string `json:"protocol" msgpack:"pr"`
 
+	// Scheme is the captured request scheme ("http" or "https").
+	Scheme string `json:"scheme,omitempty" msgpack:"sc,omitempty"`
+	// Port is the captured upstream port.
+	Port int `json:"port,omitempty" msgpack:"po,omitempty"`
+
 	// HTTP/1.1 request/response (nil for HTTP/2)
 	Request  *RawHTTP1Request  `json:"request,omitempty" msgpack:"rq,omitempty"`
 	Response *RawHTTP1Response `json:"response,omitempty" msgpack:"rs,omitempty"`
@@ -325,6 +330,8 @@ func (r *H2ResponseData) SetHeader(name, value string) { r.Headers.Set(name, val
 type HistoryMeta struct {
 	FlowID      string        `msgpack:"fid"`
 	Protocol    string        `msgpack:"pr"`
+	Scheme      string        `msgpack:"sc,omitempty"`
+	Port        int           `msgpack:"po,omitempty"`
 	Method      string        `msgpack:"m"`
 	Host        string        `msgpack:"h"`
 	Path        string        `msgpack:"p"` // includes query string
@@ -341,6 +348,14 @@ type Target struct {
 	Hostname  string
 	Port      int
 	UsesHTTPS bool
+}
+
+// Scheme returns "https" when UsesHTTPS, else "http".
+func (t *Target) Scheme() string {
+	if t.UsesHTTPS {
+		return schemeHTTPS
+	}
+	return schemeHTTP
 }
 
 // RuleApplier applies find/replace rules to requests and responses.

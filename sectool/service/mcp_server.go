@@ -503,6 +503,8 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 			RawResponse:      []byte(entry.Response),
 			InterimResponses: entry.InterimResponses,
 			Source:           SourceProxy,
+			Scheme:           entry.Scheme,
+			Port:             entry.Port,
 			Protocol:         entry.Protocol,
 		}, nil
 	} else if err != nil && !errors.Is(err, ErrNotFound) {

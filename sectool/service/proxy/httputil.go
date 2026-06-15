@@ -2,11 +2,34 @@ package proxy
 
 import (
 	"bytes"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/go-analyze/bulk"
 )
+
+// ParseAuthority extracts host and port from an HTTP/2 :authority pseudo-header.
+// Handles forms like "example.com", "example.com:8443", "[::1]:8080".
+// scheme is used to determine default port ("https" -> 443, else 80).
+func ParseAuthority(authority, scheme string) (string, int) {
+	defaultPort := 80
+	if scheme == schemeHTTPS {
+		defaultPort = 443
+	}
+
+	host, portStr, err := net.SplitHostPort(authority)
+	if err != nil {
+		// No port in authority
+		return strings.ToLower(authority), defaultPort
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return strings.ToLower(host), defaultPort
+	}
+	return strings.ToLower(host), port
+}
 
 // ExtractMethod extracts the HTTP method from raw request bytes.
 // Returns the first space-delimited token from the request line.

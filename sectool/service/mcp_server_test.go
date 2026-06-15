@@ -252,6 +252,8 @@ func (b *mockHttpBackend) GetProxyHistoryMeta(ctx context.Context, count int, af
 			Status:      status,
 			RespLen:     len(respBody),
 			Protocol:    e.Protocol,
+			Scheme:      e.Scheme,
+			Port:        e.Port,
 			Placeholder: e.Placeholder,
 		}
 	}
@@ -427,6 +429,22 @@ func (b *mockHttpBackend) AddProxyEntry(request, response, notes string) string 
 		Request:   request,
 		Response:  response,
 		Notes:     notes,
+	})
+	return flowID
+}
+
+// AddProxyEntryScheme adds an entry with an explicit scheme/port. Returns the minted flow_id.
+func (b *mockHttpBackend) AddProxyEntryScheme(request, response, scheme string, port int) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	flowID := ids.Generate(ids.DefaultLength)
+	b.entries = append(b.entries, ProxyEntry{
+		FlowID:    flowID,
+		Timestamp: time.Now().UTC(),
+		Request:   request,
+		Response:  response,
+		Scheme:    scheme,
+		Port:      port,
 	})
 	return flowID
 }

@@ -327,8 +327,14 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 		for _, entry := range filtered {
 			scheme := entry.scheme
 			port := entry.port
-			if scheme == "" {
-				scheme, port, _ = inferSchemeAndPort(entry.host)
+			if scheme == "" || port == 0 {
+				inferredScheme, inferredPort, _ := inferSchemeAndPort(entry.host)
+				if scheme == "" {
+					scheme = inferredScheme
+				}
+				if port == 0 {
+					port = inferredPort
+				}
 			}
 
 			flows = append(flows, protocol.FlowEntry{
@@ -688,6 +694,8 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 					method:    method,
 					host:      host,
 					path:      path,
+					scheme:    entry.Scheme,
+					port:      entry.Port,
 					status:    status,
 					respLen:   len(respBody),
 					request:   entry.Request,
@@ -711,6 +719,8 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 					method:    m.Method,
 					host:      m.Host,
 					path:      m.Path,
+					scheme:    m.Scheme,
+					port:      m.Port,
 					status:    m.Status,
 					respLen:   m.RespLen,
 					source:    SourceProxy,

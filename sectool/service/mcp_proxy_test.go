@@ -519,6 +519,41 @@ func TestMCP_FlowGet(t *testing.T) {
 		assert.Equal(t, "resp body here", string(decodedBody))
 	})
 
+	t.Run("stored_http_scheme", func(t *testing.T) {
+		// Plaintext upstream on a non-80 port: stored scheme must win over inference
+		httpFlowID := mockHTTP.AddProxyEntryScheme(
+			"GET /app HTTP/1.1\r\nHost: 192.168.1.100:3000\r\n\r\n",
+			"HTTP/1.1 200 OK\r\n\r\n",
+			"http", 3000,
+		)
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"host":        "192.168.1.100:3000",
+		})
+		require.NotEmpty(t, listResp.Flows)
+		assert.Equal(t, "http", listResp.Flows[0].Scheme)
+		assert.Equal(t, 3000, listResp.Flows[0].Port)
+
+		resp := CallMCPToolJSONOK[protocol.FlowGetResponse](t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": httpFlowID,
+		})
+		assert.Equal(t, "http://192.168.1.100:3000/app", resp.URL)
+	})
+
+	t.Run("legacy_entry_infers_scheme", func(t *testing.T) {
+		// No stored scheme (legacy/Burp): falls back to host-based inference
+		legacyID := mockHTTP.AddProxyEntry(
+			"GET /x HTTP/1.1\r\nHost: legacy.com:443\r\n\r\n",
+			"HTTP/1.1 200 OK\r\n\r\n",
+			"",
+		)
+		resp := CallMCPToolJSONOK[protocol.FlowGetResponse](t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": legacyID,
+		})
+		assert.Equal(t, "https://legacy.com:443/x", resp.URL)
+	})
+
 	t.Run("scope_response_body", func(t *testing.T) {
 		var raw map[string]interface{}
 		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{
