@@ -3,6 +3,7 @@ package service
 import (
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -29,6 +30,66 @@ func TestMCP_ProxyRespondAdd(t *testing.T) {
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "set-cookies", resp.Label)
 	assert.Equal(t, "<html>ok</html>", resp.Body)
+}
+
+func TestMCP_ProxyRespondAdd_ScalarHeaders(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+
+	resp := CallMCPToolJSONOK[protocol.ResponderEntry](t, mcpClient, "proxy_respond_add", map[string]interface{}{
+		"origin": "https://example.com",
+		"path":   "/scalars",
+		"headers": map[string]interface{}{
+			"Content-Length": 0,
+			"X-Flag":         true,
+			"X-Name":         "value",
+			"X-Empty":        nil,
+		},
+	})
+
+	assert.Equal(t, "0", resp.Headers["Content-Length"])
+	assert.Equal(t, "true", resp.Headers["X-Flag"])
+	assert.Equal(t, "value", resp.Headers["X-Name"])
+	assert.Empty(t, resp.Headers["X-Empty"])
+}
+
+func TestGetStringMapArg(t *testing.T) {
+	t.Parallel()
+
+	newReq := func(args map[string]interface{}) mcp.CallToolRequest {
+		return mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: args}}
+	}
+
+	t.Run("missing_key", func(t *testing.T) {
+		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{}), "headers"))
+	})
+
+	t.Run("nil_value", func(t *testing.T) {
+		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{"headers": nil}), "headers"))
+	})
+
+	t.Run("wrong_type", func(t *testing.T) {
+		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{"headers": "oops"}), "headers"))
+	})
+
+	t.Run("coerce_scalars", func(t *testing.T) {
+		got := getStringMapArg(newReq(map[string]interface{}{"headers": map[string]interface{}{
+			"str":    "v",
+			"num":    float64(0),
+			"flag":   true,
+			"null":   nil,
+			"nested": map[string]interface{}{"a": "b"},
+			"list":   []interface{}{"a"},
+		}}), "headers")
+
+		assert.Equal(t, map[string]string{
+			"str":  "v",
+			"num":  "0",
+			"flag": "true",
+			"null": "",
+		}, got)
+	})
 }
 
 func TestMCP_ProxyRespondAdd_Validation(t *testing.T) {

@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -140,8 +142,16 @@ func getStringMapArg(req mcp.CallToolRequest, key string) map[string]string {
 	}
 	result := make(map[string]string, len(m))
 	for k, v := range m {
-		if s, ok := v.(string); ok {
-			result[k] = s
+		switch val := v.(type) {
+		case nil:
+			result[k] = ""
+		case string:
+			result[k] = val
+		case bool, float64, int, int64, json.Number:
+			// coerce scalar JSON values to strings rather than dropping them
+			result[k] = fmt.Sprint(val)
+		default:
+			// skip maps/slices/objects, not valid header scalars
 		}
 	}
 	return result
