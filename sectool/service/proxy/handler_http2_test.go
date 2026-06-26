@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -582,6 +584,86 @@ func TestHTTP2ProxyEndToEnd(t *testing.T) {
 	require.NotNil(t, entry.H2Response)
 	assert.Equal(t, 200, entry.H2Response.StatusCode)
 	assert.Contains(t, string(entry.H2Response.Body), "Hello from HTTP/2 server")
+}
+
+// h2MockInterceptor serves a canned response for requests matching path.
+type h2MockInterceptor struct {
+	path string
+	resp *InterceptedResponse
+}
+
+func (m *h2MockInterceptor) InterceptRequest(_ string, _ int, path string, _ string) *InterceptedResponse {
+	if path == m.path {
+		return m.resp
+	}
+	return nil
+}
+
+func TestHTTP2ProxyInterceptWithRequestBody(t *testing.T) {
+	t.Parallel()
+
+	var upstreamConns atomic.Int64
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("live-ok"))
+	}))
+	server.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			upstreamConns.Add(1)
+		}
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{})
+	require.NoError(t, err)
+	go func() { _ = proxy.Serve() }()
+	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
+
+	const cannedBody = "intercepted-response"
+	proxy.SetResponseInterceptor(&h2MockInterceptor{
+		path: "/canned",
+		resp: &InterceptedResponse{
+			StatusCode: 200,
+			Headers:    Headers{{Name: "content-type", Value: "text/plain"}},
+			Body:       []byte(cannedBody),
+		},
+	})
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AddCert(proxy.CertManager().CACert())
+	transport := &http.Transport{
+		Proxy:             http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
+		TLSClientConfig:   &tls.Config{RootCAs: caCertPool, InsecureSkipVerify: true},
+		ForceAttemptHTTP2: true,
+	}
+	client := &http.Client{Transport: transport}
+
+	// Body large enough that DATA frames hit the proxy before the canned response is processed by the client
+	reqBody := strings.Repeat("A", 128*1024)
+	postReq, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/canned", strings.NewReader(reqBody))
+	require.NoError(t, err)
+	postResp, err := client.Do(postReq)
+	require.NoError(t, err)
+	postData, err := io.ReadAll(postResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, postResp.Body.Close())
+	assert.Equal(t, 200, postResp.StatusCode)
+	assert.Equal(t, cannedBody, string(postData))
+	assert.Equal(t, 2, postResp.ProtoMajor)
+
+	// Second request on the same h2 connection must still reach the upstream
+	liveReq, err := http.NewRequestWithContext(t.Context(), "GET", server.URL+"/live", nil)
+	require.NoError(t, err)
+	liveResp, err := client.Do(liveReq)
+	require.NoError(t, err)
+	liveData, err := io.ReadAll(liveResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, liveResp.Body.Close())
+	assert.Equal(t, "live-ok", string(liveData))
+
+	// One upstream connection served both: it survived rather than a GOAWAY
+	assert.Equal(t, int64(1), upstreamConns.Load())
 }
 
 func TestHTTP2ProxyHeaderRules(t *testing.T) {

@@ -120,6 +120,9 @@ type h2Stream struct {
 	// Buffering for body rules
 	reqBodyComplete  bool
 	respBodyComplete bool
+
+	// discardClientBody drains client DATA locally after an intercepted response was served mid-request-body.
+	discardClientBody bool
 }
 
 // markEndStream updates stream state for END_STREAM flag.
@@ -619,7 +622,7 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 				); intercepted != nil {
 					stream.reqHeaders = headers
 					stream.mu.Unlock()
-					p.sendInterceptedH2Response(buf, stream, intercepted, src)
+					p.sendInterceptedH2Response(buf, stream, intercepted, src, endStream)
 					return
 				}
 			}
@@ -764,6 +767,27 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 	if !exists {
 		// Unknown stream, forward anyway; pump replenishes after sending
 		p.enqueueData(dst, streamID, data, endStream, true)
+		return
+	}
+
+	// Intercepted stream: the canned response was already served and the request HEADERS
+	// were never forwarded upstream, so drain the body locally instead of relaying it onto
+	// the idle upstream stream, which would trigger a connection-level GOAWAY.
+	stream.mu.Lock()
+	discard := stream.discardClientBody
+	stream.mu.Unlock()
+	if discard {
+		stream.mu.Lock()
+		p.copyToHistoryBufferLocked(stream, data, fromClient)
+		stream.lastActivity = time.Now()
+		stream.mu.Unlock()
+		if connUpd, streamUpd := src.needsWindowUpdate(streamID); connUpd > 0 || streamUpd > 0 {
+			p.sendWindowUpdates(buf, src, streamID, connUpd, streamUpd)
+		}
+		if endStream {
+			p.storeStreamInHistory(stream)
+			p.cleanupStream(streamID)
+		}
 		return
 	}
 
@@ -1105,6 +1129,22 @@ func (p *h2Proxy) handleRSTStreamFrame(buf *bytes.Buffer, f *http2.RSTStreamFram
 	// Reset is bidirectional: drop any DATA still queued for either pump
 	p.client.markStreamAborted(f.StreamID)
 	p.upstream.markStreamAborted(f.StreamID)
+
+	// An intercepted stream was never forwarded upstream, so forwarding the client's RST onto
+	// the idle upstream stream is a PROTOCOL_ERROR that would GOAWAY the whole connection.
+	if stream, exists := p.streams.get(f.StreamID); exists {
+		stream.mu.Lock()
+		intercepted := stream.discardClientBody
+		hasExchange := stream.method != "" && stream.statusCode != 0
+		stream.mu.Unlock()
+		if intercepted {
+			if hasExchange {
+				p.storeStreamInHistory(stream)
+			}
+			p.cleanupStream(f.StreamID)
+			return
+		}
+	}
 
 	buf.Reset()
 	framer := http2.NewFramer(buf, nil)
@@ -1482,8 +1522,10 @@ func (p *h2Proxy) storeStreamInHistory(stream *h2Stream) {
 }
 
 // sendInterceptedH2Response sends a canned response to the client for an intercepted request.
+// When requestComplete is false the client is still sending a request body, so the stream is
+// kept tracked with discardClientBody set and history/cleanup are deferred until the body completes.
 // The stream mutex must NOT be held when calling this method.
-func (p *h2Proxy) sendInterceptedH2Response(buf *bytes.Buffer, stream *h2Stream, intercepted *InterceptedResponse, src *h2Conn) {
+func (p *h2Proxy) sendInterceptedH2Response(buf *bytes.Buffer, stream *h2Stream, intercepted *InterceptedResponse, src *h2Conn, requestComplete bool) {
 	streamID := stream.id
 
 	// Populate stream with response data for history
@@ -1508,6 +1550,15 @@ func (p *h2Proxy) sendInterceptedH2Response(buf *bytes.Buffer, stream *h2Stream,
 	if hasBody {
 		// Proxy-generated body consumed no receive window, so no replenishment
 		p.enqueueData(src, streamID, intercepted.Body, true, false)
+	}
+
+	if !requestComplete {
+		// keep the stream tracked so handleDataFrame drains the incoming request body
+		// history is stored when that body completes
+		stream.mu.Lock()
+		stream.discardClientBody = true
+		stream.mu.Unlock()
+		return
 	}
 
 	p.storeStreamInHistory(stream)
