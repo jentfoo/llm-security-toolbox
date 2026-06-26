@@ -47,14 +47,18 @@ type mcpServer struct {
 
 // newMCPServer creates a new MCP server instance.
 func newMCPServer(svc *Server, workflowMode string) *mcpServer {
+	// define server hooks to hide internal tools from tools list while leaving them callable
+	hooks := &server.Hooks{}
+	hooks.AddAfterListTools(func(_ context.Context, _ any, _ *mcp.ListToolsRequest, result *mcp.ListToolsResult) {
+		result.Tools = bulk.SliceFilterInPlace(func(t mcp.Tool) bool {
+			return !strings.HasPrefix(t.Name, InternalToolPrefix)
+		}, result.Tools)
+	})
+
 	opts := []server.ServerOption{
 		server.WithToolCapabilities(false),
 		server.WithLogging(),
-		server.WithToolFilter(func(_ context.Context, tools []mcp.Tool) []mcp.Tool {
-			return bulk.SliceFilterInPlace(func(t mcp.Tool) bool {
-				return !strings.HasPrefix(t.Name, InternalToolPrefix)
-			}, tools)
-		}),
+		server.WithHooks(hooks),
 	}
 
 	// Add instructions based on workflow mode
