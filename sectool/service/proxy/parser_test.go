@@ -799,6 +799,30 @@ func TestParseResponse(t *testing.T) {
 		assert.Equal(t, "OK", resp.StatusText)
 		assert.Equal(t, EndingBareCR, resp.StatusLineEnding)
 	})
+
+	t.Run("close_delimited", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			method string
+			input  string
+			want   bool
+		}{
+			{"no_length_no_chunked", "GET", "HTTP/1.1 200 OK\r\n\r\nbody bytes", true},
+			{"invalid_content_length", "GET", "HTTP/1.1 200 OK\r\nContent-Length: bad\r\n\r\nbody bytes", true},
+			{"valid_content_length", "GET", "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody", false},
+			{"chunked", "GET", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n", false},
+			{"head_no_body", "HEAD", "HTTP/1.1 200 OK\r\n\r\n", false},
+			{"status_204", "GET", "HTTP/1.1 204 No Content\r\n\r\n", false},
+			{"status_304", "GET", "HTTP/1.1 304 Not Modified\r\n\r\n", false},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				resp, err := parseResponse(strings.NewReader(tt.input), tt.method)
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, resp.CloseDelimited)
+			})
+		}
+	})
 }
 
 func TestRawHTTP1Request_Serialize(t *testing.T) {

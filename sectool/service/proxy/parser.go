@@ -368,7 +368,8 @@ func readRequestBodyWithWire(br *bufio.Reader, req *RawHTTP1Request) (body, trai
 }
 
 // readResponseBodyWithWire reads the response body and returns wasChunked, per-chunk
-// framing, and bare-LF/CR flags observed inside trailer lines.
+// framing, and bare-LF/CR flags observed inside trailer lines. It sets
+// resp.CloseDelimited when the body is framed by connection close.
 func readResponseBodyWithWire(br *bufio.Reader, resp *RawHTTP1Response) (body, trailers []byte, wasChunked bool, chunks []ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
 	te := resp.GetHeader("Transfer-Encoding")
 	if strings.Contains(strings.ToLower(te), "chunked") {
@@ -381,6 +382,7 @@ func readResponseBodyWithWire(br *bufio.Reader, resp *RawHTTP1Response) (body, t
 		cl, err := strconv.ParseInt(clStr, 10, 64)
 		if err != nil || cl < 0 {
 			// Invalid CL, try reading to EOF
+			resp.CloseDelimited = true
 			body, err := io.ReadAll(br)
 			return body, nil, false, nil, false, false, err
 		} else if cl == 0 {
@@ -391,7 +393,8 @@ func readResponseBodyWithWire(br *bufio.Reader, resp *RawHTTP1Response) (body, t
 		return buf.Bytes(), nil, false, nil, false, false, err
 	}
 
-	// No Content-Length or chunked: read until EOF
+	// No Content-Length or chunked: read until EOF (body delimited by connection close)
+	resp.CloseDelimited = true
 	body, err = io.ReadAll(br)
 	return body, nil, false, nil, false, false, err
 }

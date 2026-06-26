@@ -188,6 +188,9 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		return false
 	}
 
+	if resp.CloseDelimited {
+		return false // mirror the origin's connection-close framing
+	}
 	connHeader := strings.ToLower(resp.GetHeader("Connection"))
 	return connHeader != connectionClose
 }
@@ -456,6 +459,9 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 
 	h.storeEntry(target, req, resp, interim, startTime)
 
+	if resp.CloseDelimited {
+		return false // mirror the origin's connection-close framing
+	}
 	connHeader := strings.ToLower(resp.GetHeader("Connection"))
 	return connHeader != connectionClose
 }

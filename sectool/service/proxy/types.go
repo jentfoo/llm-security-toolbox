@@ -193,6 +193,9 @@ type RawHTTP1Response struct {
 	// Wire contains metadata about the original wire encoding.
 	// Used by SerializeRaw() to preserve exact wire format.
 	Wire *WireFormat `json:"wire,omitempty" msgpack:"w,omitempty"`
+
+	// CloseDelimited indicates the body was framed by connection close (no Content-Length, not chunked).
+	CloseDelimited bool `json:"-" msgpack:"-"`
 }
 
 // GetHeader returns the first header value with the given name (case-insensitive).
