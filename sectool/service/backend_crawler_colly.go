@@ -192,18 +192,19 @@ func readBodyLimited(r io.Reader, limit int) ([]byte, int, bool) {
 	return buf.Bytes(), totalSize, truncated
 }
 
-// fetchSeedRequest resolves a seed flow_id to its raw request bytes.
-// Tries proxy history first, then falls back to replay history.
-func (b *CollyBackend) fetchSeedRequest(ctx context.Context, flowID string) (string, error) {
+// fetchSeedRequest resolves a seed flow_id to its raw request and captured scheme,
+// trying proxy history first then replay history. The scheme is empty when the
+// source did not record one (caller infers from host).
+func (b *CollyBackend) fetchSeedRequest(ctx context.Context, flowID string) (rawRequest, scheme string, err error) {
 	entry, err := b.httpBackend.GetProxyEntry(ctx, flowID)
 	if err == nil && entry != nil {
-		return entry.Request, nil
+		return entry.Request, entry.Scheme, nil
 	} else if err != nil && !errors.Is(err, ErrNotFound) {
-		return "", fmt.Errorf("failed to fetch seed flow %q: %w", flowID, err)
+		return "", "", fmt.Errorf("failed to fetch seed flow %q: %w", flowID, err)
 	} else if replay, ok := b.replayHistoryStore.Get(flowID); ok {
-		return string(replay.RawRequest), nil
+		return string(replay.RawRequest), replay.Scheme, nil
 	}
-	return "", fmt.Errorf("seed flow %q not found in proxy or replay history", flowID)
+	return "", "", fmt.Errorf("seed flow %q not found in proxy or replay history", flowID)
 }
 
 // NewCollyBackend creates a new Colly-backed CrawlerBackend.
@@ -955,7 +956,7 @@ func (b *CollyBackend) resolveSeeds(ctx context.Context, seeds []CrawlSeed, expl
 		}
 
 		if seed.FlowID != "" {
-			rawRequest, err := b.fetchSeedRequest(ctx, seed.FlowID)
+			rawRequest, scheme, err := b.fetchSeedRequest(ctx, seed.FlowID)
 			if err != nil {
 				return nil, nil, nil, err
 			}
@@ -966,7 +967,10 @@ func (b *CollyBackend) resolveSeeds(ctx context.Context, seeds []CrawlSeed, expl
 				return nil, nil, nil, fmt.Errorf("seed flow %q has no host header", seed.FlowID)
 			}
 
-			scheme, _, _ := inferSchemeAndPort(host)
+			// Prefer the captured scheme; infer from host only when unknown
+			if scheme == "" {
+				scheme, _, _ = inferSchemeAndPort(host)
+			}
 			seedURL := scheme + "://" + host + path
 			seedURLs = append(seedURLs, seedURL)
 			domainSet[strings.ToLower(strings.Split(host, ":")[0])] = true

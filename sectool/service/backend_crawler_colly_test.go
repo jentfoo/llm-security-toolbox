@@ -346,6 +346,55 @@ func newTestCollySession(t *testing.T, flows []*CrawlFlow) (*CollyBackend, strin
 	return b, sessionID
 }
 
+func TestCollyBackendResolveSeedsScheme(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		request string
+		scheme  string
+		port    int
+		wantURL string
+	}{
+		{
+			name:    "http_nonstandard_port",
+			request: "GET /api/v1 HTTP/1.1\r\nHost: api.example.com:8080\r\n\r\n",
+			scheme:  "http",
+			port:    8080,
+			wantURL: "http://api.example.com:8080/api/v1",
+		},
+		{
+			name:    "https_default",
+			request: "GET /api/v1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+			scheme:  "https",
+			port:    443,
+			wantURL: "https://api.example.com/api/v1",
+		},
+		{
+			name:    "empty_scheme_infers_from_host",
+			request: "GET /api/v1 HTTP/1.1\r\nHost: api.example.com:8080\r\n\r\n",
+			scheme:  "",
+			port:    0,
+			wantURL: "https://api.example.com:8080/api/v1", // fallback: non-80 -> https
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockHTTP := newMockHttpBackend()
+			flowID := mockHTTP.AddProxyEntryScheme(tt.request, "HTTP/1.1 200 OK\r\n\r\n", tt.scheme, tt.port)
+
+			b := NewCollyBackend(config.DefaultConfig(), nil, mockHTTP)
+			t.Cleanup(func() { _ = b.Close() })
+
+			_, seedURLs, _, err := b.resolveSeeds(t.Context(), []CrawlSeed{{FlowID: flowID}}, nil)
+			require.NoError(t, err)
+			require.Len(t, seedURLs, 1)
+			assert.Equal(t, tt.wantURL, seedURLs[0])
+		})
+	}
+}
+
 func TestCollyBackend_ListFlows_since_last_with_search(t *testing.T) {
 	t.Parallel()
 
