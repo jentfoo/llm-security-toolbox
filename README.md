@@ -78,7 +78,7 @@ sectool mcp                        # Default: agent selects task type via workfl
 sectool mcp --workflow explore     # Pre-set exploration mode
 sectool mcp --workflow test-report # Pre-set validation mode
 sectool mcp --workflow none        # No workflow instructions
-sectool mcp --workflow multi       # Multiple users/agents share the server
+sectool mcp --workflow multi       # Multiple agents share the server
 ```
 
 | Mode | Description |
@@ -103,7 +103,7 @@ The server exposes two endpoints:
 
 ## Example CLI Usage
 
-The CLI shares state with the agent and provides a human-friendly interface for reviewing, replaying, and scripting. All commands are also available as MCP tools, state shared with the agent.
+The CLI shares state with the agent and provides a human-friendly interface for reviewing, replaying, and scripting. All CLI commands map to MCP tools, so the agent shares the same state.
 
 ```bash
 # Review what the proxy captured while you browsed
@@ -139,8 +139,9 @@ Use `sectool <command> --help` for detailed options.
 ## Key Features
 
 - **Wire-fidelity proxy** - HTTP/1.1 and HTTP/2 MITM preserving header order, casing, and protocol anomalies
-- **Replay with mutation** - Resend captured requests with selective edits to headers, body, query params, or JSON fields
+- **Replay and mutation** - Rewrite live traffic via match/replace rules or resend captured requests with modifications through an agent-optimized API
 - **Flow diffing** - Structured, content-type-aware comparison of two flows (JSON path-level, unified text, binary size) for fast report validation
+- **JS surface analysis** - extract endpoints, routes, and secrets from JavaScript/HTML bundles, then expand any call site into its usable requests
 - **Reflection detection** - Find request parameter values reflected in responses across multiple encoding variants to surface injection points
 - **OAST** - Out-of-band interaction testing via Interactsh; create domains, poll for DNS/HTTP/SMTP callbacks
 - **Redirect probing** - OAST sessions can return 307 redirects to detect if a target follows redirects, useful for SSRF chains and validation bypasses
