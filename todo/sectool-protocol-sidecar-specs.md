@@ -209,7 +209,10 @@ This design has three consequences worth calling out:
   listening socket. Cross-platform support is automatic.
 - The HTTP request that triggers an upgrade is always captured by
   sectool's HTTP machinery and is available in normal history. The
-  adapter sees only post-upgrade bytes.
+  adapter receives only post-upgrade *stream bytes*, but the triggering
+  request's headers (and its `flow_id`) are surfaced to the claiming
+  adapter on `stream_open` (§4.2), so a handshake or setup payload
+  carried inside the upgrade request remains available to the adapter.
 - Sectool stays in the connection-bookkeeping path (host, port, TLS
   cert chain, IP, timing) and applies **connection-level** scope policy
   (host/port at accept and at `dial_upstream`) to every connection.
@@ -565,9 +568,27 @@ drives the interaction. Each event is a Request from sectool to the
 sidecar, and the sidecar's Response carries the bytes to write back:
 
 - `stream_open` — a claim fired; `{stream_id, host, path, matched_claim,
-  peer_addr}`. The sidecar sets up per-stream state.
+  peer_addr}`. For an `upgrade_claim` seam the payload additionally
+  carries the captured triggering request's `request_flow_id` and its
+  `request_headers` (the headers sectool already parsed for the upgrade
+  request). A protocol that embeds handshake or setup bytes in the
+  upgrade request itself — e.g. a binary handshake carried in a request
+  header or the upgrade body — needs these to drive the post-upgrade
+  exchange, since the request is consumed by sectool before the stream
+  is handed off. Both fields are absent for `early_claim` (no HTTP
+  request precedes the stream). The sidecar sets up per-stream state.
 - `stream_deliver` — inbound bytes on a stream; `{stream_id, data}` (`data`
-  base64). This is the workhorse.
+  base64). This is the workhorse. `data` is a raw transport-level byte chunk
+  exactly as sectool read it from the socket — arbitrarily sized and **not
+  aligned to the sidecar's protocol frame/message boundaries** (one frame may
+  span several deliveries; several frames may arrive in one).
+  **Reassembly is the sidecar's responsibility:** it buffers across
+  `stream_deliver` events until it holds a complete frame before parsing,
+  mutating, and emitting it. Sectool front-ends connection setup (TCP, TLS,
+  the HTTP upgrade) but cannot frame the post-claim stream — only the owning
+  adapter knows the protocol's framing. This applies to every binary adapter
+  (a future MQTT adapter buffers until a full packet; the Tailscale sidecar
+  until a full Noise message / HTTP/2 frame).
 - `sidecar_send` — agent-initiated (MCP) replay/originate events.
 
 Every such Response MAY carry a `writes` array — `[{stream_id, data}]`,
@@ -579,13 +600,18 @@ handshake across both. While handling an event the sidecar may issue its
 own Requests back to sectool — `dial_upstream` (§6a.6) to open an
 upstream stream, `core_query` (§6a) to read state.
 
-**Every sidecar output is event-driven.** There are no unsolicited writes;
-a multi-message exchange still originates from one event (proxy or MCP),
-with later messages arriving as Responses to subsequent `stream_deliver` events.
-The single proactive control action a sidecar may take is `close_stream`
-(§6a). Sectool processes a stream's events in order — it awaits the
-Response before delivering that stream's next chunk — which yields
-ordering and backpressure for free. Captured flows for history are emitted
+**The data path is event-driven.** A multi-message exchange originates from
+one event (proxy or MCP), with later messages arriving as Responses to
+subsequent `stream_deliver` events; the `writes` they carry ride back in
+those Responses, preserving per-stream ordering and backpressure. Sectool
+processes a stream's events in order — it awaits the Response before
+delivering that stream's next chunk. The two **proactive** actions a sidecar
+may take outside an event Response are `close_stream` (§6a.7) and
+`stream_write` (§6a.10); the latter is reserved for protocol keepalives and
+other timer-driven output. Proactive `stream_write` bytes are not
+ordering-coupled to the event loop, which is exactly why they suit
+keepalives — a sidecar must not abuse them for ordinary data, which belongs
+in event Responses. Captured flows for history are emitted
 separately via `push_flow` (§6a), exactly as today;
 those are independent of the `writes` that forward bytes.
 
@@ -985,6 +1011,16 @@ sidecar attributed in `annotations.invoked_by`. Scope policy
 (`allowed_domains` / `exclude_domains`) and the destination adapter's
 own validation apply exactly as for agent-driven injection.
 
+**Self-loop exemption.** A flow originated via `invoke_adapter` by adapter X
+is exempt from `owned_rules` whose `owner` is `adapter:X` (matched via
+`annotations.invoked_by`). User rules and every other adapter's `owned_rules`
+still fire. This stops an adapter's own rewrite rules from clobbering its own
+outbound fetches — e.g. the Tailscale sidecar's upstream `/key` fetch must
+not be hit by that same sidecar's `/key` substitution rule (which would make
+it learn its own substitute key and fail the upstream handshake). The
+exemption is scoped to the originating adapter only; it does not weaken any
+other party's rules.
+
 #### 6a.9 `core_query`
 
 Read sectool's own state and read-side core tools, so a sidecar can
@@ -1002,6 +1038,29 @@ implementing its registered tools (§9.2) or its hot-path logic.
 only; a sidecar effects changes by emitting flows, by applying the rules
 sectool pushes via `sync_rules` (§6b.1), or through its registered tools
 (§9.2). It does not grant write access to another adapter's flows.
+
+#### 6a.10 `stream_write`
+
+Notification (no reply). The sidecar writes bytes to an open stream
+(client-facing, or an upstream dialed via §6a.6) **without a triggering
+event** — the proactive companion to `close_stream` (§6a.7). Its purpose is
+protocol keepalives and other timer-driven output the event loop cannot
+express; ordinary data belongs in the `writes` of an event Response (§4.2),
+which preserves per-stream ordering. A `stream_write` to an unknown
+`stream_id` is a transport error (§12).
+
+Proactive output is **recordable** in history the same way as any message a
+sidecar sends, so it need not be a hidden side channel: the sidecar may emit
+a `push_flow` (§6a.2) for the written bytes, and that flow appears in
+`proxy_poll` with `direction` / `protocol_tag` set and attributed to the
+sidecar (§11) exactly like an event-driven send. As with all captures this is
+the sidecar's decision, not something sectool enforces — `stream_write` only
+forwards bytes; the separate `push_flow` records them, the same split §4.2
+draws between `writes` and captured flows. The sidecar should record
+meaningful proactive sends (e.g. an injected message) and may skip or
+down-sample routine keepalives to keep history readable.
+
+**Params**: `{stream_id, data}` — `data` base64-encoded.
 
 ### 6b. Sectool → sidecar
 
@@ -1043,6 +1102,9 @@ is needed on the flow stream.
 - Adds, edits, and deletes all result in a full re-push with an
   incremented `snapshot_version`. v1 explicitly does not optimize
   this — local deployment makes the bandwidth cost irrelevant.
+- When applying the list to a flow originated via `invoke_adapter`, the
+  applying adapter skips rules `owned` by the originating adapter — the
+  self-loop exemption (§6a.8). All other rules apply normally.
 
 #### 6b.2 `sidecar_send`
 
@@ -1227,6 +1289,21 @@ HTTP backend applies match/replace rules inline. Emissions on different
 streams or flow_ids are independent. Agents test by capturing passively,
 mutating via rules, and iterating with `replay_send`.
 
+The default capture-and-forward path forwards promptly and needs no special
+handling. Whenever a sidecar instead **pauses forwarding on a live
+connection** — replay construction or signature rebind against a live tunnel
+(§6b.2), or a future interactive-hold extension — maintaining the protocol's
+own keepalives (HTTP/2 PING/PONG, a future MQTT adapter's PINGREQ/PINGRESP;
+Noise itself has none) is the **sidecar's** responsibility. Sectool relays
+bytes and synthesizes no protocol keepalives, and only the sidecar
+understands the protocol's liveness frames. The sidecar answers a peer's
+keepalives via the `writes` of an event Response and originates its own via
+`stream_write` (§6a.10). It must **not** implement a pause by stalling a
+`stream_deliver` Response: per §4.2 sectool awaits that Response before
+delivering the stream's next bytes, so stalling would also block inbound
+keepalives — the sidecar returns promptly and buffers the held message
+internally.
+
 ---
 
 ## 8. Feature parity with current sectool capabilities
@@ -1348,7 +1425,7 @@ adapter-enumeration tool is required in v1.
 - Add the local socket listener (Unix domain socket on unix / Windows
   loopback TCP, build-guarded), length-prefixed framing, JSON-RPC 2.0
   dispatch, and the synchronous event model (`stream_open` / `stream_deliver` /
-  Response `writes`, `close_stream` / `stream_ended`).
+  Response `writes`, `close_stream` / `stream_write` / `stream_ended`).
 - Add registration handshake, capability dispatch (early_claim including
   the `probe` / `claim_probe` path, upgrade_claim, injection_target;
   mutation-op and owned-rule registration; flow emission), heartbeat,
