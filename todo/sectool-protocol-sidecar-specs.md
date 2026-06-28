@@ -522,7 +522,7 @@ selected at **build time** behind build tags:
   named-pipe support and `AF_UNIX` on Windows carries version caveats,
   so loopback TCP is the reliable Windows transport. It is not
   filesystem-guarded, so on Windows the trust rests entirely on the
-  secured-local-host assumption (§11).
+  secured-local-host assumption (§10).
 
 The framing and JSON-RPC message model (§4.2) on top are identical across
 both. Both are local-only, so there is no non-loopback opt-in to manage.
@@ -643,7 +643,7 @@ at registration (§6a.1):
 
 - **Major mismatch is a fast fail.** If the sidecar's major differs from
   sectool's, sectool rejects `register` with a version-mismatch error
-  (§12); a managed sidecar exits non-zero. There is no cross-major
+  (§11); a managed sidecar exits non-zero. There is no cross-major
   compatibility.
 - **Minor differences are absorbed.** Within a shared major the session
   runs at the negotiated minor `min(sectool.minor, sidecar.minor)`, and
@@ -1047,13 +1047,13 @@ event** — the proactive companion to `close_stream` (§6a.7). Its purpose is
 protocol keepalives and other timer-driven output the event loop cannot
 express; ordinary data belongs in the `writes` of an event Response (§4.2),
 which preserves per-stream ordering. A `stream_write` to an unknown
-`stream_id` is a transport error (§12).
+`stream_id` is a transport error (§11).
 
 Proactive output is **recordable** in history the same way as any message a
 sidecar sends, so it need not be a hidden side channel: the sidecar may emit
 a `push_flow` (§6a.2) for the written bytes, and that flow appears in
 `proxy_poll` with `direction` / `protocol_tag` set and attributed to the
-sidecar (§11) exactly like an event-driven send. As with all captures this is
+sidecar (§10) exactly like an event-driven send. As with all captures this is
 the sidecar's decision, not something sectool enforces — `stream_write` only
 forwards bytes; the separate `push_flow` records them, the same split §4.2
 draws between `writes` and captured flows. The sidecar should record
@@ -1395,57 +1395,7 @@ adapter-enumeration tool is required in v1.
 
 ---
 
-## 10. Phased refactor
-
-### Phase 0 — contract design (paper only)
-
-- Finalize the §3 data model, §4 wire protocol, §5 capability set,
-  §6 method surface, §7 forwarding model.
-- Validate by sketching, on paper, how the HTTP/1.1, HTTP/2, and
-  WebSocket adapters express in the contract.
-- Validate by sketching at least one concrete out-of-process adapter
-  expression in a companion spec document (the Tailscale adapter spec
-  is the first such companion).
-- Fix any distortion before writing code.
-
-### Phase 1 — internalize
-
-- Refactor `sectool/service/proxy/handler_http1.go`, `handler_http2.go`,
-  `handler_websocket.go` into in-process adapter implementations.
-- Replace `HistoryEntry` with `Flow` throughout the proxy package and
-  the store. Implement lazy v0→v1 migration in the spill store.
-- Generalize the rules engine to the tuple form. Convert existing
-  rule storage in place; introduce the `owner` field.
-- Split MCP tools into a generic core and adapter-typed extensions.
-  Preserve all existing agent-visible parameter shapes.
-- All existing tests pass unchanged.
-
-### Phase 2 — out-of-process binding
-
-- Add the local socket listener (Unix domain socket on unix / Windows
-  loopback TCP, build-guarded), length-prefixed framing, JSON-RPC 2.0
-  dispatch, and the synchronous event model (`stream_open` / `stream_deliver` /
-  Response `writes`, `close_stream` / `stream_write` / `stream_ended`).
-- Add registration handshake, capability dispatch (early_claim including
-  the `probe` / `claim_probe` path, upgrade_claim, injection_target;
-  mutation-op and owned-rule registration; flow emission), heartbeat,
-  cancel/shutdown.
-- Add `dial_upstream` mediation with scope-policy enforcement.
-- Add sidecar tool registration and delegation (`mcp_tools` in
-  `register`, `invoke_tool`, `core_query`); add no default MCP tools —
-  the surface is unchanged when no sidecar is connected.
-- Ship a trivial echo external adapter as a test fixture (it
-  registers, declares one protocol, claims TCP, echoes bytes).
-
-### Phase 3 — protocol-specific adapters
-
-- Built outside this specification, but the contract is now complete.
-  Companion specifications describe individual adapters (the Tailscale
-  adapter is the first such consumer).
-
----
-
-## 11. Security considerations
+## 10. Security considerations
 
 - **Local socket trust model, OS-guarded on unix.** There is no
   application-layer token. On unix-like OSes the single connection is a
@@ -1523,7 +1473,7 @@ adapter-enumeration tool is required in v1.
 
 ---
 
-## 12. Appendix: error codes
+## 11. Appendix: error codes
 
 Standard JSON-RPC 2.0 error codes apply. Sectool-specific errors use
 the reserved range `-33000` to `-33999`:
