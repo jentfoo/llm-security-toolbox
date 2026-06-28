@@ -48,10 +48,12 @@ have explicit authorization for any deployment they target.
 ## 2. Background — Tailscale control protocol
 
 The information in this section grounds the adapter design. File
-references are to the upstream `tailscale.com` repository. All
-`file:line` references in this document are approximate and drift with
-upstream; re-pin every one against the exact commit locked in the
-sidecar's `go.mod` (§4.1) before relying on a line number.
+references are to the upstream `tailscale.com` repository and were pinned
+and verified against commit `ca20611d1` (v1.101.0-pre,
+`CurrentCapabilityVersion` 141) — the release Headscale `v0.29.0` also
+builds against. `file:line` references still drift with upstream; re-verify
+each against the exact commit locked in the sidecar's `go.mod` (§4.1) on any
+bump before relying on a line number.
 
 ### 2.1 Noise variant and key material
 
@@ -67,7 +69,15 @@ The handshake also mixes a prologue `"Tailscale Control Protocol v" +
 (§2.3.1). The header version and the prologue version **must match** or
 MAC verification fails. A MitM that regenerates the initiation must carry
 the client's advertised version through to the upstream initiation
-unchanged.
+unchanged. This protocol version **is** the client's capability version
+(`tailcfg.CurrentCapabilityVersion`, 141 at the pinned commit): the same
+integer appears three times per session — the 2-byte Noise initiation
+header, the `/key?v=<n>` query (§2.2), and the `Version` field of every
+`MapRequest` / `RegisterRequest` (§2.4). The sidecar recovers it from the
+decoded initiation (`controlbase` exposes it as the message version) and
+must reuse that value both for its own upstream initiation and for its own
+`/key` fetch (§4.4 step 3); the body `Version` rides through unchanged on
+forwarded messages.
 
 ### 2.2 Trust bootstrap
 
@@ -124,7 +134,7 @@ After the `/key` fetch:
    msg 2 and everything after it travel on the post-101 byte stream.
 5. Once the handshake completes, the server MAY emit an **EarlyNoise**
    payload before the HTTP/2 SETTINGS frame to communicate side-band
-   control information. Framing (`control/ts2021/conn.go:91,143-144`):
+   control information. Framing (`control/ts2021/conn.go:91,143-147`):
    `[5-byte magic \xff\xff\xffTS][4-byte big-endian uint32 length, ≤10
    MiB][JSON tailcfg.EarlyNoise]`. The connection then carries HTTP/2
    (RFC 7540) inside the Noise tunnel.
@@ -157,8 +167,9 @@ big-endian version first). All Noise/EarlyNoise length prefixes are
 | error | `0x03` | `[1B type][2B BE len][msg bytes]`, unauthenticated (`handshake.go:217-225`) |
 | transport record | `0x04` | `[1B type][2B BE ciphertext-len][ciphertext]` (`conn.go:169-171`) |
 
-Transport records (`control/controlbase/conn.go:26-35`): max **4096 B**
-per frame, max **4077 B** plaintext (16-byte ChaCha20Poly1305 overhead).
+Transport records (`control/controlbase/conn.go:25-35`): max **4096 B**
+per frame, max **4077 B** plaintext (4096 − 3-byte record header − 16-byte
+ChaCha20Poly1305 tag).
 A larger inner HTTP/2 frame is split across multiple Noise records.
 Zero-byte-plaintext records are legal and must be preserved
 (`conn.go:252-256`). Nonce is 12 B = 4 zero bytes + an 8-byte big-endian
@@ -195,9 +206,10 @@ First, its transports don't fit the sectool sidecar contract, which
 front-ends TCP byte streams: the WireGuard data plane is Noise_IKpsk2 over
 **UDP** (the external `github.com/tailscale/wireguard-go` dependency, not in
 the tailscale tree), disco discovery uses NaCl box over UDP
-(`disco/disco.go:11-14`), and DERP relay framing uses NaCl box
-(`derp/derp.go:73-74`) — UDP datagram transport is not modeled by the
-contract's `stream_deliver` / `dial_upstream` model. Second, the data plane
+(`disco/disco.go:11-14`), and DERP NaCl-boxes only its login
+handshake frames (`derp/derp.go:73-74`; the relayed packets it forwards are
+opaque, already-encrypted bytes) — these out-of-band transports are not
+modeled by the contract's `stream_deliver` / `dial_upstream` model. Second, the data plane
 carries no authorization or configuration decisions: peer config, ACLs, key
 distribution, and registration all live in the control plane, which is
 therefore the high-value testing surface and makes the data plane's
@@ -257,7 +269,7 @@ machine. Three operational paths exist, ordered by simplicity:
 
 1. **`tsnet` test client + programmatic `ControlURL`** (recommended
    when the test target is application code embedding tsnet). Set
-   `tsnet.Server.ControlURL` (`tsnet/tsnet.go:284`) to point at either
+   `tsnet.Server.ControlURL` (`tsnet/tsnet.go:288`) to point at either
    the server-side adapter (§5) or, when the client-side MITM is in
    play, at the sectool proxy address. This path avoids `/key`
    substitution entirely when the target server is a sectool-hosted
@@ -488,8 +500,10 @@ upstream), the sidecar's `upgrade_claim` fires:
    cleartext access to the client's inner HTTP/2 stream.
 3. In parallel (started as early as upgrade_claim fires for
    pipelining), the sidecar issues `invoke_adapter` (Spec 1 §6a.8)
-   targeting the HTTP adapter for an upstream `GET /key` against the
-   real control server, learning the real upstream Noise pubkey. Because
+   targeting the HTTP adapter for an upstream `GET /key?v=<capability-version>`
+   (the version the client advertised, recovered from the decoded initiation
+   — §2.1; a coordinator gates the response on `v` and may 400 a missing one)
+   against the real control server, learning the real upstream Noise pubkey. Because
    this fetch is `invoked_by` the sidecar, its own `/key` substitution rule
    (§4.3) does not apply to it (Spec 1 §6a.8 self-loop exemption), so the
    sidecar reads the **real** upstream key. The resulting flow lands in
@@ -590,8 +604,11 @@ corresponds to.
   forwards it unchanged. This means upstream sees the client's real
   node identity for WireGuard / DERP purposes. An agent may mutate
   `NodeKey` via `set_json` against `body.NodeKey` if the test
-  scenario requires it; the mutation invalidates `register_signature`
-  (§4.6.2).
+  scenario requires it. The register `SignatureV2` does **not** cover
+  `NodeKey` (§4.6.2), so the mutation leaves `register_signature` intact;
+  what it invalidates is the tailnet-lock `NodeKeySignature` when tailnet
+  lock is enabled (pass-through, unrebindable — stripped and annotated on
+  replay) and, on a `MapRequest`, the `hardware_attestation` signature.
 - **Disco key** and **hardware attestation key** — pass-through by
   default, mutable via `set_json` on the decoded body. Mutating the
   hardware attestation key invalidates `hardware_attestation`, which the
@@ -747,13 +764,25 @@ final message (Spec 1 §3.4).
   behavior to expect: a self-hosted control server such as Headscale
   typically accepts stripped signatures; production
   `controlplane.tailscale.com` may reject — operator picks the
-  appropriate upstream for the test scenario.
+  appropriate upstream for the test scenario. The hash binds the device
+  cert, timestamp, and both handshake static keys but **not** `NodeKey`, so
+  node-key mutations do not trigger this rebind; a cross-tunnel replay —
+  which changes `serverPubKey` /
+  `machinePubKey` — does. Re-signing uses RSA-PSS with
+  `SaltLength = rsa.PSSSaltLengthEqualsHash` and `crypto.SHA256`; the five
+  fields are concatenated with no separators and `Timestamp` is RFC3339 UTC
+  at second granularity (`RegisterRequest.Timestamp` is a `*time.Time`).
 - **`resign_hardware_attestation { hw_key_path? }`** — recomputes
-  `SHA256("<unix_ts>|<node_key>")` per
-  `control/controlclient/direct.go:1140-1157`, updates
+  `SHA256("<unix-seconds>|<nodekey:hex>")` per
+  `control/controlclient/direct.go:1145-1161`, updates
   `MapRequest.HardwareAttestationKeySignatureTimestamp` to the current
   time, and re-signs with the operator-supplied hardware attestation
-  private key. Without `hw_key_path`, strips
+  private key. The attestation key is **ECDSA P-256** (not RSA-PSS);
+  `<unix-seconds>` is the updated timestamp's whole-second Unix value and
+  `<nodekey:hex>` the node key's full text form; the `…SignatureTimestamp`
+  field stores the full-precision time while the hash binds only the
+  seconds, so both must reference the same instant. Without `hw_key_path`,
+  strips
   `HardwareAttestationKeySignature`,
   `HardwareAttestationKeySignatureTimestamp`, and
   `HardwareAttestationKey`; flow annotation lists the stripped fields
@@ -778,7 +807,7 @@ rebind map. All `bound_fields` paths reference the HTTP-shaped Flow's
 
 | name | bound_fields | rebind_op |
 |---|---|---|
-| `register_signature` | `body.Signature`, `body.SignatureType`, `body.DeviceCert`, `body.Timestamp`, `body.NodeKey` (plus implicit deps on the tunnel's `machinePubKey` / `serverPubKey`) | `resign_register_request` |
+| `register_signature` | `body.Signature`, `body.SignatureType`, `body.DeviceCert`, `body.Timestamp` (plus implicit deps on the tunnel's `serverPubKey` / `machinePubKey`, server key hashed first; `NodeKey` is **not** covered) | `resign_register_request` |
 | `hardware_attestation` | `body.HardwareAttestationKeySignature`, `body.HardwareAttestationKeySignatureTimestamp`, `body.HardwareAttestationKey` (plus implicit dep on `body.NodeKey`) | `resign_hardware_attestation` |
 | `map_session` | `body.MapSessionHandle`, `body.MapSessionSeq` | `reset_map_session` |
 | `early_noise_challenge` | `body.NodeKeyChallenge` (on the tunnel envelope's EarlyNoise payload) | `null` (currently unused by Tailscale; future risk if Tailscale begins enforcing proof-of-possession) |
@@ -801,14 +830,18 @@ re-signing when launched with the relevant key material, otherwise
 stripping the bound fields and recording the strip in the flow's
 `annotations`.
 
-Worked example: an agent calls `set_json path="NodeKey"` on a captured
-`RegisterRequest` and replays it. The sidecar recomputes
-`register_signature` automatically — if it was launched with
-`device_cert_path` / `device_key_path` the rebind produces a valid
-signature; otherwise it strips `Signature` / `SignatureType` /
-`DeviceCert` and records the strip in `annotations.stripped_fields`. To
-send the broken signature instead, mutate it on the forward (proxy) path,
-where it is forwarded as-is.
+Worked example: an agent captures a `RegisterRequest` and replays it
+through a **different** tunnel — different `serverPubKey` / `machinePubKey`,
+e.g. the cross-adapter replay of §9.8. The sidecar recomputes
+`register_signature` automatically — if launched with `device_cert_path` /
+`device_key_path` the rebind produces a valid signature; otherwise it strips
+`Signature` / `SignatureType` / `DeviceCert` and records the strip in
+`annotations.stripped_fields`. Mutating `NodeKey` does **not** trigger this
+rebind (the register signature does not cover the node key); it instead
+invalidates the tailnet-lock `NodeKeySignature` (stripped, unrebindable) and,
+on a `MapRequest`, `hardware_attestation`. To send a broken
+`register_signature` deliberately, mutate `DeviceCert` or `Timestamp` on the
+forward (proxy) path, where it is forwarded as-is.
 
 ### 4.7 Injection
 
@@ -891,13 +924,20 @@ server implemented by the adapter** — it matches the control protocol on
 the wire and uses the upstream Tailscale source only as a reference, not
 as a server library to extend or embed. Concretely the adapter:
 
-- serves `GET /key` returning an `OverTLSPublicKeyResponse` carrying its
-  own real Noise public key (§2.2);
+- serves `GET /key?v=<n>` returning an `OverTLSPublicKeyResponse` carrying
+  its own real Noise public key (§2.2); it parses the `v` capability-version
+  query param (serving the Noise `publicKey` for any `v` at or above the
+  Noise floor — Headscale serves it for `v ≥ 39`) and rejects a missing `v`;
 - accepts the `POST /ts2021` Noise upgrade as the IK **responder** (§2.3),
   then speaks HTTP/2 inside the established tunnel;
 - routes the inner `POST /machine/register` and `POST /machine/map`
   endpoints to its own handlers, plus any other inner endpoints it chooses
   to answer.
+
+The adapter declares a minimum capability version it accepts and validates
+the `Version` field on inbound `MapRequest` / `RegisterRequest` (Headscale's
+reference floor is capability 113), rejecting older clients to mirror real
+coordinator behavior.
 
 It is built directly from the low-level Tailscale protocol primitives —
 the `tailcfg` message types, the Noise IK handshake, the Noise-over-HTTP
@@ -1391,19 +1431,28 @@ operator to begin testing.
    accepts the request and the resulting Map view reflects
    `OS = "darwin"`.
 3. Apply `set_json path="NodeKey" value="<fresh node key>"` and
-   re-trigger. `NodeKey` IS a bound field of `register_signature`
-   (§4.6.2). Confirm the mutated request is forwarded as-is on the proxy
-   path with its now-broken signature (no rebind on the forward path).
-4. Issue `replay_send` on the captured flow mutating `NodeKey`. The
-   client-side MITM sidecar recomputes `register_signature` automatically
-   per its connection-time configuration — no warning and no agent rebind
-   decision.
-5. Confirm the replay succeeds against the server-side adapter (or any
-   Tailscale-compatible upstream). With the sidecar configured with
-   `device_cert_path` /
-   `device_key_path`, confirm the replay produces a valid `SignatureV2`
-   signature; without it, confirm the signature fields are stripped and
-   the flow records the strip in `annotations.stripped_fields`.
+   re-trigger. On a tailnet **without** tailnet lock, **no** RegisterRequest
+   signature binds `NodeKey` — `register_signature` does not cover it
+   (§4.6.2) — so confirm the mutated request is forwarded and accepted with
+   the substituted node key (node-key rotation/impersonation testing, not a
+   broken-signature test). On a tailnet **with** tailnet lock, confirm the
+   pass-through `NodeKeySignature` is now invalid and is stripped and
+   annotated on replay (the sidecar cannot re-sign it, §4.4.1).
+4. To exercise a `register_signature` rebind, mutate a field the signature
+   **does** cover (`set_json path="Timestamp"` or `set_json
+   path="DeviceCert"`) or replay across tunnels (§9.8), then issue
+   `replay_send`. The client-side MITM recomputes `register_signature`
+   automatically per its connection-time configuration — no warning and no
+   agent rebind decision.
+5. Confirm the replay outcome: with the sidecar configured with
+   `device_cert_path` / `device_key_path`, the replay produces a valid
+   `SignatureV2` signature; without it, `Signature` / `SignatureType` /
+   `DeviceCert` are stripped and the flow records the strip in
+   `annotations.stripped_fields`.
+6. On a streaming `/machine/map` capture, apply `set_json path="NodeKey"`
+   and replay: confirm the sidecar rebinds `hardware_attestation` (the
+   MapRequest binding that **does** cover the node key) when launched with
+   `hw_key_path`, otherwise strips and annotates it.
 
 ### 9.7 Rule sync round-trip
 
