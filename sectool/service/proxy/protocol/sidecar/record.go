@@ -1,0 +1,77 @@
+package sidecar
+
+import (
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/go-appsec/toolbox/sidecar/wire"
+)
+
+// Record is the registry entry for one connected sidecar adapter.
+type Record struct {
+	Name          string
+	Version       string
+	ProtoVersion  wire.ProtocolVersion
+	Protocols     []string
+	Capabilities  wire.Capabilities
+	MCPTools      []wire.MCPTool // tool definitions the sidecar provides
+	InstanceID    string
+	AssignedSeams []string
+
+	peer    *wire.Peer
+	bridge  *bridge
+	resume  bool
+	healthy atomic.Bool
+
+	mu       sync.Mutex
+	liveness Liveness
+	// Ownership and in-flight bookkeeping used to reclaim state on reconnect/resume.
+	ownedFlows map[string]struct{}
+	inFlight   map[string]struct{}
+}
+
+// Liveness tracks heartbeat and process identity.
+type Liveness struct {
+	LastPingSent      time.Time
+	LastPongRecv      time.Time
+	LastActivity      time.Time
+	SocketFingerprint string
+}
+
+// resumeEntry stashes a disconnected sidecar's bookkeeping so a reconnect with
+// resume=true can reclaim it.
+type resumeEntry struct {
+	ownedFlows map[string]struct{}
+	inFlight   map[string]struct{}
+}
+
+// Healthy reports whether the sidecar is answering heartbeats. An unhealthy
+// sidecar must not claim new connections.
+func (r *Record) Healthy() bool { return r.healthy.Load() }
+
+// Bridge returns the proxy claim adapter backing this sidecar, for the manager
+// to register into the proxy claim registry.
+func (r *Record) Bridge() Adapter { return r.bridge }
+
+func (r *Record) alive() bool { return r.peer != nil && !r.peer.Closed() }
+
+func (r *Record) recordPong(now time.Time) {
+	r.mu.Lock()
+	r.liveness.LastPongRecv = now
+	r.liveness.LastActivity = now
+	r.mu.Unlock()
+	r.healthy.Store(true)
+}
+
+func (r *Record) recordPingSent(now time.Time) {
+	r.mu.Lock()
+	r.liveness.LastPingSent = now
+	r.mu.Unlock()
+}
+
+func (r *Record) lastPong() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.liveness.LastPongRecv
+}

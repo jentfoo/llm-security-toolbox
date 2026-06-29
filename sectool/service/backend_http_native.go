@@ -17,6 +17,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
@@ -44,6 +45,10 @@ type NativeProxyBackend struct {
 	responders       []nativeStoredResponder
 	responderStorage store.Storage
 
+	// Sidecar IPC listener and registry; nil when sidecars are disabled.
+	sidecarListener *sidecar.Listener
+	sidecarManager  *sidecar.Manager
+
 	closed atomic.Bool
 }
 
@@ -68,6 +73,7 @@ var _ ResponderBackend = (*NativeProxyBackend)(nil)
 
 // NewNativeProxyBackend creates a new native proxy backend.
 // Does NOT start serving - call Serve() separately (typically in a goroutine).
+// Call EnableSidecars before Serve to host the out-of-process sidecar listener.
 func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, storage store.Provider, timeouts proxy.TimeoutConfig) (*NativeProxyBackend, error) {
 	historyStorage, err := storage("hist")
 	if err != nil {
@@ -119,6 +125,20 @@ func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, storage
 	return b, nil
 }
 
+// EnableSidecars constructs the sidecar IPC listener and registry. Call once
+// before Serve. cfg.NativeProxyPort should be the proxy's listen port; the
+// built-in adapter names are reserved automatically.
+func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config) error {
+	cfg.ReservedNames = []string{types.ProtocolHTTP11, types.ProtocolH2, types.ProtocolTagWS}
+	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry())
+	lst, err := sidecar.NewListener(cfg, b.sidecarManager)
+	if err != nil {
+		return err
+	}
+	b.sidecarListener = lst
+	return nil
+}
+
 // SetCaptureFilter configures the proxy to skip storing entries that the filter rejects.
 // Filtered requests are still proxied normally.
 func (b *NativeProxyBackend) SetCaptureFilter(f proxy.CaptureFilter) {
@@ -127,6 +147,13 @@ func (b *NativeProxyBackend) SetCaptureFilter(f proxy.CaptureFilter) {
 
 // Serve starts the proxy server. Call in a goroutine.
 func (b *NativeProxyBackend) Serve() error {
+	if b.sidecarListener != nil {
+		go func() {
+			if err := b.sidecarListener.Serve(); err != nil {
+				log.Printf("sidecar: listener error: %v", err)
+			}
+		}()
+	}
 	return b.server.Serve()
 }
 
@@ -182,11 +209,15 @@ func (b *NativeProxyBackend) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	return errors.Join(
+	errs := []error{
 		b.server.Shutdown(ctx),
 		b.ruleStorage.Close(),
 		b.responderStorage.Close(),
-	)
+	}
+	if b.sidecarListener != nil {
+		errs = append(errs, b.sidecarListener.Close())
+	}
+	return errors.Join(errs...)
 }
 
 // CACert returns the CA certificate used for MITM TLS interception.

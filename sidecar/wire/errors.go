@@ -1,0 +1,73 @@
+package wire
+
+import "fmt"
+
+// Sectool-specific JSON-RPC error codes occupy the reserved range
+// -33000..-33999, partitioned by concern.
+const (
+	RegLifecycleMax  = -33000 // registration and lifecycle
+	RegLifecycleMin  = -33099
+	RuleFlowMax      = -33100 // rule and flow
+	RuleFlowMin      = -33199
+	TransportMax     = -33200 // transport
+	TransportMin     = -33299
+	DialUpstreamMax  = -33300 // dial_upstream
+	DialUpstreamMin  = -33399
+	InvokeAdapterMax = -33400 // invoke_adapter
+	InvokeAdapterMin = -33499
+)
+
+// Registration / lifecycle codes.
+const (
+	CodeRegistrationRejected  = -33000
+	CodeMajorVersionMismatch  = -33001
+	CodeDuplicateRegistration = -33002
+	CodeCapabilityConflict    = -33003
+)
+
+// Transport codes.
+const (
+	CodeFramingViolation  = -33200
+	CodeOversizedMessage  = -33201
+	CodeUnknownStream     = -33202
+	CodeTransportInternal = -33299
+)
+
+// ErrorData carries the adapter name plus any relevant identifiers on a
+// sectool-specific error.
+type ErrorData struct {
+	Adapter         string `json:"adapter,omitempty"`
+	ConflictAdapter string `json:"conflict_adapter,omitempty"`
+	FlowID          string `json:"flow_id,omitempty"`
+	RuleID          string `json:"rule_id,omitempty"`
+	StreamID        string `json:"stream_id,omitempty"`
+	SnapshotVersion uint64 `json:"snapshot_version,omitempty"`
+}
+
+// Error is a JSON-RPC 2.0 error object; it implements the error interface.
+type Error struct {
+	Code    int        `json:"code"`
+	Message string     `json:"message"`
+	Data    *ErrorData `json:"data,omitempty"`
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Data != nil && e.Data.Adapter != "" {
+		return fmt.Sprintf("jsonrpc error %d (%s): %s", e.Code, e.Data.Adapter, e.Message)
+	}
+	return fmt.Sprintf("jsonrpc error %d: %s", e.Code, e.Message)
+}
+
+// NewError builds an Error with the given code and message.
+func NewError(code int, msg string) *Error {
+	return &Error{Code: code, Message: msg}
+}
+
+// WithData attaches structured data and returns the error for chaining.
+func (e *Error) WithData(d *ErrorData) *Error {
+	e.Data = d
+	return e
+}

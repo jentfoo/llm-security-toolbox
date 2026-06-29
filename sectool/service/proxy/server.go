@@ -176,6 +176,9 @@ func (s *ProxyServer) WaitReady(ctx context.Context) error {
 	return nil
 }
 
+// Registry returns the per-connection claim registry.
+func (s *ProxyServer) Registry() *protocol.Registry { return s.registry }
+
 // Serve starts accepting connections. Blocks until shutdown.
 func (s *ProxyServer) Serve() error {
 	// Decrement pre-incremented wg counter from NewProxyServer

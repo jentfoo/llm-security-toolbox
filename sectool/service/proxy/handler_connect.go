@@ -279,7 +279,7 @@ func (h *connectHandler) dialUpstream(ctx context.Context, targetAddr, sni strin
 }
 
 // routeByProtocol feeds the decrypted post-CONNECT stream through the early-claim
-// seam, keyed on the negotiated ALPN (h2 → HTTP/2 adapter, else HTTP/1.1 fallthrough).
+// seam, keyed on the negotiated ALPN (h2 -> HTTP/2 adapter, else HTTP/1.1 fallthrough).
 func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, alpn string, target *types.Target) {
 	defer func() {
 		_ = clientTLS.Close()

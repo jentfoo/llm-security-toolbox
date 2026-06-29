@@ -9,9 +9,8 @@ import (
 )
 
 // Flow is the generalized store record for one logical exchange. It carries an
-// optional request and response Message under a single flow_id, replacing the
-// protocol-unioned HistoryEntry. Child flows (e.g. WebSocket frames) reference a
-// parent via ParentFlowID.
+// optional request and response Message under a single flow_id. Child flows
+// (e.g. WebSocket frames) reference a parent via ParentFlowID.
 type Flow struct {
 	// FlowID is the unique identifier, minted at Store time.
 	FlowID string `json:"flow_id" msgpack:"fid"`
@@ -46,7 +45,7 @@ type Flow struct {
 	StartedAt   time.Time `json:"started_at" msgpack:"ts"`
 	CompletedAt time.Time `json:"completed_at,omitempty" msgpack:"ca,omitempty"`
 
-	// Annotations is open-ended typed metadata; reserved for later phases.
+	// Annotations is open-ended typed metadata attached to the flow.
 	Annotations map[string]any `json:"annotations,omitempty" msgpack:"an,omitempty"`
 
 	// SizeHint is the content length when known, for fast list pagination.

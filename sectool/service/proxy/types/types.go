@@ -1,4 +1,4 @@
-// Package types holds the proxy capture data model — the wire-fidelity HTTP/1.1
+// Package types holds the proxy capture data model: the wire-fidelity HTTP/1.1
 // request/response types, the common Flow/Message envelope, and the rule-applier
 // contract. It is depended on by the proxy package and the adapter registry
 // (proxy/protocol) without forming an import cycle.
@@ -12,8 +12,7 @@ import (
 	"github.com/go-analyze/bulk"
 )
 
-// Protocol tags identify the protocol within a stored Flow. They occupy the
-// slot HTTP flows historically used for the HTTP version.
+// Protocol tags identify the protocol within a stored Flow.
 const (
 	ProtocolHTTP11 = "http/1.1"
 	ProtocolH2     = "http/2"
@@ -268,7 +267,7 @@ func (r *RawHTTP1Response) SetBody(b []byte) {
 // structural union of RawHTTP1Request and RawHTTP1Response: a request side
 // leaves the status fields zero, a response side leaves method/path/query zero.
 // Wire-fidelity fields carry over verbatim for HTTP/1.1; HTTP/2 folds its
-// pseudo-headers into Headers (":method", ":status", …).
+// pseudo-headers into Headers (":method", ":status", etc).
 type Message struct {
 	// Request-line fields (request side)
 	Method string `json:"method,omitempty" msgpack:"m,omitempty"`

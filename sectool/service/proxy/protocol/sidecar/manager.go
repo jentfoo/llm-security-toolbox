@@ -1,0 +1,222 @@
+package sidecar
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
+	"github.com/go-appsec/toolbox/sidecar/wire"
+)
+
+// shutdownDrainSeconds is requested of each sidecar on graceful shutdown.
+const shutdownDrainSeconds = 5
+
+// Config configures the sidecar Manager and listener.
+type Config struct {
+	Socket            string
+	HeartbeatInterval time.Duration
+	HeartbeatTimeout  time.Duration
+	NativeProxyPort   int      // proxy listen port; excluded from sidecar early_claim ranges
+	ReservedNames     []string // built-in adapter names sidecars may not reuse
+}
+
+// Manager owns the registry of connected sidecars: registration, conflict
+// resolution, heartbeat, reconnect/resume, and shutdown.
+type Manager struct {
+	cfg      Config
+	registry *protocol.Registry
+	now      func() time.Time
+
+	mu          sync.Mutex
+	records     map[string]*Record
+	byInstance  map[string]*Record
+	resumeState map[string]*resumeEntry
+}
+
+// NewManager creates a Manager. registry is the native proxy's claim registry
+// used to dispatch connections to sidecar adapters; it may be nil in tests.
+func NewManager(cfg Config, registry *protocol.Registry) *Manager {
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = 10 * time.Second
+	}
+	if cfg.HeartbeatTimeout <= 0 {
+		cfg.HeartbeatTimeout = 30 * time.Second
+	}
+	return &Manager{
+		cfg:         cfg,
+		registry:    registry,
+		now:         time.Now,
+		records:     map[string]*Record{},
+		byInstance:  map[string]*Record{},
+		resumeState: map[string]*resumeEntry{},
+	}
+}
+
+// Get returns the record for an adapter name.
+func (m *Manager) Get(name string) (*Record, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.records[name]
+	return r, ok
+}
+
+// Count returns the number of registered sidecars.
+func (m *Manager) Count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.records)
+}
+
+// hasResumeState reports whether bookkeeping is stashed for an instance_id.
+func (m *Manager) hasResumeState(instanceID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.resumeState[instanceID]
+	return ok
+}
+
+// HandleConn drives one accepted sidecar connection until it closes.
+func (m *Manager) HandleConn(ctx context.Context, conn net.Conn) {
+	s := &session{m: m, fingerprint: conn.RemoteAddr().String()}
+	s.peer = wire.NewPeer(conn, s)
+
+	hbCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go m.heartbeatLoop(hbCtx, s)
+
+	_ = s.peer.Run(ctx)
+	m.detachSession(s)
+}
+
+// heartbeatLoop pings the registered sidecar and marks it unhealthy when no pong
+// arrives within the timeout.
+func (m *Manager) heartbeatLoop(ctx context.Context, s *session) {
+	ticker := time.NewTicker(m.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.peer.Done():
+			return
+		case <-ticker.C:
+			rec := s.record()
+			if rec == nil {
+				continue
+			}
+			now := m.now()
+			if now.Sub(rec.lastPong()) > m.cfg.HeartbeatTimeout {
+				rec.healthy.Store(false)
+			}
+			rec.recordPingSent(now)
+			_ = s.peer.Notify(wire.MethodPing, nil)
+		}
+	}
+}
+
+// detachSession removes a record when its connection closes, stashing resume
+// state for a resuming sidecar.
+func (m *Manager) detachSession(s *session) {
+	rec := s.record()
+	if rec == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cur, ok := m.records[rec.Name]; !ok || cur != rec {
+		return // already replaced by a reconnect
+	}
+	delete(m.records, rec.Name)
+	if rec.InstanceID != "" && m.byInstance[rec.InstanceID] == rec {
+		delete(m.byInstance, rec.InstanceID)
+	}
+	if rec.resume && rec.InstanceID != "" {
+		m.resumeState[rec.InstanceID] = &resumeEntry{ownedFlows: rec.ownedFlows, inFlight: rec.inFlight}
+	}
+}
+
+// removeLocked drops a record and closes its connection; callers hold mu.
+func (m *Manager) removeLocked(rec *Record) {
+	delete(m.records, rec.Name)
+	if rec.InstanceID != "" && m.byInstance[rec.InstanceID] == rec {
+		delete(m.byInstance, rec.InstanceID)
+	}
+	_ = rec.peer.Close()
+}
+
+// Shutdown requests a graceful close of every sidecar and waits briefly.
+func (m *Manager) Shutdown(ctx context.Context) {
+	m.mu.Lock()
+	recs := make([]*Record, 0, len(m.records))
+	for _, r := range m.records {
+		recs = append(recs, r)
+	}
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, r := range recs {
+		wg.Add(1)
+		go func(r *Record) {
+			defer wg.Done()
+			cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			var res wire.ShutdownResult
+			_ = r.peer.Call(cctx, wire.MethodShutdown, wire.ShutdownParams{DrainSeconds: shutdownDrainSeconds}, &res)
+			_ = r.peer.Close()
+		}(r)
+	}
+	wg.Wait()
+}
+
+// session is the per-connection JSON-RPC handler. It processes register, then
+// tracks the resulting record for heartbeats.
+type session struct {
+	m           *Manager
+	peer        *wire.Peer
+	fingerprint string
+
+	mu  sync.Mutex
+	rec *Record
+}
+
+func (s *session) record() *Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rec
+}
+
+func (s *session) HandleRequest(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
+	switch method {
+	case wire.MethodRegister:
+		var p wire.RegisterParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, wire.NewError(wire.CodeRegistrationRejected, "register: invalid params")
+		}
+		rec, res, rpcErr := s.m.handleRegister(s.peer, s.fingerprint, &p)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		s.mu.Lock()
+		s.rec = rec
+		s.mu.Unlock()
+		return res, nil
+	case wire.MethodPing:
+		return struct{}{}, nil
+	default:
+		return nil, wire.NewError(-32601, "method not found: "+method)
+	}
+}
+
+func (s *session) HandleNotification(_ context.Context, method string, _ json.RawMessage) {
+	switch method {
+	case wire.MethodPing:
+		_ = s.peer.Notify(wire.MethodPong, nil)
+	case wire.MethodPong:
+		if rec := s.record(); rec != nil {
+			rec.recordPong(s.m.now())
+		}
+	}
+}
