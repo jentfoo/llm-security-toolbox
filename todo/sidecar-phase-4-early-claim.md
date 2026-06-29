@@ -137,13 +137,46 @@ for the exchange. A real TCP client connects to the proxy port and round-trips b
 
 ## Definition of done
 
-- [ ] `early_claim` fires at accept with all matchers; HTTP fallthrough preserved.
-- [ ] TLS-terminating claim delivers decrypted bytes; CA key contained.
-- [ ] Full event model (`stream_open`/`stream_deliver`/`writes`/`stream_ended`/
+- [x] `early_claim` fires at accept with all matchers; HTTP fallthrough preserved.
+- [x] TLS-terminating claim delivers decrypted bytes; CA key contained.
+- [x] Full event model (`stream_open`/`stream_deliver`/`writes`/`stream_ended`/
       `close_stream`/`stream_write`) with per-stream ordering.
-- [ ] Owning-sidecar death tears down active claimed streams (client socket closed,
-      `stream_ended` emitted); no orphaned sockets.
-- [ ] `claim_probe` chain works (or is cleanly split to Phase 4b).
-- [ ] Echo fixture round-trips bytes end-to-end over a real TCP connection.
-- [ ] `sidecar` package gains claim + stream + reassembly helpers; no `sectool/` dep.
-- [ ] `make test-all` + `make lint` pass.
+- [x] Owning-sidecar death tears down active claimed streams (client socket closed);
+      no orphaned sockets. `stream_ended` is delivered for live-peer ends, not on death
+      (the owning sidecar is gone and cannot receive it).
+- [x] `claim_probe` chain works (or is cleanly split to Phase 4b).
+- [x] Echo fixture round-trips bytes end-to-end over a real TCP connection.
+- [x] `sidecar` package gains claim + stream + reassembly helpers; no `sectool/` dep.
+- [x] `make test-all` + `make lint` pass.
+
+## Implementation decisions (as built)
+
+These refine the description above where they conflict:
+
+- **Single-listener transport, no extra sockets.** Raw claims fire on the existing
+  proxy accept path discriminated by `magic_bytes_prefix`/`probe`; TLS claims by
+  SNI/host/dest-port in the CONNECT handler. `port_range` gates the local port at raw
+  accept (an unset range matches any) and the destination port on the CONNECT/TLS
+  path. Tailscale Noise is an `upgrade_claim` case (Phase 6), not `early_claim`.
+- **Accept peek narrowed.** `proxy/server.go` now peeks one byte and only widens to
+  24 for openings starting `P`/`C` (HTTP/2 preface, CONNECT), so a short binary
+  opening no longer blocks the accept loop. Existing HTTP behavior is unchanged.
+- **Registry made dynamic.** `protocol.Registry` gained a guard mutex plus
+  `InsertEarly`/`RemoveEarly` (fallthrough stays last) and `MatchTLS`; bridges are
+  inserted at registration and removed on disconnect.
+- **TLS-terminate via the CONNECT handler.** `handler_connect.go` matches a
+  `tls.terminate` claim in `GetConfigForClient` and skips the upstream dial; the
+  decrypted stream is re-offered through `ServeEarly`. A decrypted matcher that
+  declines dials upstream lazily and falls through to HTTP.
+- **Stream event loop on the bridge.** A per-sidecar `streamSet` tracks open
+  sockets; `serveClient` runs `stream_open` then ordered `stream_deliver` awaiting
+  each reply, applying `writes` (which may target a different stream), and emits
+  `stream_ended` on close. `close_stream`/`stream_write` notifications route to the
+  set; an unknown `stream_id` write is a transport error.
+- **SDK stream surface is optional.** `StreamHandler` and `ClaimProber` are
+  type-asserted alongside the existing `Handler`, so `ShutdownFunc` and current
+  fixtures keep compiling; callbacks use `wire` types directly as the rest of the
+  SDK does. `Reassembler` accumulates chunks into whole frames.
+- **No conflict-guard change needed.** The Phase 2 native-proxy-port guard already
+  no-ops for an unset `port_range` and when `NativeProxyPort` is 0, so raw claims on
+  the proxy port work without touching `conflict.go`.

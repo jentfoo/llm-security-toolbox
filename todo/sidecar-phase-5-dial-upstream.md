@@ -62,10 +62,13 @@ bypass scope because they never see OS sockets).
   (honoring `sni`/`alpn`/`skip_verify`) and bridge cleartext to the sidecar.
 - **Audit:** record the dial in history as a `dial_upstream`-tagged annotation on
   `parent_flow_id` when supplied; surface all such dials for audit (§10).
-- **Teardown on sidecar death** (§5.5): a dialed upstream stream is torn down with its
-  owning sidecar — close the upstream socket and emit `stream_ended`, the upstream-side
-  counterpart of the client-facing teardown Phase 4 owns. (Phase 4 detects death and
-  closes the client socket; this phase closes the paired upstream socket.)
+- **Teardown on sidecar death** (§5.5): register each dialed upstream socket in the
+  owning sidecar's stream table (the `streamSet` Phase 4 added) so the death teardown
+  Phase 4 built (`closeAll`, invoked from the manager when the connection drops)
+  closes it alongside the client socket. No `stream_ended` is emitted on death — the
+  owning sidecar is gone and cannot receive it; as built in Phase 4, `stream_ended`
+  fires only for live-peer ends (client/upstream disconnect, scope invalidation,
+  shutdown), where it prompts the sidecar to `close_stream` the paired stream.
 
 ## Scope — `sidecar` package
 
