@@ -101,12 +101,34 @@ upstream streams. Variants exercise an out-of-scope destination and a TLS upstre
 
 ## Definition of done
 
-- [ ] `dial_upstream` opens scope-checked upstream connections and bridges bytes as a
+- [x] `dial_upstream` opens scope-checked upstream connections and bridges bytes as a
       stream; default-destination from `parent_flow_id` works.
-- [ ] Scope rejection / network failure / TLS failure return the correct errors.
-- [ ] Upstream TLS termination supported.
-- [ ] Every dial is recorded for audit.
-- [ ] Forwarding fixture proxies end-to-end; out-of-scope and TLS variants verified.
-- [ ] `sidecar` package gains `DialUpstream` + upstream-stream handling; no `sectool/`
+- [x] Scope rejection / network failure / TLS failure return the correct errors.
+- [x] Upstream TLS termination supported.
+- [x] Every dial is recorded for audit.
+- [x] Forwarding fixture proxies end-to-end; out-of-scope and TLS variants verified.
+- [x] `sidecar` package gains `DialUpstream` + upstream-stream handling; no `sectool/`
       dep.
-- [ ] `make test-all` + `make lint` pass.
+- [x] `make test-all` + `make lint` pass.
+
+## Implementation decisions (as built)
+
+These refine the description above where they conflict:
+
+- **Audit as a dedicated linked flow.** Each dial is recorded by storing a synthetic
+  flow (`protocol_tag=dial_upstream`, `direction=bidirectional`, `method=DIAL`,
+  `ParentFlowID=parent_flow_id`) carrying a `dial_upstream` annotation `{host, port,
+  tls}`, rather than mutating the parent flow. This matches the append-only history
+  model and the captured/mutated and `invoked_by` audit conventions of later phases,
+  and needs no new history API. The audit flow is stored unconditionally (bypassing
+  the capture filter) so a dial is never dropped from audit.
+- **Default destination from the parent flow.** When `host`/`port` are omitted, the
+  destination resolves from `parent_flow_id`: port/scheme from the `Flow`, host from
+  its request `Host` header. The sidecar records the destination on that flow.
+- **Upstream stream reuses the Phase 4 event model.** The dialed socket is registered
+  in the owning sidecar's `streamSet` (so death teardown closes it) and driven by a
+  shared `pump` loop; there is no `stream_open` for it (the `dial_upstream` reply is
+  the open), and `stream_ended` fires on close like a client stream.
+- **Scope and timeout injected via `Config`.** The manager gains `ScopeCheck` (nil
+  allows any host, matching the no-restriction default) and `DialTimeout`, wired from
+  the server's domain policy and proxy dial timeout.
