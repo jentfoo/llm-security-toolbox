@@ -9,6 +9,29 @@
 Requires **Phase 1** (the adapter registry the sidecar plugs into, and the `Flow`
 model). Prerequisite for every later sidecar phase.
 
+## Implementation decisions (as built)
+
+These refine/override the description below where they conflict:
+
+- **Attached launch model only — no managed subprocess.** sectool never spawns,
+  monitors, or restarts sidecars. The operator runs `sectool mcp` and the sidecar
+  process independently; both resolve the same socket from config. All
+  managed-subprocess language below is superseded.
+- **`sidecars:` is declarative globals**, not launch config: `enabled` (default
+  false), `heartbeat_interval_secs` (10), `heartbeat_timeout_secs` (30). The
+  listener is created only when `sidecars.enabled` is true **and** the native
+  backend is active; under Burp with `enabled=true` sectool logs a warning and
+  continues.
+- **Three packages.** `toolbox/sidecar` (client SDK), `toolbox/sidecar/wire`
+  (shared wire types + error codes + length-prefixed JSON-RPC peer; no sectool
+  deps), and the server-side host at **`sectool/service/proxy/protocol/sidecar`**
+  (listener, manager/registry, bridge).
+- **Listener lifecycle via `NativeProxyBackend.EnableSidecars`**, called from
+  `startBuiltinProxy` after construction (the `NewNativeProxyBackend` signature is
+  unchanged), started in `Serve()`, stopped in `Close()`.
+- **`Config.Version` is a build-time variable**, not a literal — the existing
+  version-mismatch migration backfills the new fields on next load; nothing to bump.
+
 ## Goal
 
 Bring an out-of-process sidecar to life as a registered adapter: it connects over a
@@ -39,10 +62,9 @@ row). Concretely (confirmed in `sectool/service/server.go` /
 (during `Server.shutdown()`). The sidecar listener is created, started, and shut down
 **as part of that same `NativeProxyBackend` lifecycle** — so it comes up with the
 native proxy and tears down with it. When Burp is the active backend the native proxy
-is never constructed, so no sidecar listener exists; if a `sidecars:` launch config is
-present in that case, sectool logs a warning that sidecars are unavailable under the
-Burp backend and continues normally (matching sectool's existing fall-back
-philosophy).
+is never constructed, so no sidecar listener exists; if `sidecars.enabled` is set in
+that case, sectool logs a warning that sidecars are unavailable under the Burp backend
+and continues normally (matching sectool's existing fall-back philosophy).
 
 The spec fixes the transport (§4.1): a single local socket — a Unix domain socket on
 unix-like OSes (performance + filesystem-permission access control), a loopback TCP
@@ -56,8 +78,8 @@ creation, overridable by a `--sidecar-socket` flag.
 
 sectool config lives at `~/.sectool/config.json` (auto-created with defaults by
 `sectool/config/config.go`). This phase adds the `sidecar_socket` field and a
-`sidecars:` section for launch configuration. MCP server flags are parsed in
-`sectool/service/flags.go`.
+`sidecars:` section (declarative globals: `enabled` + heartbeat timings). MCP server
+flags are parsed in `sectool/service/flags.go`.
 
 ## Spec references
 
@@ -74,13 +96,13 @@ sectool config lives at `~/.sectool/config.json` (auto-created with defaults by
 
 - **Listener (native-backend-owned):** a local socket listener, build-tagged for UDS
   (unix) vs loopback TCP (Windows). On unix, create the containing dir `0700` and
-  socket `0600` (§10). New server-side package, e.g. `sectool/service/sidecar/` —
+  socket `0600` (§10). Server-side package `sectool/service/proxy/protocol/sidecar` —
   distinct from the root `sidecar` client SDK package. Its lifecycle is **owned by
-  `NativeProxyBackend`**: constructed in `NewNativeProxyBackend`/`startBuiltinProxy`,
-  the listener started inside `Serve()`, and shut down inside `Close()`. It is created
-  only on the native path; under Burp it does not exist (warn-and-skip if a `sidecars:`
-  config is present, see Background). The registry + bridge from Phase 1 are likewise
-  native-only.
+  `NativeProxyBackend`**: built via `EnableSidecars` from `startBuiltinProxy`, the
+  listener started inside `Serve()`, and shut down inside `Close()`. It is created
+  only on the native path when `sidecars.enabled` is true; under Burp it does not
+  exist (warn-and-skip if `sidecars.enabled`, see Background). The registry + bridge
+  from Phase 1 are likewise native-only.
 - **Framing + dispatch:** length-prefixed (4-byte BE `uint32`) JSON-RPC 2.0 codec
   with a **dedicated drain-always reader** that dispatches each message to a separate
   goroutine, so a handler awaiting a nested Request never blocks the read loop
@@ -129,18 +151,17 @@ sectool config lives at `~/.sectool/config.json` (auto-created with defaults by
 - **Lifecycle:** `shutdown` (§6b.3, drain then close); restart/reconnect keyed by
   `instance_id` (§5.5) — reattach flow-ownership metadata when `resume=true`, treat a
   differing `instance_id` as a distinct instance and close the old one's flows.
-- **Launch models** (§5.1): managed subprocess (sectool spawns from configured launch
-  command, monitors, restarts per policy) and attached (operator starts it, it dials
-  the resolved socket). Configuration under a new `sidecars:` section in
-  `sectool/config/config.go`; add `sidecar_socket` (auto-set default per OS) and the
-  `--sidecar-socket` override flag. Managed-subprocess spawn is part of the native
-  backend lifecycle (it starts with the proxy, see Background); under Burp it is not
-  spawned.
+- **Launch model** (§5.1): attached only — the operator starts the sidecar, which
+  dials the resolved socket. sectool does not spawn, monitor, or restart sidecars.
+  Configuration under a new `sidecars:` section in `sectool/config/config.go`
+  (`enabled`, `heartbeat_interval_secs`, `heartbeat_timeout_secs`); add
+  `sidecar_socket` (auto-set default per OS) and the `--sidecar-socket` override flag.
 - **Config migration:** adding `sidecar_socket` and the `sidecars:` section relies on
   the existing schema-version migration in `config.go` (`LoadOrCreatePath` re-saves
-  with defaults when `cfg.Version != Version`), so existing `~/.sectool/config.json`
-  files gain the new fields with defaults on next load. Bump `Config.Version`
-  accordingly.
+  with defaults when `cfg.Version != Version`), plus the per-field zero-value backfill
+  in `loadConfig`, so existing `~/.sectool/config.json` files gain the new fields with
+  defaults on next load. `Config.Version` is a build-time variable, not a literal — no
+  manual bump.
 
 ## Scope — `sidecar` package
 
@@ -174,9 +195,11 @@ func (c *Conn) Serve(ctx context.Context, h Handler) error // dispatch loop
 
 ## Test fixture
 
-A minimal fixture process built on the `sidecar` package that connects, registers
-(declaring one protocol and, in variants, conflicting/over-version capabilities),
-heartbeats, reconnects with a stable `instance_id`, and shuts down.
+An in-process fixture driving the `sidecar` SDK (and raw `wire` peers for the
+silent/conflict variants) in a goroutine against a listener in the same test
+process: it connects, registers (declaring one protocol and, in variants,
+conflicting/over-version capabilities), heartbeats, reconnects with a stable
+`instance_id`, and shuts down. No separate subprocess binary is built.
 
 ## Verification
 
@@ -193,18 +216,18 @@ heartbeats, reconnects with a stable `instance_id`, and shuts down.
 
 ## Definition of done
 
-- [ ] Build-tagged local listener with correct permissions; both variants compile.
-- [ ] Sidecar listener lifecycle owned by `NativeProxyBackend` (starts in `Serve()`,
-      stops in `Close()`); never created under Burp; warn-and-skip when a `sidecars:`
-      config is present under Burp.
-- [ ] Length-prefixed JSON-RPC 2.0 codec with deadlock-free reader.
-- [ ] §11 error-code constants + `data` convention defined in the shared wire package.
-- [ ] `register` handshake stores all declared fields (incl. `mcp_tools` stored only);
+- [x] Build-tagged local listener with correct permissions; both variants compile.
+- [x] Sidecar listener lifecycle owned by `NativeProxyBackend` (`EnableSidecars`;
+      starts in `Serve()`, stops in `Close()`); only created when `sidecars.enabled`
+      under the native backend; warn-and-skip when enabled under Burp.
+- [x] Length-prefixed JSON-RPC 2.0 codec with deadlock-free reader.
+- [x] §11 error-code constants + `data` convention defined in the shared wire package.
+- [x] `register` handshake stores all declared fields (incl. `mcp_tools` stored only);
       version negotiation and §5.3.1 conflict resolution enforced.
-- [ ] Heartbeat, `shutdown`, and `instance_id` restart/reconnect work; ownership +
+- [x] Heartbeat, `shutdown`, and `instance_id` restart/reconnect work; ownership +
       in-flight bookkeeping established for `resume`.
-- [ ] Config (`sidecar_socket`, `sidecars:`) and `--sidecar-socket` flag in place;
-      `Config.Version` bumped with migration.
-- [ ] Root `sidecar` package exists, depends on nothing under `sectool/`, drives the
+- [x] Config (`sidecar_socket`, `sidecars:`) and `--sidecar-socket` flag in place;
+      migration via build-time `Config.Version` + per-field backfill.
+- [x] Root `sidecar` package exists, depends on nothing under `sectool/`, drives the
       fixture end-to-end.
 - [ ] `make test-all` + `make lint` pass; no-sidecar behavior unchanged.

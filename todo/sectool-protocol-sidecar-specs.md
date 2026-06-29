@@ -644,7 +644,7 @@ at registration (§6a.1):
 
 - **Major mismatch is a fast fail.** If the sidecar's major differs from
   sectool's, sectool rejects `register` with a version-mismatch error
-  (§11); a managed sidecar exits non-zero. There is no cross-major
+  (§11); the sidecar exits non-zero. There is no cross-major
   compatibility.
 - **Minor differences are absorbed.** Within a shared major the session
   runs at the negotiated minor `min(sectool.minor, sidecar.minor)`, and
@@ -658,22 +658,23 @@ at registration (§6a.1):
 
 ## 5. Sidecar lifecycle and registration
 
-### 5.1 Launch models
+### 5.1 Launch model
 
-Two launch models, both supported:
+v1 supports the **attached process** model only:
 
-- **Managed subprocess.** Sectool spawns the sidecar at startup using
-  a configured launch command (binary path, args, env). The parent
-  passes the socket path (via `--sidecar-socket` or a shared `--config`).
-  Sectool monitors process lifetime and restarts the sidecar according
-  to a configurable policy on crash.
-- **Attached process.** An operator starts the sidecar independently
-  (e.g., for debugging or for sidecars that need elevated privileges);
+- **Attached process.** An operator starts the sidecar independently;
   it resolves the same socket path from config (§4.1). Sectool accepts
-  the connection and registers it.
+  the connection and registers it. The operator runs `sectool mcp` and
+  the sidecar process independently and manages both lifetimes; sectool
+  does not spawn, monitor, or restart sidecars.
 
-Configuration of launch models lives in the sectool config file under
-a new `sidecars:` section, with per-sidecar entries.
+A managed-subprocess model (sectool spawning/supervising the sidecar from a
+launch command) is intentionally deferred; it adds process-supervision
+surface without changing the contract and can be layered on later.
+
+Sidecar configuration lives in the sectool config file under a `sidecars:`
+section holding declarative globals (`enabled`, plus heartbeat timings); it
+carries no launch commands.
 
 ### 5.2 Registration handshake
 
@@ -1458,11 +1459,10 @@ adapter-enumeration tool is required in v1.
 - **No execution of arbitrary code from sidecar metadata.** Schemas
   registered by sidecars are descriptive only; sectool does not eval
   or load code based on registration payload.
-- **Process isolation.** Managed sidecars run as separate processes;
-  a crashing sidecar cannot corrupt sectool's history store.
-  Operator-attached sidecars run under whatever identity the operator
-  chooses, including with elevated privileges if the protocol
-  requires (rare; should be avoided).
+- **Process isolation.** Sidecars run as separate processes, so a
+  crashing sidecar cannot corrupt sectool's history store. They run
+  under whatever identity the operator chooses, including with elevated
+  privileges if the protocol requires (rare; should be avoided).
 - **TLS MITM is unchanged.** The existing fake-CA mechanism remains
   the only way sectool decrypts TLS. Sidecars do not receive raw CA
   private keys; if a sidecar needs to perform its own decryption
