@@ -17,8 +17,12 @@ into two independent merges that should land in order:
 Generalize sectool's internal capture model so it can host protocol adapters, with
 **no behavior change**. Two outcomes:
 
-1. The unioned `HistoryEntry` is replaced by a generalized `Flow` across the proxy
-   package and the store, with transparent migration of pre-existing records.
+1. The unioned `HistoryEntry` is replaced by a generalized `Flow` — a single common
+   envelope type shared by the store today and the out-of-process sidecar API in
+   later phases — across the proxy package and the store. sectool's history store is
+   ephemeral (in-memory, spilling only to a temp file under a per-startup encryption
+   key; never persisted across restarts), so this is a pure in-code type swap with
+   **no record migration**.
 2. The three built-in HTTP handlers become adapters dispatched through a
    claim/registry seam instead of the hardcoded protocol switch.
 
@@ -69,8 +73,10 @@ in Phase 2, the out-of-process sidecar surface — scoped to the native backend.
 
 - §2.2 Adapter registry, §2.3 Connection lifecycle and handoff seams, §2.4 Refactor
   scope for built-in adapters.
-- §3.1 Flow, §3.1.1 HistoryEntry → Flow migration, §3.2 session/tunnel envelope,
-  §3.3 streams (data-model shapes the `Flow` type must support).
+- §3.1 Flow, §3.1.1 HistoryEntry → Flow field mapping (used here only as the
+  field-correspondence guide for the in-code swap — there is no runtime migration,
+  the store is ephemeral), §3.2 session/tunnel envelope, §3.3 streams (data-model
+  shapes the `Flow` type must support).
 - §3.5 Rule targeting (only the parts needed to keep existing rules working; the full
   tuple/`owner` generalization is **Phase 7**).
 
@@ -79,21 +85,49 @@ in Phase 2, the out-of-process sidecar surface — scoped to the native backend.
 **1a — `Flow` replaces `HistoryEntry`:**
 
 - Define `Flow` in `sectool/service/proxy/types.go` per spec §3.1: a `request` and/or
-  `response` sub-object (each `{method, path, headers, body, status?}`) plus flow-level
-  `flow_id`, `adapter`, `protocol_tag`, `direction`, `parent_flow_id`, `started_at`,
-  `completed_at`, `annotations`, `size_hint`. Carry the existing wire-fidelity types
-  (`Header`, `Wire`, `ChunkFrame`, `LineEnding`) verbatim for HTTP/1.1 fidelity.
+  `response` sub-object plus flow-level `flow_id`, `adapter`, `protocol_tag`,
+  `direction`, `parent_flow_id`, `started_at`, `completed_at`, `annotations`,
+  `size_hint`. Each side is a **single common `Message` envelope** —
+  `{method, path, query, status, headers, body}` plus the existing wire-fidelity
+  fields (`Header`, `Wire`, `ChunkFrame`, `LineEnding`, trailers, line endings)
+  carried verbatim for HTTP/1.1. `Message` is the structural union of today's
+  near-identical `RawHTTP1Request` + `RawHTTP1Response`; HTTP/2 pseudo-headers fold
+  into `headers` (`:authority`, `:status`, …). This one type is the storage
+  representation today and the sidecar-API representation in later phases (see
+  "Envelope representation" below).
+- **Adapters stay protocol-specific on the hot path; the common type is a boundary.**
+  The HTTP/1.1, HTTP/2, and WebSocket handlers keep parsing, applying rules, and
+  serializing in their precise wire types (`RawHTTP1Request`/`RawHTTP1Response`,
+  `h2Stream` state); they convert to the common `Message`/`Flow` **only at store
+  time**. The wire/rules/serialization hot paths are therefore untouched
+  (byte-identical), and the generic representation lives only where flows are stored,
+  listed, diffed, and replayed.
 - Populate `Flow` from each built-in handler using the §3.1.1 mapping table
-  (`Protocol`→`adapter`/`protocol_tag`; `H2StreamID`→header `X-Sectool-Stream-Id`;
-  WS frames→child flows with `parent_flow_id` = handshake flow, `method=FRAME`).
+  (`Protocol`→`adapter`/`protocol_tag`; `H2StreamID`→header `X-Sectool-Stream-Id`).
+  **WebSocket frames become child flows now** (laying the §3.3 stream foundation):
+  one child `Flow` per frame with `parent_flow_id` = the handshake flow,
+  `method=FRAME`, `path=/ws/<opcode>`, `body` = unmasked payload, `direction` set.
+  Children are stored payload-only and excluded from the `proxy_poll` listing /
+  `flowOrder`, so external output is unchanged (frames are not surfaced today).
 - Update `proxy/history.go` (store/get/page) and the native backend's `ProxyEntry`
   formatting (`backend_http_native.go`) to read from `Flow`. Keep `ProxyEntry`'s
-  external shape identical — it is the regression firewall.
-- **Lazy v0→v1 migration** in the store read path (`proxy/history.go` `Get`, see
-  spec §3.1.1): records have no per-record version tag today, so detect a v0
-  (`HistoryEntry`) msgpack record on read and rewrite it to `Flow` inline. No startup
-  migration, no double storage. Preserve all `SpillStore` behavior (hot cache,
-  eviction, compaction, zstd+AES).
+  external shape identical — it is the regression firewall. `protocol_tag="http/2"`
+  must surface back as the legacy `"h2"` (and `websocket` / `http/1.1` unchanged) so
+  `ProxyEntry.Protocol` and `HistoryMeta` stay byte-identical.
+- **No record migration.** The history store is ephemeral — every record in a run is
+  written by the current build, so there are no prior `HistoryEntry` records to
+  convert and no version tag is needed. `HistoryEntry` and the H2/WS stored sub-types
+  are deleted outright. All `SpillStore` behavior (hot cache, eviction, compaction,
+  zstd+AES) is preserved unchanged.
+
+> **Envelope representation (decided).** A single common `Message`/`Flow` struct — not
+> a Go interface with per-protocol implementations. An interface would force a custom
+> msgpack codec carrying a type discriminator (re-hiding the very union being removed)
+> and a setter-heavy interface for in-place rule mutation. The single struct loses no
+> wire fidelity; its only cost is a few unused fields per side (a response carries an
+> empty `method`, a request an empty `status`). Protocol-specific richness is kept
+> where it belongs — in the adapters' hot-path wire types — and flattened to the
+> common type at the store-time boundary.
 
 **1b — adapter registry + dispatch seam:**
 
@@ -137,26 +171,31 @@ introduced in **Phase 2** with the transport.
 
 ## Test fixture
 
-None — Phase 1 has no sidecar. Validation is via existing suites plus new
-store-migration tests.
+None — Phase 1 has no sidecar, and the store is ephemeral (no record migration).
+Validation is via the existing proxy suites plus new golden-output regression
+(`proxy_poll` / `flow_get`) around the `HistoryEntry`→`Flow` swap.
 
 ## Verification
 
 - Existing HTTP/1.1, HTTP/2, and WebSocket proxy suites pass **byte-identical**.
-- New unit test: feed real captured v0 (`HistoryEntry`) spill records through the
-  store read path and assert correct v1 (`Flow`) rewrite, with `SpillStore`
-  semantics intact.
 - Golden-output regression: snapshot `proxy_poll` and `flow_get` output across a
   fixture capture set before and after the swap; assert no diff. This is the primary
   tripwire that the `ProxyEntry` firewall held.
+- New unit tests for the store-time conversion: `Message`/`Flow` round-trips through
+  the store; HTTP/2 pseudo-header folding reproduces identical `formatH2*` bytes; WS
+  child flows are stored, retrievable by id, and absent from `Page` / `PageMeta`.
 - `make test-all` and `make lint` clean.
 
 ## Definition of done
 
-- [ ] `Flow` replaces `HistoryEntry` in the proxy package and store; no remaining
-      union-field access outside the migration shim.
-- [ ] Lazy v0→v1 migration verified against real records.
+- [ ] `Flow` (with the single common `Message` envelope) replaces `HistoryEntry` in
+      the proxy package and store; no remaining protocol-union fields; `HistoryEntry`
+      and the H2/WS stored sub-types deleted.
+- [ ] Adapters convert to the common type only at store time; wire/rules/serialization
+      hot paths untouched.
+- [ ] WebSocket frames stored as child flows (`parent_flow_id`, `method=FRAME`),
+      excluded from the default listing.
 - [ ] Three built-in handlers implement the adapter interface; dispatch goes through
-      the registry claim; HTTP/2 cleartext and WS-101 behavior unchanged.
+      the registry claim; HTTP/2 cleartext and WS-101 behavior unchanged. *(1b)*
 - [ ] Golden `proxy_poll`/`flow_get` output unchanged; all existing tests green.
 - [ ] `make test-all` + `make lint` pass.

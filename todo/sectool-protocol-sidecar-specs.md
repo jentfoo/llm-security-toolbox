@@ -351,13 +351,14 @@ The migration is essentially a field rename:
 | `H2StreamID` | header `X-Sectool-Stream-Id` |
 | `WSFrames` (`[]WSFrame`) | one child flow per frame; `parent_flow_id` set to the handshake-response flow; `method=FRAME`, `path=/ws/<opcode>`, body = unmasked payload |
 
-**Migration strategy: lazy rewrite on access.** The spill store's read
-path detects v0 records by msgpack version tag and rewrites them to v1
-inline on next touch. No startup migration, no double storage, hot
-records compact naturally. Cold records remain v0 until accessed or
-until a background sweep promotes them. SpillStore behavior
-(`store/spill.go:42-48`: 200 MiB hot cache, 50 % eviction, 100 MiB
-dead-byte compaction, zstd+AES-256) is preserved.
+**Migration strategy: none required.** sectool's history store is ephemeral —
+in-memory with disk paging to a temp file under a per-startup encryption key,
+never persisted across restarts. Every record in a given run is written by the
+current build, so there are no prior-schema records to detect or convert and no
+per-record version tag is needed; the table above is the field-correspondence
+guide for the in-code `HistoryEntry`→`Flow` swap, not a runtime conversion.
+SpillStore behavior (`store/spill.go:42-48`: 200 MiB hot cache, 50 % eviction,
+100 MiB dead-byte compaction, zstd+AES-256) is preserved unchanged.
 
 ### 3.2 Session / tunnel envelope (a Flow convention)
 
@@ -1331,7 +1332,7 @@ section maps each to its post-refactor representation.
 | `workflow` (explore, test-report, cli) | Unchanged. Instruction templates per task are extended to mention any sidecar-registered tools (§9) present in the session. |
 | `encode` / `decode` / `hash` / `jwt_decode` / `uuid_generate` | Fully unchanged. |
 | `MCP transport` (`/mcp` streamable HTTP, `/sse` legacy) | Unchanged. The bidirectional needs of the sidecar contract live on the local IPC connection, not the agent-facing MCP transport. Agents continue to poll. |
-| `storage / spill / encryption` | Unchanged. The Flow type replaces HistoryEntry as the on-disk representation with a versioned migration (lazy rewrite on access, §3.1.1). SpillStore behavior is preserved. |
+| `storage / spill / encryption` | Unchanged. The Flow type replaces HistoryEntry as the in-memory/spill representation; no migration is needed because the store is ephemeral (§3.1.1). SpillStore behavior is preserved. |
 | `Burp backend` | Unchanged. Lives one level above the adapter registry. When Burp is selected as the top-level backend, the adapter registry is not consulted; sectool delegates capture to the Burp MCP. Custom-protocol sidecars are only available under the native top-level backend. |
 
 ---
