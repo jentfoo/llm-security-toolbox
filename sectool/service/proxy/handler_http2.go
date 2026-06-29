@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	// protocolH2 is the protocol string for HTTP/2
-	protocolH2 = "h2"
+	// protocolH2 is sectool's internal protocol selector for HTTP/2.
+	// Distinct from the ALPN wire token "h2" used during TLS negotiation.
+	protocolH2 = "http/2"
 
 	// initialWindowSize is the HTTP/2 default window (64KB)
 	initialWindowSize = 65535
@@ -1492,33 +1493,41 @@ func (p *h2Proxy) storeStreamInHistory(stream *h2Stream) {
 		scheme = schemeHTTPS // h2 is always tunneled over TLS via CONNECT
 	}
 	_, port := ParseAuthority(stream.authority, scheme)
-	entry := &HistoryEntry{
-		Protocol:   protocolH2,
-		Scheme:     scheme,
-		Port:       port,
-		H2StreamID: stream.id,
-		H2Request: &H2RequestData{
-			Method:    stream.method,
-			Scheme:    stream.scheme,
-			Authority: stream.authority,
-			Path:      stream.path,
-			Headers:   stream.reqHeaders,
-			Body:      append([]byte(nil), stream.reqBody.Bytes()...), // copy to avoid holding reference
+
+	// Fold HTTP/2 pseudo-headers and the stream id ahead of the regular headers.
+	reqHeaders := make(Headers, 0, len(stream.reqHeaders)+5)
+	reqHeaders = append(reqHeaders,
+		Header{Name: ":method", Value: stream.method},
+		Header{Name: ":scheme", Value: stream.scheme},
+		Header{Name: ":authority", Value: stream.authority},
+		Header{Name: ":path", Value: stream.path},
+		Header{Name: headerStreamID, Value: strconv.FormatUint(uint64(stream.id), 10)},
+	)
+	reqHeaders = append(reqHeaders, stream.reqHeaders...)
+
+	flow := &Flow{
+		Adapter:     protocolH2,
+		ProtocolTag: protocolH2,
+		Scheme:      scheme,
+		Port:        port,
+		Request: &Message{
+			Headers: reqHeaders,
+			Body:    append([]byte(nil), stream.reqBody.Bytes()...), // copy to avoid holding reference
 		},
-		H2Response: &H2ResponseData{
+		Response: &Message{
 			StatusCode: stream.statusCode,
 			Headers:    stream.respHeaders,
 			Body:       append([]byte(nil), stream.respBody.Bytes()...), // copy to avoid holding reference
 		},
-		Timestamp: stream.startTime,
-		Duration:  time.Since(stream.startTime),
+		StartedAt:   stream.startTime,
+		CompletedAt: time.Now(),
 	}
 	stream.mu.Unlock()
 
-	if !p.handler.history.ShouldCapture(entry) {
+	if !p.handler.history.ShouldCapture(flow) {
 		return
 	}
-	p.handler.history.Store(entry)
+	p.handler.history.Store(flow)
 }
 
 // sendInterceptedH2Response sends a canned response to the client for an intercepted request.

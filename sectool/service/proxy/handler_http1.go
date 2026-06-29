@@ -307,20 +307,25 @@ func (h *http1Handler) forwardInterim(clientConn net.Conn, ir *RawHTTP1Response)
 
 // storeEntry saves the request/response pair, plus any interim 1xx responses, to history.
 func (h *http1Handler) storeEntry(target *Target, req *RawHTTP1Request, resp *RawHTTP1Response, interim []*RawHTTP1Response, startTime time.Time) {
-	entry := &HistoryEntry{
-		Protocol:         protocolHTTP11,
-		Scheme:           target.Scheme(),
-		Port:             target.Port,
-		Request:          req,
-		Response:         resp,
-		InterimResponses: interim,
-		Timestamp:        startTime,
-		Duration:         time.Since(startTime),
+	flow := &Flow{
+		Adapter:     protocolHTTP11,
+		ProtocolTag: protocolHTTP11,
+		Scheme:      target.Scheme(),
+		Port:        target.Port,
+		Request:     rawRequestToMessage(req),
+		StartedAt:   startTime,
+		CompletedAt: time.Now(),
 	}
-	if !h.history.ShouldCapture(entry) {
+	if resp != nil {
+		flow.Response = rawResponseToMessage(resp)
+	}
+	for _, ir := range interim {
+		flow.InterimResponses = append(flow.InterimResponses, rawResponseToMessage(ir))
+	}
+	if !h.history.ShouldCapture(flow) {
 		return
 	}
-	h.history.Store(entry)
+	h.history.Store(flow)
 }
 
 // HandleTLS handles HTTP/1.1 traffic over already-established TLS connections.

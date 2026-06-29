@@ -93,55 +93,65 @@ func (h *HistoryStore) recover() {
 	})
 }
 
-// Store mints a flow_id, assigns it to entry, persists, and returns the flow_id. entry.Timestamp must be set by the caller.
-func (h *HistoryStore) Store(entry *HistoryEntry) string {
+// Store mints a flow_id, assigns it to flow, persists, and returns the flow_id.
+// flow.StartedAt must be set by the caller. Child flows (ParentFlowID set) are
+// stored payload-only: no meta key and absent from the listing order.
+func (h *HistoryStore) Store(flow *Flow) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	flowID := h.mintUniqueFlowIDLocked()
-	entry.FlowID = flowID
-	ts := entry.Timestamp.UTC()
-	entry.Timestamp = ts
+	flow.FlowID = flowID
+	ts := flow.StartedAt.UTC()
+	flow.StartedAt = ts
 
-	h.writeEntryLocked(entry)
+	h.writePayloadLocked(flow)
+	if flow.ParentFlowID != "" {
+		return flowID
+	}
+	h.writeMetaLocked(flow)
 	h.insertOrderLocked(orderedFlow{flowID: flowID, timestamp: ts})
 	h.timestampByFlow[flowID] = ts
 	return flowID
 }
 
 // mintUniqueFlowIDLocked generates a flow_id, retrying on collision. Caller must hold mu.
+// Probes the payload key so child flows (which have no meta key) are also covered.
 func (h *HistoryStore) mintUniqueFlowIDLocked() string {
 	for {
 		candidate := ids.Generate(ids.DefaultLength)
 		if _, exists := h.timestampByFlow[candidate]; exists {
 			continue
-		} else if _, found, _ := h.storage.Get(historyMetaKey(candidate)); found {
+		} else if _, found, _ := h.storage.Get(historyPayloadKey(candidate)); found {
 			continue
 		}
 		return candidate
 	}
 }
 
-// writeEntryLocked serializes and writes both payload and meta keys for an entry. Caller must hold mu.
-func (h *HistoryStore) writeEntryLocked(entry *HistoryEntry) {
-	meta := entry.extractMeta()
+// writePayloadLocked serializes and writes the payload key for a flow. Caller must hold mu.
+func (h *HistoryStore) writePayloadLocked(flow *Flow) {
+	payloadData, err := store.Serialize(flow)
+	if err != nil {
+		log.Printf("proxy: serialize history flow %s: %v", flow.FlowID, err)
+		return
+	}
+	if err := h.storage.Set(historyPayloadKey(flow.FlowID), payloadData); err != nil {
+		log.Printf("proxy: save history payload %s: %v", flow.FlowID, err)
+	}
+}
+
+// writeMetaLocked serializes and writes the meta key for a flow. Caller must hold mu.
+// Must run after writePayloadLocked: a torn write leaves an invisible orphan payload.
+func (h *HistoryStore) writeMetaLocked(flow *Flow) {
+	meta := flow.extractMeta()
 	metaData, err := store.Serialize(&meta)
 	if err != nil {
-		log.Printf("proxy: serialize history meta %s: %v", entry.FlowID, err)
+		log.Printf("proxy: serialize history meta %s: %v", flow.FlowID, err)
 		return
 	}
-	payloadData, err := store.Serialize(entry)
-	if err != nil {
-		log.Printf("proxy: serialize history entry %s: %v", entry.FlowID, err)
-		return
-	}
-	// payload first, meta second: torn write leaves invisible orphan payload
-	if err := h.storage.Set(historyPayloadKey(entry.FlowID), payloadData); err != nil {
-		log.Printf("proxy: save history payload %s: %v", entry.FlowID, err)
-		return
-	}
-	if err := h.storage.Set(historyMetaKey(entry.FlowID), metaData); err != nil {
-		log.Printf("proxy: save history meta %s: %v", entry.FlowID, err)
+	if err := h.storage.Set(historyMetaKey(flow.FlowID), metaData); err != nil {
+		log.Printf("proxy: save history meta %s: %v", flow.FlowID, err)
 	}
 }
 
@@ -154,19 +164,20 @@ func (h *HistoryStore) insertOrderLocked(e orderedFlow) {
 	h.flowOrder = slices.Insert(h.flowOrder, idx, e)
 }
 
-// Get retrieves an entry by flow_id.
-func (h *HistoryStore) Get(flowID string) (*HistoryEntry, bool) {
+// Get retrieves a flow by flow_id.
+func (h *HistoryStore) Get(flowID string) (*Flow, bool) {
 	data, found, err := h.storage.Get(historyPayloadKey(flowID))
 	if err != nil || !found {
 		return nil, false
 	}
-	var entry HistoryEntry
-	if err := store.Deserialize(data, &entry); err != nil {
+	var flow Flow
+	if err := store.Deserialize(data, &flow); err != nil {
 		return nil, false
 	}
 	// msgpack timestamps lose timezone info; normalize to UTC
-	entry.Timestamp = entry.Timestamp.UTC()
-	return &entry, true
+	flow.StartedAt = flow.StartedAt.UTC()
+	flow.CompletedAt = flow.CompletedAt.UTC()
+	return &flow, true
 }
 
 // GetMeta retrieves lightweight metadata for an entry by flow_id.
@@ -183,19 +194,19 @@ func (h *HistoryStore) GetMeta(flowID string) (*HistoryMeta, bool) {
 	return &meta, true
 }
 
-// Page returns up to count entries strictly after afterFlowID, ordered oldest-first.
-func (h *HistoryStore) Page(count int, afterFlowID string) []*HistoryEntry {
+// Page returns up to count flows strictly after afterFlowID, ordered oldest-first.
+func (h *HistoryStore) Page(count int, afterFlowID string) []*Flow {
 	if count <= 0 {
 		return nil
 	}
 	flowIDs := h.pageFlowIDs(count, afterFlowID)
-	entries := make([]*HistoryEntry, 0, len(flowIDs))
+	flows := make([]*Flow, 0, len(flowIDs))
 	for _, fid := range flowIDs {
-		if e, ok := h.Get(fid); ok {
-			entries = append(entries, e)
+		if f, ok := h.Get(fid); ok {
+			flows = append(flows, f)
 		}
 	}
-	return entries
+	return flows
 }
 
 // PageMeta returns up to count meta entries strictly after afterFlowID, ordered oldest-first.
@@ -246,19 +257,6 @@ func (h *HistoryStore) Count() int {
 	return len(h.flowOrder)
 }
 
-// Update persists changes to an existing entry.
-// entry.FlowID must be set (from a prior Store).
-func (h *HistoryStore) Update(entry *HistoryEntry) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if _, exists := h.timestampByFlow[entry.FlowID]; !exists {
-		log.Printf("proxy: cannot update unknown history entry %s", entry.FlowID)
-		return
-	}
-	h.writeEntryLocked(entry)
-}
-
 // Delete removes entries by flow_id. Idempotent; unknown ids are skipped.
 // Returns the number of entries actually removed.
 func (h *HistoryStore) Delete(flowIDs ...string) int {
@@ -295,212 +293,177 @@ func (h *HistoryStore) Close() {
 	_ = h.storage.Close()
 }
 
-// extractMeta builds HistoryMeta from a HistoryEntry using existing accessor methods.
-func (e *HistoryEntry) extractMeta() HistoryMeta {
+// extractMeta builds HistoryMeta from a Flow using its accessor methods.
+func (f *Flow) extractMeta() HistoryMeta {
 	return HistoryMeta{
-		FlowID:      e.FlowID,
-		Protocol:    e.Protocol,
-		Scheme:      e.Scheme,
-		Port:        e.Port,
-		Method:      e.GetMethod(),
-		Host:        e.GetHost(),
-		Path:        e.getFullPath(),
-		Status:      e.GetStatusCode(),
-		ContentType: e.GetResponseHeader("content-type"),
-		RespLen:     e.responseBodyLen(),
-		H2StreamID:  e.H2StreamID,
-		Timestamp:   e.Timestamp,
-		Duration:    e.Duration,
+		FlowID:      f.FlowID,
+		Protocol:    f.ProtocolTag,
+		Scheme:      f.Scheme,
+		Port:        f.Port,
+		Method:      f.GetMethod(),
+		Host:        f.GetHost(),
+		Path:        f.getFullPath(),
+		Status:      f.GetStatusCode(),
+		ContentType: f.GetResponseHeader("content-type"),
+		RespLen:     f.responseBodyLen(),
+		Timestamp:   f.StartedAt,
+		Duration:    f.CompletedAt.Sub(f.StartedAt),
 	}
 }
+
+// isH2 reports whether the flow's request side carries folded HTTP/2 pseudo-headers.
+func (f *Flow) isH2() bool { return f.ProtocolTag == protocolH2 }
 
 // getFullPath returns path including query string for summary/meta display.
 // For HTTP/1.1, concatenates Path + "?" + Query when Query is non-empty.
-// For H2, Path already includes query.
-func (e *HistoryEntry) getFullPath() string {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Request != nil {
-			return e.H2Request.Path
-		}
-	default:
-		if e.Request != nil {
-			if e.Request.Query != "" {
-				return e.Request.Path + "?" + e.Request.Query
-			}
-			return e.Request.Path
-		}
+// For H2, :path already includes the query.
+func (f *Flow) getFullPath() string {
+	if f.Request == nil {
+		return ""
 	}
-	return ""
+	if f.isH2() {
+		return f.Request.GetHeader(":path")
+	}
+	if f.Request.Query != "" {
+		return f.Request.Path + "?" + f.Request.Query
+	}
+	return f.Request.Path
 }
 
 // responseBodyLen returns the length of the response body.
-func (e *HistoryEntry) responseBodyLen() int {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Response != nil {
-			return len(e.H2Response.Body)
-		}
-	default:
-		if e.Response != nil {
-			return len(e.Response.Body)
-		}
+func (f *Flow) responseBodyLen() int {
+	if f.Response != nil {
+		return len(f.Response.Body)
 	}
 	return 0
 }
 
 // FormatRequest returns the request in wire-compatible format.
 // For HTTP/1.1, uses SerializeRaw to preserve anomalies like bare-LF.
-// For HTTP/2, builds a similar text format from pseudo-headers and headers.
-func (e *HistoryEntry) FormatRequest(buf *bytes.Buffer) []byte {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Request == nil {
-			return nil
-		}
-		return formatH2Request(buf, e.H2Request)
-
-	default:
-		// HTTP/1.1 or websocket
-		if e.Request == nil {
-			return nil
-		}
-		return e.Request.SerializeRaw(buf)
+// For HTTP/2, rebuilds HTTP/1.1-style text from the folded pseudo-headers.
+func (f *Flow) FormatRequest(buf *bytes.Buffer) []byte {
+	if f.Request == nil {
+		return nil
 	}
+	if f.isH2() {
+		return formatH2Request(buf, f.Request)
+	}
+	return f.Request.toRawRequest().SerializeRaw(buf)
 }
 
 // FormatResponse returns the response in wire-compatible format.
 // For HTTP/1.1, uses SerializeRaw to preserve anomalies like bare-LF.
-// For HTTP/2, builds a similar text format from pseudo-headers and headers.
-func (e *HistoryEntry) FormatResponse(buf *bytes.Buffer) []byte {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Response == nil {
-			return nil
-		}
-		return formatH2Response(buf, e.H2Response)
-
-	default:
-		// HTTP/1.1 or websocket
-		if e.Response == nil {
-			return nil
-		}
-		return e.Response.SerializeRaw(buf)
+// For HTTP/2, rebuilds HTTP/1.1-style text from the folded pseudo-headers.
+func (f *Flow) FormatResponse(buf *bytes.Buffer) []byte {
+	if f.Response == nil {
+		return nil
 	}
+	if f.isH2() {
+		return formatH2Response(buf, f.Response)
+	}
+	return f.Response.toRawResponse().SerializeRaw(buf)
 }
 
-// GetMethod returns the request method for any protocol.
-func (e *HistoryEntry) GetMethod() string {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Request != nil {
-			return e.H2Request.Method
-		}
-	default:
-		if e.Request != nil {
-			return e.Request.Method
-		}
+// FormatInterimResponses returns each 1xx response in wire form (HTTP/1.1 only).
+func (f *Flow) FormatInterimResponses(buf *bytes.Buffer) []string {
+	if len(f.InterimResponses) == 0 {
+		return nil
 	}
-	return ""
+	out := make([]string, 0, len(f.InterimResponses))
+	for _, ir := range f.InterimResponses {
+		out = append(out, string(ir.toRawResponse().SerializeRaw(buf)))
+	}
+	return out
 }
 
-// GetPath returns the URL path without query string for any protocol.
+// GetMethod returns the request method.
+func (f *Flow) GetMethod() string {
+	if f.Request == nil {
+		return ""
+	}
+	if f.isH2() {
+		return f.Request.GetHeader(":method")
+	}
+	return f.Request.Method
+}
+
+// GetPath returns the URL path without query string.
 // For H2, strips the query portion since :path includes it.
-func (e *HistoryEntry) GetPath() string {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Request != nil {
-			if idx := strings.IndexByte(e.H2Request.Path, '?'); idx >= 0 {
-				return e.H2Request.Path[:idx]
-			}
-			return e.H2Request.Path
-		}
-	default:
-		if e.Request != nil {
-			return e.Request.Path
-		}
+func (f *Flow) GetPath() string {
+	if f.Request == nil {
+		return ""
 	}
-	return ""
+	if f.isH2() {
+		path := f.Request.GetHeader(":path")
+		if idx := strings.IndexByte(path, '?'); idx >= 0 {
+			return path[:idx]
+		}
+		return path
+	}
+	return f.Request.Path
 }
 
-// GetHost returns the host for any protocol.
-func (e *HistoryEntry) GetHost() string {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Request != nil {
-			return e.H2Request.Authority
-		}
-	default:
-		if e.Request != nil {
-			return e.Request.GetHeader("Host")
-		}
+// GetHost returns the request host.
+func (f *Flow) GetHost() string {
+	if f.Request == nil {
+		return ""
 	}
-	return ""
+	if f.isH2() {
+		return f.Request.GetHeader(":authority")
+	}
+	return f.Request.GetHeader("Host")
 }
 
-// GetStatusCode returns the response status code for any protocol.
-func (e *HistoryEntry) GetStatusCode() int {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Response != nil {
-			return e.H2Response.StatusCode
-		}
-	default:
-		if e.Response != nil {
-			return e.Response.StatusCode
-		}
+// GetStatusCode returns the response status code.
+func (f *Flow) GetStatusCode() int {
+	if f.Response != nil {
+		return f.Response.StatusCode
 	}
 	return 0
 }
 
 // GetRequestHeader returns a request header value (case-insensitive).
-func (e *HistoryEntry) GetRequestHeader(name string) string {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Request != nil {
-			return e.H2Request.GetHeader(name)
-		}
-	default:
-		if e.Request != nil {
-			return e.Request.GetHeader(name)
-		}
+func (f *Flow) GetRequestHeader(name string) string {
+	if f.Request != nil {
+		return f.Request.GetHeader(name)
 	}
 	return ""
 }
 
 // GetResponseHeader returns a response header value (case-insensitive).
-func (e *HistoryEntry) GetResponseHeader(name string) string {
-	switch e.Protocol {
-	case "h2":
-		if e.H2Response != nil {
-			return e.H2Response.GetHeader(name)
-		}
-	default:
-		if e.Response != nil {
-			return e.Response.GetHeader(name)
-		}
+func (f *Flow) GetResponseHeader(name string) string {
+	if f.Response != nil {
+		return f.Response.GetHeader(name)
 	}
 	return ""
 }
 
-// formatH2Request formats an H2 request as HTTP/1.1 text for display and replay.
-// Uses HTTP/1.1 version in the request line so it can be parsed by the standard
-// HTTP/1.1 parser. The actual protocol ("h2") is tracked separately in HistoryEntry.Protocol.
-func formatH2Request(buf *bytes.Buffer, req *H2RequestData) []byte {
+// isPseudoOrStreamHeader reports headers that must not be re-emitted when
+// rebuilding HTTP/1.1-style text: HTTP/2 pseudo-headers and the synthetic stream id.
+func isPseudoOrStreamHeader(name string) bool {
+	return strings.HasPrefix(name, ":") || strings.EqualFold(name, headerStreamID)
+}
+
+// formatH2Request rebuilds an HTTP/1.1-style request from a folded HTTP/2 Message
+// for display and replay. The HTTP/1.1 version keeps it parseable by the standard
+// parser; pseudo-headers and the stream id are reconstructed into the request line
+// and host, never re-emitted as headers.
+func formatH2Request(buf *bytes.Buffer, req *Message) []byte {
 	buf.Reset()
 
-	// Request line - use HTTP/1.1 for parser compatibility; actual protocol tracked separately
-	buf.WriteString(req.Method)
+	buf.WriteString(req.GetHeader(":method"))
 	buf.WriteByte(' ')
-	buf.WriteString(req.Path)
+	buf.WriteString(req.GetHeader(":path"))
 	buf.WriteString(" HTTP/1.1\r\n")
 
-	// Host from authority
 	buf.WriteString("host: ")
-	buf.WriteString(req.Authority)
+	buf.WriteString(req.GetHeader(":authority"))
 	buf.WriteString("\r\n")
 
 	for _, h := range req.Headers {
+		if isPseudoOrStreamHeader(h.Name) {
+			continue
+		}
 		buf.WriteString(h.Name)
 		buf.WriteString(": ")
 		buf.WriteString(h.Value)
@@ -513,8 +476,8 @@ func formatH2Request(buf *bytes.Buffer, req *H2RequestData) []byte {
 	return buf.Bytes()
 }
 
-// formatH2Response formats an H2 response for display.
-func formatH2Response(buf *bytes.Buffer, resp *H2ResponseData) []byte {
+// formatH2Response rebuilds an HTTP/1.1-style response from a folded HTTP/2 Message.
+func formatH2Response(buf *bytes.Buffer, resp *Message) []byte {
 	buf.Reset()
 
 	buf.WriteString("HTTP/2 ")
@@ -527,6 +490,9 @@ func formatH2Response(buf *bytes.Buffer, resp *H2ResponseData) []byte {
 	buf.WriteString("\r\n")
 
 	for _, h := range resp.Headers {
+		if isPseudoOrStreamHeader(h.Name) {
+			continue
+		}
 		buf.WriteString(h.Name)
 		buf.WriteString(": ")
 		buf.WriteString(h.Value)

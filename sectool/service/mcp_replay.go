@@ -292,7 +292,7 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 	}
 
 	// HTTP/2 requires TLS
-	if httpProtocol == "h2" {
+	if httpProtocol == "http/2" {
 		if mods.Target != "" && strings.HasPrefix(strings.ToLower(mods.Target), "http://") {
 			return errorResult("cannot replay HTTP/2 request to http:// target: HTTP/2 requires TLS. To replay as HTTP/1.1, use a flow captured as HTTP/1.1 or manually construct the request."), nil
 		}

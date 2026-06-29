@@ -520,7 +520,7 @@ func TestSender_Send_H2(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: true,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Force:    true,
 		})
 
@@ -554,7 +554,7 @@ func TestSender_Send_H2(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: true,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Force:    true,
 		})
 
@@ -582,7 +582,7 @@ func TestSender_Send_H2(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: true,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Force:    true,
 		})
 
@@ -602,7 +602,7 @@ func TestSender_Send_H2(t *testing.T) {
 				Port:      80,
 				UsesHTTPS: false,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Force:    true,
 		})
 
@@ -641,7 +641,7 @@ func TestSender_Send_H2(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: true,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Force:    true,
 		})
 
@@ -684,7 +684,7 @@ func TestSender_Send_H2(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: true,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Modifications: &Modifications{
 				Method:        "POST",
 				SetHeaders:    []string{"X-Added: new-value"},
@@ -732,7 +732,7 @@ func TestSender_Send_H2(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: true,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Force:    true,
 		})
 
@@ -771,7 +771,7 @@ func TestSender_Send_H2(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: true,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Force:    true,
 		})
 
@@ -991,7 +991,7 @@ func TestSender_SendWithRedirects(t *testing.T) {
 				Port:      port,
 				UsesHTTPS: true,
 			},
-			Protocol: "h2",
+			Protocol: protocolH2,
 			Force:    true,
 		})
 

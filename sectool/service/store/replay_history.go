@@ -51,7 +51,7 @@ type ReplayHistoryEntry struct {
 	Path            string
 	Scheme          string // "http" or "https"
 	Port            int    // original port (0 = infer from scheme)
-	Protocol        string // "http/1.1" or "h2"
+	Protocol        string // "http/1.1" or "http/2"
 
 	// Response data
 	RespHeaders []byte

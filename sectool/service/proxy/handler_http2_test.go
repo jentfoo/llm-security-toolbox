@@ -293,17 +293,17 @@ func TestStoreStreamInHistory(t *testing.T) {
 	assert.Equal(t, 1, history.Count())
 
 	entry := firstEntry(t, history)
-	assert.Equal(t, "h2", entry.Protocol)
-	assert.Equal(t, uint32(1), entry.H2StreamID)
-	require.NotNil(t, entry.H2Request)
-	assert.Equal(t, "GET", entry.H2Request.Method)
-	assert.Equal(t, "https", entry.H2Request.Scheme)
-	assert.Equal(t, "test.example.com", entry.H2Request.Authority)
-	assert.Equal(t, "/api/v1", entry.H2Request.Path)
-	assert.Equal(t, "request body", string(entry.H2Request.Body))
-	require.NotNil(t, entry.H2Response)
-	assert.Equal(t, 200, entry.H2Response.StatusCode)
-	assert.Equal(t, `{"ok": true}`, string(entry.H2Response.Body))
+	assert.Equal(t, "http/2", entry.ProtocolTag)
+	assert.Equal(t, "1", entry.GetRequestHeader(headerStreamID))
+	require.NotNil(t, entry.Request)
+	assert.Equal(t, "GET", entry.GetMethod())
+	assert.Equal(t, "https", entry.GetRequestHeader(":scheme"))
+	assert.Equal(t, "test.example.com", entry.GetHost())
+	assert.Equal(t, "/api/v1", entry.GetPath())
+	assert.Equal(t, "request body", string(entry.Request.Body))
+	require.NotNil(t, entry.Response)
+	assert.Equal(t, 200, entry.GetStatusCode())
+	assert.Equal(t, `{"ok": true}`, string(entry.Response.Body))
 }
 
 func TestH2ConnConsumeRecvWindow(t *testing.T) {
@@ -577,13 +577,13 @@ func TestHTTP2ProxyEndToEnd(t *testing.T) {
 	testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 
 	entry := firstEntry(t, proxy.History())
-	assert.Equal(t, "h2", entry.Protocol)
-	require.NotNil(t, entry.H2Request)
-	assert.Equal(t, "GET", entry.H2Request.Method)
-	assert.Contains(t, entry.H2Request.Path, "/test")
-	require.NotNil(t, entry.H2Response)
-	assert.Equal(t, 200, entry.H2Response.StatusCode)
-	assert.Contains(t, string(entry.H2Response.Body), "Hello from HTTP/2 server")
+	assert.Equal(t, "http/2", entry.ProtocolTag)
+	require.NotNil(t, entry.Request)
+	assert.Equal(t, "GET", entry.GetMethod())
+	assert.Contains(t, entry.GetPath(), "/test")
+	require.NotNil(t, entry.Response)
+	assert.Equal(t, 200, entry.GetStatusCode())
+	assert.Contains(t, string(entry.Response.Body), "Hello from HTTP/2 server")
 }
 
 // h2MockInterceptor serves a canned response for requests matching path.

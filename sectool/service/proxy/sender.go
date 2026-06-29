@@ -50,8 +50,8 @@ type SendOptions struct {
 	Force         bool           // Bypass validation
 
 	// Protocol specifies the original request's protocol.
-	// Values: "http/1.1", "h2", or "" (defaults to http/1.1)
-	// When "h2", the sender will negotiate HTTP/2 with the server.
+	// Values: "http/1.1", "http/2", or "" (defaults to http/1.1)
+	// When "http/2", the sender will negotiate HTTP/2 with the server.
 	Protocol string
 }
 
@@ -226,7 +226,7 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 		// probed when sendRequestWithProtocol attempts the TLS handshake with H2 ALPN.
 		// If the server doesn't support H2, an error is returned (per spec: no silent downgrade).
 		// Same-origin redirects maintain the current protocol.
-		if isCrossOrigin && currentProtocol == "h2" && !newTarget.UsesHTTPS {
+		if isCrossOrigin && currentProtocol == protocolH2 && !newTarget.UsesHTTPS {
 			// H2 requires HTTPS - if redirect goes to HTTP, that's a protocol mismatch
 			return nil, errors.New("cross-origin redirect from HTTPS to HTTP cannot maintain HTTP/2; replay as HTTP/1.1 manually if desired")
 		}
@@ -247,7 +247,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 	}
 
 	// HTTP/2 requires HTTPS
-	if protocol == "h2" && !target.UsesHTTPS {
+	if protocol == protocolH2 && !target.UsesHTTPS {
 		return nil, errors.New("HTTP/2 requires HTTPS; cannot send h2 request to non-TLS target")
 	}
 
@@ -259,14 +259,14 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 		// Build ALPN list based on protocol preference
 		var nextProtos []string
 		minVersion := uint16(tls.VersionTLS10)
-		if protocol == "h2" {
+		if protocol == protocolH2 {
 			// Prefer H2, fallback to H1
-			nextProtos = []string{"h2", "http/1.1"}
+			nextProtos = []string{alpnH2, alpnHTTP1}
 			// HTTP/2 requires TLS 1.2+ in practice (ALPN extension, cipher requirements)
 			minVersion = tls.VersionTLS12
 		} else {
 			// HTTP/1.1 only
-			nextProtos = []string{"http/1.1"}
+			nextProtos = []string{alpnHTTP1}
 		}
 
 		tlsDialer := &tls.Dialer{
@@ -287,7 +287,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 		tlsConn := conn.(*tls.Conn)
 		negotiated := tlsConn.ConnectionState().NegotiatedProtocol
 
-		if protocol == "h2" {
+		if protocol == protocolH2 {
 			if negotiated == "h2" {
 				// Send as HTTP/2 - set combined deadline since H2 multiplexes reads/writes
 				defer func() { _ = conn.Close() }()

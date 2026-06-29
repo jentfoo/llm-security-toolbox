@@ -14,6 +14,12 @@ import (
 	"sync"
 )
 
+// ALPN protocol identifiers (RFC 7301): the on-the-wire tokens exchanged during TLS negotiation.
+const (
+	alpnH2    = "h2"
+	alpnHTTP1 = "http/1.1"
+)
+
 // connectHandler handles CONNECT requests for HTTPS MITM interception.
 type connectHandler struct {
 	certManager  *CertManager
@@ -240,7 +246,7 @@ func (h *connectHandler) probeUpstream(ctx context.Context, targetAddr, sni stri
 
 	// Default to HTTP/1.1 if no ALPN negotiated
 	if negotiatedProto == "" {
-		negotiatedProto = "http/1.1"
+		negotiatedProto = alpnHTTP1
 	}
 
 	// Cache the result
@@ -276,7 +282,7 @@ func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstrea
 	}()
 
 	switch protocol {
-	case "h2":
+	case alpnH2:
 		// HTTP/2 MITM
 		clientTLSConn, ok1 := clientTLS.(*tls.Conn)
 		upstreamTLSConn, ok2 := upstreamConn.(*tls.Conn)

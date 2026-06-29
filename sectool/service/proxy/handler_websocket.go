@@ -194,8 +194,8 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 	// Strip extensions from response (after rules, to ensure no compression)
 	h.stripResponseExtensions(resp)
 
-	// Store upgrade handshake in history and get reference for frame storage
-	historyEntry := h.storeHandshake(scheme, port, req, resp, startTime)
+	// Store upgrade handshake; frames reference its flow_id as their parent
+	parentFlowID := h.storeHandshake(scheme, port, req, resp, startTime)
 
 	// Send 101 to client
 	if _, err := clientConn.Write(resp.SerializeRaw(&buf)); err != nil {
@@ -206,7 +206,7 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 	// Start bidirectional frame proxy
 	proxy := &wsProxy{
 		handler:      h,
-		historyEntry: historyEntry,
+		parentFlowID: parentFlowID,
 		clientConn:   clientConn,
 		clientBuf:    clientReader,
 		upstreamConn: upstreamConn,
@@ -244,22 +244,23 @@ func (h *webSocketHandler) sendError(conn net.Conn, code int, message string) {
 }
 
 // storeHandshake stores the WebSocket upgrade handshake in history.
-// Returns the entry so frames can be appended to it, or nil if filtered.
-func (h *webSocketHandler) storeHandshake(scheme string, port int, req *RawHTTP1Request, resp *RawHTTP1Response, startTime time.Time) *HistoryEntry {
-	entry := &HistoryEntry{
-		Protocol:  "websocket",
-		Scheme:    scheme,
-		Port:      port,
-		Request:   req,
-		Response:  resp,
-		Timestamp: startTime,
-		Duration:  time.Since(startTime),
+// Returns the stored flow_id so frames can reference it as their parent,
+// or "" if the handshake was filtered out.
+func (h *webSocketHandler) storeHandshake(scheme string, port int, req *RawHTTP1Request, resp *RawHTTP1Response, startTime time.Time) string {
+	flow := &Flow{
+		Adapter:     protocolHTTP11,
+		ProtocolTag: protocolTagWS,
+		Scheme:      scheme,
+		Port:        port,
+		Request:     rawRequestToMessage(req),
+		Response:    rawResponseToMessage(resp),
+		StartedAt:   startTime,
+		CompletedAt: time.Now(),
 	}
-	if !h.history.ShouldCapture(entry) {
-		return nil
+	if !h.history.ShouldCapture(flow) {
+		return ""
 	}
-	h.history.Store(entry)
-	return entry
+	return h.history.Store(flow)
 }
 
 // =============================================================================
@@ -269,8 +270,7 @@ func (h *webSocketHandler) storeHandshake(scheme string, port int, req *RawHTTP1
 // wsProxy handles bidirectional WebSocket frame proxying.
 type wsProxy struct {
 	handler      *webSocketHandler
-	historyEntry *HistoryEntry // handshake entry where frames are appended
-	entryMu      sync.Mutex    // protects historyEntry.WSFrames
+	parentFlowID string // handshake flow_id; "" when the handshake was filtered out
 	clientConn   net.Conn
 	clientBuf    *bufio.Reader
 	upstreamConn net.Conn
@@ -350,30 +350,33 @@ func (p *wsProxy) proxyFrames(src *bufio.Reader, dst net.Conn, direction string,
 	}
 }
 
-// storeFrame appends a WebSocket frame to the handshake's history entry.
+// storeFrame stores a WebSocket frame as a child flow of the handshake.
 func (p *wsProxy) storeFrame(frame *wsFrame, direction string) {
-	if p.historyEntry == nil {
+	if p.parentFlowID == "" {
 		return
 	}
 
-	// Strip "ws:" prefix from direction for storage (e.g., "ws:to-server" -> "to-server")
-	dir := direction
-	if len(dir) > 3 && dir[:3] == "ws:" {
-		dir = dir[3:]
+	now := time.Now()
+	msg := &Message{
+		Method: methodFrame,
+		Path:   "/ws/" + strconv.Itoa(int(frame.opcode)),
+		Body:   frame.payload,
 	}
-
-	wsFrame := WSFrame{
-		Direction: dir,
-		Opcode:    frame.opcode,
-		Payload:   frame.payload,
-		Timestamp: time.Now(),
+	child := &Flow{
+		Adapter:      protocolTagWS,
+		ProtocolTag:  protocolTagWSFrame,
+		ParentFlowID: p.parentFlowID,
+		StartedAt:    now,
+		CompletedAt:  now,
 	}
-
-	p.entryMu.Lock()
-	p.historyEntry.WSFrames = append(p.historyEntry.WSFrames, wsFrame)
-	// Update while holding lock to prevent concurrent reads during marshaling
-	p.handler.history.Update(p.historyEntry)
-	p.entryMu.Unlock()
+	if direction == "ws:to-client" {
+		child.Direction = directionS2C
+		child.Response = msg
+	} else {
+		child.Direction = directionC2S
+		child.Request = msg
+	}
+	p.handler.history.Store(child)
 }
 
 func (p *wsProxy) close() {

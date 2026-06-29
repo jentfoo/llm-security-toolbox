@@ -21,8 +21,8 @@ func BuildCaptureFilter(cfg config.ProxyConfig) (proxy.CaptureFilter, error) {
 		return nil, fmt.Errorf("exclude_extensions: %w", err)
 	}
 
-	return func(entry *proxy.HistoryEntry) bool {
-		ext := strings.ToLower(strings.TrimPrefix(path.Ext(entry.GetPath()), "."))
+	return func(flow *proxy.Flow) bool {
+		ext := strings.ToLower(strings.TrimPrefix(path.Ext(flow.GetPath()), "."))
 		return ext == "" || !extRe.MatchString(ext)
 	}, nil
 }

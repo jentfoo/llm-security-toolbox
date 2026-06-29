@@ -22,8 +22,8 @@ func newTestHTTP1Handler(t *testing.T) *http1Handler {
 	return &http1Handler{history: history}
 }
 
-// firstEntry returns the oldest HistoryEntry in h. Test helper for offset-free assertions.
-func firstEntry(t *testing.T, h *HistoryStore) *HistoryEntry {
+// firstEntry returns the oldest Flow in h. Test helper for offset-free assertions.
+func firstEntry(t *testing.T, h *HistoryStore) *Flow {
 	t.Helper()
 
 	entries := h.Page(1, "")
@@ -575,7 +575,7 @@ func TestStoreEntry(t *testing.T) {
 		assert.Equal(t, 1, h.history.Count())
 
 		entry := firstEntry(t, h.history)
-		assert.Equal(t, "http/1.1", entry.Protocol)
+		assert.Equal(t, "http/1.1", entry.ProtocolTag)
 		assert.Equal(t, "GET", entry.Request.Method)
 		assert.Equal(t, 200, entry.Response.StatusCode)
 		assert.Equal(t, "http", entry.Scheme)

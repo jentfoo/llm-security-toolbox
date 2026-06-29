@@ -471,7 +471,7 @@ type resolvedFlow struct {
 	Source           string        // "proxy", "replay", "crawl"
 	Scheme           string        // "http" or "https" (empty = infer from host)
 	Port             int           // original port (0 = infer from scheme)
-	Protocol         string        // "http/1.1", "h2", or empty (defaults to http/1.1)
+	Protocol         string        // "http/1.1", "http/2", or empty (defaults to http/1.1)
 	Duration         time.Duration // replay, crawl (zero = not available)
 	FoundOn          string        // crawl only
 	Depth            int           // crawl only

@@ -50,7 +50,7 @@ func TestServe(t *testing.T) {
 		testutil.WaitForCount(t, func() int { return proxy.History().Count() }, 1)
 
 		entry := firstEntry(t, proxy.History())
-		assert.Equal(t, "http/1.1", entry.Protocol)
+		assert.Equal(t, "http/1.1", entry.ProtocolTag)
 		assert.Equal(t, "GET", entry.Request.Method)
 		assert.Equal(t, 200, entry.Response.StatusCode)
 	})
@@ -470,16 +470,6 @@ func (t *trackingRuleApplier) ApplyRequestRules(req *RawHTTP1Request) *RawHTTP1R
 }
 
 func (t *trackingRuleApplier) ApplyResponseRules(resp *RawHTTP1Response) *RawHTTP1Response {
-	t.responseCalled.Store(true)
-	return resp
-}
-
-func (t *trackingRuleApplier) ApplyH2RequestRules(req *H2RequestData) *H2RequestData {
-	t.requestCalled.Store(true)
-	return req
-}
-
-func (t *trackingRuleApplier) ApplyH2ResponseRules(resp *H2ResponseData) *H2ResponseData {
 	t.responseCalled.Store(true)
 	return resp
 }

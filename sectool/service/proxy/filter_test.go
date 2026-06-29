@@ -15,34 +15,34 @@ func TestShouldCapture(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
 
-		entry := &HistoryEntry{
-			Protocol: "http/1.1",
-			Request:  &RawHTTP1Request{Method: "GET", Path: "/style.css"},
+		flow := &Flow{
+			ProtocolTag: protocolHTTP11,
+			Request:     &Message{Method: "GET", Path: "/style.css"},
 		}
-		assert.True(t, h.ShouldCapture(entry))
+		assert.True(t, h.ShouldCapture(flow))
 	})
 
 	t.Run("filter_allows", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-		h.SetCaptureFilter(func(e *HistoryEntry) bool { return true })
+		h.SetCaptureFilter(func(f *Flow) bool { return true })
 
-		entry := &HistoryEntry{
-			Protocol: "http/1.1",
-			Request:  &RawHTTP1Request{Method: "GET", Path: "/api/data"},
+		flow := &Flow{
+			ProtocolTag: protocolHTTP11,
+			Request:     &Message{Method: "GET", Path: "/api/data"},
 		}
-		assert.True(t, h.ShouldCapture(entry))
+		assert.True(t, h.ShouldCapture(flow))
 	})
 
 	t.Run("filter_rejects", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-		h.SetCaptureFilter(func(e *HistoryEntry) bool { return false })
+		h.SetCaptureFilter(func(f *Flow) bool { return false })
 
-		entry := &HistoryEntry{
-			Protocol: "http/1.1",
-			Request:  &RawHTTP1Request{Method: "GET", Path: "/logo.png"},
+		flow := &Flow{
+			ProtocolTag: protocolHTTP11,
+			Request:     &Message{Method: "GET", Path: "/logo.png"},
 		}
-		assert.False(t, h.ShouldCapture(entry))
+		assert.False(t, h.ShouldCapture(flow))
 	})
 }

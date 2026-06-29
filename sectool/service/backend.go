@@ -120,7 +120,7 @@ type ProxyEntry struct {
 	// InterimResponses holds wire-formatted 1xx responses that preceded Response.
 	InterimResponses []string `json:"interim_responses,omitempty"`
 	Notes            string   `json:"notes"`
-	Protocol         string   `json:"protocol"`         // "http/1.1" or "h2" (empty defaults to http/1.1)
+	Protocol         string   `json:"protocol"`         // "http/1.1" or "http/2" (empty defaults to http/1.1)
 	Scheme           string   `json:"scheme,omitempty"` // "http" or "https" (empty = infer from host)
 	Port             int      `json:"port,omitempty"`   // original port (0 = infer from scheme)
 	// Placeholder marks an unparseable Burp entry that preserves offset contiguity; skipped for display.
@@ -138,7 +138,7 @@ type SendRequestInput struct {
 	FollowRedirects bool
 	Force           bool // Skip validation for protocol-level tests
 
-	// Protocol from the original history entry ("http/1.1" or "h2")
+	// Protocol from the original history entry ("http/1.1" or "http/2")
 	// Empty defaults to HTTP/1.1
 	Protocol string
 }

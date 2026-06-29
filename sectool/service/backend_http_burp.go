@@ -552,7 +552,7 @@ func (b *BurpBackend) sendWithRepeater(ctx context.Context, tabName string, req 
 	// Route to appropriate send method
 	var rawResponse string
 	var err error
-	if req.Protocol == "h2" {
+	if req.Protocol == "http/2" {
 		params := rawRequestToH2Params(req.RawRequest, req.Target)
 		rawResponse, err = b.client.SendHTTP2Request(ctx, params)
 	} else {
