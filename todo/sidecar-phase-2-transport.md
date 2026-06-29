@@ -26,7 +26,8 @@ three built-in HTTP adapters are registered in-process. This phase adds the
 **out-of-process** path: an external process connects to sectool over local IPC and
 registers as an adapter through a JSON-RPC bridge. From the registry's perspective an
 out-of-process sidecar is just another adapter, fronted by an in-process **bridge**
-that marshals the Go adapter interface to/from the wire.
+that marshals the Go adapter interfaces (`EarlyAdapter` / `UpgradeAdapter`, in
+`sectool/service/proxy/protocol`) to/from the wire.
 
 **The sidecar IPC server is owned by the native proxy backend.** The registry, the
 bridge, and the local-socket listener all live under the native proxy — they exist

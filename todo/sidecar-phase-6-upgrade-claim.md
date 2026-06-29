@@ -24,7 +24,8 @@ After Phase 4, sidecars claim connections from the first byte (`early_claim`). B
 many protocols begin as HTTP and switch mid-connection; the claim for those must fire
 at the upgrade point, not at accept. Today (pre-refactor) the 101 takeover was
 hard-wired to WebSocket via `isWebSocketUpgrade`, and h2c was rejected at accept;
-Phase 1 folded these into the registry, and this phase opens that seam to sidecars.
+Phase 1 folded the WS-101 takeover into the registry's `upgrade_claim` seam (h2c
+stays an accept-time guard, not a claim), and this phase opens that seam to sidecars.
 
 The spec's upgrade-claim seam (§2.3): sectool drives all HTTP framing itself
 (including the upgrade request), captures the triggering request as an HTTP flow,

@@ -110,10 +110,16 @@ in Phase 2, the out-of-process sidecar surface — scoped to the native backend.
   Children are stored payload-only and excluded from the `proxy_poll` listing /
   `flowOrder`, so external output is unchanged (frames are not surfaced today).
 - Update `proxy/history.go` (store/get/page) and the native backend's `ProxyEntry`
-  formatting (`backend_http_native.go`) to read from `Flow`. Keep `ProxyEntry`'s
-  external shape identical — it is the regression firewall. `protocol_tag="http/2"`
-  must surface back as the legacy `"h2"` (and `websocket` / `http/1.1` unchanged) so
-  `ProxyEntry.Protocol` and `HistoryMeta` stay byte-identical.
+  formatting (`backend_http_native.go`) to read from `Flow`. `ProxyEntry` stays the
+  boundary external consumers read (not `Flow` directly), so the swap stays inside the
+  proxy package plus the store — but byte-identity of `ProxyEntry`/`HistoryMeta` field
+  values is *not* a goal; only the agent-visible output must not regress. The
+  `protocol_tag` is carried through verbatim: HTTP/2 surfaces as `"http/2"` (the
+  internal selector was renamed from the old `"h2"`), `websocket` / `http/1.1`
+  unchanged. `ProxyEntry.Protocol` / `HistoryMeta.Protocol` are internal plumbing
+  (the value feeds replay's protocol selection and is not rendered in `proxy_poll` —
+  `FlowEntry` has no protocol field — nor in `flow_get`, which emits raw bytes via the
+  unchanged `formatH2*`), so the `"h2"`→`"http/2"` rename is not agent-visible.
 - **No record migration.** The history store is ephemeral — every record in a run is
   written by the current build, so there are no prior `HistoryEntry` records to
   convert and no version tag is needed. `HistoryEntry` and the H2/WS stored sub-types
@@ -131,9 +137,11 @@ in Phase 2, the out-of-process sidecar surface — scoped to the native backend.
 
 **1b — adapter registry + dispatch seam:**
 
-- Introduce a **minimal** in-process adapter interface and registry (e.g.
-  `sectool/service/adapter/`). Sized only to what the three built-in adapters need:
-  per-connection claim selection and dispatch. A representative shape:
+- Introduce a **minimal** in-process adapter interface and registry (the
+  `sectool/service/proxy/protocol` package — see "Implementation outcome"). Sized only
+  to what the three built-in adapters need: per-connection claim selection and dispatch.
+  A representative shape (realized as-built as two seams, `EarlyAdapter` /
+  `UpgradeAdapter`):
 
   ```go
   type Adapter interface {
@@ -151,6 +159,37 @@ in Phase 2, the out-of-process sidecar surface — scoped to the native backend.
   and the h2c-preface handling into the claim model rather than the special-cased
   switch — without changing observable behavior (h2c still rejected, WS still taken
   over after the handshake).
+
+## Implementation outcome (as built)
+
+Decisions taken during implementation that refine the scope above:
+
+- **Package layout.** The data model was relocated into a new `sectool/service/proxy/types`
+  package (`Flow`, `Message`, `RawHTTP1Request/Response`, `Header(s)`, `ChunkFrame`,
+  `WireFormat`, `LineEnding`, `Target`, `HistoryMeta`, `RuleApplier`, and the
+  `SerializeRaw`/`format*` helpers). The adapter registry lives in a separate
+  `sectool/service/proxy/protocol` package — **not** `sectool/service/adapter/`. Both choices
+  break the import cycle one-directionally (`proxy/types` ← `proxy/protocol` ← `proxy`, and
+  `proxy/types` ← `proxy`); a sibling/nested package without the type relocation would cycle
+  against `proxy` for `Target`/`RawHTTP1Request`/handler structs. References were re-qualified
+  to `types.X` directly (no re-export aliases). `HistoryStore`, the handlers, the parser, and
+  the sender stay in `proxy`.
+- **Two claim seams, not one.** Instead of a single `Adapter{Claim, Handle}`, `proxy/protocol`
+  defines `EarlyAdapter` (`Name`/`ClaimEarly`/`ServeEarly`) for accept-time claims and
+  `UpgradeAdapter` (`Name`/`ClaimUpgrade`/`ServeUpgrade`) for post-HTTP-upgrade claims, plus
+  `EarlyClaimCtx` / `UpgradeClaimCtx` / `UpgradeConns` context structs and a `Registry`
+  (`DispatchEarly` / `ClaimUpgrade`, first-claim-wins). The ALPN-h2 post-CONNECT path is
+  modeled as an `early_claim` on the decrypted stream (`TLSTerminated` + `ALPN`), unifying raw
+  accept and post-CONNECT into one seam.
+- **Handlers wrapped by thin shims.** `http1Adapter` / `http2Adapter` / `wsAdapter`
+  (`adapter_shims.go`) implement the interfaces over the existing handler structs; the handler
+  bodies (`handler_http2.go`, `handler_websocket.go`) are unchanged. `handler_http1.go` swapped
+  its `wsHandler` field for `reg *protocol.Registry` and routes the two WS-upgrade sites through
+  `ClaimUpgrade`.
+- **h2c reject and CONNECT stay as transport guards.** `handleConnection` keeps the
+  h2c-cleartext reject and the `CONNECT ` detection as pre-seam guards; the claim seam only
+  chooses among the three real capture adapters. `routeByProtocol` feeds the decrypted stream
+  back through `DispatchEarly`. (`http1` is the unconditional fallthrough, registered last.)
 
 ## Scope — `sidecar` package
 
@@ -188,14 +227,14 @@ Validation is via the existing proxy suites plus new golden-output regression
 
 ## Definition of done
 
-- [ ] `Flow` (with the single common `Message` envelope) replaces `HistoryEntry` in
+- [x] `Flow` (with the single common `Message` envelope) replaces `HistoryEntry` in
       the proxy package and store; no remaining protocol-union fields; `HistoryEntry`
       and the H2/WS stored sub-types deleted.
-- [ ] Adapters convert to the common type only at store time; wire/rules/serialization
+- [x] Adapters convert to the common type only at store time; wire/rules/serialization
       hot paths untouched.
-- [ ] WebSocket frames stored as child flows (`parent_flow_id`, `method=FRAME`),
+- [x] WebSocket frames stored as child flows (`parent_flow_id`, `method=FRAME`),
       excluded from the default listing.
-- [ ] Three built-in handlers implement the adapter interface; dispatch goes through
-      the registry claim; HTTP/2 cleartext and WS-101 behavior unchanged. *(1b)*
-- [ ] Golden `proxy_poll`/`flow_get` output unchanged; all existing tests green.
-- [ ] `make test-all` + `make lint` pass.
+- [x] Three built-in handlers implement the adapter interface (via thin shims); dispatch
+      goes through the registry claim; HTTP/2 cleartext and WS-101 behavior unchanged. *(1b)*
+- [x] Golden `proxy_poll`/`flow_get` output unchanged; all existing tests green.
+- [x] `make test-all` + `make lint` pass.
