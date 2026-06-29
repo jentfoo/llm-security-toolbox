@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
@@ -23,7 +24,7 @@ type http1Handler struct {
 	maxBodyBytes        int
 	ruleApplier         types.RuleApplier   // optional, nil means no rules applied
 	responseInterceptor ResponseInterceptor // optional, nil means no interception
-	wsHandler           *webSocketHandler   // optional, for WebSocket upgrade handling
+	reg                 *protocol.Registry  // optional, for upgrade-claim dispatch
 	timeouts            TimeoutConfig
 }
 
@@ -98,9 +99,12 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		req = h.ruleApplier.ApplyRequestRules(req)
 	}
 
-	if h.wsHandler != nil && isWebSocketUpgrade(req) {
-		h.wsHandler.Handle(ctx, clientConn, clientReader, req, target)
-		return false // WebSocket takes over
+	if h.reg != nil {
+		uc := &protocol.UpgradeClaimCtx{Req: req, Target: target}
+		if a, ok := h.reg.ClaimUpgrade(uc); ok {
+			a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{ClientConn: clientConn, ClientReader: clientReader})
+			return false // adapter takes over
+		}
 	}
 
 	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
@@ -393,10 +397,17 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		req = h.ruleApplier.ApplyRequestRules(req)
 	}
 
-	if h.wsHandler != nil && isWebSocketUpgrade(req) {
-		// Reuse existing upstream connection to avoid race window
-		h.wsHandler.HandleTLSWithUpstream(ctx, clientConn, clientReader, upstreamConn, upstreamReader, req, target)
-		return false // WebSocket takes over, don't continue loop
+	if h.reg != nil {
+		uc := &protocol.UpgradeClaimCtx{Req: req, Target: target, TLS: true}
+		if a, ok := h.reg.ClaimUpgrade(uc); ok {
+			a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{
+				ClientConn:     clientConn,
+				ClientReader:   clientReader,
+				UpstreamConn:   upstreamConn,
+				UpstreamReader: upstreamReader,
+			})
+			return false // adapter takes over
+		}
 	}
 
 	if h.timeouts.WriteTimeout > 0 {

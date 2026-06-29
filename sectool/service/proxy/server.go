@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
@@ -45,6 +46,9 @@ type ProxyServer struct {
 	http2Handler   *http2Handler
 	connectHandler *connectHandler
 	wsHandler      *webSocketHandler
+
+	// registry: per-connection adapter claim/dispatch
+	registry *protocol.Registry
 
 	// Shutdown coordination
 	ctx          context.Context
@@ -80,13 +84,25 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage
 	http1Handler := &http1Handler{
 		history:      history,
 		maxBodyBytes: maxBodyBytes,
-		wsHandler:    wsHandler,
 		timeouts:     timeouts,
 	}
 
 	http2Handler := newHTTP2Handler(history, maxBodyBytes, timeouts)
 
 	connectHandler := newConnectHandler(certManager, http1Handler, http2Handler, history, maxBodyBytes, timeouts)
+
+	// http1 is the unconditional fallthrough and must be registered last
+	registry := &protocol.Registry{
+		Early: []protocol.EarlyAdapter{
+			http2Adapter{h: http2Handler},
+			http1Adapter{h: http1Handler},
+		},
+		Upgrade: []protocol.UpgradeAdapter{
+			wsAdapter{h: wsHandler},
+		},
+	}
+	http1Handler.reg = registry
+	connectHandler.reg = registry
 
 	s := &ProxyServer{
 		listener:       listener,
@@ -98,6 +114,7 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage
 		http2Handler:   http2Handler,
 		connectHandler: connectHandler,
 		wsHandler:      wsHandler,
+		registry:       registry,
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -213,14 +230,18 @@ func (s *ProxyServer) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// CONNECT requests - handle HTTPS MITM
+	// CONNECT: tunnel + MITM, then re-enter the early seam via routeByProtocol
 	if bytes.HasPrefix(peek, []byte("CONNECT ")) {
 		s.connectHandler.Handle(s.ctx, conn, br)
 		return
 	}
 
-	// Default: HTTP/1.1 request
-	s.http1Handler.Handle(s.ctx, conn, br)
+	// raw accept; http1 adapter is the fallthrough
+	s.registry.DispatchEarly(s.ctx, &protocol.EarlyClaimCtx{
+		Peek:         peek,
+		ClientConn:   conn,
+		ClientReader: br,
+	})
 }
 
 // Shutdown gracefully stops the server.

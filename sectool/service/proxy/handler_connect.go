@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
@@ -27,6 +28,7 @@ type connectHandler struct {
 	certManager  *CertManager
 	http1Handler *http1Handler
 	http2Handler *http2Handler
+	reg          *protocol.Registry
 	history      *HistoryStore
 	maxBodyBytes int
 
@@ -276,30 +278,23 @@ func (h *connectHandler) dialUpstream(ctx context.Context, targetAddr, sni strin
 	return tlsDialer.DialContext(ctx, "tcp", targetAddr)
 }
 
-// routeByProtocol routes the connection to the appropriate protocol handler.
-func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, protocol string, target *types.Target) {
+// routeByProtocol feeds the decrypted post-CONNECT stream through the early-claim
+// seam, keyed on the negotiated ALPN (h2 → HTTP/2 adapter, else HTTP/1.1 fallthrough).
+func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, alpn string, target *types.Target) {
 	defer func() {
 		_ = clientTLS.Close()
 		_ = upstreamConn.Close()
 	}()
 
-	switch protocol {
-	case alpnH2:
-		// HTTP/2 MITM
-		clientTLSConn, ok1 := clientTLS.(*tls.Conn)
-		upstreamTLSConn, ok2 := upstreamConn.(*tls.Conn)
-		if ok1 && ok2 && h.http2Handler != nil {
-			h.http2Handler.Handle(ctx, clientTLSConn, upstreamTLSConn)
-		} else {
-			log.Printf("proxy: HTTP/2 handler not available or invalid connection types")
-		}
-
-	default:
-		// HTTP/1.1 or no ALPN
-		clientReader := bufio.NewReader(clientTLS)
-		upstreamReader := bufio.NewReader(upstreamConn)
-		h.http1Handler.HandleTLS(ctx, clientTLS, upstreamConn, clientReader, upstreamReader, target)
-	}
+	h.reg.DispatchEarly(ctx, &protocol.EarlyClaimCtx{
+		TLSTerminated:  true,
+		ALPN:           alpn,
+		Target:         target,
+		ClientConn:     clientTLS,
+		ClientReader:   bufio.NewReader(clientTLS),
+		UpstreamConn:   upstreamConn,
+		UpstreamReader: bufio.NewReader(upstreamConn),
+	})
 }
 
 // sendConnectError writes an HTTP error response for CONNECT failures.
