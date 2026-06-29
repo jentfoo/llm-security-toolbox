@@ -230,4 +230,4 @@ conflicting/over-version capabilities), heartbeats, reconnects with a stable
       migration via build-time `Config.Version` + per-field backfill.
 - [x] Root `sidecar` package exists, depends on nothing under `sectool/`, drives the
       fixture end-to-end.
-- [ ] `make test-all` + `make lint` pass; no-sidecar behavior unchanged.
+- [x] `make test-all` + `make lint` pass; no-sidecar behavior unchanged.

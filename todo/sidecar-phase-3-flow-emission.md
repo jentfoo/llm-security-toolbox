@@ -109,6 +109,9 @@ sidecar can inspect captured traffic and the rule list while implementing its lo
   sidecar's own logic over RPC, not by intercepted sockets.
 - Rule push and mutation audit pairs → Phase 7.
 - Replay/origination of emitted flows → Phase 8.
+- `find_reflected` **cross-flow pairing** of one-way request/response flows
+  (same-adapter / shared-`parent_flow_id`, spec §8) → deferred. Phase 3 keeps the
+  single-flow behavior, which already covers adapter flows that carry both sides.
 
 ## Test fixture
 
@@ -127,21 +130,48 @@ calls to read back what it pushed.
 - `core_query` returns correct read-side results and rejects write attempts.
 - `proxy_poll`/`flow_get` filter on `adapter`/`protocol_tag`/`parent_flow_id`.
 - Each flow records the emitting adapter name, sidecar version, and instance_id.
-- `find_reflected` pairs same-adapter / shared-`parent_flow_id` flows (HTTP default
-  unchanged); `diff_flow` content-type detection works on adapter flows.
+- `find_reflected` operates on adapter flows carrying both sides (single-flow; HTTP
+  default unchanged); `diff_flow` content-type detection works on adapter flows.
 - `log`/`report_metrics` intake observed. End-to-end through MCP tools, no socket.
 - `make test-all` + `make lint` pass; no-sidecar behavior unchanged.
 
+## Implementation decisions (as built)
+
+These refine the description above where they conflict:
+
+- **`core_query` wiring via dependency injection, not a setter.** `EnableSidecars`
+  takes the `CoreQuerier` (the `*Server`, which resolves its read-side MCP tools
+  lazily through an atomic pointer once the MCP server is built). All sidecar wiring
+  stays inside `NativeProxyBackend.EnableSidecars`; no type assertion or post-hoc
+  setter in `server.Run`.
+- **`body_raw`/`body_codec` live on `Message`** (request and response sides) and are
+  populated only when the logical `body` differs from the wire form; nil for HTTP and
+  most flows, so no bytes are duplicated in the common case.
+- **Sidecar identity** is recorded as the forced `Flow.adapter` (the registered name)
+  plus `annotations.sidecar_version` / `annotations.sidecar_instance_id`.
+- **Stream/session children** are surfaced via a `parent_flow_id` filter on
+  `proxy_poll`, backed by a parent->children emission-order index on the history store
+  (`Children`) and an `HttpBackend.GetProxyChildren` method (empty for Burp). Children
+  stay excluded from the default top-level listing.
+- **`find_reflected` stays single-flow** for this phase: it operates on adapter flows
+  carrying both sides; cross-flow pairing of one-way messages is deferred.
+- **SDK emission helpers** are `PushFlow` plus `CompleteFlow` (the two-phase /
+  teardown form), with `Log`, `ReportMetrics`, and `CoreQuery`. Streams and
+  session/tunnel nesting are expressed by setting `parent_flow_id` on `PushFlow`
+  rather than dedicated open-stream / push-child helpers.
+- **CLI parity**: `--adapter` / `--protocol-tag` / `--parent-flow-id` added to
+  `proxy list`.
+
 ## Definition of done
 
-- [ ] `push_flow` supports single, two-phase, stream (ordered children), and
+- [x] `push_flow` supports single, two-phase, stream (ordered children), and
       session/tunnel shapes, with `body_raw`/`body_codec` storage.
-- [ ] `log`, `report_metrics`, `core_query` (read-only) implemented.
-- [ ] `adapter`/`protocol_tag`/`parent_flow_id` filters live in `proxy_poll`/
+- [x] `log`, `report_metrics`, `core_query` (read-only) implemented.
+- [x] `adapter`/`protocol_tag`/`parent_flow_id` filters live in `proxy_poll`/
       `flow_get`; per-flow identity (adapter name, version, instance_id) recorded.
-- [ ] `find_reflected`/`diff_flow` generalized to non-HTTP flows (HTTP behavior
+- [x] `find_reflected`/`diff_flow` generalized to non-HTTP flows (HTTP behavior
       unchanged; variant encodings stay HTTP-specific).
-- [ ] Flow-pusher fixture validates all shapes end-to-end through MCP tools.
-- [ ] `sidecar` package gains the emission + `core_query` helpers; still no
+- [x] Flow-pusher fixture validates all shapes end-to-end through MCP tools.
+- [x] `sidecar` package gains the emission + `core_query` helpers; still no
       `sectool/` dependency.
-- [ ] `make test-all` + `make lint` pass.
+- [x] `make test-all` + `make lint` pass.
