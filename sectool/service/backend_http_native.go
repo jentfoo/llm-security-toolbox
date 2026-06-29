@@ -17,6 +17,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
@@ -61,7 +62,7 @@ type nativeStoredRule struct {
 
 // Compile-time checks that NativeProxyBackend implements interfaces.
 var _ HttpBackend = (*NativeProxyBackend)(nil)
-var _ proxy.RuleApplier = (*NativeProxyBackend)(nil)
+var _ types.RuleApplier = (*NativeProxyBackend)(nil)
 var _ proxy.ResponseInterceptor = (*NativeProxyBackend)(nil)
 var _ ResponderBackend = (*NativeProxyBackend)(nil)
 
@@ -285,7 +286,7 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 
 	opts := proxy.SendOptions{
 		RawRequest: rawRequest,
-		Target: proxy.Target{
+		Target: types.Target{
 			Hostname:  req.Target.Hostname,
 			Port:      req.Target.Port,
 			UsesHTTPS: req.Target.UsesHTTPS,
@@ -467,7 +468,7 @@ func (b *NativeProxyBackend) labelExists(label string) bool {
 // Rules are applied in the order they were added.
 // When response body rules are active, strips unsupported encodings
 // from Accept-Encoding so the server responds with an encoding we can decompress.
-func (b *NativeProxyBackend) ApplyRequestRules(req *proxy.RawHTTP1Request) *proxy.RawHTTP1Request {
+func (b *NativeProxyBackend) ApplyRequestRules(req *types.RawHTTP1Request) *types.RawHTTP1Request {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
@@ -508,7 +509,7 @@ func (b *NativeProxyBackend) ApplyRequestRules(req *proxy.RawHTTP1Request) *prox
 
 // ApplyResponseRules applies response header and body rules.
 // Handles decompression/recompression for body rules.
-func (b *NativeProxyBackend) ApplyResponseRules(resp *proxy.RawHTTP1Response) *proxy.RawHTTP1Response {
+func (b *NativeProxyBackend) ApplyResponseRules(resp *types.RawHTTP1Response) *types.RawHTTP1Response {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
@@ -571,7 +572,7 @@ func (b *NativeProxyBackend) HasBodyRules(isRequest bool) bool {
 // ApplyRequestBodyOnlyRules applies only body rules to a request body.
 // Used by HTTP/2 where headers are sent separately before body.
 // If recompression fails, returns error so caller can reset the stream.
-func (b *NativeProxyBackend) ApplyRequestBodyOnlyRules(body []byte, headers proxy.Headers) ([]byte, error) {
+func (b *NativeProxyBackend) ApplyRequestBodyOnlyRules(body []byte, headers types.Headers) ([]byte, error) {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
@@ -594,7 +595,7 @@ func (b *NativeProxyBackend) ApplyRequestBodyOnlyRules(body []byte, headers prox
 // ApplyResponseBodyOnlyRules applies only body rules to a response body.
 // Used by HTTP/2 where headers are sent separately before body.
 // If recompression fails, returns original body to avoid corrupting response.
-func (b *NativeProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers proxy.Headers) []byte {
+func (b *NativeProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers types.Headers) []byte {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
@@ -616,7 +617,7 @@ func (b *NativeProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers pro
 }
 
 // applyRequestHeaderRules applies header rules to request.
-func (b *NativeProxyBackend) applyRequestHeaderRules(req *proxy.RawHTTP1Request, rules []nativeStoredRule) *proxy.RawHTTP1Request {
+func (b *NativeProxyBackend) applyRequestHeaderRules(req *types.RawHTTP1Request, rules []nativeStoredRule) *types.RawHTTP1Request {
 	// Serialize headers to text format
 	var headerBuf bytes.Buffer
 	for _, h := range req.Headers {
@@ -645,7 +646,7 @@ func (b *NativeProxyBackend) applyRequestHeaderRules(req *proxy.RawHTTP1Request,
 }
 
 // applyRequestBodyRules applies body rules to request with compression handling.
-func (b *NativeProxyBackend) applyRequestBodyRules(req *proxy.RawHTTP1Request, rules []nativeStoredRule) *proxy.RawHTTP1Request {
+func (b *NativeProxyBackend) applyRequestBodyRules(req *types.RawHTTP1Request, rules []nativeStoredRule) *types.RawHTTP1Request {
 	encoding := req.GetHeader("Content-Encoding")
 	result := applyBodyRulesWithCompression(req.Body, encoding, rules)
 
@@ -665,7 +666,7 @@ func (b *NativeProxyBackend) applyRequestBodyRules(req *proxy.RawHTTP1Request, r
 }
 
 // applyResponseHeaderRules applies header rules to response.
-func (b *NativeProxyBackend) applyResponseHeaderRules(resp *proxy.RawHTTP1Response, rules []nativeStoredRule) *proxy.RawHTTP1Response {
+func (b *NativeProxyBackend) applyResponseHeaderRules(resp *types.RawHTTP1Response, rules []nativeStoredRule) *types.RawHTTP1Response {
 	// Serialize headers to text format
 	var headerBuf bytes.Buffer
 	for _, h := range resp.Headers {
@@ -694,7 +695,7 @@ func (b *NativeProxyBackend) applyResponseHeaderRules(resp *proxy.RawHTTP1Respon
 }
 
 // applyResponseBodyRules applies body rules to response with compression handling.
-func (b *NativeProxyBackend) applyResponseBodyRules(resp *proxy.RawHTTP1Response, rules []nativeStoredRule) *proxy.RawHTTP1Response {
+func (b *NativeProxyBackend) applyResponseBodyRules(resp *types.RawHTTP1Response, rules []nativeStoredRule) *types.RawHTTP1Response {
 	encoding := resp.GetHeader("Content-Encoding")
 	result := applyBodyRulesWithCompression(resp.Body, encoding, rules)
 
@@ -848,9 +849,9 @@ func replaceCaseInsensitive(input []byte, match, replace string) []byte {
 }
 
 // parseHeadersFromText parses "Name: Value\r\n" lines into Header slice.
-func parseHeadersFromText(text []byte) []proxy.Header {
+func parseHeadersFromText(text []byte) []types.Header {
 	lines := bytes.Split(text, []byte("\r\n"))
-	headers := make([]proxy.Header, 0, len(lines))
+	headers := make([]types.Header, 0, len(lines))
 	for _, line := range lines {
 		if len(line) == 0 {
 			continue
@@ -862,7 +863,7 @@ func parseHeadersFromText(text []byte) []proxy.Header {
 		}
 		name := string(line[:idx])
 		value := string(bytes.TrimSpace(line[idx+1:]))
-		headers = append(headers, proxy.Header{Name: name, Value: value})
+		headers = append(headers, types.Header{Name: name, Value: value})
 	}
 	return headers
 }

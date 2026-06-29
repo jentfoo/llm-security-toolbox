@@ -1,4 +1,8 @@
-package proxy
+// Package types holds the proxy capture data model — the wire-fidelity HTTP/1.1
+// request/response types, the common Flow/Message envelope, and the rule-applier
+// contract. It is depended on by the proxy package and the adapter registry
+// (proxy/protocol) without forming an import cycle.
+package types
 
 import (
 	"slices"
@@ -9,21 +13,26 @@ import (
 )
 
 // Protocol tags identify the protocol within a stored Flow. They occupy the
-// slot HTTP flows historically used for the HTTP version. The HTTP/1.1 and
-// HTTP/2 tags are protocolHTTP11 / protocolH2.
+// slot HTTP flows historically used for the HTTP version.
 const (
-	protocolTagWS      = "websocket"       // upgrade handshake flow
-	protocolTagWSFrame = "websocket.frame" // per-frame child flow
+	ProtocolHTTP11 = "http/1.1"
+	ProtocolH2     = "http/2"
 
-	directionC2S = "client_to_server"
-	directionS2C = "server_to_client"
+	ProtocolTagWS      = "websocket"       // upgrade handshake flow
+	ProtocolTagWSFrame = "websocket.frame" // per-frame child flow
 
-	// headerStreamID carries the wire stream id (e.g. an HTTP/2 stream id);
+	SchemeHTTP  = "http"
+	SchemeHTTPS = "https"
+
+	DirectionC2S = "client_to_server"
+	DirectionS2C = "server_to_client"
+
+	// HeaderStreamID carries the wire stream id (e.g. an HTTP/2 stream id);
 	// folded into request headers and skipped when serializing for display.
-	headerStreamID = "X-Sectool-Stream-Id"
+	HeaderStreamID = "X-Sectool-Stream-Id"
 
-	// methodFrame is the synthetic method used for WebSocket frame child flows.
-	methodFrame = "FRAME"
+	// MethodFrame is the synthetic method used for WebSocket frame child flows.
+	MethodFrame = "FRAME"
 )
 
 // LineEnding identifies the terminator used on a single HTTP line.
@@ -313,8 +322,8 @@ func (m *Message) SetBody(b []byte) {
 	m.Chunks = nil
 }
 
-// rawRequestToMessage converts a parsed HTTP/1.1 request into a store Message.
-func rawRequestToMessage(r *RawHTTP1Request) *Message {
+// RequestToMessage converts a parsed HTTP/1.1 request into a store Message.
+func RequestToMessage(r *RawHTTP1Request) *Message {
 	return &Message{
 		Method:            r.Method,
 		Path:              r.Path,
@@ -330,8 +339,8 @@ func rawRequestToMessage(r *RawHTTP1Request) *Message {
 	}
 }
 
-// rawResponseToMessage converts a parsed HTTP/1.1 response into a store Message.
-func rawResponseToMessage(r *RawHTTP1Response) *Message {
+// ResponseToMessage converts a parsed HTTP/1.1 response into a store Message.
+func ResponseToMessage(r *RawHTTP1Response) *Message {
 	return &Message{
 		Version:           r.Version,
 		StatusCode:        r.StatusCode,
@@ -358,7 +367,7 @@ func (m *Message) toRawRequest() *RawHTTP1Request {
 		Body:              m.Body,
 		Trailers:          m.Trailers,
 		Chunks:            m.Chunks,
-		Protocol:          protocolHTTP11,
+		Protocol:          ProtocolHTTP11,
 		RequestLineEnding: m.FirstLineEnding,
 		HeaderBlockEnding: m.HeaderBlockEnding,
 		Wire:              m.Wire,
@@ -380,51 +389,6 @@ func (m *Message) toRawResponse() *RawHTTP1Response {
 		Wire:              m.Wire,
 		CloseDelimited:    m.CloseDelimited,
 	}
-}
-
-// Flow is the generalized store record for one logical exchange. It carries an
-// optional request and response Message under a single flow_id, replacing the
-// protocol-unioned HistoryEntry. Child flows (e.g. WebSocket frames) reference a
-// parent via ParentFlowID.
-type Flow struct {
-	// FlowID is the unique identifier, minted at Store time.
-	FlowID string `json:"flow_id" msgpack:"fid"`
-
-	// Adapter is the name of the adapter that emitted the flow.
-	Adapter string `json:"adapter" msgpack:"ad"`
-
-	// ProtocolTag is the protocol identifier within the adapter
-	// (e.g. "http/1.1", "http/2", "websocket", "websocket.frame").
-	ProtocolTag string `json:"protocol_tag" msgpack:"pr"`
-
-	// Direction orients a one-way message: client_to_server, server_to_client,
-	// or bidirectional. Empty for two-sided request/response flows.
-	Direction string `json:"direction,omitempty" msgpack:"dir,omitempty"`
-
-	// ParentFlowID links a child flow to its parent (e.g. a frame to its handshake).
-	ParentFlowID string `json:"parent_flow_id,omitempty" msgpack:"pid,omitempty"`
-
-	// Scheme is the captured request scheme ("http" or "https").
-	Scheme string `json:"scheme,omitempty" msgpack:"sc,omitempty"`
-	// Port is the captured upstream port.
-	Port int `json:"port,omitempty" msgpack:"po,omitempty"`
-
-	// Request and/or Response sides of the exchange.
-	Request  *Message `json:"request,omitempty" msgpack:"rq,omitempty"`
-	Response *Message `json:"response,omitempty" msgpack:"rs,omitempty"`
-
-	// InterimResponses holds 1xx responses received before the final Response.
-	InterimResponses []*Message `json:"interim_responses,omitempty" msgpack:"ir,omitempty"`
-
-	// Timing metadata.
-	StartedAt   time.Time `json:"started_at" msgpack:"ts"`
-	CompletedAt time.Time `json:"completed_at,omitempty" msgpack:"ca,omitempty"`
-
-	// Annotations is open-ended typed metadata; reserved for later phases.
-	Annotations map[string]any `json:"annotations,omitempty" msgpack:"an,omitempty"`
-
-	// SizeHint is the content length when known, for fast list pagination.
-	SizeHint int `json:"size_hint,omitempty" msgpack:"sh,omitempty"`
 }
 
 // HistoryMeta holds lightweight metadata extracted at store time.
@@ -454,9 +418,9 @@ type Target struct {
 // Scheme returns "https" when UsesHTTPS, else "http".
 func (t *Target) Scheme() string {
 	if t.UsesHTTPS {
-		return schemeHTTPS
+		return SchemeHTTPS
 	}
-	return schemeHTTP
+	return SchemeHTTP
 }
 
 // RuleApplier applies find/replace rules to requests and responses.

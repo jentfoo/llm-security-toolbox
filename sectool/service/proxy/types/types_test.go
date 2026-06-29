@@ -1,4 +1,4 @@
-package proxy
+package types
 
 import (
 	"bytes"
@@ -50,12 +50,12 @@ func TestMessage(t *testing.T) {
 			},
 			Body:              []byte("hello"),
 			Chunks:            []ChunkFrame{{Size: 5}},
-			Protocol:          protocolHTTP11,
+			Protocol:          ProtocolHTTP11,
 			RequestLineEnding: EndingBareLF,
 			HeaderBlockEnding: EndingCRLF,
 		}
 
-		got := rawRequestToMessage(orig).toRawRequest()
+		got := RequestToMessage(orig).toRawRequest()
 		assert.Equal(t, orig, got)
 
 		var bufA, bufB bytes.Buffer
@@ -75,7 +75,7 @@ func TestMessage(t *testing.T) {
 			CloseDelimited:    true,
 		}
 
-		got := rawResponseToMessage(orig).toRawResponse()
+		got := ResponseToMessage(orig).toRawResponse()
 		assert.Equal(t, orig, got)
 
 		var bufA, bufB bytes.Buffer

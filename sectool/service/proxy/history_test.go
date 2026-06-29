@@ -9,14 +9,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
-func newTestEntry(method, path string) *Flow {
-	return &Flow{
-		Adapter:     protocolHTTP11,
-		ProtocolTag: protocolHTTP11,
-		Request: &Message{
+func newTestEntry(method, path string) *types.Flow {
+	return &types.Flow{
+		Adapter:     types.ProtocolHTTP11,
+		ProtocolTag: types.ProtocolHTTP11,
+		Request: &types.Message{
 			Method:  method,
 			Path:    path,
 			Version: "HTTP/1.1",
@@ -26,22 +27,22 @@ func newTestEntry(method, path string) *Flow {
 }
 
 // newTestEntryAt produces a test flow with an explicit start time.
-func newTestEntryAt(method, path string, ts time.Time) *Flow {
+func newTestEntryAt(method, path string, ts time.Time) *types.Flow {
 	f := newTestEntry(method, path)
 	f.StartedAt = ts
 	return f
 }
 
 // h2Req builds a request Message with folded HTTP/2 pseudo-headers.
-func h2Req(method, authority, path string, body []byte, hdrs ...Header) *Message {
-	headers := Headers{
+func h2Req(method, authority, path string, body []byte, hdrs ...types.Header) *types.Message {
+	headers := types.Headers{
 		{Name: ":method", Value: method},
 		{Name: ":scheme", Value: "https"},
 		{Name: ":authority", Value: authority},
 		{Name: ":path", Value: path},
 	}
 	headers = append(headers, hdrs...)
-	return &Message{Headers: headers, Body: body}
+	return &types.Message{Headers: headers, Body: body}
 }
 
 func TestHistoryStore_Store(t *testing.T) {
@@ -75,12 +76,12 @@ func TestHistoryStore_Store(t *testing.T) {
 		t.Cleanup(h.Close)
 
 		parent := h.Store(newTestEntry("GET", "/ws"))
-		child := h.Store(&Flow{
-			Adapter:      protocolTagWS,
-			ProtocolTag:  protocolTagWSFrame,
-			Direction:    directionC2S,
+		child := h.Store(&types.Flow{
+			Adapter:      types.ProtocolTagWS,
+			ProtocolTag:  types.ProtocolTagWSFrame,
+			Direction:    types.DirectionC2S,
 			ParentFlowID: parent,
-			Request:      &Message{Method: methodFrame, Path: "/ws/1", Body: []byte("hi")},
+			Request:      &types.Message{Method: types.MethodFrame, Path: "/ws/1", Body: []byte("hi")},
 			StartedAt:    time.Now(),
 		})
 
@@ -150,27 +151,27 @@ func TestHistoryStore_Get(t *testing.T) {
 		t.Cleanup(h.Close)
 
 		ts := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
-		flow := &Flow{
-			Adapter:     protocolHTTP11,
-			ProtocolTag: protocolHTTP11,
+		flow := &types.Flow{
+			Adapter:     types.ProtocolHTTP11,
+			ProtocolTag: types.ProtocolHTTP11,
 			StartedAt:   ts,
 			CompletedAt: ts.Add(250 * time.Millisecond),
-			Request: &Message{
+			Request: &types.Message{
 				Method:  "POST",
 				Path:    "/api/data",
 				Query:   "foo=bar",
 				Version: "HTTP/1.1",
-				Headers: []Header{
+				Headers: []types.Header{
 					{Name: "Content-Type", Value: "application/json"},
 					{Name: "x-custom", Value: "value"},
 				},
 				Body: []byte(`{"key":"value"}`),
 			},
-			Response: &Message{
+			Response: &types.Message{
 				Version:    "HTTP/1.1",
 				StatusCode: 201,
 				StatusText: "Created",
-				Headers:    []Header{{Name: "Content-Type", Value: "application/json"}},
+				Headers:    []types.Header{{Name: "Content-Type", Value: "application/json"}},
 				Body:       []byte(`{"id":123}`),
 			},
 		}
@@ -382,19 +383,19 @@ func TestFormatRequest(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		flow    *Flow
+		flow    *types.Flow
 		wantNil bool
 		check   func(t *testing.T, result []byte)
 	}{
 		{
 			name: "http1_request",
-			flow: &Flow{
-				ProtocolTag: protocolHTTP11,
-				Request: &Message{
+			flow: &types.Flow{
+				ProtocolTag: types.ProtocolHTTP11,
+				Request: &types.Message{
 					Method:  "GET",
 					Path:    "/test",
 					Version: "HTTP/1.1",
-					Headers: []Header{{Name: "Host", Value: "example.com"}},
+					Headers: []types.Header{{Name: "Host", Value: "example.com"}},
 				},
 			},
 			check: func(t *testing.T, result []byte) {
@@ -405,9 +406,9 @@ func TestFormatRequest(t *testing.T) {
 		},
 		{
 			name: "h2_request",
-			flow: &Flow{
-				ProtocolTag: protocolH2,
-				Request:     h2Req("POST", "example.com", "/api", []byte(`{"test":1}`), Header{Name: "content-type", Value: "application/json"}),
+			flow: &types.Flow{
+				ProtocolTag: types.ProtocolH2,
+				Request:     h2Req("POST", "example.com", "/api", []byte(`{"test":1}`), types.Header{Name: "content-type", Value: "application/json"}),
 			},
 			check: func(t *testing.T, result []byte) {
 				t.Helper()
@@ -419,11 +420,11 @@ func TestFormatRequest(t *testing.T) {
 		},
 		{
 			name: "h2_pseudo_headers_folded",
-			flow: &Flow{
-				ProtocolTag: protocolH2,
+			flow: &types.Flow{
+				ProtocolTag: types.ProtocolH2,
 				Request: h2Req("GET", "example.com", "/x", nil,
-					Header{Name: headerStreamID, Value: "7"},
-					Header{Name: "accept", Value: "*/*"}),
+					types.Header{Name: types.HeaderStreamID, Value: "7"},
+					types.Header{Name: "accept", Value: "*/*"}),
 			},
 			check: func(t *testing.T, result []byte) {
 				t.Helper()
@@ -431,25 +432,25 @@ func TestFormatRequest(t *testing.T) {
 				// request line/host, never re-emitted as headers.
 				assert.NotContains(t, string(result), ":method")
 				assert.NotContains(t, string(result), ":path")
-				assert.NotContains(t, string(result), headerStreamID)
+				assert.NotContains(t, string(result), types.HeaderStreamID)
 				assert.Contains(t, string(result), "GET /x HTTP/1.1")
 				assert.Contains(t, string(result), "accept: */*")
 			},
 		},
 		{
 			name:    "nil_request",
-			flow:    &Flow{ProtocolTag: protocolHTTP11},
+			flow:    &types.Flow{ProtocolTag: types.ProtocolHTTP11},
 			wantNil: true,
 		},
 		{
 			name: "http1_empty_body",
-			flow: &Flow{
-				ProtocolTag: protocolHTTP11,
-				Request: &Message{
+			flow: &types.Flow{
+				ProtocolTag: types.ProtocolHTTP11,
+				Request: &types.Message{
 					Method:  "GET",
 					Path:    "/",
 					Version: "HTTP/1.1",
-					Headers: []Header{{Name: "Host", Value: "example.com"}},
+					Headers: []types.Header{{Name: "Host", Value: "example.com"}},
 					Body:    []byte{},
 				},
 			},
@@ -479,19 +480,19 @@ func TestFormatResponse(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		flow    *Flow
+		flow    *types.Flow
 		wantNil bool
 		check   func(t *testing.T, result []byte)
 	}{
 		{
 			name: "http1_response",
-			flow: &Flow{
-				ProtocolTag: protocolHTTP11,
-				Response: &Message{
+			flow: &types.Flow{
+				ProtocolTag: types.ProtocolHTTP11,
+				Response: &types.Message{
 					Version:    "HTTP/1.1",
 					StatusCode: 200,
 					StatusText: "OK",
-					Headers:    []Header{{Name: "Content-Type", Value: "text/plain"}},
+					Headers:    []types.Header{{Name: "Content-Type", Value: "text/plain"}},
 					Body:       []byte("Hello"),
 				},
 			},
@@ -504,11 +505,11 @@ func TestFormatResponse(t *testing.T) {
 		},
 		{
 			name: "h2_response",
-			flow: &Flow{
-				ProtocolTag: protocolH2,
-				Response: &Message{
+			flow: &types.Flow{
+				ProtocolTag: types.ProtocolH2,
+				Response: &types.Message{
 					StatusCode: 201,
-					Headers:    []Header{{Name: "content-type", Value: "application/json"}},
+					Headers:    []types.Header{{Name: "content-type", Value: "application/json"}},
 					Body:       []byte(`{"id":1}`),
 				},
 			},
@@ -521,14 +522,14 @@ func TestFormatResponse(t *testing.T) {
 		},
 		{
 			name:    "nil_response",
-			flow:    &Flow{ProtocolTag: protocolHTTP11},
+			flow:    &types.Flow{ProtocolTag: types.ProtocolHTTP11},
 			wantNil: true,
 		},
 		{
 			name: "h2_nonstandard_status",
-			flow: &Flow{
-				ProtocolTag: protocolH2,
-				Response:    &Message{StatusCode: 999},
+			flow: &types.Flow{
+				ProtocolTag: types.ProtocolH2,
+				Response:    &types.Message{StatusCode: 999},
 			},
 			check: func(t *testing.T, result []byte) {
 				t.Helper()
@@ -538,9 +539,9 @@ func TestFormatResponse(t *testing.T) {
 		},
 		{
 			name: "http1_empty_body",
-			flow: &Flow{
-				ProtocolTag: protocolHTTP11,
-				Response: &Message{
+			flow: &types.Flow{
+				ProtocolTag: types.ProtocolHTTP11,
+				Response: &types.Message{
 					Version:    "HTTP/1.1",
 					StatusCode: 204,
 					StatusText: "No Content",
@@ -572,32 +573,32 @@ func TestGetPath(t *testing.T) {
 
 	tests := []struct {
 		name string
-		flow *Flow
+		flow *types.Flow
 		want string
 	}{
 		{
 			name: "http1",
-			flow: &Flow{ProtocolTag: protocolHTTP11, Request: &Message{Path: "/api/users"}},
+			flow: &types.Flow{ProtocolTag: types.ProtocolHTTP11, Request: &types.Message{Path: "/api/users"}},
 			want: "/api/users",
 		},
 		{
 			name: "h2_no_query",
-			flow: &Flow{ProtocolTag: protocolH2, Request: h2Req("GET", "example.com", "/api/data", nil)},
+			flow: &types.Flow{ProtocolTag: types.ProtocolH2, Request: h2Req("GET", "example.com", "/api/data", nil)},
 			want: "/api/data",
 		},
 		{
 			name: "h2_strips_query",
-			flow: &Flow{ProtocolTag: protocolH2, Request: h2Req("GET", "example.com", "/search?q=test&page=1", nil)},
+			flow: &types.Flow{ProtocolTag: types.ProtocolH2, Request: h2Req("GET", "example.com", "/search?q=test&page=1", nil)},
 			want: "/search",
 		},
 		{
 			name: "nil_http1",
-			flow: &Flow{ProtocolTag: protocolHTTP11},
+			flow: &types.Flow{ProtocolTag: types.ProtocolHTTP11},
 			want: "",
 		},
 		{
 			name: "nil_h2",
-			flow: &Flow{ProtocolTag: protocolH2},
+			flow: &types.Flow{ProtocolTag: types.ProtocolH2},
 			want: "",
 		},
 	}
@@ -614,37 +615,37 @@ func TestGetHost(t *testing.T) {
 
 	tests := []struct {
 		name string
-		flow *Flow
+		flow *types.Flow
 		want string
 	}{
 		{
 			name: "http1",
-			flow: &Flow{ProtocolTag: protocolHTTP11, Request: &Message{Headers: []Header{{Name: "Host", Value: "example.com"}}}},
+			flow: &types.Flow{ProtocolTag: types.ProtocolHTTP11, Request: &types.Message{Headers: []types.Header{{Name: "Host", Value: "example.com"}}}},
 			want: "example.com",
 		},
 		{
 			name: "h2",
-			flow: &Flow{ProtocolTag: protocolH2, Request: h2Req("GET", "api.example.com", "/", nil)},
+			flow: &types.Flow{ProtocolTag: types.ProtocolH2, Request: h2Req("GET", "api.example.com", "/", nil)},
 			want: "api.example.com",
 		},
 		{
 			name: "nil_http1",
-			flow: &Flow{ProtocolTag: protocolHTTP11},
+			flow: &types.Flow{ProtocolTag: types.ProtocolHTTP11},
 			want: "",
 		},
 		{
 			name: "nil_h2",
-			flow: &Flow{ProtocolTag: protocolH2},
+			flow: &types.Flow{ProtocolTag: types.ProtocolH2},
 			want: "",
 		},
 		{
 			name: "http1_case_insensitive",
-			flow: &Flow{ProtocolTag: protocolHTTP11, Request: &Message{Headers: []Header{{Name: "host", Value: "lowercase.com"}}}},
+			flow: &types.Flow{ProtocolTag: types.ProtocolHTTP11, Request: &types.Message{Headers: []types.Header{{Name: "host", Value: "lowercase.com"}}}},
 			want: "lowercase.com",
 		},
 		{
 			name: "http1_no_host_header",
-			flow: &Flow{ProtocolTag: protocolHTTP11, Request: &Message{Headers: []Header{{Name: "X-Custom", Value: "value"}}}},
+			flow: &types.Flow{ProtocolTag: types.ProtocolHTTP11, Request: &types.Message{Headers: []types.Header{{Name: "X-Custom", Value: "value"}}}},
 			want: "",
 		},
 	}
@@ -661,37 +662,37 @@ func TestGetRequestHeader(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		flow       *Flow
+		flow       *types.Flow
 		headerName string
 		want       string
 	}{
 		{
 			name:       "http1",
-			flow:       &Flow{ProtocolTag: protocolHTTP11, Request: &Message{Headers: []Header{{Name: "Content-Type", Value: "application/json"}}}},
+			flow:       &types.Flow{ProtocolTag: types.ProtocolHTTP11, Request: &types.Message{Headers: []types.Header{{Name: "Content-Type", Value: "application/json"}}}},
 			headerName: "Content-Type",
 			want:       "application/json",
 		},
 		{
 			name:       "h2",
-			flow:       &Flow{ProtocolTag: protocolH2, Request: h2Req("GET", "example.com", "/", nil, Header{Name: "authorization", Value: "Bearer token"})},
+			flow:       &types.Flow{ProtocolTag: types.ProtocolH2, Request: h2Req("GET", "example.com", "/", nil, types.Header{Name: "authorization", Value: "Bearer token"})},
 			headerName: "authorization",
 			want:       "Bearer token",
 		},
 		{
 			name:       "nil_request",
-			flow:       &Flow{ProtocolTag: protocolHTTP11},
+			flow:       &types.Flow{ProtocolTag: types.ProtocolHTTP11},
 			headerName: "Content-Type",
 			want:       "",
 		},
 		{
 			name:       "case_insensitive_lookup",
-			flow:       &Flow{ProtocolTag: protocolHTTP11, Request: &Message{Headers: []Header{{Name: "Content-Type", Value: "text/plain"}}}},
+			flow:       &types.Flow{ProtocolTag: types.ProtocolHTTP11, Request: &types.Message{Headers: []types.Header{{Name: "Content-Type", Value: "text/plain"}}}},
 			headerName: "content-type",
 			want:       "text/plain",
 		},
 		{
 			name: "first_matching_header",
-			flow: &Flow{ProtocolTag: protocolHTTP11, Request: &Message{Headers: []Header{
+			flow: &types.Flow{ProtocolTag: types.ProtocolHTTP11, Request: &types.Message{Headers: []types.Header{
 				{Name: "X-Custom", Value: "first"},
 				{Name: "x-custom", Value: "second"},
 			}}},
@@ -712,37 +713,37 @@ func TestGetResponseHeader(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		flow       *Flow
+		flow       *types.Flow
 		headerName string
 		want       string
 	}{
 		{
 			name:       "http1",
-			flow:       &Flow{ProtocolTag: protocolHTTP11, Response: &Message{Headers: []Header{{Name: "Content-Type", Value: "text/html"}}}},
+			flow:       &types.Flow{ProtocolTag: types.ProtocolHTTP11, Response: &types.Message{Headers: []types.Header{{Name: "Content-Type", Value: "text/html"}}}},
 			headerName: "Content-Type",
 			want:       "text/html",
 		},
 		{
 			name:       "h2",
-			flow:       &Flow{ProtocolTag: protocolH2, Response: &Message{Headers: []Header{{Name: "x-request-id", Value: "abc123"}}}},
+			flow:       &types.Flow{ProtocolTag: types.ProtocolH2, Response: &types.Message{Headers: []types.Header{{Name: "x-request-id", Value: "abc123"}}}},
 			headerName: "x-request-id",
 			want:       "abc123",
 		},
 		{
 			name:       "nil_response",
-			flow:       &Flow{ProtocolTag: protocolHTTP11},
+			flow:       &types.Flow{ProtocolTag: types.ProtocolHTTP11},
 			headerName: "Content-Type",
 			want:       "",
 		},
 		{
 			name:       "case_insensitive_lookup",
-			flow:       &Flow{ProtocolTag: protocolHTTP11, Response: &Message{Headers: []Header{{Name: "Content-Type", Value: "text/plain"}}}},
+			flow:       &types.Flow{ProtocolTag: types.ProtocolHTTP11, Response: &types.Message{Headers: []types.Header{{Name: "Content-Type", Value: "text/plain"}}}},
 			headerName: "content-type",
 			want:       "text/plain",
 		},
 		{
 			name: "first_matching_header",
-			flow: &Flow{ProtocolTag: protocolHTTP11, Response: &Message{Headers: []Header{
+			flow: &types.Flow{ProtocolTag: types.ProtocolHTTP11, Response: &types.Message{Headers: []types.Header{
 				{Name: "Set-Cookie", Value: "first=1"},
 				{Name: "Set-Cookie", Value: "second=2"},
 			}}},

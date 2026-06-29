@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-analyze/bulk"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"golang.org/x/net/http2"
 )
 
@@ -35,7 +36,7 @@ type Sender struct {
 
 	// RequestRuleApplier applies find/replace rules to each request before sending.
 	// Called for every request including redirect hops. If nil, no rules are applied.
-	RequestRuleApplier func(req *RawHTTP1Request) *RawHTTP1Request
+	RequestRuleApplier func(req *types.RawHTTP1Request) *types.RawHTTP1Request
 
 	// Timeouts holds configurable timeout values for dial, read, and write.
 	// Zero values mean no timeout.
@@ -45,7 +46,7 @@ type Sender struct {
 // SendOptions configures request sending.
 type SendOptions struct {
 	RawRequest    []byte         // Raw HTTP request bytes
-	Target        Target         // Where to send
+	Target        types.Target   // Where to send
 	Modifications *Modifications // Optional changes
 	Force         bool           // Bypass validation
 
@@ -68,7 +69,7 @@ type Modifications struct {
 }
 
 type SendResult struct {
-	Response *RawHTTP1Response
+	Response *types.RawHTTP1Response
 	Duration time.Duration
 
 	// ModifiedRequest holds the first hop's post-rule request bytes, set only when rules
@@ -77,7 +78,7 @@ type SendResult struct {
 }
 
 // prepareRequest parses raw request bytes, applies modifications, and optionally validates.
-func (s *Sender) prepareRequest(rawRequest []byte, mods *Modifications, force bool) (*RawHTTP1Request, error) {
+func (s *Sender) prepareRequest(rawRequest []byte, mods *Modifications, force bool) (*types.RawHTTP1Request, error) {
 	req, err := ParseRequest(bytes.NewReader(rawRequest))
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
@@ -102,15 +103,15 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 
 	// Validate protocol early (applies to all paths)
 	switch opts.Protocol {
-	case "", protocolHTTP11, protocolH2:
+	case "", types.ProtocolHTTP11, types.ProtocolH2:
 		// Valid values
 	default:
-		return nil, fmt.Errorf("invalid protocol %q: must be %q, %q, or empty", opts.Protocol, protocolHTTP11, protocolH2)
+		return nil, fmt.Errorf("invalid protocol %q: must be %q, %q, or empty", opts.Protocol, types.ProtocolHTTP11, types.ProtocolH2)
 	}
 
 	// No modifications + HTTP/1.1: send raw bytes for wire fidelity.
 	// H2 always requires framing, so it falls through to prepareRequest.
-	isHTTP11 := opts.Protocol == "" || opts.Protocol == protocolHTTP11
+	isHTTP11 := opts.Protocol == "" || opts.Protocol == types.ProtocolHTTP11
 	if isHTTP11 && isEmptyModifications(opts.Modifications) {
 		// Validate when force=false (parse-only, does not re-serialize)
 		if !opts.Force {
@@ -205,7 +206,7 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 		}
 
 		// Build the next hop from the pristine base, not the rule-applied sendReq
-		var newTarget Target
+		var newTarget types.Target
 		currentBase, newTarget, currentPath, err = buildRedirectRequest(currentBase, location, currentTarget, currentPath, resp.StatusCode)
 		if err != nil {
 			// Can't follow redirect, return current response
@@ -226,7 +227,7 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 		// probed when sendRequestWithProtocol attempts the TLS handshake with H2 ALPN.
 		// If the server doesn't support H2, an error is returned (per spec: no silent downgrade).
 		// Same-origin redirects maintain the current protocol.
-		if isCrossOrigin && currentProtocol == protocolH2 && !newTarget.UsesHTTPS {
+		if isCrossOrigin && currentProtocol == types.ProtocolH2 && !newTarget.UsesHTTPS {
 			// H2 requires HTTPS - if redirect goes to HTTP, that's a protocol mismatch
 			return nil, errors.New("cross-origin redirect from HTTPS to HTTP cannot maintain HTTP/2; replay as HTTP/1.1 manually if desired")
 		}
@@ -237,17 +238,17 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 }
 
 // sendRequestWithProtocol sends a single request with protocol preference.
-func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Request, target Target, protocol string) (*RawHTTP1Response, error) {
+func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *types.RawHTTP1Request, target types.Target, protocol string) (*types.RawHTTP1Response, error) {
 	// Validate protocol value
 	switch protocol {
-	case "", protocolHTTP11, protocolH2:
+	case "", types.ProtocolHTTP11, types.ProtocolH2:
 		// Valid values
 	default:
-		return nil, fmt.Errorf("invalid protocol %q: must be %q, %q, or empty", protocol, protocolHTTP11, protocolH2)
+		return nil, fmt.Errorf("invalid protocol %q: must be %q, %q, or empty", protocol, types.ProtocolHTTP11, types.ProtocolH2)
 	}
 
 	// HTTP/2 requires HTTPS
-	if protocol == protocolH2 && !target.UsesHTTPS {
+	if protocol == types.ProtocolH2 && !target.UsesHTTPS {
 		return nil, errors.New("HTTP/2 requires HTTPS; cannot send h2 request to non-TLS target")
 	}
 
@@ -259,7 +260,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 		// Build ALPN list based on protocol preference
 		var nextProtos []string
 		minVersion := uint16(tls.VersionTLS10)
-		if protocol == protocolH2 {
+		if protocol == types.ProtocolH2 {
 			// Prefer H2, fallback to H1
 			nextProtos = []string{alpnH2, alpnHTTP1}
 			// HTTP/2 requires TLS 1.2+ in practice (ALPN extension, cipher requirements)
@@ -287,7 +288,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 		tlsConn := conn.(*tls.Conn)
 		negotiated := tlsConn.ConnectionState().NegotiatedProtocol
 
-		if protocol == protocolH2 {
+		if protocol == types.ProtocolH2 {
 			if negotiated == "h2" {
 				// Send as HTTP/2 - set combined deadline since H2 multiplexes reads/writes
 				defer func() { _ = conn.Close() }()
@@ -335,7 +336,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *RawHTTP1Reque
 // applyModifications applies all modifications to a request.
 // Content-Length is auto-updated on body changes unless the user explicitly
 // set it via SetHeaders. Force only disables validation, not CL behavior.
-func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications, force bool) error {
+func (s *Sender) applyModifications(req *types.RawHTTP1Request, mods *Modifications, force bool) error {
 	if mods == nil {
 		return nil
 	}
@@ -365,7 +366,7 @@ func (s *Sender) applyModifications(req *RawHTTP1Request, mods *Modifications, f
 			idx := strings.Index(entry, ":")
 			name := strings.TrimSpace(entry[:idx])
 			value := strings.TrimSpace(entry[idx+1:])
-			req.Headers = append(req.Headers, Header{Name: name, Value: value})
+			req.Headers = append(req.Headers, types.Header{Name: name, Value: value})
 		}
 	}
 
@@ -414,7 +415,7 @@ func isEmptyModifications(mods *Modifications) bool {
 
 // sendRawRequest sends raw request bytes without parsing/serializing.
 // Used for wire fidelity when no modifications are needed (HTTP/1.1 only).
-func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*RawHTTP1Response, error) {
+func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*types.RawHTTP1Response, error) {
 	method := ExtractMethod(opts.RawRequest)
 
 	targetAddr := fmt.Sprintf("%s:%d", opts.Target.Hostname, opts.Target.Port)
@@ -462,7 +463,7 @@ func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*RawHTTP
 
 // applyQueryModifications modifies query parameters in the request path
 // using raw string manipulation to preserve original parameter order and encoding.
-func applyQueryModifications(req *RawHTTP1Request, mods *Modifications) {
+func applyQueryModifications(req *types.RawHTTP1Request, mods *Modifications) {
 	// Convert map entries to "key=value" strings with URL encoding
 	keys := bulk.MapKeysSlice(mods.SetParams)
 	slices.Sort(keys)
@@ -474,7 +475,7 @@ func applyQueryModifications(req *RawHTTP1Request, mods *Modifications) {
 }
 
 // buildRedirectRequest builds a new request for following a redirect.
-func buildRedirectRequest(originalReq *RawHTTP1Request, location string, currentTarget Target, currentPath string, status int) (*RawHTTP1Request, Target, string, error) {
+func buildRedirectRequest(originalReq *types.RawHTTP1Request, location string, currentTarget types.Target, currentPath string, status int) (*types.RawHTTP1Request, types.Target, string, error) {
 	// Determine method and body preservation
 	preserveMethod := status == 307 || status == 308
 	preserveBody := status == 307 || status == 308
@@ -482,11 +483,11 @@ func buildRedirectRequest(originalReq *RawHTTP1Request, location string, current
 	// Resolve location
 	newTarget, newPath, err := resolveRedirectLocation(location, currentTarget, currentPath)
 	if err != nil {
-		return nil, Target{}, "", err
+		return nil, types.Target{}, "", err
 	}
 
 	// Build new request
-	newReq := &RawHTTP1Request{
+	newReq := &types.RawHTTP1Request{
 		Method:   "GET",
 		Path:     PathWithoutQuery(newPath),
 		Query:    queryFromPath(newPath),
@@ -540,17 +541,17 @@ func buildRedirectRequest(originalReq *RawHTTP1Request, location string, current
 }
 
 // resolveRedirectLocation resolves a Location header to target and path.
-func resolveRedirectLocation(location string, currentTarget Target, currentPath string) (Target, string, error) {
+func resolveRedirectLocation(location string, currentTarget types.Target, currentPath string) (types.Target, string, error) {
 	// Absolute URL
 	if strings.HasPrefix(location, "http://") || strings.HasPrefix(location, "https://") {
 		u, err := url.Parse(location)
 		if err != nil {
-			return Target{}, "", err
+			return types.Target{}, "", err
 		}
 
-		target := Target{
+		target := types.Target{
 			Hostname:  u.Hostname(),
-			UsesHTTPS: u.Scheme == schemeHTTPS,
+			UsesHTTPS: u.Scheme == types.SchemeHTTPS,
 		}
 		if u.Port() != "" {
 			target.Port, _ = strconv.Atoi(u.Port())
@@ -565,18 +566,18 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 
 	// Protocol-relative URL
 	if strings.HasPrefix(location, "//") {
-		scheme := schemeHTTPS
+		scheme := types.SchemeHTTPS
 		if !currentTarget.UsesHTTPS {
-			scheme = schemeHTTP
+			scheme = types.SchemeHTTP
 		}
 		u, err := url.Parse(scheme + ":" + location)
 		if err != nil {
-			return Target{}, "", err
+			return types.Target{}, "", err
 		}
 
-		target := Target{
+		target := types.Target{
 			Hostname:  u.Hostname(),
-			UsesHTTPS: scheme == schemeHTTPS,
+			UsesHTTPS: scheme == types.SchemeHTTPS,
 		}
 		if u.Port() != "" {
 			target.Port, _ = strconv.Atoi(u.Port())
@@ -617,7 +618,7 @@ func queryFromPath(p string) string {
 
 // sendH2Request sends a request using HTTP/2 protocol.
 // The connection must already be established with ALPN negotiating "h2".
-func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *RawHTTP1Request, target Target) (*RawHTTP1Response, error) {
+func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *types.RawHTTP1Request, target types.Target) (*types.RawHTTP1Response, error) {
 	// Create HTTP/2 connection wrapper
 	h2c := newH2Conn(conn)
 
@@ -664,7 +665,7 @@ func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *RawHTTP1
 	pseudos := map[string]string{
 		":method":    req.Method,
 		":path":      requestPath,
-		":scheme":    schemeHTTPS,
+		":scheme":    types.SchemeHTTPS,
 		":authority": authority,
 	}
 
@@ -903,8 +904,8 @@ func (s *Sender) readH2SettingsAndAck(framer *http2.Framer, h2c *h2Conn) error {
 
 // readH2Response reads an HTTP/2 response from the framer. It first processes any
 // frames buffered during flow control waiting, then continues reading from the framer.
-func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint32, bufferedFrames []http2.Frame) (*RawHTTP1Response, error) {
-	var headers, trailers Headers
+func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint32, bufferedFrames []http2.Frame) (*types.RawHTTP1Response, error) {
+	var headers, trailers types.Headers
 	var statusCode int
 	var body bytes.Buffer
 	var gotInitialHeaders bool
@@ -930,7 +931,7 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 
 	// processHeaderBlock decodes the accumulated header block when END_HEADERS is set
 	// Returns a response if stream is complete, nil otherwise
-	processHeaderBlock := func() (*RawHTTP1Response, error) {
+	processHeaderBlock := func() (*types.RawHTTP1Response, error) {
 		// Always decode to keep the HPACK dynamic table synchronized; skipping a
 		// block (even for another stream) corrupts every later decode
 		pseudos, hdrs, err := h2c.decodeHeaders(headerBlock.Bytes())
@@ -1083,12 +1084,12 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 
 // buildH2ResponseWithTrailers creates a RawHTTP1Response from HTTP/2 response data.
 // Trailers are appended to headers for compatibility with HTTP/1.1-style response handling.
-func buildH2ResponseWithTrailers(statusCode int, headers, trailers Headers, body []byte) *RawHTTP1Response {
+func buildH2ResponseWithTrailers(statusCode int, headers, trailers types.Headers, body []byte) *types.RawHTTP1Response {
 	allHeaders := headers
 	if len(trailers) > 0 {
 		allHeaders = append(allHeaders, trailers...)
 	}
-	return &RawHTTP1Response{
+	return &types.RawHTTP1Response{
 		Version:    "HTTP/2",
 		StatusCode: statusCode,
 		StatusText: http.StatusText(statusCode),

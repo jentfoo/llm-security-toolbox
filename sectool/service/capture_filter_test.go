@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/toolbox/sectool/config"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 func TestBuildCaptureFilter(t *testing.T) {
@@ -99,10 +99,10 @@ func TestBuildCaptureFilter(t *testing.T) {
 }
 
 // h1Entry creates an HTTP/1.1 Flow for testing.
-func h1Entry(method, urlPath string) *proxy.Flow {
-	return &proxy.Flow{
+func h1Entry(method, urlPath string) *types.Flow {
+	return &types.Flow{
 		ProtocolTag: "http/1.1",
-		Request: &proxy.Message{
+		Request: &types.Message{
 			Method: method,
 			Path:   urlPath,
 		},
@@ -110,11 +110,11 @@ func h1Entry(method, urlPath string) *proxy.Flow {
 }
 
 // h2Entry creates an HTTP/2 Flow with the path folded into the :path pseudo-header.
-func h2Entry(method, urlPath string) *proxy.Flow {
-	return &proxy.Flow{
+func h2Entry(method, urlPath string) *types.Flow {
+	return &types.Flow{
 		ProtocolTag: "http/2",
-		Request: &proxy.Message{
-			Headers: proxy.Headers{
+		Request: &types.Message{
+			Headers: types.Headers{
 				{Name: ":method", Value: method},
 				{Name: ":path", Value: urlPath},
 			},

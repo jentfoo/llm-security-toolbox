@@ -12,21 +12,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
-const (
-	protocolHTTP11 = "http/1.1"
-
-	schemeHTTP  = "http"
-	schemeHTTPS = "https"
-
-	connectionClose = "close"
-)
+const connectionClose = "close"
 
 type http1Handler struct {
 	history             *HistoryStore
 	maxBodyBytes        int
-	ruleApplier         RuleApplier         // optional, nil means no rules applied
+	ruleApplier         types.RuleApplier   // optional, nil means no rules applied
 	responseInterceptor ResponseInterceptor // optional, nil means no interception
 	wsHandler           *webSocketHandler   // optional, for WebSocket upgrade handling
 	timeouts            TimeoutConfig
@@ -81,7 +76,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 
 	// Rewrite proxy-form to origin-form
 	h.rewriteToOriginForm(req, target)
-	req.Protocol = protocolHTTP11
+	req.Protocol = types.ProtocolHTTP11
 
 	// Check for response interception before rules and upstream dial
 	if h.responseInterceptor != nil {
@@ -143,7 +138,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	}
 
 	upstreamReader := bufio.NewReader(upstreamConn)
-	interim, resp, err := readFinalResponse(upstreamReader, req.Method, func(ir *RawHTTP1Response) error {
+	interim, resp, err := readFinalResponse(upstreamReader, req.Method, func(ir *types.RawHTTP1Response) error {
 		return h.forwardInterim(clientConn, ir)
 	})
 	if err != nil {
@@ -196,9 +191,9 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 }
 
 // extractTarget determines the upstream server from the request.
-func (h *http1Handler) extractTarget(req *RawHTTP1Request) (*Target, error) {
+func (h *http1Handler) extractTarget(req *types.RawHTTP1Request) (*types.Target, error) {
 	// Check for proxy-form URL (absolute URI)
-	if strings.HasPrefix(req.Path, schemeHTTP+"://") || strings.HasPrefix(req.Path, schemeHTTPS+"://") {
+	if strings.HasPrefix(req.Path, types.SchemeHTTP+"://") || strings.HasPrefix(req.Path, types.SchemeHTTPS+"://") {
 		return h.parseProxyFormURL(req.Path)
 	}
 
@@ -212,19 +207,19 @@ func (h *http1Handler) extractTarget(req *RawHTTP1Request) (*Target, error) {
 }
 
 // parseProxyFormURL parses an absolute URI like http://example.com:8080/path
-func (h *http1Handler) parseProxyFormURL(rawURL string) (*Target, error) {
+func (h *http1Handler) parseProxyFormURL(rawURL string) (*types.Target, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid proxy-form URL: %w", err)
 	}
 
-	usesHTTPS := u.Scheme == schemeHTTPS
+	usesHTTPS := u.Scheme == types.SchemeHTTPS
 	return h.parseHostPort(u.Host, usesHTTPS)
 }
 
 // parseHostPort parses host:port, defaulting port based on scheme.
 // Handles IPv6 addresses with brackets (e.g., "[::1]:8080" or "[::1]").
-func (h *http1Handler) parseHostPort(hostPort string, usesHTTPS bool) (*Target, error) {
+func (h *http1Handler) parseHostPort(hostPort string, usesHTTPS bool) (*types.Target, error) {
 	host, portStr, err := net.SplitHostPort(hostPort)
 	if err != nil {
 		// No port specified, use default
@@ -242,7 +237,7 @@ func (h *http1Handler) parseHostPort(hostPort string, usesHTTPS bool) (*Target, 
 		return nil, fmt.Errorf("invalid port: %s", portStr)
 	}
 
-	return &Target{
+	return &types.Target{
 		Hostname:  host,
 		Port:      port,
 		UsesHTTPS: usesHTTPS,
@@ -250,9 +245,9 @@ func (h *http1Handler) parseHostPort(hostPort string, usesHTTPS bool) (*Target, 
 }
 
 // rewriteToOriginForm converts proxy-form requests to origin-form.
-func (h *http1Handler) rewriteToOriginForm(req *RawHTTP1Request, target *Target) {
+func (h *http1Handler) rewriteToOriginForm(req *types.RawHTTP1Request, target *types.Target) {
 	// If path is an absolute URI, extract just the path component
-	if strings.HasPrefix(req.Path, schemeHTTP+"://") || strings.HasPrefix(req.Path, schemeHTTPS+"://") {
+	if strings.HasPrefix(req.Path, types.SchemeHTTP+"://") || strings.HasPrefix(req.Path, types.SchemeHTTPS+"://") {
 		u, err := url.Parse(req.Path)
 		if err != nil {
 			return
@@ -281,11 +276,11 @@ func isTimeoutError(err error) bool {
 // sendError writes an HTTP error response to the client.
 func (h *http1Handler) sendError(conn net.Conn, code int, message string) {
 	body := []byte(message + "\n")
-	resp := &RawHTTP1Response{
+	resp := &types.RawHTTP1Response{
 		Version:    "HTTP/1.1",
 		StatusCode: code,
 		StatusText: message,
-		Headers: []Header{
+		Headers: []types.Header{
 			{Name: "Content-Type", Value: "text/plain"},
 			{Name: "Content-Length", Value: strconv.Itoa(len(body))},
 			{Name: "Connection", Value: "close"},
@@ -296,7 +291,7 @@ func (h *http1Handler) sendError(conn net.Conn, code int, message string) {
 }
 
 // forwardInterim writes an interim 1xx response to the client as-is (no rules applied).
-func (h *http1Handler) forwardInterim(clientConn net.Conn, ir *RawHTTP1Response) error {
+func (h *http1Handler) forwardInterim(clientConn net.Conn, ir *types.RawHTTP1Response) error {
 	var buf bytes.Buffer
 	if h.timeouts.WriteTimeout > 0 {
 		_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
@@ -306,21 +301,21 @@ func (h *http1Handler) forwardInterim(clientConn net.Conn, ir *RawHTTP1Response)
 }
 
 // storeEntry saves the request/response pair, plus any interim 1xx responses, to history.
-func (h *http1Handler) storeEntry(target *Target, req *RawHTTP1Request, resp *RawHTTP1Response, interim []*RawHTTP1Response, startTime time.Time) {
-	flow := &Flow{
-		Adapter:     protocolHTTP11,
-		ProtocolTag: protocolHTTP11,
+func (h *http1Handler) storeEntry(target *types.Target, req *types.RawHTTP1Request, resp *types.RawHTTP1Response, interim []*types.RawHTTP1Response, startTime time.Time) {
+	flow := &types.Flow{
+		Adapter:     types.ProtocolHTTP11,
+		ProtocolTag: types.ProtocolHTTP11,
 		Scheme:      target.Scheme(),
 		Port:        target.Port,
-		Request:     rawRequestToMessage(req),
+		Request:     types.RequestToMessage(req),
 		StartedAt:   startTime,
 		CompletedAt: time.Now(),
 	}
 	if resp != nil {
-		flow.Response = rawResponseToMessage(resp)
+		flow.Response = types.ResponseToMessage(resp)
 	}
 	for _, ir := range interim {
-		flow.InterimResponses = append(flow.InterimResponses, rawResponseToMessage(ir))
+		flow.InterimResponses = append(flow.InterimResponses, types.ResponseToMessage(ir))
 	}
 	if !h.history.ShouldCapture(flow) {
 		return
@@ -332,7 +327,7 @@ func (h *http1Handler) storeEntry(target *Target, req *RawHTTP1Request, resp *Ra
 // Used by CONNECT handler after TLS handshake is complete.
 // Loops handling request/response pairs until connection closes.
 // target is needed for WebSocket upgrade detection (wss://).
-func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader *bufio.Reader, upstreamReader *bufio.Reader, target *Target) {
+func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader *bufio.Reader, upstreamReader *bufio.Reader, target *types.Target) {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -359,7 +354,7 @@ func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn n
 
 // handleSingleTLS handles a single HTTP/1.1 request/response exchange over TLS.
 // Returns true to continue processing more requests, false to close connection.
-func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader, upstreamReader *bufio.Reader, target *Target) bool {
+func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstreamConn net.Conn, clientReader, upstreamReader *bufio.Reader, target *types.Target) bool {
 	startTime := time.Now()
 	var buf bytes.Buffer
 
@@ -373,7 +368,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		return false
 	}
 
-	req.Protocol = protocolHTTP11
+	req.Protocol = types.ProtocolHTTP11
 
 	// Check for response interception before rules and upstream send
 	if h.responseInterceptor != nil {
@@ -423,7 +418,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		_ = upstreamConn.SetReadDeadline(time.Now().Add(h.timeouts.ReadTimeout))
 	}
 
-	interim, resp, err := readFinalResponse(upstreamReader, req.Method, func(ir *RawHTTP1Response) error {
+	interim, resp, err := readFinalResponse(upstreamReader, req.Method, func(ir *types.RawHTTP1Response) error {
 		return h.forwardInterim(clientConn, ir)
 	})
 	if err != nil {

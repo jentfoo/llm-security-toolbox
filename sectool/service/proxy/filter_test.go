@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
@@ -15,9 +16,9 @@ func TestShouldCapture(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
 
-		flow := &Flow{
-			ProtocolTag: protocolHTTP11,
-			Request:     &Message{Method: "GET", Path: "/style.css"},
+		flow := &types.Flow{
+			ProtocolTag: types.ProtocolHTTP11,
+			Request:     &types.Message{Method: "GET", Path: "/style.css"},
 		}
 		assert.True(t, h.ShouldCapture(flow))
 	})
@@ -25,11 +26,11 @@ func TestShouldCapture(t *testing.T) {
 	t.Run("filter_allows", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-		h.SetCaptureFilter(func(f *Flow) bool { return true })
+		h.SetCaptureFilter(func(f *types.Flow) bool { return true })
 
-		flow := &Flow{
-			ProtocolTag: protocolHTTP11,
-			Request:     &Message{Method: "GET", Path: "/api/data"},
+		flow := &types.Flow{
+			ProtocolTag: types.ProtocolHTTP11,
+			Request:     &types.Message{Method: "GET", Path: "/api/data"},
 		}
 		assert.True(t, h.ShouldCapture(flow))
 	})
@@ -37,11 +38,11 @@ func TestShouldCapture(t *testing.T) {
 	t.Run("filter_rejects", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
-		h.SetCaptureFilter(func(f *Flow) bool { return false })
+		h.SetCaptureFilter(func(f *types.Flow) bool { return false })
 
-		flow := &Flow{
-			ProtocolTag: protocolHTTP11,
-			Request:     &Message{Method: "GET", Path: "/logo.png"},
+		flow := &types.Flow{
+			ProtocolTag: types.ProtocolHTTP11,
+			Request:     &types.Message{Method: "GET", Path: "/logo.png"},
 		}
 		assert.False(t, h.ShouldCapture(flow))
 	})

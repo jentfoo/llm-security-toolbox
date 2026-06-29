@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/go-analyze/bulk"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 // ParseAuthority extracts host and port from an HTTP/2 :authority pseudo-header.
@@ -15,7 +16,7 @@ import (
 // scheme is used to determine default port ("https" -> 443, else 80).
 func ParseAuthority(authority, scheme string) (string, int) {
 	defaultPort := 80
-	if scheme == schemeHTTPS {
+	if scheme == types.SchemeHTTPS {
 		defaultPort = 443
 	}
 

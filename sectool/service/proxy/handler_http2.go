@@ -15,14 +15,11 @@ import (
 	"time"
 
 	"github.com/go-analyze/bulk"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"golang.org/x/net/http2"
 )
 
 const (
-	// protocolH2 is sectool's internal protocol selector for HTTP/2.
-	// Distinct from the ALPN wire token "h2" used during TLS negotiation.
-	protocolH2 = "http/2"
-
 	// initialWindowSize is the HTTP/2 default window (64KB)
 	initialWindowSize = 65535
 	streamIdleTimeout = 5 * time.Minute
@@ -60,7 +57,7 @@ const (
 // http2Handler handles HTTP/2 MITM interception.
 type http2Handler struct {
 	history             *HistoryStore
-	ruleApplier         RuleApplier
+	ruleApplier         types.RuleApplier
 	responseInterceptor ResponseInterceptor
 	maxBodyBytes        int
 	timeouts            TimeoutConfig
@@ -76,7 +73,7 @@ func newHTTP2Handler(history *HistoryStore, maxBodyBytes int, timeouts TimeoutCo
 }
 
 // SetRuleApplier sets the rule applier for header and body modifications.
-func (h *http2Handler) SetRuleApplier(applier RuleApplier) {
+func (h *http2Handler) SetRuleApplier(applier types.RuleApplier) {
 	h.ruleApplier = applier
 }
 
@@ -93,12 +90,12 @@ type h2Stream struct {
 	scheme     string
 	authority  string
 	path       string
-	reqHeaders Headers
+	reqHeaders types.Headers
 	reqBody    bytes.Buffer // history capture (limited to maxBodyBytes)
 
 	// Response data
 	statusCode  int
-	respHeaders Headers
+	respHeaders types.Headers
 	respBody    bytes.Buffer // history capture (limited to maxBodyBytes)
 
 	// Full body buffers for body rule application (when rules exist)
@@ -632,7 +629,7 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 			if p.handler.ruleApplier != nil {
 				// Convert to RawHTTP1Request for rule application
 				pathPart, queryPart, _ := strings.Cut(stream.path, "?")
-				req := &RawHTTP1Request{
+				req := &types.RawHTTP1Request{
 					Method:  stream.method,
 					Path:    pathPart,
 					Query:   queryPart,
@@ -662,7 +659,7 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 
 			// Apply response header rules
 			if p.handler.ruleApplier != nil {
-				resp := &RawHTTP1Response{
+				resp := &types.RawHTTP1Response{
 					StatusCode: stream.statusCode,
 					Headers:    headers,
 				}
@@ -1490,31 +1487,31 @@ func (p *h2Proxy) storeStreamInHistory(stream *h2Stream) {
 	stream.mu.Lock()
 	scheme := stream.scheme
 	if scheme == "" {
-		scheme = schemeHTTPS // h2 is always tunneled over TLS via CONNECT
+		scheme = types.SchemeHTTPS // h2 is always tunneled over TLS via CONNECT
 	}
 	_, port := ParseAuthority(stream.authority, scheme)
 
 	// Fold HTTP/2 pseudo-headers and the stream id ahead of the regular headers.
-	reqHeaders := make(Headers, 0, len(stream.reqHeaders)+5)
+	reqHeaders := make(types.Headers, 0, len(stream.reqHeaders)+5)
 	reqHeaders = append(reqHeaders,
-		Header{Name: ":method", Value: stream.method},
-		Header{Name: ":scheme", Value: stream.scheme},
-		Header{Name: ":authority", Value: stream.authority},
-		Header{Name: ":path", Value: stream.path},
-		Header{Name: headerStreamID, Value: strconv.FormatUint(uint64(stream.id), 10)},
+		types.Header{Name: ":method", Value: stream.method},
+		types.Header{Name: ":scheme", Value: stream.scheme},
+		types.Header{Name: ":authority", Value: stream.authority},
+		types.Header{Name: ":path", Value: stream.path},
+		types.Header{Name: types.HeaderStreamID, Value: strconv.FormatUint(uint64(stream.id), 10)},
 	)
 	reqHeaders = append(reqHeaders, stream.reqHeaders...)
 
-	flow := &Flow{
-		Adapter:     protocolH2,
-		ProtocolTag: protocolH2,
+	flow := &types.Flow{
+		Adapter:     types.ProtocolH2,
+		ProtocolTag: types.ProtocolH2,
 		Scheme:      scheme,
 		Port:        port,
-		Request: &Message{
+		Request: &types.Message{
 			Headers: reqHeaders,
 			Body:    append([]byte(nil), stream.reqBody.Bytes()...), // copy to avoid holding reference
 		},
-		Response: &Message{
+		Response: &types.Message{
 			StatusCode: stream.statusCode,
 			Headers:    stream.respHeaders,
 			Body:       append([]byte(nil), stream.respBody.Bytes()...), // copy to avoid holding reference

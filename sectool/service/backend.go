@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/go-appsec/toolbox/sectool/protocol"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 // ErrLabelExists is returned when label conflicts with an existing entry (rule or OAST).
@@ -128,8 +128,8 @@ type ProxyEntry struct {
 }
 
 // Target specifies the destination for a request.
-// Type alias for proxy.Target to enable unified target handling across packages.
-type Target = proxy.Target
+// Type alias for types.Target to enable unified target handling across packages.
+type Target = types.Target
 
 // SendRequestInput contains all parameters for sending a request.
 type SendRequestInput struct {

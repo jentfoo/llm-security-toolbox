@@ -16,6 +16,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
@@ -266,7 +267,7 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 			trailers = parsed.Trailers
 		}
 		var framed bytes.Buffer
-		proxy.EncodeStandardChunkedBody(&framed, reqBody, trailers)
+		types.EncodeStandardChunkedBody(&framed, reqBody, trailers)
 		reqBody = framed.Bytes()
 	}
 

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 const maxWebSocketFrameSize = 100 * 1024 * 1024 // 100 MB
@@ -22,7 +24,7 @@ const maxWebSocketFrameSize = 100 * 1024 * 1024 // 100 MB
 // webSocketHandler handles WebSocket proxying for both ws:// and wss://.
 type webSocketHandler struct {
 	history     *HistoryStore
-	ruleApplier RuleApplier
+	ruleApplier types.RuleApplier
 	certManager *CertManager
 	timeouts    TimeoutConfig
 }
@@ -37,12 +39,12 @@ func newWebSocketHandler(history *HistoryStore, certManager *CertManager, timeou
 }
 
 // SetRuleApplier sets the rule applier for WebSocket rules.
-func (h *webSocketHandler) SetRuleApplier(applier RuleApplier) {
+func (h *webSocketHandler) SetRuleApplier(applier types.RuleApplier) {
 	h.ruleApplier = applier
 }
 
 // isWebSocketUpgrade checks if the request is a WebSocket upgrade.
-func isWebSocketUpgrade(req *RawHTTP1Request) bool {
+func isWebSocketUpgrade(req *types.RawHTTP1Request) bool {
 	upgrade := req.GetHeader("Upgrade")
 	connection := req.GetHeader("Connection")
 	return strings.EqualFold(upgrade, "websocket") &&
@@ -54,8 +56,8 @@ func (h *webSocketHandler) Handle(
 	ctx context.Context,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
-	req *RawHTTP1Request,
-	target *Target,
+	req *types.RawHTTP1Request,
+	target *types.Target,
 ) {
 	startTime := time.Now()
 
@@ -80,8 +82,8 @@ func (h *webSocketHandler) HandleTLS(
 	ctx context.Context,
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
-	req *RawHTTP1Request,
-	target *Target,
+	req *types.RawHTTP1Request,
+	target *types.Target,
 ) {
 	startTime := time.Now()
 
@@ -114,8 +116,8 @@ func (h *webSocketHandler) HandleTLSWithUpstream(
 	clientReader *bufio.Reader,
 	upstreamConn net.Conn,
 	upstreamReader *bufio.Reader,
-	req *RawHTTP1Request,
-	target *Target,
+	req *types.RawHTTP1Request,
+	target *types.Target,
 ) {
 	startTime := time.Now()
 
@@ -133,7 +135,7 @@ func (h *webSocketHandler) proxyWebSocket(
 	clientConn net.Conn,
 	clientReader *bufio.Reader,
 	upstreamConn net.Conn,
-	req *RawHTTP1Request,
+	req *types.RawHTTP1Request,
 	startTime time.Time,
 ) {
 	upstreamReader := bufio.NewReader(upstreamConn)
@@ -149,7 +151,7 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 	clientReader *bufio.Reader,
 	upstreamConn net.Conn,
 	upstreamReader *bufio.Reader,
-	req *RawHTTP1Request,
+	req *types.RawHTTP1Request,
 	startTime time.Time,
 ) {
 	defer func() { _ = upstreamConn.Close() }()
@@ -217,23 +219,23 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 }
 
 // stripExtensions removes Sec-WebSocket-Extensions header to disable compression.
-func (h *webSocketHandler) stripExtensions(req *RawHTTP1Request) {
+func (h *webSocketHandler) stripExtensions(req *types.RawHTTP1Request) {
 	req.RemoveHeader("Sec-WebSocket-Extensions")
 }
 
 // stripResponseExtensions removes Sec-WebSocket-Extensions from response.
-func (h *webSocketHandler) stripResponseExtensions(resp *RawHTTP1Response) {
+func (h *webSocketHandler) stripResponseExtensions(resp *types.RawHTTP1Response) {
 	resp.RemoveHeader("Sec-WebSocket-Extensions")
 }
 
 // sendError writes an HTTP error response.
 func (h *webSocketHandler) sendError(conn net.Conn, code int, message string) {
 	body := []byte(message + "\n")
-	resp := &RawHTTP1Response{
+	resp := &types.RawHTTP1Response{
 		Version:    "HTTP/1.1",
 		StatusCode: code,
 		StatusText: message,
-		Headers: []Header{
+		Headers: []types.Header{
 			{Name: "Content-Type", Value: "text/plain"},
 			{Name: "Content-Length", Value: strconv.Itoa(len(body))},
 			{Name: "Connection", Value: "close"},
@@ -246,14 +248,14 @@ func (h *webSocketHandler) sendError(conn net.Conn, code int, message string) {
 // storeHandshake stores the WebSocket upgrade handshake in history.
 // Returns the stored flow_id so frames can reference it as their parent,
 // or "" if the handshake was filtered out.
-func (h *webSocketHandler) storeHandshake(scheme string, port int, req *RawHTTP1Request, resp *RawHTTP1Response, startTime time.Time) string {
-	flow := &Flow{
-		Adapter:     protocolHTTP11,
-		ProtocolTag: protocolTagWS,
+func (h *webSocketHandler) storeHandshake(scheme string, port int, req *types.RawHTTP1Request, resp *types.RawHTTP1Response, startTime time.Time) string {
+	flow := &types.Flow{
+		Adapter:     types.ProtocolHTTP11,
+		ProtocolTag: types.ProtocolTagWS,
 		Scheme:      scheme,
 		Port:        port,
-		Request:     rawRequestToMessage(req),
-		Response:    rawResponseToMessage(resp),
+		Request:     types.RequestToMessage(req),
+		Response:    types.ResponseToMessage(resp),
 		StartedAt:   startTime,
 		CompletedAt: time.Now(),
 	}
@@ -357,23 +359,23 @@ func (p *wsProxy) storeFrame(frame *wsFrame, direction string) {
 	}
 
 	now := time.Now()
-	msg := &Message{
-		Method: methodFrame,
+	msg := &types.Message{
+		Method: types.MethodFrame,
 		Path:   "/ws/" + strconv.Itoa(int(frame.opcode)),
 		Body:   frame.payload,
 	}
-	child := &Flow{
-		Adapter:      protocolTagWS,
-		ProtocolTag:  protocolTagWSFrame,
+	child := &types.Flow{
+		Adapter:      types.ProtocolTagWS,
+		ProtocolTag:  types.ProtocolTagWSFrame,
 		ParentFlowID: p.parentFlowID,
 		StartedAt:    now,
 		CompletedAt:  now,
 	}
 	if direction == "ws:to-client" {
-		child.Direction = directionS2C
+		child.Direction = types.DirectionS2C
 		child.Response = msg
 	} else {
-		child.Direction = directionC2S
+		child.Direction = types.DirectionC2S
 		child.Request = msg
 	}
 	p.handler.history.Store(child)

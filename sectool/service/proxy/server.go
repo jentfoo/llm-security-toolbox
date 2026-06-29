@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
@@ -131,7 +132,7 @@ func (s *ProxyServer) SetCaptureFilter(f CaptureFilter) {
 
 // SetRuleApplier sets the rule applier for all handlers.
 // Call after construction but before Serve().
-func (s *ProxyServer) SetRuleApplier(applier RuleApplier) {
+func (s *ProxyServer) SetRuleApplier(applier types.RuleApplier) {
 	s.http1Handler.ruleApplier = applier
 	s.http2Handler.SetRuleApplier(applier)
 	s.connectHandler.SetRuleApplier(applier)

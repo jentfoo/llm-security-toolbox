@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 // ALPN protocol identifiers (RFC 7301): the on-the-wire tokens exchanged during TLS negotiation.
@@ -51,7 +53,7 @@ func newConnectHandler(certManager *CertManager, http1Handler *http1Handler, htt
 }
 
 // SetRuleApplier propagates the rule applier to child handlers.
-func (h *connectHandler) SetRuleApplier(applier RuleApplier) {
+func (h *connectHandler) SetRuleApplier(applier types.RuleApplier) {
 	h.http1Handler.ruleApplier = applier
 	if h.http2Handler != nil {
 		h.http2Handler.SetRuleApplier(applier)
@@ -85,7 +87,7 @@ type readerConn struct {
 func (c *readerConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // parseConnectRequest parses "CONNECT host:port HTTP/1.1" and reads remaining headers.
-func (h *connectHandler) parseConnectRequest(reader *bufio.Reader) (*Target, error) {
+func (h *connectHandler) parseConnectRequest(reader *bufio.Reader) (*types.Target, error) {
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, fmt.Errorf("read request line: %w", err)
@@ -124,7 +126,7 @@ func (h *connectHandler) parseConnectRequest(reader *bufio.Reader) (*Target, err
 		}
 	}
 
-	return &Target{
+	return &types.Target{
 		Hostname:  host,
 		Port:      port,
 		UsesHTTPS: true,
@@ -133,7 +135,7 @@ func (h *connectHandler) parseConnectRequest(reader *bufio.Reader) (*Target, err
 
 // handleTLS performs TLS handshake with delayed protocol probing.
 // The probe happens inside GetConfigForClient to ensure protocol matching.
-func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader, target *Target) {
+func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader, target *types.Target) {
 	targetAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
 
 	// Variables to capture from GetConfigForClient callback
@@ -275,7 +277,7 @@ func (h *connectHandler) dialUpstream(ctx context.Context, targetAddr, sni strin
 }
 
 // routeByProtocol routes the connection to the appropriate protocol handler.
-func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, protocol string, target *Target) {
+func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, protocol string, target *types.Target) {
 	defer func() {
 		_ = clientTLS.Close()
 		_ = upstreamConn.Close()
