@@ -41,6 +41,24 @@ type Handler interface {
 	OnShutdown(drainSeconds int)
 }
 
+// StreamHandler is the optional byte-stream callback surface for a sidecar with an
+// early_claim. A Handler that also implements it receives the claimed stream's
+// events; OnStreamOpen/OnStreamDeliver return bytes for sectool to write back
+// (possibly to a different stream_id). Inbound chunks are raw transport bytes, not
+// aligned to protocol frames; use Reassembler to accumulate complete frames.
+type StreamHandler interface {
+	OnStreamOpen(wire.StreamOpenParams) ([]wire.StreamWrite, error)
+	OnStreamDeliver(wire.StreamDeliverParams) ([]wire.StreamWrite, error)
+	OnStreamEnded(wire.StreamEndedParams)
+}
+
+// ClaimProber is the optional probe-decision callback for a probe-based
+// early_claim. Returning true takes the connection; false declines so sectool
+// tries the next claim. An error is reported as a probe fault and declines.
+type ClaimProber interface {
+	OnClaimProbe(wire.ClaimProbeParams) (bool, error)
+}
+
 // ShutdownFunc adapts a function to Handler.
 type ShutdownFunc func(drainSeconds int)
 

@@ -171,3 +171,66 @@ type CoreQueryResult struct {
 	Content string `json:"content"`
 	IsError bool   `json:"is_error,omitempty"`
 }
+
+// StreamWrite is one entry in a writes array: bytes for sectool to write to the
+// named stream's socket. StreamID may differ from the stream an event arrived on.
+type StreamWrite struct {
+	StreamID string `json:"stream_id"`
+	Data     []byte `json:"data"`
+}
+
+// StreamResult replies to stream_open and stream_deliver with optional bytes to
+// write back to one or more sockets.
+type StreamResult struct {
+	Writes []StreamWrite `json:"writes,omitempty"`
+}
+
+// StreamOpenParams announces that a claim fired and a new stream exists.
+type StreamOpenParams struct {
+	StreamID     string `json:"stream_id"`
+	Host         string `json:"host,omitempty"`
+	Path         string `json:"path,omitempty"`
+	MatchedClaim string `json:"matched_claim,omitempty"`
+	PeerAddr     string `json:"peer_addr,omitempty"`
+}
+
+// StreamDeliverParams carries inbound socket bytes for a stream.
+type StreamDeliverParams struct {
+	StreamID string `json:"stream_id"`
+	Data     []byte `json:"data"`
+}
+
+// StreamEndedParams notifies the sidecar that a stream closed.
+type StreamEndedParams struct {
+	StreamID string `json:"stream_id"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// CloseStreamParams is a sidecar-initiated proactive stream close.
+type CloseStreamParams struct {
+	StreamID string `json:"stream_id"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// StreamWriteParams is a sidecar-initiated proactive write, for keepalives and
+// other timer-driven output outside an event Response.
+type StreamWriteParams struct {
+	StreamID string `json:"stream_id"`
+	Data     []byte `json:"data"`
+}
+
+// ClaimProbeParams asks the sidecar whether a buffered opening stream is its
+// protocol, for an early_claim that set probe.
+type ClaimProbeParams struct {
+	Host     string `json:"host,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	PeerAddr string `json:"peer_addr,omitempty"`
+	SNI      string `json:"sni,omitempty"`
+	Data     []byte `json:"data,omitempty"`
+}
+
+// ClaimProbeResult is the sidecar's claim decision. A false claim is normal
+// control flow, not an error.
+type ClaimProbeResult struct {
+	Claim bool `json:"claim"`
+}

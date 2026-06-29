@@ -109,6 +109,26 @@ func (h connHandler) HandleRequest(_ context.Context, method string, params json
 		_ = json.Unmarshal(params, &p)
 		h.c.currentHandler().OnShutdown(p.DrainSeconds)
 		return wire.ShutdownResult{Ack: true}, nil
+	case wire.MethodStreamOpen:
+		return streamReply(h, params, func(sh StreamHandler, p wire.StreamOpenParams) ([]wire.StreamWrite, error) {
+			return sh.OnStreamOpen(p)
+		})
+	case wire.MethodStreamDeliver:
+		return streamReply(h, params, func(sh StreamHandler, p wire.StreamDeliverParams) ([]wire.StreamWrite, error) {
+			return sh.OnStreamDeliver(p)
+		})
+	case wire.MethodClaimProbe:
+		prober, ok := h.c.currentHandler().(ClaimProber)
+		if !ok {
+			return nil, wire.NewError(wire.CodeClaimProbeFault, "claim_probe: no prober")
+		}
+		var p wire.ClaimProbeParams
+		_ = json.Unmarshal(params, &p)
+		claim, err := prober.OnClaimProbe(p)
+		if err != nil {
+			return nil, wire.NewError(wire.CodeClaimProbeFault, "claim_probe: "+err.Error())
+		}
+		return wire.ClaimProbeResult{Claim: claim}, nil
 	case wire.MethodPing:
 		return struct{}{}, nil
 	default:
@@ -116,8 +136,32 @@ func (h connHandler) HandleRequest(_ context.Context, method string, params json
 	}
 }
 
-func (h connHandler) HandleNotification(_ context.Context, method string, _ json.RawMessage) {
-	if method == wire.MethodPing {
+// streamReply dispatches a stream Request to the StreamHandler and wraps its
+// writes in a StreamResult. A handler that does not implement StreamHandler
+// (despite an early_claim) is a transport error.
+func streamReply[P any](h connHandler, params json.RawMessage, call func(StreamHandler, P) ([]wire.StreamWrite, error)) (any, *wire.Error) {
+	sh, ok := h.c.currentHandler().(StreamHandler)
+	if !ok {
+		return nil, wire.NewError(wire.CodeTransportInternal, "stream event: no stream handler")
+	}
+	var p P
+	_ = json.Unmarshal(params, &p)
+	writes, err := call(sh, p)
+	if err != nil {
+		return nil, wire.NewError(wire.CodeTransportInternal, err.Error())
+	}
+	return wire.StreamResult{Writes: writes}, nil
+}
+
+func (h connHandler) HandleNotification(_ context.Context, method string, params json.RawMessage) {
+	switch method {
+	case wire.MethodPing:
 		_ = h.c.peer.Notify(wire.MethodPong, nil)
+	case wire.MethodStreamEnded:
+		if sh, ok := h.c.currentHandler().(StreamHandler); ok {
+			var p wire.StreamEndedParams
+			_ = json.Unmarshal(params, &p)
+			sh.OnStreamEnded(p)
+		}
 	}
 }

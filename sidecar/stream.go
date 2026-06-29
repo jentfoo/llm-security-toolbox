@@ -1,0 +1,16 @@
+package sidecar
+
+import "github.com/go-appsec/toolbox/sidecar/wire"
+
+// CloseStream proactively closes an open stream (client-facing or a dialed
+// upstream). It is the companion to the stream events delivered to a StreamHandler.
+func (c *Conn) CloseStream(streamID, reason string) error {
+	return c.peer.Notify(wire.MethodCloseStream, wire.CloseStreamParams{StreamID: streamID, Reason: reason})
+}
+
+// StreamWrite proactively writes bytes to an open stream without a triggering
+// event, for protocol keepalives and other timer-driven output. Ordinary data
+// belongs in the writes returned from a stream event, which preserve ordering.
+func (c *Conn) StreamWrite(streamID string, data []byte) error {
+	return c.peer.Notify(wire.MethodStreamWrite, wire.StreamWriteParams{StreamID: streamID, Data: data})
+}

@@ -144,12 +144,17 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 	var upstreamConn net.Conn
 	var negotiatedProto string
 	var probeErr error
+	var sni string
+	// tlsBridge is set when a sidecar claims this connection by SNI/target; sectool
+	// then terminates TLS with the fake CA and hands it the decrypted stream with no
+	// upstream dial.
+	var tlsBridge protocol.TLSEarlyAdapter
 
 	// Create TLS config with GetConfigForClient for delayed protocol probing
 	tlsConfig := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			// Capture SNI
-			sni := hello.ServerName
+			sni = hello.ServerName
 			if sni == "" {
 				sni = target.Hostname
 			}
@@ -157,6 +162,16 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 			// Log potential domain fronting
 			if sni != target.Hostname {
 				log.Printf("proxy: SNI mismatch - CONNECT target=%s, SNI=%s (possible domain fronting)", target.Hostname, sni)
+			}
+
+			// A sidecar tls.terminate claim takes precedence: skip the upstream dial.
+			if b, ok := h.reg.MatchTLS(sni, target.Hostname, target.Port); ok {
+				tlsBridge = b
+				cert, certErr := h.certManager.GetCertificate(sni)
+				if certErr != nil {
+					return nil, certErr
+				}
+				return &tls.Config{Certificates: []tls.Certificate{*cert}}, nil
 			}
 
 			// Probe or use cached protocol
@@ -198,6 +213,34 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 		if upstreamConn != nil {
 			_ = upstreamConn.Close()
 		}
+		return
+	}
+
+	// A sidecar claimed the connection: hand it the decrypted stream. The decrypted
+	// matchers may still decline, in which case we dial upstream now and fall through
+	// to the HTTP path.
+	if tlsBridge != nil {
+		c := &protocol.EarlyClaimCtx{
+			TLSTerminated: true,
+			Target:        target,
+			ClientConn:    clientTLS,
+			ClientReader:  bufio.NewReader(clientTLS),
+		}
+		if tlsBridge.ClaimEarly(c) {
+			tlsBridge.ServeEarly(ctx, c)
+			_ = clientTLS.Close()
+			return
+		}
+		// The client handshake already completed with no ALPN (the claim cert offered
+		// none), so the client speaks HTTP/1.1; dial upstream with no ALPN too to keep
+		// both ends on HTTP/1.1 rather than risk an h2/h1 split.
+		var err error
+		if upstreamConn, negotiatedProto, err = h.probeOrConnect(ctx, targetAddr, sni, nil); err != nil {
+			log.Printf("proxy: upstream probe failed: %v", err)
+			_ = clientTLS.Close()
+			return
+		}
+		h.routeByProtocol(ctx, clientTLS, upstreamConn, negotiatedProto, target)
 		return
 	}
 

@@ -54,6 +54,15 @@ type EarlyAdapter interface {
 	ServeEarly(ctx context.Context, c *EarlyClaimCtx)
 }
 
+// TLSEarlyAdapter gates a TLS connection before termination, by the ClientHello
+// SNI and the CONNECT target. Implemented by sidecar bridges whose early claim
+// sets tls.terminate; the connect handler MITMs a matched connection with the
+// fake CA and re-offers the decrypted stream through ServeEarly.
+type TLSEarlyAdapter interface {
+	EarlyAdapter
+	ClaimTLS(sni, host string, port int) bool
+}
+
 // UpgradeAdapter claims and serves a connection after an HTTP/1.x upgrade signal.
 type UpgradeAdapter interface {
 	Name() string

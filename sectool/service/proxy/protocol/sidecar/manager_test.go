@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
@@ -23,7 +24,7 @@ func testManager(cfg Config) *Manager {
 	if cfg.ReservedNames == nil {
 		cfg.ReservedNames = []string{"http/1.1", "http/2", "websocket"}
 	}
-	return NewManager(cfg, nil, nil, nil)
+	return NewManager(cfg, &protocol.Registry{}, nil, nil)
 }
 
 // dialManager connects a client wire.Peer to the manager over net.Pipe. When

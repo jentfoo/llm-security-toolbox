@@ -37,6 +37,7 @@ const (
 	CodeFramingViolation  = -33200
 	CodeOversizedMessage  = -33201
 	CodeUnknownStream     = -33202
+	CodeClaimProbeFault   = -33203
 	CodeTransportInternal = -33299
 )
 

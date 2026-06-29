@@ -17,4 +17,10 @@ const (
 	MethodLog           = "log"
 	MethodReportMetrics = "report_metrics"
 	MethodCoreQuery     = "core_query"
+	MethodStreamOpen    = "stream_open"
+	MethodStreamDeliver = "stream_deliver"
+	MethodStreamEnded   = "stream_ended"
+	MethodCloseStream   = "close_stream"
+	MethodStreamWrite   = "stream_write"
+	MethodClaimProbe    = "claim_probe"
 )

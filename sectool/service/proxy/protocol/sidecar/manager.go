@@ -41,8 +41,8 @@ type Manager struct {
 
 // NewManager creates a Manager. registry is the native proxy's claim registry
 // used to dispatch connections to sidecar adapters; flows is the history sink
-// for push_flow; coreQuery dispatches read-side core tools for core_query. Any
-// may be nil in tests.
+// for push_flow; coreQuery dispatches read-side core tools for core_query. flows
+// and coreQuery may be nil in tests.
 func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQuery CoreQuerier) *Manager {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = 10 * time.Second
@@ -140,6 +140,7 @@ func (m *Manager) detachSession(s *session) {
 	if rec.InstanceID != "" && m.byInstance[rec.InstanceID] == rec {
 		delete(m.byInstance, rec.InstanceID)
 	}
+	m.releaseClaims(rec)
 	if rec.resume && rec.InstanceID != "" {
 		m.resumeState[rec.InstanceID] = &resumeEntry{ownedFlows: rec.ownedFlows, inFlight: rec.inFlight}
 	}
@@ -151,7 +152,15 @@ func (m *Manager) removeLocked(rec *Record) {
 	if rec.InstanceID != "" && m.byInstance[rec.InstanceID] == rec {
 		delete(m.byInstance, rec.InstanceID)
 	}
+	m.releaseClaims(rec)
 	_ = rec.peer.Close()
+}
+
+// releaseClaims unregisters the sidecar's claim bridge and tears down its active
+// byte streams, closing the client sockets so none is orphaned.
+func (m *Manager) releaseClaims(rec *Record) {
+	m.registry.RemoveEarly(rec.Name)
+	rec.bridge.shutdown()
 }
 
 // Shutdown requests a graceful close of every sidecar and waits briefly.
@@ -250,6 +259,22 @@ func (s *session) HandleNotification(_ context.Context, method string, params js
 			log.Printf("sidecar[%s]: drop malformed %s notification: %v", s.adapterName(), method, err)
 		} else {
 			s.handleReportMetrics(&p)
+		}
+	case wire.MethodCloseStream:
+		var p wire.CloseStreamParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			log.Printf("sidecar[%s]: drop malformed %s notification: %v", s.adapterName(), method, err)
+		} else if rec := s.record(); rec != nil {
+			rec.bridge.streams.closeStream(p.StreamID)
+		}
+	case wire.MethodStreamWrite:
+		var p wire.StreamWriteParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			log.Printf("sidecar[%s]: drop malformed %s notification: %v", s.adapterName(), method, err)
+		} else if rec := s.record(); rec != nil {
+			if werr := rec.bridge.streams.streamWrite(p.StreamID, p.Data); werr != nil {
+				log.Printf("sidecar[%s]: %s", s.adapterName(), werr.Message)
+			}
 		}
 	}
 }

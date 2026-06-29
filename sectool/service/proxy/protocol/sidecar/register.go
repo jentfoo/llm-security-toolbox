@@ -95,6 +95,9 @@ func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.Re
 	if p.InstanceID != "" {
 		m.byInstance[p.InstanceID] = rec
 	}
+	if rec.Capabilities.EarlyClaim != nil {
+		m.registry.InsertEarly(rec.bridge)
+	}
 
 	return rec, &wire.RegisterResult{
 		ProtocolVersion: rec.ProtoVersion,

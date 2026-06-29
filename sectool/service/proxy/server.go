@@ -219,11 +219,20 @@ func (s *ProxyServer) handleConnection(conn net.Conn) {
 
 	br := bufio.NewReader(conn)
 
-	// Peek first bytes to detect protocol
-	peek, err := br.Peek(24)
+	// Peek only the first byte to avoid blocking a binary protocol whose opening
+	// message is shorter than the HTTP discriminators. Widen the peek only for
+	// openings that could be the HTTP/2 cleartext preface or a CONNECT request;
+	// genuine clients send those in full immediately.
+	first, err := br.Peek(1)
 	if err != nil {
 		// Connection closed or error before any data
 		return
+	}
+	peek := first
+	if first[0] == 'P' || first[0] == 'C' {
+		if wide, werr := br.Peek(24); werr == nil {
+			peek = wide
+		}
 	}
 
 	// HTTP/2 preface: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
