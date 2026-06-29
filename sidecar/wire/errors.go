@@ -41,6 +41,13 @@ const (
 	CodeTransportInternal = -33299
 )
 
+// dial_upstream codes.
+const (
+	CodeDialScopeRejected = -33300
+	CodeDialFailed        = -33301
+	CodeDialTLSFailed     = -33302
+)
+
 // ErrorData carries the adapter name plus any relevant identifiers on a
 // sectool-specific error.
 type ErrorData struct {

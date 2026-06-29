@@ -402,6 +402,8 @@ func (s *Server) startBuiltinProxy() error {
 			HeartbeatInterval: time.Duration(s.cfg.Sidecars.HeartbeatIntervalSecs) * time.Second,
 			HeartbeatTimeout:  time.Duration(s.cfg.Sidecars.HeartbeatTimeoutSecs) * time.Second,
 			NativeProxyPort:   s.proxyPort,
+			ScopeCheck:        s.cfg.IsDomainAllowed,
+			DialTimeout:       timeouts.DialTimeout,
 		}, s); err != nil {
 			_ = backend.Close()
 			return fmt.Errorf("enable sidecars: %w", err)

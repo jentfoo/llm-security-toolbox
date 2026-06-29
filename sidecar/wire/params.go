@@ -234,3 +234,28 @@ type ClaimProbeParams struct {
 type ClaimProbeResult struct {
 	Claim bool `json:"claim"`
 }
+
+// DialUpstreamTLS configures TLS termination toward the upstream. When Enabled,
+// sectool performs the handshake and bridges cleartext bytes to the sidecar.
+type DialUpstreamTLS struct {
+	Enabled    bool     `json:"enabled"`
+	SNI        string   `json:"sni,omitempty"`
+	ALPN       []string `json:"alpn,omitempty"`
+	SkipVerify bool     `json:"skip_verify,omitempty"`
+}
+
+// DialUpstreamParams asks sectool to open an upstream TCP connection on the
+// sidecar's behalf. Host/Port omitted default to the original destination of
+// ParentFlowID's connection; supplying them redirects to a different upstream.
+type DialUpstreamParams struct {
+	Host         string           `json:"host,omitempty"`
+	Port         int              `json:"port,omitempty"`
+	TLS          *DialUpstreamTLS `json:"tls,omitempty"`
+	ParentFlowID string           `json:"parent_flow_id,omitempty"`
+}
+
+// DialUpstreamResult carries the stream identifier for the opened upstream
+// socket; its bytes flow via stream_deliver events and Response writes.
+type DialUpstreamResult struct {
+	StreamID string `json:"stream_id"`
+}

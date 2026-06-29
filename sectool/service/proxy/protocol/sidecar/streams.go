@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"sync"
@@ -86,16 +87,29 @@ func (ss *streamSet) serveClient(ctx context.Context, rec *Record, c *protocol.E
 	// The stream is established: tell the sidecar when it ends however the loop
 	// exits. A peer disconnect makes the notify a no-op, but a mid-stream RPC error
 	// or a normal EOF must still release the sidecar's per-stream state.
-	defer func() {
-		_ = rec.peer.Notify(wire.MethodStreamEnded, wire.StreamEndedParams{StreamID: id, Reason: "closed"})
-	}()
+	defer ss.notifyEnded(rec, id)
 	if ss.applyWrites(res.Writes) != nil {
 		return
 	}
+	ss.pump(ctx, rec, id, c.ClientReader)
+}
 
+// serveUpstream runs a dialed upstream socket through the event model. The dial
+// reply already announced the stream, so there is no stream_open; inbound upstream
+// bytes deliver as stream_deliver and stream_ended fires on close. The caller
+// registered the socket via add; this releases it on exit.
+func (ss *streamSet) serveUpstream(ctx context.Context, rec *Record, id string, conn net.Conn) {
+	defer ss.remove(id)
+	defer ss.notifyEnded(rec, id)
+	ss.pump(ctx, rec, id, conn)
+}
+
+// pump delivers inbound bytes from r as ordered stream_deliver events, awaiting
+// each reply and applying its writes before reading the next chunk.
+func (ss *streamSet) pump(ctx context.Context, rec *Record, id string, r io.Reader) {
 	buf := make([]byte, streamReadBuf)
 	for {
-		n, err := c.ClientReader.Read(buf)
+		n, err := r.Read(buf)
 		if n > 0 {
 			var dres wire.StreamResult
 			if derr := rec.peer.Call(ctx, wire.MethodStreamDeliver, wire.StreamDeliverParams{
@@ -109,9 +123,14 @@ func (ss *streamSet) serveClient(ctx context.Context, rec *Record, c *protocol.E
 			}
 		}
 		if err != nil {
-			break
+			return
 		}
 	}
+}
+
+// notifyEnded tells the sidecar a stream closed so it can close the paired stream.
+func (ss *streamSet) notifyEnded(rec *Record, id string) {
+	_ = rec.peer.Notify(wire.MethodStreamEnded, wire.StreamEndedParams{StreamID: id, Reason: "closed"})
 }
 
 // closeStream closes the named stream's socket on the sidecar's request.

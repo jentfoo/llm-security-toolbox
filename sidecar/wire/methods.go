@@ -23,4 +23,5 @@ const (
 	MethodCloseStream   = "close_stream"
 	MethodStreamWrite   = "stream_write"
 	MethodClaimProbe    = "claim_probe"
+	MethodDialUpstream  = "dial_upstream"
 )

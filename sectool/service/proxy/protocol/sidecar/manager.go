@@ -22,6 +22,10 @@ type Config struct {
 	HeartbeatTimeout  time.Duration
 	NativeProxyPort   int      // proxy listen port; excluded from sidecar early_claim ranges
 	ReservedNames     []string // built-in adapter names sidecars may not reuse
+	// ScopeCheck gates dial_upstream destinations; nil allows any host.
+	ScopeCheck func(host string) (allowed bool, reason string)
+	// DialTimeout bounds each dial_upstream connection attempt.
+	DialTimeout time.Duration
 }
 
 // Manager owns the registry of connected sidecars: registration, conflict
@@ -231,6 +235,12 @@ func (s *session) HandleRequest(ctx context.Context, method string, params json.
 			return nil, wire.NewError(wire.CodeCoreQueryRejected, "core_query: invalid params")
 		}
 		return s.handleCoreQuery(ctx, &p)
+	case wire.MethodDialUpstream:
+		var p wire.DialUpstreamParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, wire.NewError(wire.CodeDialFailed, "dial_upstream: invalid params")
+		}
+		return s.handleDialUpstream(ctx, &p)
 	case wire.MethodPing:
 		return struct{}{}, nil
 	default:
