@@ -127,10 +127,12 @@ func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, storage
 
 // EnableSidecars constructs the sidecar IPC listener and registry. Call once
 // before Serve. cfg.NativeProxyPort should be the proxy's listen port; the
-// built-in adapter names are reserved automatically.
-func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config) error {
+// built-in adapter names are reserved automatically. coreQuery backs the sidecar
+// core_query method; it resolves the read-side tools lazily so it can be supplied
+// before the MCP server exists.
+func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sidecar.CoreQuerier) error {
 	cfg.ReservedNames = []string{types.ProtocolHTTP11, types.ProtocolH2, types.ProtocolTagWS}
-	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry())
+	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry(), b.server.History(), coreQuery)
 	lst, err := sidecar.NewListener(cfg, b.sidecarManager)
 	if err != nil {
 		return err
@@ -235,13 +237,15 @@ func (b *NativeProxyBackend) GetProxyHistory(ctx context.Context, count int, aft
 		reqStr := string(entry.FormatRequest(&buf))
 		respStr := string(entry.FormatResponse(&buf))
 		result = append(result, ProxyEntry{
-			FlowID:    entry.FlowID,
-			Timestamp: entry.StartedAt,
-			Request:   reqStr,
-			Response:  respStr,
-			Protocol:  entry.ProtocolTag,
-			Scheme:    entry.Scheme,
-			Port:      entry.Port,
+			FlowID:       entry.FlowID,
+			Timestamp:    entry.StartedAt,
+			Request:      reqStr,
+			Response:     respStr,
+			Protocol:     entry.ProtocolTag,
+			Adapter:      entry.Adapter,
+			ParentFlowID: entry.ParentFlowID,
+			Scheme:       entry.Scheme,
+			Port:         entry.Port,
 		})
 	}
 
@@ -253,17 +257,19 @@ func (b *NativeProxyBackend) GetProxyHistoryMeta(ctx context.Context, count int,
 	result := make([]ProxyEntryMeta, len(metas))
 	for i, m := range metas {
 		result[i] = ProxyEntryMeta{
-			FlowID:      m.FlowID,
-			Timestamp:   m.Timestamp,
-			Method:      m.Method,
-			Host:        m.Host,
-			Path:        m.Path,
-			Status:      m.Status,
-			RespLen:     m.RespLen,
-			Protocol:    m.Protocol,
-			Scheme:      m.Scheme,
-			Port:        m.Port,
-			ContentType: m.ContentType,
+			FlowID:       m.FlowID,
+			Timestamp:    m.Timestamp,
+			Method:       m.Method,
+			Host:         m.Host,
+			Path:         m.Path,
+			Status:       m.Status,
+			RespLen:      m.RespLen,
+			Protocol:     m.Protocol,
+			Adapter:      m.Adapter,
+			ParentFlowID: m.ParentFlowID,
+			Scheme:       m.Scheme,
+			Port:         m.Port,
+			ContentType:  m.ContentType,
 		}
 	}
 	return result, nil
@@ -284,9 +290,32 @@ func (b *NativeProxyBackend) GetProxyEntry(ctx context.Context, flowID string) (
 		Response:         respStr,
 		InterimResponses: entry.FormatInterimResponses(&buf),
 		Protocol:         entry.ProtocolTag,
+		Adapter:          entry.Adapter,
+		ParentFlowID:     entry.ParentFlowID,
 		Scheme:           entry.Scheme,
 		Port:             entry.Port,
 	}, nil
+}
+
+func (b *NativeProxyBackend) GetProxyChildren(ctx context.Context, parentFlowID string) ([]ProxyEntry, error) {
+	children := b.server.History().Children(parentFlowID)
+	var buf bytes.Buffer
+	result := make([]ProxyEntry, 0, len(children))
+	for _, entry := range children {
+		result = append(result, ProxyEntry{
+			FlowID:           entry.FlowID,
+			Timestamp:        entry.StartedAt,
+			Request:          string(entry.FormatRequest(&buf)),
+			Response:         string(entry.FormatResponse(&buf)),
+			InterimResponses: entry.FormatInterimResponses(&buf),
+			Protocol:         entry.ProtocolTag,
+			Adapter:          entry.Adapter,
+			ParentFlowID:     entry.ParentFlowID,
+			Scheme:           entry.Scheme,
+			Port:             entry.Port,
+		})
+	}
+	return result, nil
 }
 
 func (b *NativeProxyBackend) DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error) {

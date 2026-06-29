@@ -263,6 +263,14 @@ func (r *RawHTTP1Response) SetBody(b []byte) {
 	r.Chunks = nil
 }
 
+// BodyCodec is the transform chain and logical content-type mapping a Message's
+// BodyRaw to its Body, supplied by adapters whose wire form sectool cannot
+// natively decode.
+type BodyCodec struct {
+	Transforms  []string `json:"transforms,omitempty" msgpack:"tr,omitempty"`
+	ContentType string   `json:"content_type,omitempty" msgpack:"ct,omitempty"`
+}
+
 // Message is the common store envelope for one side of a Flow. It is the
 // structural union of RawHTTP1Request and RawHTTP1Response: a request side
 // leaves the status fields zero, a response side leaves method/path/query zero.
@@ -286,6 +294,16 @@ type Message struct {
 
 	// Body is the message body (decoded if chunked, raw otherwise).
 	Body []byte `json:"body,omitempty" msgpack:"b,omitempty"`
+
+	// BodyRaw holds the original wire bytes, set by an adapter only when they
+	// differ from a decoded logical Body (protobuf, custom framing). nil
+	// whenever Body already is the wire payload (HTTP and most flows). Replayed
+	// verbatim when Body is unmutated.
+	BodyRaw []byte `json:"body_raw,omitempty" msgpack:"br,omitempty"`
+
+	// BodyCodec is the transform chain and logical content-type mapping BodyRaw
+	// to Body, used to re-encode a mutated Body on replay. Set only with BodyRaw.
+	BodyCodec *BodyCodec `json:"body_codec,omitempty" msgpack:"bc,omitempty"`
 
 	// Trailers for chunked encoding (raw bytes).
 	Trailers []byte `json:"trailers,omitempty" msgpack:"t,omitempty"`
@@ -393,8 +411,11 @@ func (m *Message) toRawResponse() *RawHTTP1Response {
 // HistoryMeta holds lightweight metadata extracted at store time.
 // Used by summary/list paths to avoid deserializing full request/response bodies.
 type HistoryMeta struct {
-	FlowID      string        `msgpack:"fid"`
-	Protocol    string        `msgpack:"pr"`
+	FlowID       string `msgpack:"fid"`
+	Protocol     string `msgpack:"pr"`
+	Adapter      string `msgpack:"ad,omitempty"`
+	ParentFlowID string `msgpack:"pid,omitempty"`
+
 	Scheme      string        `msgpack:"sc,omitempty"`
 	Port        int           `msgpack:"po,omitempty"`
 	Method      string        `msgpack:"m"`

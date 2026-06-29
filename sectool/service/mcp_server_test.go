@@ -273,6 +273,10 @@ func (b *mockHttpBackend) GetProxyEntry(ctx context.Context, flowID string) (*Pr
 	return nil, ErrNotFound
 }
 
+func (b *mockHttpBackend) GetProxyChildren(ctx context.Context, parentFlowID string) ([]ProxyEntry, error) {
+	return nil, nil
+}
+
 func (b *mockHttpBackend) DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

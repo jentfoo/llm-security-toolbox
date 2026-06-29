@@ -451,6 +451,11 @@ func (b *BurpBackend) GetProxyEntry(ctx context.Context, flowID string) (*ProxyE
 	}, nil
 }
 
+// GetProxyChildren returns no children: the Burp backend has no nested flows.
+func (b *BurpBackend) GetProxyChildren(ctx context.Context, parentFlowID string) ([]ProxyEntry, error) {
+	return nil, nil
+}
+
 func (b *BurpBackend) DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error) {
 	return 0, ErrNotSupported
 }

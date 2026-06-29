@@ -1,6 +1,9 @@
 package wire
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ProtocolVersion is the major.minor contract version.
 type ProtocolVersion struct {
@@ -87,4 +90,84 @@ type ShutdownParams struct {
 // ShutdownResult acknowledges a shutdown request.
 type ShutdownResult struct {
 	Ack bool `json:"ack"`
+}
+
+// Header is a single name-value metadata entry on a message.
+type Header struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// BodyCodec describes how Body was derived from BodyRaw: the ordered transform
+// chain (e.g. decryption, decompression, de-framing) and the logical content-type.
+// Used on replay to re-encode a mutated Body back to the wire form.
+type BodyCodec struct {
+	Transforms  []string `json:"transforms,omitempty"`
+	ContentType string   `json:"content_type,omitempty"`
+}
+
+// FlowMessage is one side of a flow: request or response. Body is the logical
+// payload every tool operates on; BodyRaw/BodyCodec carry the wire form when it
+// is not natively decodable by sectool. Byte fields are base64 in JSON.
+type FlowMessage struct {
+	Method     string     `json:"method,omitempty"`
+	Path       string     `json:"path,omitempty"`
+	Query      string     `json:"query,omitempty"`
+	StatusCode int        `json:"status_code,omitempty"`
+	StatusText string     `json:"status_text,omitempty"`
+	Headers    []Header   `json:"headers,omitempty"`
+	Body       []byte     `json:"body,omitempty"`
+	BodyRaw    []byte     `json:"body_raw,omitempty"`
+	BodyCodec  *BodyCodec `json:"body_codec,omitempty"`
+}
+
+// Flow is a captured exchange a sidecar publishes via push_flow. FlowID is empty
+// on first emission (sectool assigns) and set to re-target an existing flow for
+// two-phase completion or session/stream teardown.
+type Flow struct {
+	FlowID       string         `json:"flow_id,omitempty"`
+	Adapter      string         `json:"adapter,omitempty"`
+	ProtocolTag  string         `json:"protocol_tag,omitempty"`
+	Direction    string         `json:"direction,omitempty"`
+	ParentFlowID string         `json:"parent_flow_id,omitempty"`
+	Scheme       string         `json:"scheme,omitempty"`
+	Port         int            `json:"port,omitempty"`
+	Request      *FlowMessage   `json:"request,omitempty"`
+	Response     *FlowMessage   `json:"response,omitempty"`
+	StartedAt    time.Time      `json:"started_at,omitempty"`
+	CompletedAt  time.Time      `json:"completed_at,omitempty"`
+	Annotations  map[string]any `json:"annotations,omitempty"`
+}
+
+// PushFlowParams is the Flow emitted via push_flow.
+type PushFlowParams = Flow
+
+// PushFlowResult carries the flow_id sectool assigned (or echoed back).
+type PushFlowResult struct {
+	FlowID string `json:"flow_id"`
+}
+
+// LogParams is a structured diagnostic log line.
+type LogParams struct {
+	Level   string         `json:"level,omitempty"`
+	Message string         `json:"message"`
+	Fields  map[string]any `json:"fields,omitempty"`
+}
+
+// ReportMetricsParams carries counter and gauge samples.
+type ReportMetricsParams struct {
+	Counters map[string]int64   `json:"counters,omitempty"`
+	Gauges   map[string]float64 `json:"gauges,omitempty"`
+}
+
+// CoreQueryParams invokes a read-side core tool by name.
+type CoreQueryParams struct {
+	Tool   string          `json:"tool"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+// CoreQueryResult is the core tool's result text.
+type CoreQueryResult struct {
+	Content string `json:"content"`
+	IsError bool   `json:"is_error,omitempty"`
 }

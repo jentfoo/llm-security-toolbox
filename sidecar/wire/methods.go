@@ -9,8 +9,12 @@ const (
 
 // JSON-RPC method names exchanged over the connection.
 const (
-	MethodRegister = "register"
-	MethodPing     = "ping"
-	MethodPong     = "pong"
-	MethodShutdown = "shutdown"
+	MethodRegister      = "register"
+	MethodPing          = "ping"
+	MethodPong          = "pong"
+	MethodShutdown      = "shutdown"
+	MethodPushFlow      = "push_flow"
+	MethodLog           = "log"
+	MethodReportMetrics = "report_metrics"
+	MethodCoreQuery     = "core_query"
 )

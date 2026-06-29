@@ -55,18 +55,20 @@ type Flow struct {
 // ExtractMeta builds HistoryMeta from a Flow using its accessor methods.
 func (f *Flow) ExtractMeta() HistoryMeta {
 	return HistoryMeta{
-		FlowID:      f.FlowID,
-		Protocol:    f.ProtocolTag,
-		Scheme:      f.Scheme,
-		Port:        f.Port,
-		Method:      f.GetMethod(),
-		Host:        f.GetHost(),
-		Path:        f.getFullPath(),
-		Status:      f.GetStatusCode(),
-		ContentType: f.GetResponseHeader("content-type"),
-		RespLen:     f.responseBodyLen(),
-		Timestamp:   f.StartedAt,
-		Duration:    f.CompletedAt.Sub(f.StartedAt),
+		FlowID:       f.FlowID,
+		Protocol:     f.ProtocolTag,
+		Adapter:      f.Adapter,
+		ParentFlowID: f.ParentFlowID,
+		Scheme:       f.Scheme,
+		Port:         f.Port,
+		Method:       f.GetMethod(),
+		Host:         f.GetHost(),
+		Path:         f.getFullPath(),
+		Status:       f.GetStatusCode(),
+		ContentType:  f.GetResponseHeader("content-type"),
+		RespLen:      f.responseBodyLen(),
+		Timestamp:    f.StartedAt,
+		Duration:     f.CompletedAt.Sub(f.StartedAt),
 	}
 }
 

@@ -75,3 +75,29 @@ func (r *Record) lastPong() time.Time {
 	defer r.mu.Unlock()
 	return r.liveness.LastPongRecv
 }
+
+// trackOwned records a newly emitted flow as owned, and in-flight when it still
+// awaits a two-phase completion.
+func (r *Record) trackOwned(flowID string, inFlight bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ownedFlows[flowID] = struct{}{}
+	if inFlight {
+		r.inFlight[flowID] = struct{}{}
+	}
+}
+
+// owns reports whether the adapter emitted the flow.
+func (r *Record) owns(flowID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.ownedFlows[flowID]
+	return ok
+}
+
+// markComplete clears a flow's in-flight status after two-phase completion.
+func (r *Record) markComplete(flowID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.inFlight, flowID)
+}

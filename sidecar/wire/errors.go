@@ -23,6 +23,13 @@ const (
 	CodeMajorVersionMismatch  = -33001
 	CodeDuplicateRegistration = -33002
 	CodeCapabilityConflict    = -33003
+	CodeNotRegistered         = -33005
+)
+
+// Rule and flow codes; also cover flow emission and core_query validation.
+const (
+	CodeFlowRejected      = -33100
+	CodeCoreQueryRejected = -33101
 )
 
 // Transport codes.

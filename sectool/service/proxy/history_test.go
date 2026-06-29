@@ -124,6 +124,91 @@ func TestHistoryStore_Store(t *testing.T) {
 	})
 }
 
+func TestHistoryStore_Complete(t *testing.T) {
+	t.Parallel()
+
+	t.Run("attaches_response_and_completion", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		flowID := h.Store(newTestEntry("GET", "/api"))
+		completedAt := time.Now().Add(time.Second)
+		resp := &types.Message{StatusCode: 200, Body: []byte("ok")}
+		ok := h.Complete(flowID, resp, completedAt, map[string]any{"phase": "mutated"})
+		require.True(t, ok)
+
+		got, found := h.Get(flowID)
+		require.True(t, found)
+		require.NotNil(t, got.Response)
+		assert.Equal(t, 200, got.Response.StatusCode)
+		assert.Equal(t, completedAt.UTC(), got.CompletedAt)
+		assert.Equal(t, "mutated", got.Annotations["phase"])
+
+		// Meta reflects the now-attached status.
+		meta, found := h.GetMeta(flowID)
+		require.True(t, found)
+		assert.Equal(t, 200, meta.Status)
+	})
+
+	t.Run("unknown_flow_id", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+		assert.False(t, h.Complete("missing", nil, time.Now(), nil))
+	})
+
+	t.Run("child_flow_has_no_meta", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		parent := h.Store(newTestEntry("STREAM", "/s"))
+		child := h.Store(&types.Flow{
+			ProtocolTag:  "custom.chunk",
+			ParentFlowID: parent,
+			Request:      &types.Message{Method: "CHUNK", Body: []byte("a")},
+			StartedAt:    time.Now(),
+		})
+		require.True(t, h.Complete(child, &types.Message{Body: []byte("done")}, time.Now(), nil))
+
+		got, found := h.Get(child)
+		require.True(t, found)
+		assert.Equal(t, "done", string(got.Response.Body))
+		_, hasMeta := h.GetMeta(child)
+		assert.False(t, hasMeta)
+	})
+}
+
+func TestHistoryStore_Children(t *testing.T) {
+	t.Parallel()
+
+	h := newHistoryStore(store.NewMemStorage())
+	t.Cleanup(h.Close)
+
+	parent := h.Store(newTestEntry("STREAM", "/s"))
+	// Emit children out of timestamp order to prove emission order is preserved,
+	// not a timestamp sort.
+	base := time.Now()
+	emitTimes := []time.Time{base.Add(3 * time.Second), base, base.Add(time.Second)}
+	want := make([]string, 0, len(emitTimes))
+	for i, ts := range emitTimes {
+		id := h.Store(&types.Flow{
+			ProtocolTag:  "custom.chunk",
+			ParentFlowID: parent,
+			Direction:    types.DirectionS2C,
+			Request:      &types.Message{Method: "CHUNK", Body: []byte{byte('0' + i)}},
+			StartedAt:    ts,
+		})
+		want = append(want, id)
+	}
+
+	children := h.Children(parent)
+	got := make([]string, len(children))
+	for i, c := range children {
+		got[i] = c.FlowID
+	}
+	assert.Equal(t, want, got)
+	assert.Empty(t, h.Children("no-such-parent"))
+}
+
 func TestHistoryStore_Get(t *testing.T) {
 	t.Parallel()
 
@@ -333,6 +418,48 @@ func TestHistoryStore_Delete(t *testing.T) {
 		assert.Equal(t, 0, h.Delete())
 		assert.Equal(t, 1, h.Count())
 	})
+
+	t.Run("removes_child_flow", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		parent := h.Store(newTestEntry("STREAM", "/s"))
+		c1 := h.Store(childFlow(parent, "a"))
+		c2 := h.Store(childFlow(parent, "b"))
+
+		assert.Equal(t, 1, h.Delete(c1))
+		_, ok := h.Get(c1)
+		assert.False(t, ok) // payload removed
+		// Parent untouched; surviving child still indexed, in order.
+		assert.Equal(t, 1, h.Count())
+		remaining := h.Children(parent)
+		require.Len(t, remaining, 1)
+		assert.Equal(t, c2, remaining[0].FlowID)
+	})
+
+	t.Run("delete_parent_drops_child_index", func(t *testing.T) {
+		h := newHistoryStore(store.NewMemStorage())
+		t.Cleanup(h.Close)
+
+		parent := h.Store(newTestEntry("STREAM", "/s"))
+		h.Store(childFlow(parent, "a"))
+
+		assert.Equal(t, 1, h.Delete(parent))
+		assert.Equal(t, 0, h.Count())
+		// Child index for the gone parent is dropped (no dangling references).
+		assert.Empty(t, h.Children(parent))
+	})
+}
+
+// childFlow builds a payload-only child flow under parent.
+func childFlow(parent, body string) *types.Flow {
+	return &types.Flow{
+		ProtocolTag:  "custom.chunk",
+		ParentFlowID: parent,
+		Direction:    types.DirectionS2C,
+		Request:      &types.Message{Method: "CHUNK", Body: []byte(body)},
+		StartedAt:    time.Now(),
+	}
 }
 
 func TestHistoryStore_TimestampOrdering(t *testing.T) {
@@ -376,6 +503,33 @@ func TestHistoryStore_Recovery(t *testing.T) {
 	for i, e := range entries {
 		assert.Equal(t, ids[i], e.FlowID)
 	}
+}
+
+func TestHistoryStore_RecoverChildOrder(t *testing.T) {
+	t.Parallel()
+
+	storage := store.NewMemStorage()
+	h := newHistoryStore(storage)
+
+	parent := h.Store(newTestEntryAt("STREAM", "/s", time.Now()))
+	base := time.Now()
+	var childIDs []string
+	for i := 0; i < 3; i++ {
+		c := childFlow(parent, "x")
+		c.StartedAt = base.Add(time.Duration(i) * time.Millisecond)
+		childIDs = append(childIDs, h.Store(c))
+	}
+
+	// Rebuild over the same storage; the child index must be reconstructed so
+	// children remain reachable via Children, ordered by (started_at, flow_id).
+	h2 := newHistoryStore(storage)
+	t.Cleanup(h2.Close)
+
+	got := make([]string, 0, 3)
+	for _, c := range h2.Children(parent) {
+		got = append(got, c.FlowID)
+	}
+	assert.Equal(t, childIDs, got)
 }
 
 func TestFormatRequest(t *testing.T) {

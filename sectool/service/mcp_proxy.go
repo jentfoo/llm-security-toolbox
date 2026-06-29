@@ -50,6 +50,9 @@ Results include both proxy-captured traffic (source=proxy) and replay-sent traff
 		mcp.WithString("since", mcp.Description(sinceDesc)),
 		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob (*, ?)")),
 		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob (*, ?)")),
+		mcp.WithString("adapter", mcp.Description("Filter by emitting adapter name glob (*, ?), e.g. 'http/1.1' or a sidecar name")),
+		mcp.WithString("protocol_tag", mcp.Description("Filter by protocol tag glob (*, ?), e.g. 'http/1.1' or 'http/2'")),
+		mcp.WithString("parent_flow_id", mcp.Description("Filter to child flows of this parent flow_id (stream children, session inner flows)")),
 		mcp.WithNumber("limit", mcp.Description("Max results to return")),
 		mcp.WithNumber("offset", mcp.Description("Skip first N results (flows mode, applied after filtering)")),
 	)
@@ -254,6 +257,9 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 		Since:        req.GetString("since", ""),
 		ExcludeHost:  req.GetString("exclude_host", ""),
 		ExcludePath:  req.GetString("exclude_path", ""),
+		Adapter:      req.GetString("adapter", ""),
+		ProtocolTag:  req.GetString("protocol_tag", ""),
+		ParentFlowID: req.GetString("parent_flow_id", ""),
 		Limit:        req.GetInt("limit", 0),
 		Offset:       req.GetInt("offset", 0),
 		Source:       req.GetString("source", ""),
@@ -283,7 +289,15 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	needsFullText := listReq.SearchHeader != "" || listReq.SearchBody != ""
-	allEntries, err := m.service.fetchAllProxyEntries(ctx, needsFullText)
+	// parent_flow_id targets nested children, which are excluded from the top-level
+	// listing and surfaced (in emission order) only through this dedicated path.
+	var allEntries []flowEntry
+	var err error
+	if listReq.ParentFlowID != "" {
+		allEntries, err = m.service.fetchProxyChildren(ctx, listReq.ParentFlowID)
+	} else {
+		allEntries, err = m.service.fetchAllProxyEntries(ctx, needsFullText)
+	}
 	if err != nil {
 		return errorResultFromErr("failed to fetch proxy history: ", err), nil
 	}
@@ -653,18 +667,20 @@ func (m *mcpServer) handleProxyRuleDelete(ctx context.Context, req mcp.CallToolR
 
 // flowEntry holds parsed metadata for a proxy or replay history entry.
 type flowEntry struct {
-	flowID    string
-	timestamp time.Time // primary sort key; flow_id breaks ties
-	method    string
-	host      string
-	path      string
-	scheme    string // "http" or "https" (empty = infer from host)
-	port      int    // original port (0 = infer from scheme)
-	status    int
-	respLen   int
-	request   string
-	response  string
-	source    string // "proxy" or "replay"
+	flowID      string
+	timestamp   time.Time // primary sort key; flow_id breaks ties
+	method      string
+	host        string
+	path        string
+	scheme      string // "http" or "https" (empty = infer from host)
+	port        int    // original port (0 = infer from scheme)
+	status      int
+	respLen     int
+	request     string
+	response    string
+	source      string // "proxy" or "replay"
+	adapter     string // emitting adapter name
+	protocolTag string // protocol tag (e.g. "http/1.1", "http/2")
 }
 
 // drainProxyHistory pages all proxy history entries from the backend in fetchBatchSize chunks.
@@ -689,18 +705,20 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 				status := readResponseStatusCode([]byte(entry.Response))
 				_, respBody := splitHeadersBody([]byte(entry.Response))
 				page = append(page, flowEntry{
-					flowID:    entry.FlowID,
-					timestamp: entry.Timestamp,
-					method:    method,
-					host:      host,
-					path:      path,
-					scheme:    entry.Scheme,
-					port:      entry.Port,
-					status:    status,
-					respLen:   len(respBody),
-					request:   entry.Request,
-					response:  entry.Response,
-					source:    SourceProxy,
+					flowID:      entry.FlowID,
+					timestamp:   entry.Timestamp,
+					method:      method,
+					host:        host,
+					path:        path,
+					scheme:      entry.Scheme,
+					port:        entry.Port,
+					status:      status,
+					respLen:     len(respBody),
+					request:     entry.Request,
+					response:    entry.Response,
+					source:      SourceProxy,
+					adapter:     entry.Adapter,
+					protocolTag: entry.Protocol,
 				})
 			}
 		} else {
@@ -714,16 +732,18 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 					continue
 				}
 				page = append(page, flowEntry{
-					flowID:    m.FlowID,
-					timestamp: m.Timestamp,
-					method:    m.Method,
-					host:      m.Host,
-					path:      m.Path,
-					scheme:    m.Scheme,
-					port:      m.Port,
-					status:    m.Status,
-					respLen:   m.RespLen,
-					source:    SourceProxy,
+					flowID:      m.FlowID,
+					timestamp:   m.Timestamp,
+					method:      m.Method,
+					host:        m.Host,
+					path:        m.Path,
+					scheme:      m.Scheme,
+					port:        m.Port,
+					status:      m.Status,
+					respLen:     m.RespLen,
+					source:      SourceProxy,
+					adapter:     m.Adapter,
+					protocolTag: m.Protocol,
 				})
 			}
 		}
@@ -803,6 +823,39 @@ func (s *Server) fetchAllProxyEntries(ctx context.Context, needsFullText bool) (
 	return all, nil
 }
 
+// fetchProxyChildren retrieves the child flows of parentFlowID in emission order
+// (stream children, session inner flows), which are excluded from the top-level
+// listing. Order is preserved as emitted, not re-sorted by timestamp.
+func (s *Server) fetchProxyChildren(ctx context.Context, parentFlowID string) ([]flowEntry, error) {
+	children, err := s.httpBackend.GetProxyChildren(ctx, parentFlowID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]flowEntry, 0, len(children))
+	for _, entry := range children {
+		method, host, path := extractRequestMeta(entry.Request)
+		status := readResponseStatusCode([]byte(entry.Response))
+		_, respBody := splitHeadersBody([]byte(entry.Response))
+		out = append(out, flowEntry{
+			flowID:      entry.FlowID,
+			timestamp:   entry.Timestamp,
+			method:      method,
+			host:        host,
+			path:        path,
+			scheme:      entry.Scheme,
+			port:        entry.Port,
+			status:      status,
+			respLen:     len(respBody),
+			request:     entry.Request,
+			response:    entry.Response,
+			source:      SourceProxy,
+			adapter:     entry.Adapter,
+			protocolTag: entry.Protocol,
+		})
+	}
+	return out, nil
+}
+
 // applyProxyFilters applies client-side filters to proxy history entries.
 // When maxResults > 0, stops after collecting that many matches (early termination for offset+limit).
 func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID string, searchHeaderRe, searchBodyRe *regexp.Regexp, maxResults int) []flowEntry {
@@ -849,7 +902,13 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID st
 			continue
 		} else if req.ExcludePath != "" && matchesGlob(e.path, req.ExcludePath) {
 			continue
+		} else if req.Adapter != "" && !matchesGlob(e.adapter, req.Adapter) {
+			continue
+		} else if req.ProtocolTag != "" && !matchesGlob(e.protocolTag, req.ProtocolTag) {
+			continue
 		}
+		// parent_flow_id is a source selector, not a row filter: when set, entries
+		// already come from fetchProxyChildren (only that parent's children).
 		if searchHeaderRe != nil || searchBodyRe != nil {
 			if !matchesFlowSearch([]byte(e.request), []byte(e.response), searchHeaderRe, searchBodyRe) {
 				continue

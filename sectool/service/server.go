@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -42,6 +44,7 @@ type Server struct {
 
 	// Runtime state
 	mcpServer *mcpServer
+	mcpReady  atomic.Pointer[mcpServer] // set once mcpServer is built; backs sidecar core_query
 	started   chan struct{}
 	startedAt time.Time
 
@@ -170,6 +173,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	s.mcpServer = newMCPServer(s, s.mcpWorkflowMode)
+	s.mcpReady.Store(s.mcpServer)
 	if err := s.mcpServer.Start(s.mcpPort); err != nil {
 		return fmt.Errorf("failed to start MCP server: %w", err)
 	}
@@ -219,6 +223,16 @@ func (s *Server) shutdown() error {
 
 	log.Printf("sectool MCP server stopped")
 	return nil
+}
+
+// CoreQuery dispatches a read-side core tool by name for the sidecar core_query
+// method, delegating to the MCP server's tool handlers once it is built.
+func (s *Server) CoreQuery(ctx context.Context, tool string, params json.RawMessage) (string, bool, error) {
+	m := s.mcpReady.Load()
+	if m == nil {
+		return "", false, errors.New("core tools not ready")
+	}
+	return m.CoreQuery(ctx, tool, params)
 }
 
 // RequestShutdown initiates server shutdown.
@@ -388,7 +402,7 @@ func (s *Server) startBuiltinProxy() error {
 			HeartbeatInterval: time.Duration(s.cfg.Sidecars.HeartbeatIntervalSecs) * time.Second,
 			HeartbeatTimeout:  time.Duration(s.cfg.Sidecars.HeartbeatTimeoutSecs) * time.Second,
 			NativeProxyPort:   s.proxyPort,
-		}); err != nil {
+		}, s); err != nil {
 			_ = backend.Close()
 			return fmt.Errorf("enable sidecars: %w", err)
 		}

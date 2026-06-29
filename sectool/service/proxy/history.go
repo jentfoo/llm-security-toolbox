@@ -3,6 +3,7 @@ package proxy
 import (
 	"cmp"
 	"log"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -50,6 +51,7 @@ type HistoryStore struct {
 	storage         store.Storage
 	flowOrder       []orderedFlow        // ordered by (timestamp, flowID) ascending
 	timestampByFlow map[string]time.Time // flow_id -> timestamp, for cursor resolution
+	childOrder      map[string][]string  // parent flow_id -> child flow_ids in emission order
 	captureFilter   atomic.Value         // stores CaptureFilter
 }
 
@@ -59,15 +61,22 @@ func newHistoryStore(storage store.Storage) *HistoryStore {
 	h := &HistoryStore{
 		storage:         storage,
 		timestampByFlow: make(map[string]time.Time),
+		childOrder:      make(map[string][]string),
 	}
 	h.recover()
 	return h
 }
 
-// recover rebuilds in-memory order from persisted meta keys.
+// recover rebuilds in-memory order from persisted keys: top-level ordering from
+// meta keys, and the parent child index from payload-only child flows.
 func (h *HistoryStore) recover() {
+	var payloadKeys []string
 	for _, key := range h.storage.KeySet() {
-		if !strings.HasPrefix(key, historyKeyPrefix) || strings.HasSuffix(key, historyPayloadSuf) {
+		if !strings.HasPrefix(key, historyKeyPrefix) {
+			continue
+		}
+		if strings.HasSuffix(key, historyPayloadSuf) {
+			payloadKeys = append(payloadKeys, key)
 			continue
 		}
 		data, found, err := h.storage.Get(key)
@@ -89,6 +98,41 @@ func (h *HistoryStore) recover() {
 	slices.SortFunc(h.flowOrder, func(a, b orderedFlow) int {
 		return cmp.Or(a.timestamp.Compare(b.timestamp), cmp.Compare(a.flowID, b.flowID))
 	})
+	h.recoverChildOrder(payloadKeys)
+}
+
+// recoverChildOrder rebuilds the parent child index from payload-only child
+// flows (children carry no meta key). Live emission order is in-memory only; on
+// recovery it is approximated by (started_at, flow_id), matching the top-level
+// ordering. This runs only when a store is rebuilt over existing storage; the
+// history store is ephemeral, so it does not occur across process restarts.
+func (h *HistoryStore) recoverChildOrder(payloadKeys []string) {
+	type childRec struct {
+		parent, id string
+		ts         time.Time
+	}
+	var children []childRec
+	for _, key := range payloadKeys {
+		fid := strings.TrimSuffix(strings.TrimPrefix(key, historyKeyPrefix), historyPayloadSuf)
+		if _, ok := h.timestampByFlow[fid]; ok {
+			continue // top-level flow, already ordered via its meta key
+		}
+		data, found, err := h.storage.Get(key)
+		if err != nil || !found {
+			continue
+		}
+		var flow types.Flow
+		if err := store.Deserialize(data, &flow); err != nil || flow.ParentFlowID == "" {
+			continue
+		}
+		children = append(children, childRec{parent: flow.ParentFlowID, id: fid, ts: flow.StartedAt.UTC()})
+	}
+	slices.SortStableFunc(children, func(a, b childRec) int {
+		return cmp.Or(a.ts.Compare(b.ts), cmp.Compare(a.id, b.id))
+	})
+	for _, c := range children {
+		h.childOrder[c.parent] = append(h.childOrder[c.parent], c.id)
+	}
 }
 
 // Store mints a flow_id, assigns it to flow, persists, and returns the flow_id.
@@ -105,12 +149,45 @@ func (h *HistoryStore) Store(flow *types.Flow) string {
 
 	h.writePayloadLocked(flow)
 	if flow.ParentFlowID != "" {
+		h.childOrder[flow.ParentFlowID] = append(h.childOrder[flow.ParentFlowID], flowID)
 		return flowID
 	}
 	h.writeMetaLocked(flow)
 	h.insertOrderLocked(orderedFlow{flowID: flowID, timestamp: ts})
 	h.timestampByFlow[flowID] = ts
 	return flowID
+}
+
+// Complete attaches a late response and/or completion to an already-stored
+// flow: the two-phase form used for deferred responses and session/stream
+// teardown. resp, when non-nil, populates the response side; a non-zero
+// completedAt sets CompletedAt; annotations merge over existing keys. Returns
+// false when flowID is unknown.
+func (h *HistoryStore) Complete(flowID string, resp *types.Message, completedAt time.Time, annotations map[string]any) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	flow, ok := h.Get(flowID)
+	if !ok {
+		return false
+	}
+	if resp != nil {
+		flow.Response = resp
+	}
+	if !completedAt.IsZero() {
+		flow.CompletedAt = completedAt.UTC()
+	}
+	if len(annotations) > 0 {
+		if flow.Annotations == nil {
+			flow.Annotations = make(map[string]any, len(annotations))
+		}
+		maps.Copy(flow.Annotations, annotations)
+	}
+	h.writePayloadLocked(flow)
+	if flow.ParentFlowID == "" {
+		h.writeMetaLocked(flow)
+	}
+	return true
 }
 
 // mintUniqueFlowIDLocked generates a flow_id, retrying on collision. Caller must hold mu.
@@ -176,6 +253,21 @@ func (h *HistoryStore) Get(flowID string) (*types.Flow, bool) {
 	flow.StartedAt = flow.StartedAt.UTC()
 	flow.CompletedAt = flow.CompletedAt.UTC()
 	return &flow, true
+}
+
+// Children returns the child flows of parentFlowID in emission order.
+func (h *HistoryStore) Children(parentFlowID string) []*types.Flow {
+	h.mu.RLock()
+	childIDs := slices.Clone(h.childOrder[parentFlowID])
+	h.mu.RUnlock()
+
+	flows := make([]*types.Flow, 0, len(childIDs))
+	for _, fid := range childIDs {
+		if f, ok := h.Get(fid); ok {
+			flows = append(flows, f)
+		}
+	}
+	return flows
 }
 
 // GetMeta retrieves lightweight metadata for an entry by flow_id.
@@ -263,23 +355,41 @@ func (h *HistoryStore) Delete(flowIDs ...string) int {
 
 	var deleted int
 	for _, fid := range flowIDs {
-		ts, ok := h.timestampByFlow[fid]
+		if ts, ok := h.timestampByFlow[fid]; ok {
+			// Top-level flow: drop meta, payload, ordering, and its child index
+			if err := h.storage.Delete(historyMetaKey(fid)); err != nil {
+				log.Printf("proxy: delete history meta %s: %v", fid, err)
+				continue
+			}
+			if err := h.storage.Delete(historyPayloadKey(fid)); err != nil {
+				log.Printf("proxy: delete history payload %s: %v", fid, err)
+			}
+			delete(h.timestampByFlow, fid)
+			delete(h.childOrder, fid)
+			idx := sort.Search(len(h.flowOrder), func(i int) bool {
+				return !lessOrder(h.flowOrder[i].timestamp, h.flowOrder[i].flowID, ts, fid)
+			})
+			if idx < len(h.flowOrder) && h.flowOrder[idx].flowID == fid {
+				h.flowOrder = slices.Delete(h.flowOrder, idx, idx+1)
+			}
+			deleted++
+			continue
+		}
+
+		// Child flow (payload-only) or unknown id
+		flow, ok := h.Get(fid)
 		if !ok {
 			continue
 		}
-		if err := h.storage.Delete(historyMetaKey(fid)); err != nil {
-			log.Printf("proxy: delete history meta %s: %v", fid, err)
-			continue
+		if flow.ParentFlowID != "" {
+			siblings := h.childOrder[flow.ParentFlowID]
+			if i := slices.Index(siblings, fid); i >= 0 {
+				h.childOrder[flow.ParentFlowID] = slices.Delete(siblings, i, i+1)
+			}
 		}
+		delete(h.childOrder, fid) // drop fid's own child index if it nested further
 		if err := h.storage.Delete(historyPayloadKey(fid)); err != nil {
 			log.Printf("proxy: delete history payload %s: %v", fid, err)
-		}
-		delete(h.timestampByFlow, fid)
-		idx := sort.Search(len(h.flowOrder), func(i int) bool {
-			return !lessOrder(h.flowOrder[i].timestamp, h.flowOrder[i].flowID, ts, fid)
-		})
-		if idx < len(h.flowOrder) && h.flowOrder[idx].flowID == fid {
-			h.flowOrder = slices.Delete(h.flowOrder, idx, idx+1)
 		}
 		deleted++
 	}

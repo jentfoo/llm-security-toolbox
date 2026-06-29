@@ -3,6 +3,7 @@ package sidecar
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -26,9 +27,11 @@ type Config struct {
 // Manager owns the registry of connected sidecars: registration, conflict
 // resolution, heartbeat, reconnect/resume, and shutdown.
 type Manager struct {
-	cfg      Config
-	registry *protocol.Registry
-	now      func() time.Time
+	cfg       Config
+	registry  *protocol.Registry
+	flows     FlowSink
+	coreQuery CoreQuerier
+	now       func() time.Time
 
 	mu          sync.Mutex
 	records     map[string]*Record
@@ -37,8 +40,10 @@ type Manager struct {
 }
 
 // NewManager creates a Manager. registry is the native proxy's claim registry
-// used to dispatch connections to sidecar adapters; it may be nil in tests.
-func NewManager(cfg Config, registry *protocol.Registry) *Manager {
+// used to dispatch connections to sidecar adapters; flows is the history sink
+// for push_flow; coreQuery dispatches read-side core tools for core_query. Any
+// may be nil in tests.
+func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQuery CoreQuerier) *Manager {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = 10 * time.Second
 	}
@@ -48,6 +53,8 @@ func NewManager(cfg Config, registry *protocol.Registry) *Manager {
 	return &Manager{
 		cfg:         cfg,
 		registry:    registry,
+		flows:       flows,
+		coreQuery:   coreQuery,
 		now:         time.Now,
 		records:     map[string]*Record{},
 		byInstance:  map[string]*Record{},
@@ -188,7 +195,7 @@ func (s *session) record() *Record {
 	return s.rec
 }
 
-func (s *session) HandleRequest(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
+func (s *session) HandleRequest(ctx context.Context, method string, params json.RawMessage) (any, *wire.Error) {
 	switch method {
 	case wire.MethodRegister:
 		var p wire.RegisterParams
@@ -203,6 +210,18 @@ func (s *session) HandleRequest(_ context.Context, method string, params json.Ra
 		s.rec = rec
 		s.mu.Unlock()
 		return res, nil
+	case wire.MethodPushFlow:
+		var p wire.Flow
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, wire.NewError(wire.CodeFlowRejected, "push_flow: invalid params")
+		}
+		return s.handlePushFlow(&p)
+	case wire.MethodCoreQuery:
+		var p wire.CoreQueryParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, wire.NewError(wire.CodeCoreQueryRejected, "core_query: invalid params")
+		}
+		return s.handleCoreQuery(ctx, &p)
 	case wire.MethodPing:
 		return struct{}{}, nil
 	default:
@@ -210,13 +229,27 @@ func (s *session) HandleRequest(_ context.Context, method string, params json.Ra
 	}
 }
 
-func (s *session) HandleNotification(_ context.Context, method string, _ json.RawMessage) {
+func (s *session) HandleNotification(_ context.Context, method string, params json.RawMessage) {
 	switch method {
 	case wire.MethodPing:
 		_ = s.peer.Notify(wire.MethodPong, nil)
 	case wire.MethodPong:
 		if rec := s.record(); rec != nil {
 			rec.recordPong(s.m.now())
+		}
+	case wire.MethodLog:
+		var p wire.LogParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			log.Printf("sidecar[%s]: drop malformed %s notification: %v", s.adapterName(), method, err)
+		} else {
+			s.handleLog(&p)
+		}
+	case wire.MethodReportMetrics:
+		var p wire.ReportMetricsParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			log.Printf("sidecar[%s]: drop malformed %s notification: %v", s.adapterName(), method, err)
+		} else {
+			s.handleReportMetrics(&p)
 		}
 	}
 }

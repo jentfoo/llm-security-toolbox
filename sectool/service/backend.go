@@ -57,6 +57,11 @@ type HttpBackend interface {
 	// Returns ErrNotFound if no entry exists for the flow_id.
 	GetProxyEntry(ctx context.Context, flowID string) (*ProxyEntry, error)
 
+	// GetProxyChildren returns the child flows of parentFlowID in emission order
+	// (stream children, session inner flows). Empty on backends without nested
+	// flows (Burp).
+	GetProxyChildren(ctx context.Context, parentFlowID string) ([]ProxyEntry, error)
+
 	// DeleteProxyEntries removes proxy history entries by flow_id and returns the number actually deleted.
 	// Unknown flow_ids are silently ignored. Returns ErrNotSupported on backends without delete (Burp).
 	DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error)
@@ -96,17 +101,19 @@ type ResponderBackend interface {
 // ProxyEntryMeta holds lightweight metadata for a proxy history entry.
 // Used by summary/list paths to avoid deserializing full request/response bodies.
 type ProxyEntryMeta struct {
-	FlowID      string
-	Timestamp   time.Time // capture-start for native; first observation for Burp
-	Method      string
-	Host        string
-	Path        string // includes query string
-	Status      int
-	RespLen     int
-	Protocol    string
-	Scheme      string // "http" or "https" (empty = infer from host)
-	Port        int    // original port (0 = infer from scheme)
-	ContentType string
+	FlowID       string
+	Timestamp    time.Time // capture-start for native; first observation for Burp
+	Method       string
+	Host         string
+	Path         string // includes query string
+	Status       int
+	RespLen      int
+	Protocol     string
+	Adapter      string // emitting adapter name
+	ParentFlowID string // parent flow when nested (stream child, session inner flow)
+	Scheme       string // "http" or "https" (empty = infer from host)
+	Port         int    // original port (0 = infer from scheme)
+	ContentType  string
 	// Placeholder marks an unparseable Burp entry that preserves offset contiguity; skipped for display.
 	Placeholder bool
 }
@@ -120,9 +127,11 @@ type ProxyEntry struct {
 	// InterimResponses holds wire-formatted 1xx responses that preceded Response.
 	InterimResponses []string `json:"interim_responses,omitempty"`
 	Notes            string   `json:"notes"`
-	Protocol         string   `json:"protocol"`         // "http/1.1" or "http/2" (empty defaults to http/1.1)
-	Scheme           string   `json:"scheme,omitempty"` // "http" or "https" (empty = infer from host)
-	Port             int      `json:"port,omitempty"`   // original port (0 = infer from scheme)
+	Protocol         string   `json:"protocol"`                 // "http/1.1" or "http/2" (empty defaults to http/1.1)
+	Adapter          string   `json:"adapter,omitempty"`        // emitting adapter name
+	ParentFlowID     string   `json:"parent_flow_id,omitempty"` // parent flow when nested
+	Scheme           string   `json:"scheme,omitempty"`         // "http" or "https" (empty = infer from host)
+	Port             int      `json:"port,omitempty"`           // original port (0 = infer from scheme)
 	// Placeholder marks an unparseable Burp entry that preserves offset contiguity; skipped for display.
 	Placeholder bool `json:"-"`
 }
