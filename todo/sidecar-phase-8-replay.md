@@ -10,6 +10,14 @@ Requires **Phase 5** (replay egress flows through `dial_upstream`) and **Phase 7
 (replay applies the §3.4 mutation grammar). Builds on **Phase 3** (flows it replays)
 and **Phase 2** (`injection_target` declared at registration).
 
+## Carried-forward cleanup
+
+- `protocol.UpgradeClaimCtx.TLS` (set on the http1 TLS upgrade path in Phase 6) is
+  currently unused: the WS adapter keys the TLS path off `UpgradeConns.UpstreamConn`
+  and the sidecar bridge derives scheme from `Target.Scheme()`. While touching the
+  upgrade-claim/transport seam here, either remove the field or document it as
+  informational only.
+
 ## Goal
 
 Make the existing `replay_send` and `request_send` MCP tools work on sidecar-owned

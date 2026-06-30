@@ -105,12 +105,41 @@ then echoes post-upgrade bytes.
 
 ## Definition of done
 
-- [ ] `upgrade_claim` fires on `http_101` and `connect` signals with host/path/token/
+- [x] `upgrade_claim` fires on `http_101` and `connect` signals with host/path/token/
       method matching.
-- [ ] Triggering request captured as a flow; upgrade response synthesized by sectool;
+- [x] Triggering request captured as a flow; upgrade response synthesized by sectool;
       post-upgrade bytes routed.
-- [ ] `stream_open` carries `request_flow_id` + `request_headers` for upgrade claims.
-- [ ] WebSocket-101 takeover runs through the unified upgrade-claim path unchanged.
-- [ ] Fixture validates a custom-token upgrade end-to-end.
-- [ ] `sidecar` package gains upgrade-claim registration + handling; no `sectool/` dep.
-- [ ] `make test-all` + `make lint` pass.
+- [x] `stream_open` carries `request_flow_id` + `request_headers` for upgrade claims.
+- [x] WebSocket-101 takeover runs through the unified upgrade-claim path unchanged.
+- [x] Fixture validates a custom-token upgrade end-to-end.
+- [x] `sidecar` package gains upgrade-claim registration + handling; no `sectool/` dep.
+- [x] `make test-all` + `make lint` pass.
+
+## Implementation decisions (as built)
+
+These refine the description above where they conflict:
+
+- **WS adapter untouched.** The registry `ClaimUpgrade`/`UpgradeAdapter` seam was already
+  unified in Phase 1, and the built-in WebSocket adapter already rides it (forwarding the
+  real upstream 101). Only the **sidecar** bridge gained synthesize-101 + capture +
+  handoff; the WS path is byte-identical.
+- **Capture and 101 live in the bridge.** The http1 hook already existed (it now just sets
+  `Signal: "http_101"`); the CONNECT handler gained a `Signal: "connect"` claim check
+  before TLS. All request capture and response synthesis is in
+  `protocol/sidecar/bridge.go` (`ServeUpgrade`/`captureUpgrade`/`upgradeResponse`), so the
+  proxy handlers stay generic. The captured flow is attributed to the claiming sidecar
+  (`Adapter = <sidecar name>`, sidecar annotations) while remaining a normal HTTP-shaped
+  flow in history.
+- **Synthesized 101 is generic.** sectool emits `101 Switching Protocols` echoing the
+  request's `Upgrade` token plus `Connection: Upgrade`; protocol-specific handshake bytes
+  are the sidecar's job (it reads `request_flow_id`/`request_headers` on `stream_open`).
+  For `connect` the `200` is the CONNECT handler's existing reply (not re-synthesized).
+- **`UpgradeClaimCtx.Signal`** discriminates the two seams; `matchUpgrade` requires an
+  `Upgrade` header for `http_101` so a plain request is never claimed. Pattern matching
+  reuses the `patternRank` classification (`patternMatch` in `conflict.go`).
+- **Registry ordering.** `InsertUpgrade`/`RemoveUpgrade` mirror the Early pair; the manager
+  re-inserts sidecar upgrade bridges most-specific-first (via `dominates`) ahead of the
+  built-in WS adapter, so most-specific-wins holds at fire time (incomparable overlaps are
+  already rejected at registration in Phase 2).
+- **TLS-path pre-dial released.** When the http1 TLS path pre-dials upstream, the bridge
+  closes it on handoff (the sidecar dials its own via `dial_upstream`).
