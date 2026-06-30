@@ -534,6 +534,29 @@ func (b *NativeProxyBackend) pushRules(ctx context.Context) {
 	}
 }
 
+// SidecarAdapter reports whether a healthy sidecar is registered under name.
+func (b *NativeProxyBackend) SidecarAdapter(name string) bool {
+	return b.sidecarManager != nil && b.sidecarManager.HasAdapter(name)
+}
+
+// SidecarReplay routes a sidecar-owned flow's replay to its owning adapter, which
+// re-encodes/re-wraps and sends, and returns the produced flow ids and response.
+func (b *NativeProxyBackend) SidecarReplay(ctx context.Context, adapter string, in SidecarReplayInput) (*SidecarReplayResult, error) {
+	wait := true
+	res, rpcErr := b.sidecarManager.SidecarSend(ctx, adapter, wire.SidecarSendParams{
+		FlowID:          in.FlowID,
+		Destination:     in.Destination,
+		Mutations:       in.Mutations,
+		FollowRedirects: in.FollowRedirects,
+		Force:           in.Force,
+		WaitForResponse: &wait,
+	})
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	return &SidecarReplayResult{NewFlowIDs: res.NewFlowIDs, Response: res.Response}, nil
+}
+
 // RuleSnapshot returns the current snapshot version and the rules scoped to the named
 // adapter (scope empty or equal to the name), in apply order (HTTP rules then WS).
 func (b *NativeProxyBackend) RuleSnapshot(adapter string) (uint64, []wire.Rule) {

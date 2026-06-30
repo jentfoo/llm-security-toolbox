@@ -25,4 +25,6 @@ const (
 	MethodClaimProbe    = "claim_probe"
 	MethodDialUpstream  = "dial_upstream"
 	MethodSyncRules     = "sync_rules"
+	MethodSidecarSend   = "sidecar_send"
+	MethodInvokeAdapter = "invoke_adapter"
 )

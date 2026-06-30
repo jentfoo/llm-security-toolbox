@@ -300,3 +300,57 @@ type DialUpstreamParams struct {
 type DialUpstreamResult struct {
 	StreamID string `json:"stream_id"`
 }
+
+// Mutation is one replay/origination edit applied in array order. Op names a
+// shared mutation: set_header/remove_header, set_json/remove_json,
+// set_form/remove_form, set_query/remove_query, method, path, query, body. Name
+// holds the header name, JSON/query path, or form field for the keyed ops; Value
+// holds the new value (the whole payload for method/path/query/body).
+type Mutation struct {
+	Op    string `json:"op"`
+	Name  string `json:"name,omitempty"`
+	Value string `json:"value,omitempty"`
+}
+
+// SidecarSendParams drives a replay or origination on the owning adapter. With
+// FlowID set it replays that flow (Flow carries the resolved source so the
+// adapter has body/body_raw/body_codec without a round-trip). With FlowID empty
+// it originates from Target/Payload. Destination is an optional scheme://host[:port]
+// routing override (replay). WaitForResponse defaults to true when nil.
+type SidecarSendParams struct {
+	FlowID          string          `json:"flow_id,omitempty"`
+	Flow            *Flow           `json:"flow,omitempty"`
+	Destination     string          `json:"destination,omitempty"`
+	Target          json.RawMessage `json:"target,omitempty"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	Mutations       []Mutation      `json:"mutations,omitempty"`
+	FollowRedirects bool            `json:"follow_redirects,omitempty"`
+	Force           bool            `json:"force,omitempty"`
+	WaitForResponse *bool           `json:"wait_for_response,omitempty"`
+	StreamStrategy  string          `json:"stream_strategy,omitempty"`
+}
+
+// SidecarSendResult reports the flows the replay/origination produced, optional
+// first outbound bytes, and the completed response form when WaitForResponse was set.
+type SidecarSendResult struct {
+	NewFlowIDs []string      `json:"new_flow_ids,omitempty"`
+	Writes     []StreamWrite `json:"writes,omitempty"`
+	Response   *FlowMessage  `json:"response,omitempty"`
+}
+
+// InvokeAdapterParams routes an outbound message through another adapter's
+// injection_target. Target/Payload are validated by the destination adapter, not
+// sectool. WaitForResponse defaults to true when nil.
+type InvokeAdapterParams struct {
+	Adapter         string          `json:"adapter"`
+	Target          json.RawMessage `json:"target,omitempty"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	Mutations       []Mutation      `json:"mutations,omitempty"`
+	WaitForResponse *bool           `json:"wait_for_response,omitempty"`
+}
+
+// InvokeAdapterResult carries the produced flows and optional response form.
+type InvokeAdapterResult struct {
+	NewFlowIDs []string     `json:"new_flow_ids,omitempty"`
+	Response   *FlowMessage `json:"response,omitempty"`
+}

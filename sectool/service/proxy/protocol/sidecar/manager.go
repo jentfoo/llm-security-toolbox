@@ -245,6 +245,12 @@ func (s *session) HandleRequest(ctx context.Context, method string, params json.
 			return nil, wire.NewError(wire.CodeDialFailed, "dial_upstream: invalid params")
 		}
 		return s.handleDialUpstream(ctx, &p)
+	case wire.MethodInvokeAdapter:
+		var p wire.InvokeAdapterParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, wire.NewError(wire.CodeUnknownDestAdapter, "invoke_adapter: invalid params")
+		}
+		return s.handleInvokeAdapter(ctx, &p)
 	case wire.MethodPing:
 		return struct{}{}, nil
 	default:

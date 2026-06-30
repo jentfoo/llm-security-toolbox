@@ -469,6 +469,7 @@ type resolvedFlow struct {
 	RawResponse      []byte
 	InterimResponses []string      // wire-formatted 1xx responses preceding RawResponse (proxy only)
 	Source           string        // "proxy", "replay", "crawl"
+	Adapter          string        // emitting adapter name (proxy flows; empty for built-in HTTP)
 	Scheme           string        // "http" or "https" (empty = infer from host)
 	Port             int           // original port (0 = infer from scheme)
 	Protocol         string        // "http/1.1", "http/2", or empty (defaults to http/1.1)
@@ -507,6 +508,7 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 			RawResponse:      []byte(entry.Response),
 			InterimResponses: entry.InterimResponses,
 			Source:           SourceProxy,
+			Adapter:          entry.Adapter,
 			Scheme:           entry.Scheme,
 			Port:             entry.Port,
 			Protocol:         entry.Protocol,

@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/config"
 	"github.com/go-appsec/toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
 func TestHandleReplaySend(t *testing.T) {
@@ -495,6 +496,59 @@ func TestHandleReplaySend(t *testing.T) {
 
 		assert.NotEqual(t, originalJSON, sentBody)
 		assert.NotContains(t, sentBody, `"key"`)
+	})
+}
+
+func TestHandleReplaySendSidecarRouting(t *testing.T) {
+	t.Parallel()
+
+	t.Run("routes_to_owning_sidecar", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		mockHTTP.RegisterSidecar("mqtt")
+		flowID := mockHTTP.AddProxyEntryAdapter(
+			"POST /pub HTTP/1.1\r\nHost: broker.test\r\n\r\n{}", "", "mqtt")
+		mockHTTP.SetSidecarReplay(&SidecarReplayResult{
+			NewFlowIDs: []string{"sc-1"},
+			Response:   &wire.FlowMessage{StatusCode: 202, Body: []byte("queued")},
+		})
+
+		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id":        flowID,
+			"remove_headers": []string{"X-Old"},
+			"set_headers":    []string{"X-New: 1"},
+			"set_json":       map[string]interface{}{"a": 1},
+			"body":           "raw",
+		})
+
+		assert.Equal(t, "sc-1", resp.FlowID)
+		assert.Equal(t, 202, resp.Status)
+		assert.Contains(t, resp.RespPreview, "queued")
+
+		// The native send path is bypassed for a sidecar-owned flow.
+		assert.Empty(t, mockHTTP.LastSentRequest())
+
+		// Mutations are forwarded in the documented HTTP order.
+		in := mockHTTP.LastSidecarInput()
+		require.NotNil(t, in)
+		ops := make([]string, 0, len(in.Mutations))
+		for _, mu := range in.Mutations {
+			ops = append(ops, mu.Op)
+		}
+		assert.Equal(t, []string{"remove_header", "set_header", "set_json", "body"}, ops)
+	})
+
+	t.Run("unregistered_adapter_stays_native", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		// Adapter set but no sidecar registered: native replay path runs.
+		flowID := mockHTTP.AddProxyEntryAdapter(
+			"GET /x HTTP/1.1\r\nHost: mock.test\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "ghost")
+		mockHTTP.SetSendResult("HTTP/1.1 200 OK\r\n", "native")
+
+		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id": flowID,
+		})
+		assert.NotEqual(t, "sc-1", resp.FlowID)
+		assert.NotEmpty(t, mockHTTP.LastSentRequest())
 	})
 }
 

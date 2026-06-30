@@ -49,6 +49,12 @@ const (
 	CodeDialTLSFailed     = -33302
 )
 
+// invoke_adapter codes.
+const (
+	CodeUnknownDestAdapter = -33400
+	CodeNoInjectionTarget  = -33401
+)
+
 // ErrorData carries the adapter name plus any relevant identifiers on a
 // sectool-specific error.
 type ErrorData struct {

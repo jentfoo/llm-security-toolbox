@@ -59,6 +59,14 @@ type ClaimProber interface {
 	OnClaimProbe(wire.ClaimProbeParams) (bool, error)
 }
 
+// SendHandler is the optional callback surface for a sidecar that replays its own
+// flows or originates messages (an injection_target). It receives the replay or
+// origination request, applies the mutations (ApplyMutations), re-encodes and
+// sends per the adapter's configuration, and reports the produced flow ids.
+type SendHandler interface {
+	OnSidecarSend(wire.SidecarSendParams) (wire.SidecarSendResult, error)
+}
+
 // ShutdownFunc adapts a function to Handler.
 type ShutdownFunc func(drainSeconds int)
 

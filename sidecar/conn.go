@@ -148,6 +148,18 @@ func (h connHandler) HandleRequest(_ context.Context, method string, params json
 			return nil, wire.NewError(wire.CodeRuleRejected, "sync_rules: "+err.Error())
 		}
 		return wire.SyncRulesResult{Ack: true, AppliedVersion: p.SnapshotVersion}, nil
+	case wire.MethodSidecarSend:
+		sh, ok := h.c.currentHandler().(SendHandler)
+		if !ok {
+			return nil, wire.NewError(wire.CodeTransportInternal, "sidecar_send: no send handler")
+		}
+		var p wire.SidecarSendParams
+		_ = json.Unmarshal(params, &p)
+		res, err := sh.OnSidecarSend(p)
+		if err != nil {
+			return nil, wire.NewError(wire.CodeTransportInternal, "sidecar_send: "+err.Error())
+		}
+		return res, nil
 	case wire.MethodPing:
 		return struct{}{}, nil
 	default:

@@ -78,6 +78,8 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/backend_crawler_colly.go` - Colly-based crawler implementation
 - `sectool/service/capture_filter.go` - BuildCaptureFilter: compiles proxy exclusion patterns from config
 - `sidecar/mutate/` - Shared JSON/form request-mutation helpers (`mutate.JSON`/`mutate.Form`); no `sectool/` dependency, consumed by replay and the sidecar SDK
+- `sidecar/send.go` - Sidecar SDK send surface: `ApplyMutations` (ordered §3.4 ops via `sidecar/mutate`), `Conn.InvokeAdapter`, and the `SendHandler` (`OnSidecarSend`) replay/origination hook
+- `sectool/service/proxy/protocol/sidecar/send.go` - Service-side replay/origination routing: `Manager.SidecarSend` (routes to the owning adapter, passing the source flow inline) and the `invoke_adapter` handler (records `annotations.invoked_by`)
 - `sectool/service/search.go` - RE2 pattern compilation with LLM-friendly double-escape correction; flow content matching
 - `sectool/service/httputil.go` - HTTP request/response parsing utilities
 - `sectool/service/jsonutil.go` - JSON read/analysis helpers (flatten, parse list)

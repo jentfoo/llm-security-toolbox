@@ -150,6 +150,56 @@ func sidecarAnnotations(rec *Record, extra map[string]any) map[string]any {
 	return ann
 }
 
+// flowToWireFlow converts a stored flow into its wire form, passed inline to the
+// owning adapter on sidecar_send so it has body/body_raw/body_codec without a
+// round-trip. Inverse of wireFlowToFlow.
+func flowToWireFlow(f *types.Flow) *wire.Flow {
+	if f == nil {
+		return nil
+	}
+	return &wire.Flow{
+		FlowID:       f.FlowID,
+		Adapter:      f.Adapter,
+		ProtocolTag:  f.ProtocolTag,
+		Direction:    f.Direction,
+		ParentFlowID: f.ParentFlowID,
+		Scheme:       f.Scheme,
+		Port:         f.Port,
+		Request:      messageToFlowMessage(f.Request),
+		Response:     messageToFlowMessage(f.Response),
+		StartedAt:    f.StartedAt,
+		CompletedAt:  f.CompletedAt,
+		Annotations:  f.Annotations,
+	}
+}
+
+// messageToFlowMessage converts a stored message side into its wire form. Inverse
+// of flowMessageToMessage.
+func messageToFlowMessage(m *types.Message) *wire.FlowMessage {
+	if m == nil {
+		return nil
+	}
+	fm := &wire.FlowMessage{
+		Method:     m.Method,
+		Path:       m.Path,
+		Query:      m.Query,
+		StatusCode: m.StatusCode,
+		StatusText: m.StatusText,
+		Body:       m.Body,
+		BodyRaw:    m.BodyRaw,
+	}
+	if len(m.Headers) > 0 {
+		fm.Headers = make([]wire.Header, len(m.Headers))
+		for i, h := range m.Headers {
+			fm.Headers[i] = wire.Header{Name: h.Name, Value: h.Value}
+		}
+	}
+	if m.BodyCodec != nil {
+		fm.BodyCodec = &wire.BodyCodec{Transforms: m.BodyCodec.Transforms, ContentType: m.BodyCodec.ContentType}
+	}
+	return fm
+}
+
 func flowMessageToMessage(m *wire.FlowMessage) *types.Message {
 	if m == nil {
 		return nil

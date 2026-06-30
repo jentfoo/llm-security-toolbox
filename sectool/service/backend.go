@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
+	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
 // ErrLabelExists is returned when label conflicts with an existing entry (rule or OAST).
@@ -89,6 +90,32 @@ type ResponderBackend interface {
 
 	// ListResponders returns all registered responders.
 	ListResponders(ctx context.Context) ([]protocol.ResponderEntry, error)
+}
+
+// SidecarRouter routes replay to a connected sidecar adapter. Implemented by the
+// native proxy backend; the type assertion fails under Burp or with no sidecar,
+// leaving the native HTTP replay path in effect.
+type SidecarRouter interface {
+	// SidecarAdapter reports whether a healthy sidecar is registered under name.
+	SidecarAdapter(name string) bool
+	// SidecarReplay replays a sidecar-owned flow through its owning adapter.
+	SidecarReplay(ctx context.Context, adapter string, in SidecarReplayInput) (*SidecarReplayResult, error)
+}
+
+// SidecarReplayInput carries a replay routed to the owning adapter. Destination
+// is an optional scheme://host[:port] routing override (the replay_send target).
+type SidecarReplayInput struct {
+	FlowID          string
+	Destination     string
+	Mutations       []wire.Mutation
+	FollowRedirects bool
+	Force           bool
+}
+
+// SidecarReplayResult reports the flows the adapter produced and the response form.
+type SidecarReplayResult struct {
+	NewFlowIDs []string
+	Response   *wire.FlowMessage
 }
 
 // ProxyEntryMeta holds lightweight metadata for a proxy history entry.

@@ -8,8 +8,10 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 
+	"github.com/go-analyze/bulk"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/go-appsec/toolbox/sectool/config"
@@ -19,6 +21,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar/mutate"
+	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
 func (m *mcpServer) replaySendTool() mcp.Tool {
@@ -97,6 +100,16 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	if errResult != nil {
 		return errResult, nil
 	}
+
+	// A flow owned by a connected sidecar replays through that adapter, which
+	// re-encodes/re-wraps and sends. Built-in HTTP flows fall through to the
+	// native path below.
+	if resolved.Adapter != "" {
+		if router, ok := m.service.httpBackend.(SidecarRouter); ok && router.SidecarAdapter(resolved.Adapter) {
+			return m.replaySidecar(ctx, req, router, resolved.Adapter, flowID)
+		}
+	}
+
 	rawRequest := resolved.RawRequest
 	httpProtocol := resolved.Protocol
 
@@ -134,6 +147,124 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	}
 
 	return m.executeSend(ctx, rawRequest, httpProtocol, mods, flowID)
+}
+
+// replaySidecar routes a replay of a sidecar-owned flow to its owning adapter.
+// The adapter applies the mutations, re-encodes/re-wraps, and sends; sectool
+// returns the produced flow and response form to the agent.
+func (m *mcpServer) replaySidecar(ctx context.Context, req mcp.CallToolRequest, router SidecarRouter, adapter, flowID string) (*mcp.CallToolResult, error) {
+	res, err := router.SidecarReplay(ctx, adapter, SidecarReplayInput{
+		FlowID:          flowID,
+		Destination:     req.GetString("target", ""),
+		Mutations:       buildSidecarMutations(req),
+		FollowRedirects: req.GetBool("follow_redirects", false),
+		Force:           req.GetBool("force", false),
+	})
+	if err != nil {
+		return errorResultFromErr("sidecar replay failed: ", err), nil
+	}
+	if len(res.NewFlowIDs) == 0 {
+		return errorResult("sidecar replay produced no flow"), nil
+	}
+
+	out := protocol.ReplaySendResponse{FlowID: res.NewFlowIDs[0]}
+	if r := res.Response; r != nil {
+		headers := formatWireHeaders(r.Headers)
+		out.ResponseDetails = protocol.ResponseDetails{
+			Status:      r.StatusCode,
+			RespHeaders: headers,
+			RespSize:    len(r.Body),
+			RespPreview: previewBody(r.Body, responsePreviewSize, extractHeader(headers, "Content-Type")),
+		}
+	}
+	return jsonResult(out)
+}
+
+// buildSidecarMutations translates the replay_send MCP params into the ordered
+// wire mutation list, in the same order the native HTTP path applies them.
+func buildSidecarMutations(req mcp.CallToolRequest) []wire.Mutation {
+	var muts []wire.Mutation
+	for _, h := range req.GetStringSlice("remove_headers", nil) {
+		muts = append(muts, wire.Mutation{Op: "remove_header", Name: h})
+	}
+	for _, h := range getHeaderArg(req, "set_headers") {
+		if name, value, ok := splitPair(h, ":"); ok {
+			muts = append(muts, wire.Mutation{Op: "set_header", Name: name, Value: value})
+		}
+	}
+	// Sorted so the emitted mutation array is deterministic across calls.
+	setJSON := getJSONArg(req)
+	jsonPaths := bulk.MapKeysSlice(setJSON)
+	slices.Sort(jsonPaths)
+	for _, path := range jsonPaths {
+		muts = append(muts, wire.Mutation{Op: "set_json", Name: path, Value: jsonValueString(setJSON[path])})
+	}
+	for _, path := range req.GetStringSlice("remove_json", nil) {
+		muts = append(muts, wire.Mutation{Op: "remove_json", Name: path})
+	}
+	setForm := getFormArg(req)
+	formNames := bulk.MapKeysSlice(setForm)
+	slices.Sort(formNames)
+	for _, name := range formNames {
+		muts = append(muts, wire.Mutation{Op: "set_form", Name: name, Value: setForm[name]})
+	}
+	for _, name := range req.GetStringSlice("remove_form", nil) {
+		muts = append(muts, wire.Mutation{Op: "remove_form", Name: name})
+	}
+	for _, name := range req.GetStringSlice("remove_query", nil) {
+		muts = append(muts, wire.Mutation{Op: "remove_query", Name: name})
+	}
+	for _, q := range req.GetStringSlice("set_query", nil) {
+		if name, value, ok := splitPair(q, "="); ok {
+			muts = append(muts, wire.Mutation{Op: "set_query", Name: name, Value: value})
+		}
+	}
+	if v := req.GetString("method", ""); v != "" {
+		muts = append(muts, wire.Mutation{Op: "method", Value: v})
+	}
+	if v := req.GetString("path", ""); v != "" {
+		muts = append(muts, wire.Mutation{Op: "path", Value: v})
+	}
+	if v := req.GetString("query", ""); v != "" {
+		muts = append(muts, wire.Mutation{Op: "query", Value: v})
+	}
+	if v := req.GetString("body", ""); v != "" {
+		muts = append(muts, wire.Mutation{Op: "body", Value: v})
+	}
+	return muts
+}
+
+// jsonValueString renders a set_json value as the string ApplyMutations expects:
+// strings pass through (adapter-side type inference applies), others are JSON-encoded.
+func jsonValueString(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return fmt.Sprint(v)
+}
+
+// splitPair splits s on the first sep into a trimmed name and value.
+func splitPair(s, sep string) (name, value string, ok bool) {
+	idx := strings.Index(s, sep)
+	if idx <= 0 {
+		return "", "", false
+	}
+	return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+len(sep):]), true
+}
+
+// formatWireHeaders renders a wire header list as CRLF-terminated header lines.
+func formatWireHeaders(headers []wire.Header) string {
+	var b strings.Builder
+	for _, h := range headers {
+		b.WriteString(h.Name)
+		b.WriteString(": ")
+		b.WriteString(h.Value)
+		b.WriteString("\r\n")
+	}
+	return b.String()
 }
 
 func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
