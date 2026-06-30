@@ -63,6 +63,13 @@ introspection tool is needed.
   assemble the advertised tool list from core tools plus every registered adapter's
   contributed tools at MCP-client connect. Preserve the exact existing surface when no
   sidecar is connected (§9.1).
+- **Sidecar-conditional core-tool parameters:** the same connect-time composition must
+  expose the sidecar-scoped parameters Phase 7 plumbed but left out of the schema until
+  a sidecar is present: the `adapter` argument on `proxy_rule_add` (enumerating
+  `sectool` and the connected sidecar names) and the `adapter` / `protocol_tag` filters
+  on `proxy_poll`. Each is marked with a `TODO` at its tool definition in
+  `mcp_proxy.go`. With no sidecar connected these stay absent so the surface is
+  byte-identical to today.
 - **Namespacing + collision rejection** (at registration, §9.2): **extend the Phase 2
   registration handler** with the per-tool name-collision check — Phase 2 *stored*
   `mcp_tools` but did not collision-check them (it only enforced `name`/capability

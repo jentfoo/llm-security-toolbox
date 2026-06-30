@@ -35,10 +35,10 @@ interface, decoupled from storage. HTTP/1.1 and HTTP/2 behavior is byte-identica
 `origin/main`.
 
 The **only** model change is an optional `adapter` field on a rule (spec §3.5): empty
-means the rule applies to all adapters (today's behavior); a named adapter scopes the
-rule to flows on that adapter only. The user-facing `proxy_rule_add/list/delete`
-surface, find/replace/`is_regex` semantics, and label uniqueness are otherwise
-unchanged.
+means the rule applies to all adapters (today's behavior); the reserved name `sectool`
+scopes a rule to the in-process proxy/Burp; any other value names a sidecar and scopes
+the rule to that adapter only. The user-facing `proxy_rule_add/list/delete` surface,
+find/replace/`is_regex` semantics, and label uniqueness are otherwise unchanged.
 
 `sync_rules` (§6b.1) pushes the full ordered rule list to a sidecar, which replaces its
 local cache atomically — mirroring the native backend's RWMutex-protected slice model.
@@ -66,10 +66,10 @@ surface. It is **not** carried by rules. Its JSON and form helpers move from
 - **Optional `adapter` on rules:** add an optional `adapter` field to `RuleEntry`
   (`sectool/protocol/types.go`) and `nativeStoredRule`
   (`sectool/service/backend_http_native.go`). Empty = all adapters (unchanged
-  in-process behavior); a named adapter scopes the rule. In-process application
-  (`ApplyRequestRules`/`ApplyResponseRules`/`ApplyWSRules`) applies rules with empty
-  adapter as today; a rule naming a non-HTTP/WS adapter is simply not applied
-  in-process.
+  in-process behavior); the reserved `sectool` scope names the in-process proxy; any
+  other value names a sidecar. In-process application
+  (`ApplyRequestRules`/`ApplyResponseRules`/`ApplyWSRules`) applies a rule when its
+  adapter is empty or `sectool`; a rule naming a sidecar is not applied in-process.
 - **`proxy_rule_add/list/delete`:** keep the existing 7-type surface working
   identically; accept an optional `adapter` argument on add; show `adapter` in
   `proxy_rule_list`. CRUD logic and label uniqueness are otherwise unchanged. CLI
@@ -131,14 +131,44 @@ captured/mutated pairs.
   byte-identical; `sidecar` has no `sectool/` import.
 - `make test-all` + `make lint` pass.
 
+## Implementation decisions (as built)
+
+These refine the description above where they conflict:
+
+- **Reserved `sectool` scope.** The in-process proxy/Burp is addressed as the single
+  reserved adapter scope `sectool` (`RuleAdapterBuiltin` in `service/backend.go`);
+  the built-in HTTP/WS names are not used as scopes. In-process appliers skip a rule
+  whose adapter is neither empty nor `sectool`. `sectool` is added to the manager's
+  reserved names so sidecars cannot register under it.
+- **Per-sidecar `sync_rules` filtering.** `RuleSource.RuleSnapshot(adapter)` returns
+  only the rules scoped to that adapter (empty or its name), so `sectool`-scoped and
+  other-sidecar rules are never pushed. The register response carries the same
+  filtered snapshot; `Manager.PushRules` re-pushes on every change, recording each
+  sidecar's `applied_version`. Lock order is `manager.mu -> rulesMu` in both register
+  and push, with the blocking `sync_rules` call made after locks are released.
+- **`RegisterResult.RulesSnapshot` is typed** as `[]wire.Rule` (was
+  `[]json.RawMessage`); the sidecar seeds its cache from it at `Dial`.
+- **`JSONModifier` indirection removed.** With `mutate.JSON` in a `sectool`-free
+  package, `proxy.Sender` calls it directly instead of through a callback field.
+- **User-facing `adapter` input deferred.** The `adapter` argument is plumbed through
+  the `proxy_rule_add` handler and shown in `proxy_rule_list` output (data-driven, so
+  no-sidecar output is unchanged), but is not advertised in the MCP tool schema or as
+  a CLI flag until sidecar-aware tool composition lands (a `TODO` marks the spot,
+  matching the existing `proxy_poll` `adapter`/`protocol_tag` pattern).
+- **Unit-level tests in place of a live mutator fixture.** The hot-path applier,
+  `sync_rules` ack/cache replace, the captured/mutated emit pair, and the server-side
+  per-sidecar filtering + `applied_version` tracking are covered by focused unit tests
+  (no real TCP round-trip).
+
 ## Definition of done
 
-- [ ] Optional `adapter` field added to rules; legacy rules byte-identical in effect.
-- [ ] `sync_rules` with `snapshot_version`/ack; re-push on changes.
-- [ ] Mutation audit captured/mutated pairs (incl. stream-child linking).
-- [ ] JSON/form mutation helpers relocated to `sidecar/mutate`; service rewired;
+- [x] Optional `adapter` field added to rules; legacy rules byte-identical in effect.
+- [x] `sync_rules` with `snapshot_version`/ack; re-push on changes.
+- [x] Mutation audit captured/mutated pairs (incl. stream-child linking).
+- [x] JSON/form mutation helpers relocated to `sidecar/mutate`; service rewired;
       `replay_send`/`request_send` byte-identical.
-- [ ] `sidecar` package gains rule cache + applier + `sync_rules` handler; no `sectool/`
+- [x] `sidecar` package gains rule cache + applier + `sync_rules` handler; no `sectool/`
       dep.
-- [ ] Mutator fixture validates hot-path rule application end-to-end.
-- [ ] `make test-all` + `make lint` pass.
+- [x] Hot-path rule application validated end-to-end via unit tests (the live mutator
+      fixture was reduced to unit-level coverage).
+- [x] `make test-all` + `make lint` pass.

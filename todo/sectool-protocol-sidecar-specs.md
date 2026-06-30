@@ -461,15 +461,19 @@ Rules are unchanged from the current type enum (`request_header`,
 (`find`/`replace`/`is_regex`/`label`/`rule_id`). The **only** addition is
 an optional `adapter` field:
 
-- `adapter` (optional) — empty applies the rule to all adapters (today's
-  behavior; HTTP/1.1, HTTP/2, WebSocket); a named adapter scopes the rule
-  to flows on that adapter only.
+- `adapter` (optional) — empty applies the rule to every adapter (today's
+  behavior). The reserved name `sectool` scopes the rule to the in-process
+  proxy (HTTP/1.1, HTTP/2, WebSocket) and Burp; any other value names a
+  sidecar adapter and scopes the rule to flows on that adapter only. The
+  built-in HTTP/WS adapter names (`http/1.1`, `http/2`, `websocket`) are not
+  used as rule scopes — the in-process proxy is addressed as the single
+  `sectool` scope.
 
-Each party applies the rules it can: the in-process backend applies rules
-with an empty (or HTTP/WS) adapter as today; a sidecar applies rules naming
-it (or empty) whose type it supports. A passive structured rewrite (e.g. a
-JSON field substitution on a response) is expressed as a regex rule;
-structured-op edits are a replay concern (§3.4).
+Each party applies the rules it can: the in-process backend applies a rule
+when its `adapter` is empty or `sectool`; a sidecar applies a rule when its
+`adapter` is empty or names that sidecar, and whose type it supports. A
+passive structured rewrite (e.g. a JSON field substitution on a response) is
+expressed as a regex rule; structured-op edits are a replay concern (§3.4).
 
 ---
 
@@ -1010,11 +1014,12 @@ central side owns ordering, the applying side iterates under a read lock.
 - `snapshot_version` (uint64, required) — monotonic version counter
   incremented by sectool on every rule list change. Strictly
   increases.
-- `rules` (array of Rule objects, required) — the full ordered rule
-  list as the sidecar should apply it, in the order rules must fire.
-  Each rule is the 7-type form plus the optional `adapter` scope (§3.5).
-  Rules whose `adapter` does not name this sidecar (and is not empty) may
-  be omitted by sectool as an optimization.
+- `rules` (array of Rule objects, required) — the ordered rule list the
+  sidecar should apply, in the order rules must fire. Each rule is the
+  7-type form plus the optional `adapter` scope (§3.5). sectool filters the
+  list per sidecar: it sends only rules whose `adapter` is empty or names
+  this sidecar, so `sectool`-scoped and other-sidecar rules never reach it.
+  `sectool` is a reserved adapter name sidecars may not register under.
 
 **Returns**: `{ack: true, applied_version}` where `applied_version`
 equals the `snapshot_version` from params on success; or an error if
@@ -1245,7 +1250,7 @@ section maps each to its post-refactor representation.
 | `proxy_poll` (host, path, method, status, search_header, search_body, since, exclude_host, exclude_path, limit, offset, summary/flows modes) | Unchanged tool surface. Results include flows from any adapter. Filter expressions add `adapter`, `protocol_tag`, `parent_flow_id` as filterable fields. Host/path filters apply to the HTTP-shaped Flow's `path` and `headers["Host"]` fields, which every adapter populates. |
 | `flow_get` (request, response, request_headers, response_headers, request_body, response_body, all; pattern regex) | Unchanged. Scopes resolve against the Flow's `method`/`path`/`headers`/`body` fields, which every adapter populates. |
 | `proxy_rule_list` (type_filter http/websocket/all, limit) | Unchanged. Listings additionally show each rule's optional `adapter` scope (§3.5). |
-| `proxy_rule_add` (type, find, replace, label, is_regex) | Unchanged 7-type form. Adds one optional `adapter` argument scoping the rule to a named adapter (empty = all adapters, today's behavior). Label uniqueness preserved across the entire rule list. |
+| `proxy_rule_add` (type, find, replace, label, is_regex) | Unchanged 7-type form plus an optional `adapter` scope (empty = all adapters, `sectool` = in-process proxy, otherwise a sidecar name; §3.5). The argument is surfaced in the tool schema only when a sidecar is connected; with none, the rule surface is byte-identical to today. Label uniqueness preserved across the entire rule list. |
 | `proxy_rule_delete` (rule_id or label) | Unchanged. |
 | `cookie_jar` (detail mode, name/domain filters, JWT decode) | HTTP-adapter-specific tool, unchanged shape. Cookies extracted only from flows whose adapter declares HTTP semantics. |
 | `_internal_history_delete` | Unchanged; respects notes references regardless of adapter. |
