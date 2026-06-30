@@ -209,22 +209,19 @@ type mockHttpBackend struct {
 	lastSentReq []byte               // last RawRequest from SendRequest
 	rules       []protocol.RuleEntry // in-memory rules (both HTTP and WS)
 	responders  []protocol.ResponderEntry
-
-	sidecarNames     map[string]bool      // adapters reported by SidecarAdapter
-	sidecarReplay    *SidecarReplayResult // canned SidecarReplay result
-	lastSidecarInput *SidecarReplayInput  // last SidecarReplay input
 }
 
 // Compile-time checks
 var _ HttpBackend = (*mockHttpBackend)(nil)
 var _ ResponderBackend = (*mockHttpBackend)(nil)
-var _ SidecarRouter = (*mockHttpBackend)(nil)
 
 func newMockHttpBackend() *mockHttpBackend {
 	return &mockHttpBackend{}
 }
 
 func (b *mockHttpBackend) Close() error { return nil }
+
+func (b *mockHttpBackend) Sidecars() SidecarRegistry { return nil }
 
 func (b *mockHttpBackend) GetProxyHistory(ctx context.Context, count int, afterFlowID string) ([]ProxyEntry, error) {
 	b.mu.Lock()
@@ -471,46 +468,6 @@ func (b *mockHttpBackend) AddProxyEntryAdapter(request, response, adapter string
 		Adapter:   adapter,
 	})
 	return flowID
-}
-
-// RegisterSidecar marks an adapter name as a connected sidecar for routing.
-func (b *mockHttpBackend) RegisterSidecar(name string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.sidecarNames == nil {
-		b.sidecarNames = map[string]bool{}
-	}
-	b.sidecarNames[name] = true
-}
-
-// SetSidecarReplay sets the canned result returned by SidecarReplay.
-func (b *mockHttpBackend) SetSidecarReplay(res *SidecarReplayResult) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.sidecarReplay = res
-}
-
-// LastSidecarInput returns the input from the most recent SidecarReplay call.
-func (b *mockHttpBackend) LastSidecarInput() *SidecarReplayInput {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.lastSidecarInput
-}
-
-func (b *mockHttpBackend) SidecarAdapter(name string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.sidecarNames[name]
-}
-
-func (b *mockHttpBackend) SidecarReplay(_ context.Context, _ string, in SidecarReplayInput) (*SidecarReplayResult, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.lastSidecarInput = &in
-	if b.sidecarReplay != nil {
-		return b.sidecarReplay, nil
-	}
-	return &SidecarReplayResult{NewFlowIDs: []string{"sc-new"}}, nil
 }
 
 // AddProxyPlaceholder appends an unparseable placeholder entry (no flow_id), mirroring a corrupt Burp line.

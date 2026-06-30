@@ -26,6 +26,7 @@ import (
 // upgradeHandler is a sidecar that echoes post-upgrade bytes and records the
 // stream_open params it received, so a test can assert the upgrade request context.
 type upgradeHandler struct {
+	sidecar.BaseHandler
 	opened chan wire.StreamOpenParams
 }
 

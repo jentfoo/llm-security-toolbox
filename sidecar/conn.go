@@ -41,7 +41,7 @@ func Dial(addr string, reg Registration) (*Conn, error) {
 		return nil, fmt.Errorf("sidecar: dial %s %s: %w", network, addr, err)
 	}
 
-	c := &Conn{handler: nopHandler{}, name: reg.Name, rules: newRuleCache(reg.Name)}
+	c := &Conn{handler: BaseHandler{}, name: reg.Name, rules: newRuleCache(reg.Name)}
 	c.peer = wire.NewPeer(raw, connHandler{c})
 	go func() { _ = c.peer.Run(context.Background()) }()
 
@@ -68,7 +68,7 @@ func Dial(addr string, reg Registration) (*Conn, error) {
 // cancellation, nil on a clean remote close.
 func (c *Conn) Serve(ctx context.Context, h Handler) error {
 	if h == nil {
-		h = nopHandler{}
+		h = BaseHandler{}
 	}
 	c.mu.Lock()
 	c.handler = h
@@ -113,28 +113,25 @@ func (c *Conn) currentHandler() Handler {
 type connHandler struct{ c *Conn }
 
 func (h connHandler) HandleRequest(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
+	handler := h.c.currentHandler()
 	switch method {
 	case wire.MethodShutdown:
 		var p wire.ShutdownParams
 		_ = json.Unmarshal(params, &p)
-		h.c.currentHandler().OnShutdown(p.DrainSeconds)
+		handler.OnShutdown(p.DrainSeconds)
 		return wire.ShutdownResult{Ack: true}, nil
 	case wire.MethodStreamOpen:
-		return streamReply(h, params, func(sh StreamHandler, p wire.StreamOpenParams) ([]wire.StreamWrite, error) {
-			return sh.OnStreamOpen(p)
-		})
+		var p wire.StreamOpenParams
+		_ = json.Unmarshal(params, &p)
+		return streamReply(handler.OnStreamOpen(p))
 	case wire.MethodStreamDeliver:
-		return streamReply(h, params, func(sh StreamHandler, p wire.StreamDeliverParams) ([]wire.StreamWrite, error) {
-			return sh.OnStreamDeliver(p)
-		})
+		var p wire.StreamDeliverParams
+		_ = json.Unmarshal(params, &p)
+		return streamReply(handler.OnStreamDeliver(p))
 	case wire.MethodClaimProbe:
-		prober, ok := h.c.currentHandler().(ClaimProber)
-		if !ok {
-			return nil, wire.NewError(wire.CodeClaimProbeFault, "claim_probe: no prober")
-		}
 		var p wire.ClaimProbeParams
 		_ = json.Unmarshal(params, &p)
-		claim, err := prober.OnClaimProbe(p)
+		claim, err := handler.OnClaimProbe(p)
 		if err != nil {
 			return nil, wire.NewError(wire.CodeClaimProbeFault, "claim_probe: "+err.Error())
 		}
@@ -149,25 +146,17 @@ func (h connHandler) HandleRequest(_ context.Context, method string, params json
 		}
 		return wire.SyncRulesResult{Ack: true, AppliedVersion: p.SnapshotVersion}, nil
 	case wire.MethodSidecarSend:
-		sh, ok := h.c.currentHandler().(SendHandler)
-		if !ok {
-			return nil, wire.NewError(wire.CodeTransportInternal, "sidecar_send: no send handler")
-		}
 		var p wire.SidecarSendParams
 		_ = json.Unmarshal(params, &p)
-		res, err := sh.OnSidecarSend(p)
+		res, err := handler.OnSidecarSend(p)
 		if err != nil {
 			return nil, wire.NewError(wire.CodeTransportInternal, "sidecar_send: "+err.Error())
 		}
 		return res, nil
 	case wire.MethodInvokeTool:
-		th, ok := h.c.currentHandler().(InvokeToolHandler)
-		if !ok {
-			return nil, wire.NewError(wire.CodeTransportInternal, "invoke_tool: no tool handler")
-		}
 		var p wire.InvokeToolParams
 		_ = json.Unmarshal(params, &p)
-		res, err := th.OnInvokeTool(p)
+		res, err := handler.OnInvokeTool(p)
 		if err != nil {
 			return nil, wire.NewError(wire.CodeTransportInternal, "invoke_tool: "+err.Error())
 		}
@@ -179,17 +168,9 @@ func (h connHandler) HandleRequest(_ context.Context, method string, params json
 	}
 }
 
-// streamReply dispatches a stream Request to the StreamHandler and wraps its
-// writes in a StreamResult. A handler that does not implement StreamHandler
-// (despite an early_claim) is a transport error.
-func streamReply[P any](h connHandler, params json.RawMessage, call func(StreamHandler, P) ([]wire.StreamWrite, error)) (any, *wire.Error) {
-	sh, ok := h.c.currentHandler().(StreamHandler)
-	if !ok {
-		return nil, wire.NewError(wire.CodeTransportInternal, "stream event: no stream handler")
-	}
-	var p P
-	_ = json.Unmarshal(params, &p)
-	writes, err := call(sh, p)
+// streamReply wraps a stream callback's writes in a StreamResult, mapping a
+// handler error to a transport error.
+func streamReply(writes []wire.StreamWrite, err error) (any, *wire.Error) {
 	if err != nil {
 		return nil, wire.NewError(wire.CodeTransportInternal, err.Error())
 	}
@@ -201,10 +182,8 @@ func (h connHandler) HandleNotification(_ context.Context, method string, params
 	case wire.MethodPing:
 		_ = h.c.peer.Notify(wire.MethodPong, nil)
 	case wire.MethodStreamEnded:
-		if sh, ok := h.c.currentHandler().(StreamHandler); ok {
-			var p wire.StreamEndedParams
-			_ = json.Unmarshal(params, &p)
-			sh.OnStreamEnded(p)
-		}
+		var p wire.StreamEndedParams
+		_ = json.Unmarshal(params, &p)
+		h.c.currentHandler().OnStreamEnded(p)
 	}
 }

@@ -12,8 +12,9 @@ import (
 // coreToolHandler is a read-side MCP tool handler invocable via core_query.
 type coreToolHandler func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
 
-// coreQueryHandlers returns the read-only core tools a sidecar may invoke. Write
-// tools are intentionally excluded; the host enforces the same allowlist.
+// coreQueryHandlers builds the read-only core tools a sidecar may invoke. Write
+// tools are intentionally excluded; the host enforces the same allowlist. Called
+// once at construction; CoreQuery dispatches via the stored coreQueryDispatch.
 func (m *mcpServer) coreQueryHandlers() map[string]coreToolHandler {
 	return map[string]coreToolHandler{
 		"proxy_poll":      m.handleProxyPoll,
@@ -31,7 +32,7 @@ func (m *mcpServer) coreQueryHandlers() map[string]coreToolHandler {
 // returning its result text and whether it reported an error. It reuses the
 // exact handlers agents call, so results match.
 func (m *mcpServer) CoreQuery(ctx context.Context, tool string, params json.RawMessage) (string, bool, error) {
-	handler, ok := m.coreQueryHandlers()[tool]
+	handler, ok := m.coreQueryDispatch[tool]
 	if !ok {
 		return "", false, fmt.Errorf("tool not permitted: %s", tool)
 	}

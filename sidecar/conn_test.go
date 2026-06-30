@@ -86,6 +86,7 @@ func TestDial(t *testing.T) {
 }
 
 type toolTestHandler struct {
+	BaseHandler
 	gotName string
 	gotArgs json.RawMessage
 }
@@ -96,6 +97,18 @@ func (h *toolTestHandler) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeTool
 	h.gotName = p.Name
 	h.gotArgs = p.Arguments
 	return wire.InvokeToolResult{Content: "ran " + p.Name, StructuredContent: json.RawMessage(`{"ok":true}`)}, nil
+}
+
+// shutdownHandler is a shutdown-only handler; other callbacks use BaseHandler defaults.
+type shutdownHandler struct {
+	BaseHandler
+	fn func(int)
+}
+
+func (h shutdownHandler) OnShutdown(d int) {
+	if h.fn != nil {
+		h.fn(d)
+	}
 }
 
 func TestConnInvokeTool(t *testing.T) {
@@ -130,8 +143,8 @@ func TestConnInvokeTool(t *testing.T) {
 		t.Cleanup(func() { _ = conn.Close() })
 		srv := <-peerCh
 
-		// ShutdownFunc satisfies Handler but not InvokeToolHandler.
-		go func() { _ = conn.Serve(t.Context(), ShutdownFunc(func(int) {})) }()
+		// shutdownHandler embeds BaseHandler, whose OnInvokeTool default errors.
+		go func() { _ = conn.Serve(t.Context(), shutdownHandler{}) }()
 
 		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 		defer cancel()
@@ -166,7 +179,7 @@ func TestConnHeartbeatAndShutdown(t *testing.T) {
 	})
 
 	drained := make(chan int, 1)
-	go func() { _ = conn.Serve(t.Context(), ShutdownFunc(func(d int) { drained <- d })) }()
+	go func() { _ = conn.Serve(t.Context(), shutdownHandler{fn: func(d int) { drained <- d }}) }()
 
 	require.NoError(t, srv.Notify(wire.MethodPing, nil))
 	select {

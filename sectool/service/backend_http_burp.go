@@ -19,6 +19,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/mcp"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -45,6 +46,9 @@ type BurpBackend struct {
 
 // Compile-time check that BurpBackend implements HttpBackend
 var _ HttpBackend = (*BurpBackend)(nil)
+
+// Sidecars reports no sidecars; the Burp backend does not host the sidecar listener.
+func (b *BurpBackend) Sidecars() SidecarRegistry { return nil }
 
 // ConnectBurpBackend creates a new Burp HttpBackend with the given MCP URL.
 func ConnectBurpBackend(ctx context.Context, url string, storage store.Provider, opts ...mcp.Option) (*BurpBackend, error) {
@@ -592,7 +596,7 @@ func (b *BurpBackend) sendWithRepeater(ctx context.Context, tabName string, req 
 // rawRequestToH2Params converts raw HTTP/1.1-format request bytes to H2 params.
 // Extracts method and path from the request line, maps Host to :authority,
 // and lowercases header names per H2 convention.
-func rawRequestToH2Params(raw []byte, target Target) mcp.SendHTTP2RequestParams {
+func rawRequestToH2Params(raw []byte, target types.Target) mcp.SendHTTP2RequestParams {
 	// Extract request URI from first line
 	requestURI := "/"
 	lines := bytes.SplitN(raw, []byte("\r\n"), 2)

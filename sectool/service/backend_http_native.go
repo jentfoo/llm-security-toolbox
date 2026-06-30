@@ -74,6 +74,8 @@ var _ HttpBackend = (*NativeProxyBackend)(nil)
 var _ types.RuleApplier = (*NativeProxyBackend)(nil)
 var _ proxy.ResponseInterceptor = (*NativeProxyBackend)(nil)
 var _ ResponderBackend = (*NativeProxyBackend)(nil)
+var _ sidecar.RuleSource = (*NativeProxyBackend)(nil)
+var _ SidecarRegistry = (*sidecar.Manager)(nil)
 
 // NewNativeProxyBackend creates a new native proxy backend.
 // Does NOT start serving - call Serve() separately (typically in a goroutine).
@@ -134,7 +136,7 @@ func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, storage
 // built-in adapter names are reserved automatically. coreQuery backs the sidecar
 // core_query method; it resolves the read-side tools lazily so it can be supplied
 // before the MCP server exists.
-func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sidecar.CoreQuerier) error {
+func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sidecar.CoreService) error {
 	cfg.ReservedNames = []string{types.ProtocolHTTP11, types.ProtocolH2, types.ProtocolTagWS, types.AdapterScopeCore}
 	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry(), b.server.History(), coreQuery, b)
 	lst, err := sidecar.NewListener(cfg, b.sidecarManager)
@@ -145,8 +147,11 @@ func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sideca
 	return nil
 }
 
-// SidecarManager returns the sidecar registry, or nil when sidecars are not enabled.
-func (b *NativeProxyBackend) SidecarManager() *sidecar.Manager {
+// Sidecars returns the sidecar registry, or nil when sidecars are not enabled.
+func (b *NativeProxyBackend) Sidecars() SidecarRegistry {
+	if b.sidecarManager == nil {
+		return nil // avoid a non-nil interface wrapping a nil *Manager
+	}
 	return b.sidecarManager
 }
 
@@ -537,29 +542,6 @@ func (b *NativeProxyBackend) pushRules(ctx context.Context) {
 	if b.sidecarManager != nil {
 		b.sidecarManager.PushRules(ctx)
 	}
-}
-
-// SidecarAdapter reports whether a healthy sidecar is registered under name.
-func (b *NativeProxyBackend) SidecarAdapter(name string) bool {
-	return b.sidecarManager != nil && b.sidecarManager.HasAdapter(name)
-}
-
-// SidecarReplay routes a sidecar-owned flow's replay to its owning adapter, which
-// re-encodes/re-wraps and sends, and returns the produced flow ids and response.
-func (b *NativeProxyBackend) SidecarReplay(ctx context.Context, adapter string, in SidecarReplayInput) (*SidecarReplayResult, error) {
-	wait := true
-	res, rpcErr := b.sidecarManager.SidecarSend(ctx, adapter, wire.SidecarSendParams{
-		FlowID:          in.FlowID,
-		Destination:     in.Destination,
-		Mutations:       in.Mutations,
-		FollowRedirects: in.FollowRedirects,
-		Force:           in.Force,
-		WaitForResponse: &wait,
-	})
-	if rpcErr != nil {
-		return nil, rpcErr
-	}
-	return &SidecarReplayResult{NewFlowIDs: res.NewFlowIDs, Response: res.Response}, nil
 }
 
 // RuleSnapshot returns the current snapshot version and the rules scoped to the named

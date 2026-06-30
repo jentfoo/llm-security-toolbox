@@ -13,7 +13,7 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
-// fakeCoreTools is a CoreQuerier that also reports core tool names for collision checks.
+// fakeCoreTools is a CoreService stub reporting core tool names for collision checks.
 type fakeCoreTools struct{ names []string }
 
 func (fakeCoreTools) CoreQuery(context.Context, string, json.RawMessage) (string, bool, error) {

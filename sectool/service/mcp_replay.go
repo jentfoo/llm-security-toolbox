@@ -104,10 +104,8 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	// A flow owned by a connected sidecar replays through that adapter, which
 	// re-encodes/re-wraps and sends. Built-in HTTP flows fall through to the
 	// native path below.
-	if resolved.Adapter != "" {
-		if router, ok := m.service.httpBackend.(SidecarRouter); ok && router.SidecarAdapter(resolved.Adapter) {
-			return m.replaySidecar(ctx, req, router, resolved.Adapter, flowID)
-		}
+	if resolved.Adapter != "" && m.sidecars != nil && m.sidecars.HasAdapter(resolved.Adapter) {
+		return m.replaySidecar(ctx, req, resolved.Adapter, flowID)
 	}
 
 	rawRequest := resolved.RawRequest
@@ -152,16 +150,18 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 // replaySidecar routes a replay of a sidecar-owned flow to its owning adapter.
 // The adapter applies the mutations, re-encodes/re-wraps, and sends; sectool
 // returns the produced flow and response form to the agent.
-func (m *mcpServer) replaySidecar(ctx context.Context, req mcp.CallToolRequest, router SidecarRouter, adapter, flowID string) (*mcp.CallToolResult, error) {
-	res, err := router.SidecarReplay(ctx, adapter, SidecarReplayInput{
+func (m *mcpServer) replaySidecar(ctx context.Context, req mcp.CallToolRequest, adapter, flowID string) (*mcp.CallToolResult, error) {
+	wait := true
+	res, rpcErr := m.sidecars.SidecarSend(ctx, adapter, wire.SidecarSendParams{
 		FlowID:          flowID,
 		Destination:     req.GetString("target", ""),
-		Mutations:       buildSidecarMutations(req),
+		Mutations:       buildMutations(req),
 		FollowRedirects: req.GetBool("follow_redirects", false),
 		Force:           req.GetBool("force", false),
+		WaitForResponse: &wait,
 	})
-	if err != nil {
-		return errorResultFromErr("sidecar replay failed: ", err), nil
+	if rpcErr != nil {
+		return errorResult("sidecar replay failed: " + rpcErr.Error()), nil
 	}
 	if len(res.NewFlowIDs) == 0 {
 		return errorResult("sidecar replay produced no flow"), nil
@@ -180,9 +180,13 @@ func (m *mcpServer) replaySidecar(ctx context.Context, req mcp.CallToolRequest, 
 	return jsonResult(out)
 }
 
-// buildSidecarMutations translates the replay_send MCP params into the ordered
-// wire mutation list, in the same order the native HTTP path applies them.
-func buildSidecarMutations(req mcp.CallToolRequest) []wire.Mutation {
+// buildMutations translates the replay_send MCP params into the ordered wire
+// mutation list applied by a sidecar adapter (mutate via sidecar.ApplyMutations).
+// It is the structured-path counterpart to executeSend's raw-byte application:
+// the two paths must support the same mutation ops, so a new op added to one
+// must be added to the other. The native path is intentionally NOT routed
+// through this list (it edits raw bytes for force=true wire fidelity).
+func buildMutations(req mcp.CallToolRequest) []wire.Mutation {
 	var muts []wire.Mutation
 	for _, h := range req.GetStringSlice("remove_headers", nil) {
 		muts = append(muts, wire.Mutation{Op: "remove_header", Name: h})
@@ -327,6 +331,8 @@ func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolReque
 
 // executeSend is the shared send pipeline for replay_send and request_send.
 // Applies header/body modifications, validates, sends, and stores the result.
+// This is the native raw-byte counterpart to buildMutations (the sidecar path);
+// a new mutation op supported here must also be emitted by buildMutations.
 func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProtocol string, mods sendModifications, sourceFlowID string) (*mcp.CallToolResult, error) {
 	headers, reqBody := splitHeadersBody(rawRequest)
 	headers = applyHeaderModifications(headers, mods.RemoveHeaders, mods.SetHeaders)
@@ -440,7 +446,7 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 
 	result, err := m.service.httpBackend.SendRequest(ctx, "sectool-"+replayID, SendRequestInput{
 		RawRequest: rawRequest,
-		Target: Target{
+		Target: types.Target{
 			Hostname:  host,
 			Port:      port,
 			UsesHTTPS: usesHTTPS,

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -71,6 +72,28 @@ type HttpBackend interface {
 	// DeleteRule removes a rule by ID or label.
 	// Searches both HTTP and WebSocket rules automatically.
 	DeleteRule(ctx context.Context, idOrLabel string) error
+
+	// Sidecars returns the connected sidecar registry, or nil on backends that
+	// host no sidecars (Burp).
+	Sidecars() SidecarRegistry
+}
+
+// SidecarRegistry is the connected-sidecar surface the MCP server consumes for
+// replay routing and tool composition. The native proxy backend's sidecar
+// manager implements it; it is defined here (in wire terms only) so the service
+// depends on this contract rather than the deep sidecar package.
+type SidecarRegistry interface {
+	// HasAdapter reports whether a healthy sidecar is registered under name.
+	HasAdapter(name string) bool
+	// AdapterTools returns each healthy adapter's MCP tools keyed by adapter name,
+	// as a single consistent snapshot.
+	AdapterTools() map[string][]wire.MCPTool
+	// InvokeTool delegates a sidecar-registered tool call to its owning adapter.
+	InvokeTool(ctx context.Context, name string, args json.RawMessage) (wire.InvokeToolResult, *wire.Error)
+	// SidecarSend routes a replay or origination to the named adapter.
+	SidecarSend(ctx context.Context, adapter string, p wire.SidecarSendParams) (wire.SidecarSendResult, *wire.Error)
+	// SetToolsChangedHook registers a callback invoked when the connected adapter set changes.
+	SetToolsChangedHook(fn func())
 }
 
 // ResponderBackend defines the interface for managing proxy responders.
@@ -85,32 +108,6 @@ type ResponderBackend interface {
 
 	// ListResponders returns all registered responders.
 	ListResponders(ctx context.Context) ([]protocol.ResponderEntry, error)
-}
-
-// SidecarRouter routes replay to a connected sidecar adapter. Implemented by the
-// native proxy backend; the type assertion fails under Burp or with no sidecar,
-// leaving the native HTTP replay path in effect.
-type SidecarRouter interface {
-	// SidecarAdapter reports whether a healthy sidecar is registered under name.
-	SidecarAdapter(name string) bool
-	// SidecarReplay replays a sidecar-owned flow through its owning adapter.
-	SidecarReplay(ctx context.Context, adapter string, in SidecarReplayInput) (*SidecarReplayResult, error)
-}
-
-// SidecarReplayInput carries a replay routed to the owning adapter. Destination
-// is an optional scheme://host[:port] routing override (the replay_send target).
-type SidecarReplayInput struct {
-	FlowID          string
-	Destination     string
-	Mutations       []wire.Mutation
-	FollowRedirects bool
-	Force           bool
-}
-
-// SidecarReplayResult reports the flows the adapter produced and the response form.
-type SidecarReplayResult struct {
-	NewFlowIDs []string
-	Response   *wire.FlowMessage
 }
 
 // ProxyEntryMeta holds lightweight metadata for a proxy history entry.
@@ -151,14 +148,10 @@ type ProxyEntry struct {
 	Placeholder bool `json:"-"`
 }
 
-// Target specifies the destination for a request.
-// Type alias for types.Target to enable unified target handling across packages.
-type Target = types.Target
-
 // SendRequestInput contains all parameters for sending a request.
 type SendRequestInput struct {
 	RawRequest      []byte
-	Target          Target
+	Target          types.Target
 	FollowRedirects bool
 	Force           bool // Skip validation for protocol-level tests
 

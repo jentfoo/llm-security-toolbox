@@ -45,9 +45,21 @@ type mcpServer struct {
 	workflowMode        string
 	workflowInitialized atomic.Bool
 
+	// responder is the native backend's responder surface, captured once at
+	// construction; nil under Burp (no responder support).
+	responder ResponderBackend
+
+	// sidecars is the connected sidecar registry, captured at construction; nil
+	// under Burp or when sidecars are disabled.
+	sidecars SidecarRegistry
+
 	// coreTools is the static core tool name set captured after registerTools,
 	// used to collision-check sidecar tool names.
 	coreTools []string
+
+	// coreQueryDispatch maps the read-side core tools a sidecar may invoke via
+	// core_query to their handlers; built once at construction.
+	coreQueryDispatch map[string]coreToolHandler
 
 	// sidecar tool composition: global registrations synced to the connected
 	// adapter set, guarded so concurrent registry changes serialize.
@@ -56,12 +68,17 @@ type mcpServer struct {
 	sidecarCoreParams bool
 }
 
-// newMCPServer creates a new MCP server instance.
+// newMCPServer creates a new MCP server instance. The responder and sidecar
+// capabilities are captured once from the backend (both nil under Burp).
 func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 	m := &mcpServer{
 		service:      svc,
 		workflowMode: workflowMode,
 	}
+	if rb, ok := svc.httpBackend.(ResponderBackend); ok {
+		m.responder = rb
+	}
+	m.sidecars = svc.httpBackend.Sidecars()
 
 	// define server hooks to hide internal tools from tools list while leaving them callable
 	hooks := &server.Hooks{}
@@ -88,7 +105,7 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 		instructions = workflowMultiContent
 	}
 	if instructions != "" {
-		if _, ok := svc.httpBackend.(ResponderBackend); ok {
+		if m.responder != nil {
 			instructions += workflowRespondSection
 		}
 		if svc.oastBackend.SupportsRedirect() {
@@ -105,6 +122,14 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 	m.registerTools()
 	// Snapshot the core tool names before any sidecar tools are registered.
 	m.coreTools = bulk.MapKeysSlice(m.server.ListTools())
+	m.coreQueryDispatch = m.coreQueryHandlers()
+
+	// Compose sidecar-contributed tools and keep the advertised list in sync as
+	// adapters connect and disconnect.
+	if m.sidecars != nil {
+		m.sidecars.SetToolsChangedHook(m.syncSidecarTools)
+		m.syncSidecarTools()
+	}
 
 	return m
 }
@@ -228,8 +253,8 @@ func (m *mcpServer) registerTools() {
 	}
 
 	// Register responder tools only when native proxy backend is used
-	if rb, ok := m.service.httpBackend.(ResponderBackend); ok {
-		m.addRespondTools(rb)
+	if m.responder != nil {
+		m.addRespondTools(m.responder)
 	}
 
 	if m.service.notesEnabled {
@@ -335,7 +360,7 @@ func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest)
 		return errorResult("invalid task: use 'explore' or 'test-report'"), nil
 	}
 
-	if _, ok := m.service.httpBackend.(ResponderBackend); ok {
+	if m.responder != nil {
 		content += workflowRespondSection
 	}
 	if m.service.oastBackend.SupportsRedirect() {

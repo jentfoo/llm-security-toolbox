@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/mcp"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -351,7 +352,7 @@ func TestBurpBackendSendRequest(t *testing.T) {
 
 		_, err := backend.SendRequest(t.Context(), "sectool-abc123", SendRequestInput{
 			RawRequest: []byte("GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-			Target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+			Target:     types.Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
 		})
 		require.NoError(t, err)
 
@@ -372,7 +373,7 @@ func TestBurpBackendSendRequest(t *testing.T) {
 
 		result, err := backend.SendRequest(t.Context(), "sectool-rule1", SendRequestInput{
 			RawRequest: []byte("GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-			Target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+			Target:     types.Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, result.ModifiedRequest)
@@ -391,7 +392,7 @@ func TestBurpBackendSendRequest(t *testing.T) {
 
 		result, err := backend.SendRequest(t.Context(), "sectool-rule2", SendRequestInput{
 			RawRequest: []byte("GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-			Target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+			Target:     types.Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
 		})
 		require.NoError(t, err)
 		assert.Nil(t, result.ModifiedRequest)
@@ -418,7 +419,7 @@ func TestBurpBackendSendDomainShortening(t *testing.T) {
 
 			_, err := backend.SendRequest(t.Context(), "sectool-dom1", SendRequestInput{
 				RawRequest: []byte("GET /api HTTP/1.1\r\nHost: " + tc.hostname + "\r\n\r\n"),
-				Target:     Target{Hostname: tc.hostname, Port: 443, UsesHTTPS: true},
+				Target:     types.Target{Hostname: tc.hostname, Port: 443, UsesHTTPS: true},
 			})
 			require.NoError(t, err)
 			assert.Contains(t, mockServer.LastTabName(), tc.wantInTabName)
@@ -809,7 +810,7 @@ func TestRawRequestToH2Params(t *testing.T) {
 	tests := []struct {
 		name       string
 		raw        string
-		target     Target
+		target     types.Target
 		wantMethod string
 		wantPath   string
 		wantScheme string
@@ -819,7 +820,7 @@ func TestRawRequestToH2Params(t *testing.T) {
 		{
 			name:       "simple_get",
 			raw:        "GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
-			target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+			target:     types.Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
 			wantMethod: "GET",
 			wantPath:   "/api",
 			wantScheme: "https",
@@ -828,7 +829,7 @@ func TestRawRequestToH2Params(t *testing.T) {
 		{
 			name:       "post_with_body",
 			raw:        "POST /data HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello",
-			target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+			target:     types.Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
 			wantMethod: "POST",
 			wantPath:   "/data",
 			wantScheme: "https",
@@ -838,7 +839,7 @@ func TestRawRequestToH2Params(t *testing.T) {
 		{
 			name:       "custom_port",
 			raw:        "GET / HTTP/1.1\r\nHost: example.com:8443\r\n\r\n",
-			target:     Target{Hostname: "example.com", Port: 8443, UsesHTTPS: true},
+			target:     types.Target{Hostname: "example.com", Port: 8443, UsesHTTPS: true},
 			wantMethod: "GET",
 			wantPath:   "/",
 			wantScheme: "https",
@@ -847,7 +848,7 @@ func TestRawRequestToH2Params(t *testing.T) {
 		{
 			name:       "query_string",
 			raw:        "GET /search?q=test&page=1 HTTP/1.1\r\nHost: example.com\r\n\r\n",
-			target:     Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+			target:     types.Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
 			wantMethod: "GET",
 			wantPath:   "/search?q=test&page=1",
 			wantScheme: "https",
@@ -856,7 +857,7 @@ func TestRawRequestToH2Params(t *testing.T) {
 		{
 			name:       "no_host_header",
 			raw:        "GET /path HTTP/1.1\r\n\r\n",
-			target:     Target{Hostname: "fallback.com", Port: 8080, UsesHTTPS: false},
+			target:     types.Target{Hostname: "fallback.com", Port: 8080, UsesHTTPS: false},
 			wantMethod: "GET",
 			wantPath:   "/path",
 			wantScheme: "http",

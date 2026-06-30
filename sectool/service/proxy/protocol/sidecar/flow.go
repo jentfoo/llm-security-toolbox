@@ -20,17 +20,13 @@ type FlowSink interface {
 	ShouldCapture(*types.Flow) bool
 }
 
-// CoreQuerier dispatches a read-side core tool by name, backing core_query. It
-// is the authority on which tools are permitted: a tool outside its read-only
-// set returns an error rather than dispatching.
-type CoreQuerier interface {
+// CoreService dispatches read-side core tools and reports their names. CoreQuery
+// backs the core_query method and is the authority on which tools are permitted:
+// a tool outside its read-only set returns an error rather than dispatching.
+// CoreToolNames backs registration-time collision checks of sidecar tool names
+// against core tools.
+type CoreService interface {
 	CoreQuery(ctx context.Context, tool string, params json.RawMessage) (content string, isErr bool, err error)
-}
-
-// CoreToolNamer reports the names of the core MCP tools, so sidecar-registered
-// tool names can be collision-checked against them at registration. Optionally
-// implemented by the CoreQuerier; an empty result is assumed when absent.
-type CoreToolNamer interface {
 	CoreToolNames() []string
 }
 

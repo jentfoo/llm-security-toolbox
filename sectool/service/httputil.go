@@ -24,6 +24,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/config"
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/util"
 )
 
@@ -636,8 +637,8 @@ func parseURLWithDefaultHTTPS(urlStr string) (*url.URL, error) {
 }
 
 // targetFromURL extracts Target (hostname, port, usesHTTPS) from a parsed URL.
-func targetFromURL(u *url.URL) Target {
-	t := Target{
+func targetFromURL(u *url.URL) types.Target {
+	t := types.Target{
 		Hostname:  u.Hostname(),
 		UsesHTTPS: u.Scheme != schemeHTTP,
 	}
@@ -1072,7 +1073,7 @@ func extractRequestPath(raw []byte) string {
 // buildRedirectRequest builds a new request for following a redirect.
 // Preserves headers (including cookies and Authorization),
 // handles method/body per status code.
-func buildRedirectRequest(originalReq []byte, location string, currentTarget Target, currentPath string, status int) ([]byte, Target, string, error) {
+func buildRedirectRequest(originalReq []byte, location string, currentTarget types.Target, currentPath string, status int) ([]byte, types.Target, string, error) {
 	var preserveMethod, preserveBody bool
 	switch status {
 	case 307, 308:
@@ -1082,7 +1083,7 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget Tar
 
 	newTarget, newPath, err := resolveRedirectLocation(location, currentTarget, currentPath)
 	if err != nil {
-		return nil, Target{}, "", err
+		return nil, types.Target{}, "", err
 	}
 
 	method := proxy.ExtractMethod(originalReq)
@@ -1118,11 +1119,11 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget Tar
 }
 
 // resolveRedirectLocation resolves a Location header value to a target and path.
-func resolveRedirectLocation(location string, currentTarget Target, currentPath string) (Target, string, error) {
+func resolveRedirectLocation(location string, currentTarget types.Target, currentPath string) (types.Target, string, error) {
 	if strings.HasPrefix(location, "http://") || strings.HasPrefix(location, "https://") {
 		u, err := url.Parse(location)
 		if err != nil {
-			return Target{}, "", err
+			return types.Target{}, "", err
 		}
 		return targetFromURL(u), u.RequestURI(), nil
 	}
@@ -1134,7 +1135,7 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 		}
 		u, err := url.Parse(scheme + ":" + location)
 		if err != nil {
-			return Target{}, "", err
+			return types.Target{}, "", err
 		}
 		return targetFromURL(u), u.RequestURI(), nil
 	}
@@ -1156,7 +1157,7 @@ func resolveRedirectLocation(location string, currentTarget Target, currentPath 
 
 // copyHeadersForRedirect copies headers from original request to buffer,
 // applying redirect-appropriate modifications.
-func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget Target, preserveBody, dropTE bool) {
+func copyHeadersForRedirect(originalReq []byte, buf *bytes.Buffer, newTarget types.Target, preserveBody, dropTE bool) {
 	headers, _ := splitHeadersBody(originalReq)
 
 	newHost := newTarget.Hostname

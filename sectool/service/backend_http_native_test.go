@@ -368,7 +368,7 @@ func TestNativeProxyBackend_SendRequest(t *testing.T) {
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
 	result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
 		RawRequest: rawReq,
-		Target: Target{
+		Target: types.Target{
 			Hostname:  serverURL.Hostname(),
 			Port:      mustParsePort(t, serverURL.Port()),
 			UsesHTTPS: false,
@@ -414,7 +414,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
 		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
 			RawRequest: rawReq,
-			Target: Target{
+			Target: types.Target{
 				Hostname:  serverURL.Hostname(),
 				Port:      mustParsePort(t, serverURL.Port()),
 				UsesHTTPS: false,
@@ -447,7 +447,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
 		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
 			RawRequest: rawReq,
-			Target: Target{
+			Target: types.Target{
 				Hostname:  serverURL.Hostname(),
 				Port:      mustParsePort(t, serverURL.Port()),
 				UsesHTTPS: false,
@@ -487,7 +487,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
 		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
 			RawRequest: rawReq,
-			Target: Target{
+			Target: types.Target{
 				Hostname:  serverURL.Hostname(),
 				Port:      mustParsePort(t, serverURL.Port()),
 				UsesHTTPS: false,
@@ -531,7 +531,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
 			RawRequest:      rawReq,
 			FollowRedirects: true,
-			Target: Target{
+			Target: types.Target{
 				Hostname:  serverURL.Hostname(),
 				Port:      mustParsePort(t, serverURL.Port()),
 				UsesHTTPS: false,

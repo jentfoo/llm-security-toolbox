@@ -174,12 +174,6 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.mcpServer = newMCPServer(s, s.mcpWorkflowMode)
 	s.mcpReady.Store(s.mcpServer)
-	// Compose sidecar-contributed tools into the advertised list, and keep it in
-	// sync as adapters connect and disconnect.
-	if mgr := s.mcpServer.sidecarManager(); mgr != nil {
-		mgr.SetToolsChangedHook(s.mcpServer.syncSidecarTools)
-		s.mcpServer.syncSidecarTools()
-	}
 	if err := s.mcpServer.Start(s.mcpPort); err != nil {
 		return fmt.Errorf("failed to start MCP server: %w", err)
 	}

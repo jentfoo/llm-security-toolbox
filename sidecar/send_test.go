@@ -64,8 +64,8 @@ func TestApplyMutations(t *testing.T) {
 	})
 }
 
-// sendFixture is an emit-only SendHandler that echoes the request back.
-type sendFixture struct{}
+// sendFixture is an emit-only handler that echoes the request back.
+type sendFixture struct{ BaseHandler }
 
 func (sendFixture) OnShutdown(int) {}
 func (sendFixture) OnSidecarSend(p wire.SidecarSendParams) (wire.SidecarSendResult, error) {

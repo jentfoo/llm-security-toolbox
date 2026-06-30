@@ -1,6 +1,10 @@
 package sidecar
 
-import "github.com/go-appsec/toolbox/sidecar/wire"
+import (
+	"errors"
+
+	"github.com/go-appsec/toolbox/sidecar/wire"
+)
 
 // Registration declares the adapter's identity and capabilities for the
 // register handshake. ProtocolVersion defaults to the SDK's compiled contract
@@ -33,57 +37,70 @@ func (r Registration) toParams() wire.RegisterParams {
 	}
 }
 
-// Handler is the sidecar's inbound callback surface.
+// Handler is the sidecar's inbound callback surface. Embed BaseHandler to get
+// no-op defaults and override only the callbacks the adapter implements. sectool
+// invokes a callback only for a surface the adapter claimed at registration
+// (Registration.Capabilities / Registration.MCPTools), so the defaults are
+// safety nets rather than routine paths.
 type Handler interface {
+	// --- Lifecycle ---
+
 	// OnShutdown is invoked when sectool requests a graceful close. The SDK
 	// acknowledges automatically after this returns, so the sidecar should
 	// finish in-flight work here before returning.
 	OnShutdown(drainSeconds int)
-}
 
-// StreamHandler is the optional byte-stream callback surface for a sidecar with an
-// early_claim. A Handler that also implements it receives the claimed stream's
-// events; OnStreamOpen/OnStreamDeliver return bytes for sectool to write back
-// (possibly to a different stream_id). Inbound chunks are raw transport bytes, not
-// aligned to protocol frames; use Reassembler to accumulate complete frames.
-type StreamHandler interface {
+	// --- Byte stream (early_claim adapters) ---
+
+	// OnStreamOpen and OnStreamDeliver receive the claimed stream's events and
+	// return bytes for sectool to write back (possibly to a different stream_id).
+	// Inbound chunks are raw transport bytes, not aligned to protocol frames; use
+	// Reassembler to accumulate complete frames. OnStreamEnded reports teardown.
 	OnStreamOpen(wire.StreamOpenParams) ([]wire.StreamWrite, error)
 	OnStreamDeliver(wire.StreamDeliverParams) ([]wire.StreamWrite, error)
 	OnStreamEnded(wire.StreamEndedParams)
-}
 
-// ClaimProber is the optional probe-decision callback for a probe-based
-// early_claim. Returning true takes the connection; false declines so sectool
-// tries the next claim. An error is reported as a probe fault and declines.
-type ClaimProber interface {
+	// OnClaimProbe decides a probe-based early_claim: true takes the connection,
+	// false declines so sectool tries the next claim (or falls through to HTTP).
+	// An error is reported as a probe fault and declines.
 	OnClaimProbe(wire.ClaimProbeParams) (bool, error)
-}
 
-// SendHandler is the optional callback surface for a sidecar that replays its own
-// flows or originates messages (an injection_target). It receives the replay or
-// origination request, applies the mutations (ApplyMutations), re-encodes and
-// sends per the adapter's configuration, and reports the produced flow ids.
-type SendHandler interface {
+	// --- Request / origination ---
+
+	// OnSidecarSend applies the mutations (ApplyMutations), re-encodes and sends
+	// per the adapter's configuration, and reports the produced flow ids. It
+	// serves both replay of the adapter's own flows and origination
+	// (injection_target).
 	OnSidecarSend(wire.SidecarSendParams) (wire.SidecarSendResult, error)
-}
 
-// InvokeToolHandler is the optional callback surface for a sidecar that registers
-// MCP tools (Registration.MCPTools). It receives a validated tool call delegated
-// from an MCP client and returns the result content. The handler may read sectool
-// state (Conn.CoreQuery) and emit flows (Conn.PushFlow) while running.
-type InvokeToolHandler interface {
+	// OnInvokeTool handles a validated MCP tool call (Registration.MCPTools)
+	// delegated from a client and returns the result content. The handler may
+	// read sectool state (Conn.CoreQuery) and emit flows (Conn.PushFlow).
 	OnInvokeTool(wire.InvokeToolParams) (wire.InvokeToolResult, error)
 }
 
-// ShutdownFunc adapts a function to Handler.
-type ShutdownFunc func(drainSeconds int)
+// BaseHandler provides no-op/decline defaults for every Handler callback. Embed
+// it and override only the callbacks the adapter supports.
+type BaseHandler struct{}
 
-func (f ShutdownFunc) OnShutdown(d int) {
-	if f != nil {
-		f(d)
-	}
+func (BaseHandler) OnShutdown(int) {}
+
+func (BaseHandler) OnStreamOpen(wire.StreamOpenParams) ([]wire.StreamWrite, error) {
+	return nil, nil
 }
 
-type nopHandler struct{}
+func (BaseHandler) OnStreamDeliver(wire.StreamDeliverParams) ([]wire.StreamWrite, error) {
+	return nil, nil
+}
 
-func (nopHandler) OnShutdown(int) {}
+func (BaseHandler) OnStreamEnded(wire.StreamEndedParams) {}
+
+func (BaseHandler) OnClaimProbe(wire.ClaimProbeParams) (bool, error) { return false, nil }
+
+func (BaseHandler) OnSidecarSend(wire.SidecarSendParams) (wire.SidecarSendResult, error) {
+	return wire.SidecarSendResult{}, errors.New("sidecar_send: not implemented")
+}
+
+func (BaseHandler) OnInvokeTool(wire.InvokeToolParams) (wire.InvokeToolResult, error) {
+	return wire.InvokeToolResult{}, errors.New("invoke_tool: not implemented")
+}

@@ -34,6 +34,7 @@ import (
 // forwardHandler is a sidecar that, on each claimed client stream, dials an
 // upstream via dial_upstream and proxies bytes between the two streams.
 type forwardHandler struct {
+	sidecar.BaseHandler
 	conn   *sidecar.Conn
 	dialFn func(*forwardHandler, wire.StreamOpenParams) (wire.DialUpstreamParams, error)
 

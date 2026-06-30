@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/toolbox/sectool/config"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 func TestIsFormEncodedContentType(t *testing.T) {
@@ -377,7 +378,7 @@ func TestSplitHeadersBody(t *testing.T) {
 func TestBuildRedirectRequest(t *testing.T) {
 	t.Parallel()
 
-	target := Target{Hostname: "a.example.com", Port: 443, UsesHTTPS: true}
+	target := types.Target{Hostname: "a.example.com", Port: 443, UsesHTTPS: true}
 
 	t.Run("chunked_307_dechunked", func(t *testing.T) {
 		orig := []byte("POST /upload HTTP/1.1\r\nHost: a.example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")

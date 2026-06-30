@@ -43,8 +43,8 @@ func (m *Manager) checkToolNames(p *wire.RegisterParams) *wire.Error {
 		return nil
 	}
 	owner := map[string]string{} // tool name -> owning adapter (core scope for core tools)
-	if namer, ok := m.coreQuery.(CoreToolNamer); ok {
-		for _, n := range namer.CoreToolNames() {
+	if m.coreQuery != nil {
+		for _, n := range m.coreQuery.CoreToolNames() {
 			owner[n] = types.AdapterScopeCore
 		}
 	}

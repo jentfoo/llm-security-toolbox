@@ -31,6 +31,7 @@ import (
 // same stream and records the exchange as a flow. It claims a probe connection
 // when the opening bytes carry probeMarker.
 type echoHandler struct {
+	sidecar.BaseHandler
 	conn        *sidecar.Conn
 	probeMarker []byte
 	opened      chan string

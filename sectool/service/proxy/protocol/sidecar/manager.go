@@ -35,7 +35,7 @@ type Manager struct {
 	cfg       Config
 	registry  *protocol.Registry
 	flows     FlowSink
-	coreQuery CoreQuerier
+	coreQuery CoreService
 	rules     RuleSource
 	now       func() time.Time
 
@@ -52,7 +52,7 @@ type Manager struct {
 // for push_flow; coreQuery dispatches read-side core tools for core_query; rules
 // supplies the rule snapshot pushed via sync_rules. flows, coreQuery, and rules may
 // be nil in tests.
-func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQuery CoreQuerier, rules RuleSource) *Manager {
+func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQuery CoreService, rules RuleSource) *Manager {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = 10 * time.Second
 	}

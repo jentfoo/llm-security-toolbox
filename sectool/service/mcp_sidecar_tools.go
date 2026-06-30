@@ -6,28 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 
+	"github.com/go-analyze/bulk"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
-
-// sidecarManager returns the connected sidecar registry, or nil when the active
-// backend hosts no sidecars (Burp, or sidecars disabled).
-func (m *mcpServer) sidecarManager() *sidecar.Manager {
-	type sidecarHost interface {
-		SidecarManager() *sidecar.Manager
-	}
-	if h, ok := m.service.httpBackend.(sidecarHost); ok {
-		return h.SidecarManager()
-	}
-	return nil
-}
 
 // coreToolNames returns the static core tool names captured at construction, used
 // to reject a colliding sidecar tool name at registration. Connected sidecars'
@@ -44,33 +33,36 @@ func (m *mcpServer) coreToolNames() []string {
 // With none connected the surface returns to the core baseline. It is invoked
 // whenever the registry changes; serialized so concurrent changes converge.
 func (m *mcpServer) syncSidecarTools() {
-	mgr := m.sidecarManager()
+	mgr := m.sidecars
 	if mgr == nil {
 		return
 	}
 	m.sidecarMu.Lock()
 	defer m.sidecarMu.Unlock()
 
-	defs := mgr.ToolDefs()
-	names := mgr.AdapterNames()
+	byAdapter := mgr.AdapterTools()
+	names := bulk.MapKeysSlice(byAdapter)
+	slices.Sort(names)
 
-	desired := make(map[string]struct{}, len(defs))
+	desired := make(map[string]struct{})
 	var add []server.ServerTool
-	for _, d := range defs {
-		desired[d.Tool.Name] = struct{}{}
-		schemaRaw := d.Tool.InputSchema
-		if len(schemaRaw) == 0 {
-			schemaRaw = json.RawMessage(`{"type":"object"}`)
+	for _, adapter := range names {
+		for _, tool := range byAdapter[adapter] {
+			desired[tool.Name] = struct{}{}
+			schemaRaw := tool.InputSchema
+			if len(schemaRaw) == 0 {
+				schemaRaw = json.RawMessage(`{"type":"object"}`)
+			}
+			schema, err := compileToolSchema(schemaRaw)
+			if err != nil {
+				// Expose the tool but skip validation when its schema does not compile.
+				log.Printf("sidecar tool %q (%s): input_schema does not compile: %v", tool.Name, adapter, err)
+			}
+			add = append(add, server.ServerTool{
+				Tool:    sidecarToolDef(tool, schemaRaw),
+				Handler: m.delegateSidecarTool(tool.Name, schema),
+			})
 		}
-		schema, err := compileToolSchema(schemaRaw)
-		if err != nil {
-			// Expose the tool but skip validation when its schema does not compile.
-			log.Printf("sidecar tool %q (%s): input_schema does not compile: %v", d.Tool.Name, d.Adapter, err)
-		}
-		add = append(add, server.ServerTool{
-			Tool:    sidecarToolDef(d.Tool, schemaRaw),
-			Handler: m.delegateSidecarTool(mgr, d.Tool.Name, schema),
-		})
 	}
 	if len(add) > 0 {
 		m.server.AddTools(add...)
@@ -97,7 +89,7 @@ func (m *mcpServer) syncSidecarTools() {
 
 // delegateSidecarTool returns a handler that validates the client arguments
 // against the tool's schema and delegates the call to the owning sidecar.
-func (m *mcpServer) delegateSidecarTool(mgr *sidecar.Manager, name string, schema *jsonschema.Schema) server.ToolHandlerFunc {
+func (m *mcpServer) delegateSidecarTool(name string, schema *jsonschema.Schema) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if r := m.requireWorkflow(); r != nil {
 			return r, nil
@@ -115,7 +107,7 @@ func (m *mcpServer) delegateSidecarTool(mgr *sidecar.Manager, name string, schem
 				return errorResultFromErr("invalid arguments", verr), nil
 			}
 		}
-		res, rpcErr := mgr.InvokeTool(ctx, name, args)
+		res, rpcErr := m.sidecars.InvokeTool(ctx, name, args)
 		if rpcErr != nil {
 			return errorResult(rpcErr.Error()), nil
 		}
@@ -183,18 +175,21 @@ func ruleAdapterParam(names []string) mcp.ToolOption {
 // sidecarToolsSection lists connected sidecars' tools for the workflow
 // instructions, or empty when none are registered.
 func (m *mcpServer) sidecarToolsSection() string {
-	mgr := m.sidecarManager()
+	mgr := m.sidecars
 	if mgr == nil {
 		return ""
 	}
-	defs := mgr.ToolDefs()
-	if len(defs) == 0 {
-		return ""
-	}
+	byAdapter := mgr.AdapterTools()
+	names := bulk.MapKeysSlice(byAdapter)
+	slices.Sort(names)
 	var b strings.Builder
-	b.WriteString("\n\n## Sidecar Tools\n\nProtocol adapters contribute these tools:\n")
-	for _, d := range defs {
-		fmt.Fprintf(&b, "- %s (%s): %s\n", d.Tool.Name, d.Adapter, d.Tool.Description)
+	for _, adapter := range names {
+		for _, tool := range byAdapter[adapter] {
+			if b.Len() == 0 {
+				b.WriteString("\n\n## Sidecar Tools\n\nProtocol adapters contribute these tools:\n")
+			}
+			fmt.Fprintf(&b, "- %s (%s): %s\n", tool.Name, adapter, tool.Description)
+		}
 	}
 	return b.String()
 }

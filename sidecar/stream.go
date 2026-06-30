@@ -3,7 +3,7 @@ package sidecar
 import "github.com/go-appsec/toolbox/sidecar/wire"
 
 // CloseStream proactively closes an open stream (client-facing or a dialed
-// upstream). It is the companion to the stream events delivered to a StreamHandler.
+// upstream). It is the companion to the stream events delivered to a Handler.
 func (c *Conn) CloseStream(streamID, reason string) error {
 	return c.peer.Notify(wire.MethodCloseStream, wire.CloseStreamParams{StreamID: streamID, Reason: reason})
 }

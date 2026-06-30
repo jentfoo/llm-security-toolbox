@@ -26,6 +26,7 @@ import (
 // sectool state and emits a flow before returning a result, exercising the full
 // invoke_tool delegation path.
 type toolSidecar struct {
+	sidecar.BaseHandler
 	conn *sidecar.Conn
 }
 
