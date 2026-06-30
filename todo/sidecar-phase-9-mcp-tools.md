@@ -51,6 +51,15 @@ Discoverability (§9.3): sidecar tools appear in the standard MCP `tools/list` l
 core tool, carrying their own `description`/`input_schema`; no sectool-specific
 introspection tool is needed.
 
+Protocol-specific *origination*: this phase is the home for agent-facing protocol
+send/inject tools (e.g. a Tailscale `ts_inject_map_response`). They are ordinary
+sidecar-registered tools whose handler builds on the Phase 8 `sidecar_send` originate
+path (no base flow). Phase 8 deliberately keeps no adapter selector on `replay_send`, so
+this is where protocol origination becomes agent-reachable. Cross-adapter / cross-tunnel
+replay (Tailscale §9.8) is likewise revisited here — a sidecar tool that takes a captured
+flow as a template, or `invoke_adapter` driving a sibling's `injection_target` — rather
+than via a replay parameter.
+
 ## Spec references
 
 - §6a.1 `register` (`mcp_tools` field), §6b.7 `invoke_tool`.

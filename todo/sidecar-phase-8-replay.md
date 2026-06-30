@@ -13,11 +13,27 @@ and **Phase 2** (`injection_target` declared at registration).
 
 ## Carried-forward cleanup
 
-- `protocol.UpgradeClaimCtx.TLS` (set on the http1 TLS upgrade path in Phase 6) is
-  currently unused: the WS adapter keys the TLS path off `UpgradeConns.UpstreamConn`
-  and the sidecar bridge derives scheme from `Target.Scheme()`. While touching the
-  upgrade-claim/transport seam here, either remove the field or document it as
-  informational only.
+- `protocol.UpgradeClaimCtx.TLS` (set on the http1 TLS upgrade path in Phase 6) was
+  unused: the WS adapter keys the TLS path off `UpgradeConns.UpstreamConn` and the
+  sidecar bridge derives scheme from `Target.Scheme()`. Removed in this phase.
+
+## Design decisions
+
+- **No adapter name in the agent surface.** `replay_send` auto-routes a flow to its
+  owning adapter from the captured flow's recorded `adapter` field; HTTP flows stay
+  native and unchanged. `request_send` stays HTTP-native (no adapter selector).
+- **No `target_override`.** The existing `replay_send` `target` param
+  (`scheme://host[:port]`) is forwarded to the owning adapter as a routing-only hint
+  (`destination`). The destination-adapter facet (cross-adapter / cross-tunnel replay)
+  is dropped until a concrete use case; its future homes are the Phase 9 protocol
+  injection tools and `invoke_adapter`.
+- **No sectool-side schema validation.** `injection_target.target_schema` is
+  descriptive; sectool forwards `target`/`payload`/`force` to the owning adapter, which
+  validates (or not) itself, consistent with sectool's tolerance of invalid payloads
+  for protocol testing.
+- The originate path of `sidecar_send` (no base flow) is built in the SDK and service
+  but reached in this phase only via `invoke_adapter`; agent-facing protocol
+  origination tools are Phase 9.
 
 ## Goal
 
@@ -39,19 +55,19 @@ decrypted/decompressed/de-framed by the originating adapter, Phase 3); on replay
 binding at the wire — sectool carries no adapter-specific crypto state across the
 replay boundary.
 
-`sidecar_send` (§6b.2) is the internal method behind `replay_send`/`request_send` and
-the destination side of `invoke_adapter`. With `flow_id` set it replays that flow with
-mutations (routed to the destination adapter keyed by the source flow's `adapter`
-field; `target_override` may name a different destination adapter able to encode the
-source `protocol_tag`). With `flow_id` omitted it originates from `target`/`payload`
-(validated against the adapter's `injection_target.target_schema`). Replay sends
-`body_raw` verbatim when no body mutation is requested; a mutated body is re-encoded
-through `body_codec`. Where a protocol binds fields (e.g. a signature), the owning
-adapter re-signs when it holds the key material (its connection-time configuration) or
-strips the bound fields, surfacing the outcome in `annotations`. Egress flows through
-`dial_upstream`, so scope policy applies. Stream flows replay `per_chunk` (default,
-stored/emission order) or `collapsed` (the adapter rejects `collapsed` when its
-protocol forbids merging).
+`sidecar_send` (§6b.2) is the internal method behind `replay_send` and the destination
+side of `invoke_adapter`. With `flow_id` set it replays that flow with mutations, routed
+to the owning adapter keyed by the source flow's `adapter` field; sectool passes the
+resolved source flow inline so the adapter has `body`/`body_raw`/`body_codec` without a
+round-trip. With `flow_id` omitted it originates from `target`/`payload` (validated by
+the owning adapter, not sectool). The agent's `target` (`scheme://host[:port]`) rides
+through as the `destination` routing-only override. Replay sends `body_raw` verbatim
+when no body mutation is requested; a mutated body is re-encoded through `body_codec`.
+Where a protocol binds fields (e.g. a signature), the owning adapter re-signs when it
+holds the key material (its connection-time configuration) or strips the bound fields,
+surfacing the outcome in `annotations`. Egress flows through `dial_upstream`, so scope
+policy applies. Stream flows replay `per_chunk` (default, stored/emission order) or
+`collapsed` (the adapter rejects `collapsed` when its protocol forbids merging).
 
 `injection_target` (§5.3): declares the adapter can originate outbound messages,
 driven by a sidecar-registered tool (Phase 9) or by another adapter via
@@ -76,53 +92,54 @@ is that adapter's convention (§8), not a cross-adapter guarantee.
 ## Scope — toolbox (server side)
 
 - **`sidecar_send`** (§6b.2): the internal method routing replay/origination to the
-  owning adapter. Support `flow_id` (replay) and originate (`target`/`payload`),
-  `mutations` (ordered §3.4 ops), `target_override` (destination routing /
-  cross-adapter destination only), `follow_redirects` (HTTP-specific), `force`
-  (skip adapter validation), `wait_for_response` (block for the response form), and
+  owning adapter. Support `flow_id` + inline `flow` (replay) and originate
+  (`target`/`payload`), `mutations` (ordered §3.4 ops), `destination` (routing-only
+  `scheme://host[:port]` override), `follow_redirects` (HTTP-specific), `force`
+  (forwarded to the adapter), `wait_for_response` (block for the response form), and
   `stream_strategy` (`per_chunk`/`collapsed`). Return `{new_flow_ids, writes?,
   response?}`.
-- **Route the MCP tools:** `replay_send` and `request_send` translate their existing
-  parameters into `sidecar_send` invocations routed to the owning adapter — HTTP
-  adapter handled natively (existing behavior preserved), sidecar-owned flows routed
-  over RPC. The mutation grammar is the fixed §3.4 set; `force=true` skips adapter-side
-  validation of the target/payload.
-- **Fire `injection_target`:** validate `target`/`payload` against the declaring
-  adapter's `target_schema`; originate via the adapter.
+- **Route `replay_send`:** a flow owned by a connected sidecar routes to that adapter
+  via `sidecar_send` over RPC; HTTP flows stay native (existing behavior preserved).
+  `request_send` stays HTTP-native. The mutation grammar is the fixed §3.4 set.
 - **`invoke_adapter`** (§6a.8): route an outbound message through another registered
-  adapter's `injection_target`; record `annotations.invoked_by`; apply scope policy
-  and destination validation.
+  adapter's `injection_target`; record `annotations.invoked_by`; egress scope applies
+  via `dial_upstream`. Target/payload validation is the destination adapter's concern.
 - Re-encoding, re-wrapping, and re-signing are the owning adapter's responsibility;
   sectool adds no core auto-prepend step and models no cryptographic binding.
 
 ## Scope — `sidecar` package
 
-- A `sidecar_send` handler hook: receive a replay/originate request, apply mutations
-  (reusing the `sidecar/mutate` helpers), re-encode via `body_codec`, re-wrap/re-sign
-  per the adapter's configuration, emit the resulting flow(s) and `writes`, and report
-  any stripped-binding outcome in `annotations`.
-- Injection helpers for the originate case (validate against the adapter's own
-  `target_schema`) and an `InvokeAdapter` call for cross-adapter origination.
+- A `SendHandler` hook (`OnSidecarSend`): receive a replay/originate request, apply
+  mutations (reusing the `sidecar/mutate` helpers via `ApplyMutations`), re-encode via
+  `body_codec`, re-wrap/re-sign per the adapter's configuration, emit the resulting
+  flow(s) and `writes`, and report any stripped-binding outcome in `annotations`.
+- An `InvokeAdapter` call for cross-adapter origination. Any target/payload validation
+  is the adapter's own choice, not sectool's.
 
 ## Out of scope / deferred
 
 - Exposing protocol-specific operations as MCP tools (`mcp_tools`/`invoke_tool`) →
-  Phase 9. This phase routes the *core* `replay_send`/`request_send` tools only.
+  Phase 9, which is also the home for agent-facing protocol *origination* tools built
+  on the `sidecar_send` originate path. This phase routes the core `replay_send` tool
+  and implements `invoke_adapter`.
+- Cross-adapter / cross-tunnel replay (a flow captured on one adapter replayed through
+  another) — deferred with `target_override` until a concrete use case.
+- `invoke_adapter` targeting the in-process HTTP adapter (e.g. an upstream `/key`
+  fetch) — a follow-up mapping to the native send path; this phase routes
+  `invoke_adapter` to registered sidecar destinations.
 
 ## Test fixture
 
-An injection sidecar (on the `sidecar` package) that declares `injection_target`,
-owns some flows (Phase 3), and on `sidecar_send` re-encodes and sends them via
-`dial_upstream` (Phase 5). A second fixture/adapter pair exercises `invoke_adapter`
-cross-adapter origination.
+An emit-only injection sidecar (on the `sidecar` package) implementing `SendHandler`
+that applies mutations and pushes the resulting flow(s) on `sidecar_send`. A second
+fixture/adapter pair exercises `invoke_adapter` cross-adapter origination.
 
 ## Verification
 
 - `replay_send` on an HTTP flow is byte-identical to today; on a sidecar-owned flow it
   routes via `sidecar_send`, the adapter re-encodes/sends, and a new flow is produced.
-- `request_send` originates from `target`/`payload` validated against the schema.
 - Unmutated replay sends `body_raw` verbatim; a mutated body is re-encoded via
-  `body_codec`; stripped/ re-signed bindings are surfaced in `annotations`.
+  `body_codec`; stripped/re-signed bindings are surfaced in `annotations`.
 - `stream_strategy` `per_chunk` replays in emission order; `collapsed` is rejected when
   the protocol forbids it.
 - `invoke_adapter` originates through a sibling adapter, records `invoked_by`, and
@@ -131,13 +148,12 @@ cross-adapter origination.
 
 ## Definition of done
 
-- [ ] `sidecar_send` supports replay and originate with the full param set and return
-      shape; `replay_send`/`request_send` route to the owning adapter.
-- [ ] `injection_target` validation + origination; `invoke_adapter` cross-adapter
-      origination with `invoked_by` audit.
-- [ ] Re-encode via `body_codec`; binding re-sign/strip surfaced in `annotations`;
-      `stream_strategy` honored.
-- [ ] Injection + cross-adapter fixtures validate end-to-end.
-- [ ] `sidecar` package gains `sidecar_send` handler + injection/`InvokeAdapter`
+- [x] `sidecar_send` supports replay and originate with the param set and return shape;
+      `replay_send` routes a sidecar-owned flow to its owning adapter.
+- [x] `invoke_adapter` cross-adapter origination with `invoked_by` audit.
+- [x] Re-encode via `body_codec`; binding re-sign/strip surfaced in `annotations`;
+      `stream_strategy` honored (adapter-side).
+- [x] Injection + cross-adapter fixtures validate end-to-end.
+- [x] `sidecar` package gains the `SendHandler` hook + `ApplyMutations`/`InvokeAdapter`
       helpers; no `sectool/` dep.
-- [ ] `make test-all` + `make lint` pass.
+- [x] `make test-all` + `make lint` pass.

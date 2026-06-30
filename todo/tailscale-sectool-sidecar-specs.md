@@ -1051,15 +1051,18 @@ simultaneously against the same sectool instance:
 **Bindings are mirrored across adapters.** Both the client-side MITM and
 the server-side adapter track the same bindings internally (§4.6.2 / §5.2),
 because they are properties of the Tailscale protocol itself, not of a
-specific capture point. A flow captured on one adapter and replayed
-through the other — the destination adapter selected via `replay_send`'s
-`target_override` (Spec 1 §6b.2) — is rebound by that destination adapter
-automatically per its connection-time configuration. For example,
-capturing a `RegisterRequest` on the server-side adapter and replaying it
-through the client-side MITM crosses tunnels, so the client-side MITM
-recomputes `register_signature` with its configured identity (re-signing
-with the operator cert, or stripping when none is configured) before
-forwarding upstream.
+specific capture point. A flow captured on one adapter and re-encoded
+through the other (cross-adapter replay) is rebound by that adapter
+automatically per its connection-time configuration. For example, capturing
+a `RegisterRequest` on the server-side adapter and replaying it through the
+client-side MITM crosses tunnels, so the client-side MITM recomputes
+`register_signature` with its configured identity (re-signing with the
+operator cert, or stripping when none is configured) before forwarding
+upstream. `replay_send` itself always routes a flow to its owning adapter
+(no adapter selector); selecting a *different* destination adapter is
+deferred (Spec 1 §6b.2) and, when added, is driven through a sidecar
+injection tool (§4.7, Spec 1 §9.2) or `invoke_adapter`, not a replay
+parameter.
 
 ---
 
@@ -1127,8 +1130,8 @@ with governs every replay it performs:
 Because identity is fixed at connection time, the consequent
 `register_signature` rebind (§4.6.2) is performed automatically by the
 sidecar; the agent supplies no identity parameter and makes no rebind
-decision. `target_override` (Spec 1 §6b.2) carries destination routing
-only.
+decision. `replay_send`'s `target` (Spec 1 §6b.2) carries destination
+routing only (`scheme://host:port`); it selects no adapter and no identity.
 
 ### 6.4 Binding-aware replay
 
@@ -1447,17 +1450,19 @@ operator to begin testing.
    scoped to `adapter=http/1.1`, or handled internally by the sidecar) —
    it is an ordinary user rule with no special delete protection.
 
-### 9.8 Cross-tunnel replay with auto-rebind
+### 9.8 Cross-tunnel replay with auto-rebind (deferred)
 
-1. Capture a `RegisterRequest` on the server-side adapter (path:
-   client → server-side adapter, no MITM tunnel).
-2. Call `replay_send` with `target_override` selecting the client-side
-   MITM sidecar as the destination adapter. This crosses tunnels
-   (different `serverPubKey` and `machinePubKey` on the destination
-   side).
-3. Confirm the client-side MITM sidecar rebinds `register_signature`
-   automatically per its connection-time configuration — no sectool
-   warning or agent decision.
-4. Confirm the resulting upstream `RegisterRequest` has either a valid
-   signature (operator cert configured) or a stripped signature plus
-   diagnostic annotations listing the stripped fields and reason.
+Cross-adapter replay — capturing a `RegisterRequest` on the server-side
+adapter and re-encoding it through the client-side MITM, which crosses
+tunnels (different `serverPubKey` / `machinePubKey`) and triggers the
+`register_signature` rebind — depends on selecting a *different* destination
+adapter than the one that captured the flow. `replay_send` deliberately has
+no adapter selector (it routes a flow to its owning adapter), so this
+scenario is deferred until the selection mechanism lands: a client-side
+sidecar injection tool (§4.7, Spec 1 §9.2) that takes the captured flow as a
+template, or `invoke_adapter` driving the client-side MITM's
+`injection_target`. The rebind behavior the scenario exercises is unchanged
+and already covered by same-adapter replay (§6.4): when the destination
+adapter is configured with the operator cert it produces a valid
+`SignatureV2`, otherwise it strips `Signature` / `SignatureType` /
+`DeviceCert` and records the strip in `annotations.stripped_fields`.

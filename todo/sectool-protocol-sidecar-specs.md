@@ -937,9 +937,10 @@ the HTTP adapter.
 
 - `adapter` (string, required) — destination adapter name; must have
   declared `injection_target`.
-- `target` (object, required) — validated against the destination
-  adapter's `injection_target.target_schema`.
-- `payload` (object, required) — validated against the same schema.
+- `target` (object, required) — validated by the destination adapter
+  against its `injection_target.target_schema` (sectool does not validate).
+- `payload` (object, required) — validated the same way by the destination
+  adapter.
 - `mutations` (array, optional) — operations applied to the payload
   before send, per §3.4.
 - `wait_for_response` (boolean, optional, default true) — when true,
@@ -1043,22 +1044,26 @@ is needed on the flow stream.
 #### 6b.2 `sidecar_send`
 
 This is the internal sectool→sidecar method behind the agent-facing
-`replay_send` and `request_send` MCP tools, and the destination side of
-`invoke_adapter` (§6a.8). With `flow_id` set it replays that captured flow
-with mutations applied (`replay_send`); with `flow_id` omitted it
-originates a fresh outbound message from `target` / `payload`
-(`request_send`). Agents never call `sidecar_send` directly; sectool
+`replay_send` MCP tool and the destination side of `invoke_adapter`
+(§6a.8). With `flow_id` set it replays that captured flow with mutations
+applied (`replay_send`); with `flow_id` omitted it originates a fresh
+outbound message from `target` / `payload` (driven by `invoke_adapter` or a
+Phase 9 injection tool — the HTTP-shaped `request_send` stays native and
+does not route here). Agents never call `sidecar_send` directly; sectool
 routes the invocation to the owning adapter via this method.
 
-Replay (`flow_id` present) routes to a
-**destination adapter** keyed by the source flow's `adapter` field
-(§3.1) — by default the adapter that emitted the flow, since it recorded
-which adapter handled the original. `target_override` may name a
-**different** destination adapter, which must be able to encode the source
-flow's `protocol_tag`. (This is what cross-adapter replay needs — e.g., a
-flow captured on a server-side adapter replayed through a client-side MITM
-adapter.) For an in-process HTTP flow the destination is the HTTP adapter,
-handled natively; for a sidecar-owned flow it is the owning sidecar.
+Replay (`flow_id` present) routes to the **owning adapter** keyed by the
+source flow's `adapter` field (§3.1) — the adapter that emitted the flow,
+since it recorded which adapter handled the original. There is no
+agent-facing adapter selector: the owning adapter is fixed by the captured
+flow. For an in-process HTTP flow the destination is the HTTP adapter,
+handled natively; for a sidecar-owned flow it is the owning sidecar. sectool
+passes the resolved source flow inline so the adapter has
+`body`/`body_raw`/`body_codec` without a round-trip. (Cross-adapter replay —
+a flow captured on one adapter re-encoded through a different adapter able to
+encode its `protocol_tag` — is deferred; when needed it is expressed through
+a Phase 9 injection tool or `invoke_adapter`, not an adapter selector on
+replay.)
 
 The captured flow's `body` is the plaintext logical form (already
 decrypted, decompressed, and de-framed by the originating adapter). On
@@ -1090,28 +1095,31 @@ still flows through `dial_upstream`, so scope policy applies.
 
 - `flow_id` (string, optional) — source flow to replay. Omit to originate
   a fresh message, in which case `target` / `payload` supply it.
-- `target` (object, optional) — for the originate case, validated against
-  the adapter's `injection_target.target_schema` (§5.3); names where/what
-  to send. Examples: HTTP `{url, method, headers, body, follow_redirects}`;
-  session-oriented `{flow_id, endpoint, body, stream}` where its `flow_id`
-  references an existing session/tunnel envelope (§3.2) whose transport the
-  injection reuses (the Tailscale adapter calls this `tunnel_id`).
+- `flow` (object, optional) — the resolved source flow (§3.1) sectool passes
+  inline on replay so the owning adapter has `body`/`body_raw`/`body_codec`
+  without a round-trip.
+- `target` (object, optional) — for the originate case, the adapter-typed
+  destination the owning adapter validates (sectool does not); names
+  where/what to send. Examples: HTTP `{url, method, headers, body,
+  follow_redirects}`; session-oriented `{flow_id, endpoint, body, stream}`
+  where its `flow_id` references an existing session/tunnel envelope (§3.2)
+  whose transport the injection reuses (the Tailscale adapter calls this
+  `tunnel_id`).
 - `payload` (object, optional) — adapter-typed message content for the
-  originate case, validated against the same schema.
+  originate case, validated the same way (by the adapter, not sectool).
 - `mutations` (array, required) — ordered list of mutation operations
   (shared or adapter-declared) per §3.4, applied to the replayed or
   originated message as given. The owning adapter re-establishes any
   cryptographic binding automatically (see above); there is no core
   auto-prepend step.
-- `target_override` (object, optional) — override of **destination
-  routing only**: a different `scheme://host:port`, and/or a different
-  destination adapter for cross-adapter replay (which must be able to
-  encode the source flow's `protocol_tag`). It does not carry identity or
-  other protocol-replay parameters — those are the destination adapter's
-  connection-time configuration.
+- `destination` (string, optional) — routing-only override
+  (`scheme://host:port`) sourced from the agent's `target` on replay. It does
+  not select a destination adapter (the owning adapter is fixed by the source
+  flow) and carries no identity or protocol-replay parameters — those are the
+  adapter's connection-time configuration.
 - `follow_redirects` (boolean, optional, HTTP-adapter-specific).
-- `force` (boolean, optional) — skip adapter-side validation (e.g. for
-  protocol-level tests).
+- `force` (boolean, optional) — forwarded to the owning adapter to skip its
+  own validation (e.g. for protocol-level tests); sectool does not validate.
 - `wait_for_response` (boolean, optional, default true) — when true, blocks
   until the produced flow completes so the response form is returned
   alongside `new_flow_ids` (used by `invoke_adapter`, §6a.8).
@@ -1256,7 +1264,7 @@ section maps each to its post-refactor representation.
 | `_internal_history_delete` | Unchanged; respects notes references regardless of adapter. |
 | `proxy_respond_add` / `proxy_respond_delete` / `proxy_respond_list` | Unchanged. The in-process HTTP responder store and matcher schema are retained as-is. |
 | `replay_send` (full mutation grammar: set_headers, remove_headers, set_json, remove_json, set_form, remove_form, set_query, remove_query, method, body, target, path, follow_redirects, force) | Unchanged tool surface and mutation grammar (§3.4). For HTTP adapter flows the existing parameter set is supported identically. For a sidecar-owned flow the mutations are routed to the owning adapter (§6b.2), which applies the same logical edits via the shared `sidecar/mutate` helpers and re-encodes/re-wraps/re-signs at the wire per its connection-time configuration. The mutation execution order documented in `mcp_replay.go` (remove → set → set_json/remove_json → set_form/remove_form → remove_query → set_query → body → compression) is preserved for HTTP and is that in-process adapter's convention. |
-| `request_send` (url, method, headers, body, follow_redirects, force) | Routed via `sidecar_send` with no base flow (§6b.2). Surface unchanged. |
+| `request_send` (url, method, headers, body, follow_redirects, force) | Unchanged: HTTP-native origination (no adapter selector). Sidecar origination is reached via `invoke_adapter` (§6a.8) or a sidecar-registered injection tool (§9.2), both dispatched to the owning adapter as `sidecar_send` with no base flow (§6b.2). |
 | `diff_flow` (text/JSON/binary modes, max_diff_lines) | Operates on `headers` and `body` of both flows. JSON and text modes detect from Content-Type; binary mode is the default for unrecognized content. |
 | `find_reflected` (variants: url_query, url_path, html_entity, js_unicode, js_hex, html_decimal, html_hex) | Generalized. Default behavior unchanged for HTTP flows. For any pair of flows on the same adapter (or sharing a `parent_flow_id`), the tool searches request-side parameters reflected in response-side body. Variant encodings remain HTTP-specific; per-adapter encoding variants may be added. |
 | `oast_*` tools | Unchanged. OAST events are independent of adapters; cross-references continue to attach to flow IDs regardless of which adapter produced the flow. |
