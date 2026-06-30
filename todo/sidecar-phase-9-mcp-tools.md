@@ -127,14 +127,14 @@ registers a colliding tool name to exercise rejection.
 
 ## Definition of done
 
-- [ ] Tool list composed from core + adapter-contributed tools at client connect;
-      no-sidecar surface unchanged.
-- [ ] `mcp_tools` namespacing + collision rejection added to the Phase 2 registration
+- [x] Tool list composed from core + adapter-contributed tools, synced to the
+      connected-adapter set; no-sidecar surface unchanged.
+- [x] `mcp_tools` namespacing + collision rejection added to the registration
       handler (tool-name collisions vs core + other sidecars).
-- [ ] `invoke_tool` delegation with `input_schema` validation; result returned
+- [x] `invoke_tool` delegation with `input_schema` validation; result returned
       verbatim; `core_query`/`push_flow` usable mid-call.
-- [ ] Sidecar tools discoverable via `tools/list`; `workflow` templates mention them.
-- [ ] Tool-registration + `invoke_tool` fixtures validate end-to-end (incl. collision).
-- [ ] `sidecar` package gains tool registration + `invoke_tool` handler; no `sectool/`
+- [x] Sidecar tools discoverable via `tools/list`; `workflow` templates mention them.
+- [x] Tool-registration + `invoke_tool` fixtures validate end-to-end (incl. collision).
+- [x] `sidecar` package gains tool registration + `invoke_tool` handler; no `sectool/`
       dep.
-- [ ] `make test-all` + `make lint` pass.
+- [x] `make test-all` + `make lint` pass.
