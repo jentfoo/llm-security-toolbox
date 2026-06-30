@@ -33,6 +33,9 @@ type UpgradeClaimCtx struct {
 	Req    *types.RawHTTP1Request
 	Target *types.Target
 	TLS    bool // request arrived over a post-CONNECT TLS stream
+	// Signal is the upgrade signal driving this claim: "http_101" after a parsed
+	// upgrade request, or "connect" after a CONNECT tunnel is established.
+	Signal string
 }
 
 // UpgradeConns are the connections handed to an upgrade adapter when it serves.

@@ -192,6 +192,12 @@ type StreamOpenParams struct {
 	Path         string `json:"path,omitempty"`
 	MatchedClaim string `json:"matched_claim,omitempty"`
 	PeerAddr     string `json:"peer_addr,omitempty"`
+	// RequestFlowID is the captured triggering request's flow, set only for an
+	// upgrade_claim; absent for an early_claim.
+	RequestFlowID string `json:"request_flow_id,omitempty"`
+	// RequestHeaders are the triggering request's headers, set only for an
+	// upgrade_claim; absent for an early_claim.
+	RequestHeaders []Header `json:"request_headers,omitempty"`
 }
 
 // StreamDeliverParams carries inbound socket bytes for a stream.

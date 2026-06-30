@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"net"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
@@ -19,10 +22,11 @@ const probeTimeout = 5 * time.Second
 type bridge struct {
 	rec     *Record
 	streams *streamSet
+	flows   FlowSink
 }
 
-func newBridge(rec *Record) *bridge {
-	return &bridge{rec: rec, streams: newStreamSet()}
+func newBridge(rec *Record, flows FlowSink) *bridge {
+	return &bridge{rec: rec, streams: newStreamSet(), flows: flows}
 }
 
 func (b *bridge) Name() string { return b.rec.Name }
@@ -74,9 +78,66 @@ func (b *bridge) ClaimTLS(sni, host string, port int) bool {
 	return true
 }
 
-func (b *bridge) ClaimUpgrade(*protocol.UpgradeClaimCtx) bool { return false }
+// ClaimUpgrade matches the sidecar's upgrade_claim against a parsed HTTP upgrade
+// request or an established CONNECT tunnel.
+func (b *bridge) ClaimUpgrade(c *protocol.UpgradeClaimCtx) bool {
+	uc := b.rec.Capabilities.UpgradeClaim
+	if uc == nil || !b.rec.Healthy() {
+		return false
+	}
+	return matchUpgrade(uc, c)
+}
 
-func (b *bridge) ServeUpgrade(context.Context, *protocol.UpgradeClaimCtx, protocol.UpgradeConns) {}
+// ServeUpgrade captures the triggering request as a flow, synthesizes the upgrade
+// response, and hands the post-upgrade bytes to the sidecar as a stream.
+func (b *bridge) ServeUpgrade(ctx context.Context, c *protocol.UpgradeClaimCtx, conns protocol.UpgradeConns) {
+	// The sidecar drives its own upstream via dial_upstream; release any the proxy
+	// pre-dialed on the TLS path.
+	if conns.UpstreamConn != nil {
+		_ = conns.UpstreamConn.Close()
+	}
+	resp := upgradeResponse(c)
+	flowID := b.captureUpgrade(c, resp)
+	// The http_101 response is synthesized here; the connect 200 was already sent
+	// by the CONNECT handler.
+	if c.Signal != "connect" {
+		var buf bytes.Buffer
+		if _, err := conns.ClientConn.Write(resp.SerializeRaw(&buf)); err != nil {
+			return
+		}
+	}
+	host, path := upgradeInfo(c)
+	b.streams.serveUpgrade(ctx, b.rec, conns, flowID, wireHeaders(c.Req.Headers), host, path)
+}
+
+// captureUpgrade records the triggering request (with the synthesized response) as
+// a normal flow, returning its flow_id or "" when the capture filter excludes it.
+func (b *bridge) captureUpgrade(c *protocol.UpgradeClaimCtx, resp *types.RawHTTP1Response) string {
+	if b.flows == nil {
+		return ""
+	}
+	var port int
+	scheme := types.SchemeHTTP
+	if c.Target != nil {
+		port, scheme = c.Target.Port, c.Target.Scheme()
+	}
+	now := time.Now()
+	flow := &types.Flow{
+		Adapter:     b.rec.Name,
+		ProtocolTag: types.ProtocolHTTP11,
+		Scheme:      scheme,
+		Port:        port,
+		Request:     types.RequestToMessage(c.Req),
+		Response:    types.ResponseToMessage(resp),
+		StartedAt:   now,
+		CompletedAt: now,
+		Annotations: sidecarAnnotations(b.rec, nil),
+	}
+	if !b.flows.ShouldCapture(flow) {
+		return ""
+	}
+	return b.flows.Store(flow)
+}
 
 // shutdown closes the sidecar's active client streams; called when the sidecar
 // connection drops so no claimed socket is orphaned.
@@ -103,6 +164,77 @@ func (b *bridge) runProbe(c *protocol.EarlyClaimCtx) bool {
 		return false
 	}
 	return res.Claim
+}
+
+// matchUpgrade reports whether an upgrade claim matches the request: same signal
+// (defaulting http_101), method, and host/path patterns. An http_101 claim also
+// requires the request to carry an Upgrade header so a plain request is not taken.
+func matchUpgrade(uc *wire.UpgradeClaim, c *protocol.UpgradeClaimCtx) bool {
+	signal := uc.UpgradeSignal
+	if signal == "" {
+		signal = "http_101"
+	}
+	if signal != c.Signal {
+		return false
+	}
+	if signal == "http_101" && c.Req.GetHeader("Upgrade") == "" {
+		return false
+	}
+	if len(uc.MethodSet) > 0 && !slices.Contains(uc.MethodSet, c.Req.Method) {
+		return false
+	}
+	var host string
+	if c.Target != nil {
+		host = c.Target.Hostname
+	}
+	return patternMatch(uc.HostPattern, host) && patternMatch(uc.PathPattern, upgradePath(c))
+}
+
+// upgradeResponse builds the response sectool synthesizes for the claim: a 101
+// echoing the request's Upgrade token, or a 200 for the already-sent connect reply.
+func upgradeResponse(c *protocol.UpgradeClaimCtx) *types.RawHTTP1Response {
+	if c.Signal == "connect" {
+		return &types.RawHTTP1Response{Version: "HTTP/1.1", StatusCode: 200, StatusText: "Connection Established"}
+	}
+	return &types.RawHTTP1Response{
+		Version:    "HTTP/1.1",
+		StatusCode: 101,
+		StatusText: "Switching Protocols",
+		Headers: types.Headers{
+			{Name: "Upgrade", Value: c.Req.GetHeader("Upgrade")},
+			{Name: "Connection", Value: "Upgrade"},
+		},
+	}
+}
+
+// upgradeInfo derives the stream_open host/path from the triggering request.
+func upgradeInfo(c *protocol.UpgradeClaimCtx) (host, path string) {
+	if c.Target != nil {
+		host = c.Target.Hostname
+	}
+	return host, upgradePath(c)
+}
+
+// upgradePath is the request path used for claim matching and stream_open: the
+// query-stripped request path, or empty for a connect tunnel which has no path.
+func upgradePath(c *protocol.UpgradeClaimCtx) string {
+	if c.Signal == "connect" {
+		return ""
+	}
+	p, _, _ := strings.Cut(c.Req.Path, "?")
+	return p
+}
+
+// wireHeaders converts parsed request headers to the wire shape for stream_open.
+func wireHeaders(hs types.Headers) []wire.Header {
+	if len(hs) == 0 {
+		return nil
+	}
+	out := make([]wire.Header, len(hs))
+	for i, h := range hs {
+		out[i] = wire.Header{Name: h.Name, Value: h.Value}
+	}
+	return out
 }
 
 // matchPrefix reports whether the stream's opening bytes start with prefix,

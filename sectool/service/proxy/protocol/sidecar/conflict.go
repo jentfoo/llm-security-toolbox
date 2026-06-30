@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/go-appsec/toolbox/sidecar/wire"
@@ -156,4 +157,30 @@ func patternRank(p string) int {
 	default:
 		return rankLiteral
 	}
+}
+
+// patternMatch reports whether value matches the claim pattern, interpreting it by
+// rank: catch-all matches anything, literal by equality, glob by */? wildcards,
+// otherwise as an unanchored regex.
+func patternMatch(pattern, value string) bool {
+	switch patternRank(pattern) {
+	case rankCatchAll:
+		return true
+	case rankLiteral:
+		return pattern == value
+	case rankGlob:
+		re, err := regexp.Compile("^" + globToRegex(pattern) + "$")
+		return err == nil && re.MatchString(value)
+	default:
+		re, err := regexp.Compile(pattern)
+		return err == nil && re.MatchString(value)
+	}
+}
+
+// globToRegex converts a *(any) / ?(single) glob into a regex fragment.
+func globToRegex(glob string) string {
+	escaped := regexp.QuoteMeta(glob)
+	escaped = strings.ReplaceAll(escaped, `\*`, ".*")
+	escaped = strings.ReplaceAll(escaped, `\?`, ".")
+	return escaped
 }

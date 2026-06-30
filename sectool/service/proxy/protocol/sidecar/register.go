@@ -3,6 +3,7 @@ package sidecar
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -84,7 +85,7 @@ func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.Re
 		liveness:      Liveness{LastActivity: now, LastPongRecv: now, SocketFingerprint: fingerprint},
 	}
 	rec.healthy.Store(true)
-	rec.bridge = newBridge(rec)
+	rec.bridge = newBridge(rec, m.flows)
 	if carried != nil {
 		rec.ownedFlows, rec.inFlight = carried.ownedFlows, carried.inFlight
 	} else {
@@ -98,6 +99,9 @@ func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.Re
 	if rec.Capabilities.EarlyClaim != nil {
 		m.registry.InsertEarly(rec.bridge)
 	}
+	if rec.Capabilities.UpgradeClaim != nil {
+		m.reorderUpgradeClaims()
+	}
 
 	return rec, &wire.RegisterResult{
 		ProtocolVersion: rec.ProtoVersion,
@@ -105,6 +109,36 @@ func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.Re
 		RulesSnapshot:   []json.RawMessage{},
 		ServerTime:      now.Format(time.RFC3339Nano),
 	}, nil
+}
+
+// reorderUpgradeClaims re-inserts every upgrade-claiming sidecar bridge so the
+// most-specific matchers are evaluated first (ahead of the built-in adapters).
+// Callers hold mu.
+func (m *Manager) reorderUpgradeClaims() {
+	recs := make([]*Record, 0, len(m.records))
+	for _, r := range m.records {
+		if r.Capabilities.UpgradeClaim != nil {
+			recs = append(recs, r)
+		}
+	}
+	slices.SortStableFunc(recs, func(a, b *Record) int {
+		switch {
+		case dominates(a.Capabilities.UpgradeClaim, b.Capabilities.UpgradeClaim):
+			return -1
+		case dominates(b.Capabilities.UpgradeClaim, a.Capabilities.UpgradeClaim):
+			return 1
+		default:
+			return 0
+		}
+	})
+	for _, r := range recs {
+		m.registry.RemoveUpgrade(r.Name)
+	}
+	// InsertUpgrade prepends, so inserting least-specific first leaves the
+	// most-specific at the front.
+	for i := len(recs) - 1; i >= 0; i-- {
+		m.registry.InsertUpgrade(recs[i].bridge)
+	}
 }
 
 // assignedSeams lists the capability claims that were accepted.

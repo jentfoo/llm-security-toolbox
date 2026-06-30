@@ -164,6 +164,7 @@ func (m *Manager) removeLocked(rec *Record) {
 // byte streams, closing the client sockets so none is orphaned.
 func (m *Manager) releaseClaims(rec *Record) {
 	m.registry.RemoveEarly(rec.Name)
+	m.registry.RemoveUpgrade(rec.Name)
 	rec.bridge.shutdown()
 }
 

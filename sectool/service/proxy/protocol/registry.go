@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"sync"
+
+	"github.com/go-analyze/bulk"
 )
 
 // Registry holds the ordered claim seams for the native proxy backend; first
@@ -34,6 +36,27 @@ func (r *Registry) RemoveEarly(name string) {
 	for i, a := range r.Early {
 		if a.Name() == name {
 			r.Early = append(r.Early[:i], r.Early[i+1:]...)
+			return
+		}
+	}
+}
+
+// InsertUpgrade adds an upgrade adapter at the front so sidecar claims are
+// evaluated before the built-in WebSocket adapter. Callers insert in
+// most-specific-first order.
+func (r *Registry) InsertUpgrade(a UpgradeAdapter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Upgrade = bulk.SlicePrependInPlace(a, r.Upgrade)
+}
+
+// RemoveUpgrade drops the upgrade adapter with the given name.
+func (r *Registry) RemoveUpgrade(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, a := range r.Upgrade {
+		if a.Name() == name {
+			r.Upgrade = append(r.Upgrade[:i], r.Upgrade[i+1:]...)
 			return
 		}
 	}

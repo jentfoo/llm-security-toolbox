@@ -74,14 +74,39 @@ func (ss *streamSet) serveClient(ctx context.Context, rec *Record, c *protocol.E
 	defer ss.remove(id)
 
 	host, path := openInfo(c)
-	var res wire.StreamResult
-	if err := rec.peer.Call(ctx, wire.MethodStreamOpen, wire.StreamOpenParams{
+	ss.runClient(ctx, rec, id, c.ClientReader, wire.StreamOpenParams{
 		StreamID:     id,
 		Host:         host,
 		Path:         path,
 		MatchedClaim: rec.Name,
 		PeerAddr:     c.ClientConn.RemoteAddr().String(),
-	}, &res); err != nil {
+	})
+}
+
+// serveUpgrade runs a post-upgrade client connection through the event model,
+// carrying the captured triggering request's flow_id and headers on stream_open so
+// the sidecar can drive a handshake embedded in the upgrade request.
+func (ss *streamSet) serveUpgrade(ctx context.Context, rec *Record, conns protocol.UpgradeConns, reqFlowID string, reqHeaders []wire.Header, host, path string) {
+	id := ss.add(conns.ClientConn)
+	defer ss.remove(id)
+
+	ss.runClient(ctx, rec, id, conns.ClientReader, wire.StreamOpenParams{
+		StreamID:       id,
+		Host:           host,
+		Path:           path,
+		MatchedClaim:   rec.Name,
+		PeerAddr:       conns.ClientConn.RemoteAddr().String(),
+		RequestFlowID:  reqFlowID,
+		RequestHeaders: reqHeaders,
+	})
+}
+
+// runClient opens the stream, applies any opening writes, and pumps inbound bytes,
+// emitting stream_ended on exit. The caller registered the socket and owns closing
+// it.
+func (ss *streamSet) runClient(ctx context.Context, rec *Record, id string, r io.Reader, open wire.StreamOpenParams) {
+	var res wire.StreamResult
+	if err := rec.peer.Call(ctx, wire.MethodStreamOpen, open, &res); err != nil {
 		return
 	}
 	// The stream is established: tell the sidecar when it ends however the loop
@@ -91,7 +116,7 @@ func (ss *streamSet) serveClient(ctx context.Context, rec *Record, c *protocol.E
 	if ss.applyWrites(res.Writes) != nil {
 		return
 	}
-	ss.pump(ctx, rec, id, c.ClientReader)
+	ss.pump(ctx, rec, id, r)
 }
 
 // serveUpstream runs a dialed upstream socket through the event model. The dial

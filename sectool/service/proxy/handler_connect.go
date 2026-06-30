@@ -76,6 +76,26 @@ func (h *connectHandler) Handle(ctx context.Context, clientConn net.Conn, client
 		return
 	}
 
+	// A connect-signal sidecar may claim the established tunnel before TLS, taking
+	// the raw post-CONNECT bytes.
+	if h.reg != nil {
+		hostPort := net.JoinHostPort(target.Hostname, strconv.Itoa(target.Port))
+		uc := &protocol.UpgradeClaimCtx{
+			Req: &types.RawHTTP1Request{
+				Method:  "CONNECT",
+				Path:    hostPort,
+				Version: "HTTP/1.1",
+				Headers: []types.Header{{Name: "Host", Value: hostPort}},
+			},
+			Target: target,
+			Signal: "connect",
+		}
+		if a, ok := h.reg.ClaimUpgrade(uc); ok {
+			a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{ClientConn: clientConn, ClientReader: clientReader})
+			return
+		}
+	}
+
 	h.handleTLS(ctx, clientConn, clientReader, target)
 }
 

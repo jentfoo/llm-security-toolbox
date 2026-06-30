@@ -100,7 +100,7 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 	}
 
 	if h.reg != nil {
-		uc := &protocol.UpgradeClaimCtx{Req: req, Target: target}
+		uc := &protocol.UpgradeClaimCtx{Req: req, Target: target, Signal: "http_101"}
 		if a, ok := h.reg.ClaimUpgrade(uc); ok {
 			a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{ClientConn: clientConn, ClientReader: clientReader})
 			return false // adapter takes over
@@ -398,7 +398,7 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 	}
 
 	if h.reg != nil {
-		uc := &protocol.UpgradeClaimCtx{Req: req, Target: target, TLS: true}
+		uc := &protocol.UpgradeClaimCtx{Req: req, Target: target, TLS: true, Signal: "http_101"}
 		if a, ok := h.reg.ClaimUpgrade(uc); ok {
 			a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{
 				ClientConn:     clientConn,
