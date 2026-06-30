@@ -24,14 +24,17 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
-func (m *mcpServer) proxyPollTool() mcp.Tool {
+// proxyPollTool builds the proxy_poll definition. extra carries the
+// sidecar-conditional adapter/protocol_tag filters, appended only when a sidecar
+// is connected so the no-sidecar schema is unchanged.
+func (m *mcpServer) proxyPollTool(extra ...mcp.ToolOption) mcp.Tool {
 	incremental := `Incremental: since accepts flow_id or "last" (cursor); use to window summaries to recent traffic. Only flows mode advances the cursor. Limit caps results in both modes; offset is for paging flows only.`
 	sinceDesc := "Entries after flow_id, or 'last' (cursor)"
 	if m.workflowMode == protocol.WorkflowModeMulti {
 		incremental = `Incremental: pass a previous flow_id as since to window results to flows after it. Limit caps results in both modes; offset is for paging flows only.`
 		sinceDesc = "Entries after this flow_id"
 	}
-	return mcp.NewTool("proxy_poll",
+	return mcp.NewTool("proxy_poll", append([]mcp.ToolOption{
 		mcp.WithDescription(`Query proxy history: summary (default) or flows mode.
 
 Output modes:
@@ -39,7 +42,7 @@ Output modes:
 - "flows": Returns individual flows with flow_id for use with flow_get or replay_send. Requires at least one filter or limit.
 
 Results include both proxy-captured traffic (source=proxy) and replay-sent traffic (source=replay) in chronological order.
-`+incremental),
+` + incremental),
 		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default) or 'flows'")),
 		mcp.WithString("source", mcp.Description("Filter by source: 'proxy', 'replay', or empty for both")),
 		mcp.WithString("host", mcp.Description("Filter by host glob (*, ?). *.example.com = subdomains only; *example.com = domain + subdomains")),
@@ -51,13 +54,11 @@ Results include both proxy-captured traffic (source=proxy) and replay-sent traff
 		mcp.WithString("since", mcp.Description(sinceDesc)),
 		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob (*, ?)")),
 		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob (*, ?)")),
-		// TODO - adapter and protocol_tag should only be documented in API when sidecar is connected
-		//mcp.WithString("adapter", mcp.Description("Filter by emitting adapter name glob (*, ?), e.g. 'http/1.1' or a sidecar name")),
-		//mcp.WithString("protocol_tag", mcp.Description("Filter by protocol tag glob (*, ?), e.g. 'http/1.1' or 'http/2'")),
+		// adapter/protocol_tag filters are appended via extra in syncSidecarTools when a sidecar is connected
 		mcp.WithString("parent_flow_id", mcp.Description("Filter to child flows of this parent flow_id (stream children, session inner flows)")),
 		mcp.WithNumber("limit", mcp.Description("Max results to return")),
 		mcp.WithNumber("offset", mcp.Description("Skip first N results (flows mode, applied after filtering)")),
-	)
+	}, extra...)...)
 }
 
 func (m *mcpServer) flowGetTool() mcp.Tool {
@@ -83,8 +84,11 @@ func (m *mcpServer) proxyRuleListTool() mcp.Tool {
 	)
 }
 
-func (m *mcpServer) proxyRuleAddTool() mcp.Tool {
-	return mcp.NewTool("proxy_rule_add",
+// proxyRuleAddTool builds the proxy_rule_add definition. extra carries the
+// sidecar-conditional adapter scope param, appended only when a sidecar is
+// connected so the no-sidecar schema is unchanged.
+func (m *mcpServer) proxyRuleAddTool(extra ...mcp.ToolOption) mcp.Tool {
+	return mcp.NewTool("proxy_rule_add", append([]mcp.ToolOption{
 		mcp.WithDescription(`Add a proxy rule that modifies request/response traffic.
 
 Modes (determined by which fields are set):
@@ -103,8 +107,8 @@ To modify a rule, delete it with proxy_rule_delete and recreate.`),
 		mcp.WithString("replace", mcp.Description("Replacement text. Use without find to append instead of replace.")),
 		mcp.WithString("label", mcp.Description("Optional unique label (usable as rule_id)")),
 		mcp.WithBoolean("is_regex", mcp.Description("Treat find as regex pattern (RE2)")),
-		// TODO - describe adapter parameter only when a sidecar is connected (include sidecar name as option and "sectool")
-	)
+		// adapter scope param is appended via extra in syncSidecarTools when a sidecar is connected
+	}, extra...)...)
 }
 
 func (m *mcpServer) proxyRuleDeleteTool() mcp.Tool {

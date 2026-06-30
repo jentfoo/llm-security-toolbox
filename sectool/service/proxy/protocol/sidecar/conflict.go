@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
@@ -29,6 +30,41 @@ func (m *Manager) checkConflicts(p *wire.RegisterParams) *wire.Error {
 	if uc := p.Capabilities.UpgradeClaim; uc != nil {
 		if err := m.checkUpgradeClaim(p.Name, uc); err != nil {
 			return err
+		}
+	}
+	return m.checkToolNames(p)
+}
+
+// checkToolNames rejects a registration whose mcp_tools names duplicate one
+// another, collide with a core tool, or collide with another sidecar's tool.
+// Callers hold m.mu.
+func (m *Manager) checkToolNames(p *wire.RegisterParams) *wire.Error {
+	if len(p.MCPTools) == 0 {
+		return nil
+	}
+	owner := map[string]string{} // tool name -> owning adapter (core scope for core tools)
+	if namer, ok := m.coreQuery.(CoreToolNamer); ok {
+		for _, n := range namer.CoreToolNames() {
+			owner[n] = types.AdapterScopeCore
+		}
+	}
+	for _, r := range m.records {
+		for _, t := range r.MCPTools {
+			owner[t.Name] = r.Name
+		}
+	}
+	seen := map[string]struct{}{}
+	for _, t := range p.MCPTools {
+		if _, dup := seen[t.Name]; dup {
+			return wire.NewError(wire.CodeToolNameConflict,
+				"duplicate mcp_tool name in registration: "+t.Name).
+				WithData(&wire.ErrorData{Adapter: p.Name, ConflictAdapter: p.Name})
+		}
+		seen[t.Name] = struct{}{}
+		if other, taken := owner[t.Name]; taken {
+			return wire.NewError(wire.CodeToolNameConflict,
+				fmt.Sprintf("mcp_tool name %q already provided by adapter %q", t.Name, other)).
+				WithData(&wire.ErrorData{Adapter: p.Name, ConflictAdapter: other})
 		}
 	}
 	return nil

@@ -27,6 +27,13 @@ type CoreQuerier interface {
 	CoreQuery(ctx context.Context, tool string, params json.RawMessage) (content string, isErr bool, err error)
 }
 
+// CoreToolNamer reports the names of the core MCP tools, so sidecar-registered
+// tool names can be collision-checked against them at registration. Optionally
+// implemented by the CoreQuerier; an empty result is assumed when absent.
+type CoreToolNamer interface {
+	CoreToolNames() []string
+}
+
 // RuleSource returns the current rule snapshot for a named adapter: the monotonic
 // version and the rules whose scope is empty or equals the adapter name. It backs the
 // register-time snapshot and sync_rules pushes.

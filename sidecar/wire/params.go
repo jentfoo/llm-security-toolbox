@@ -62,6 +62,21 @@ type MCPTool struct {
 	Annotations json.RawMessage `json:"annotations,omitempty"`
 }
 
+// InvokeToolParams delegates an MCP client's call of a sidecar-registered tool.
+// Arguments are validated against the tool's input_schema before delegation.
+type InvokeToolParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// InvokeToolResult is the sidecar tool's result, returned verbatim to the MCP
+// client: markdown text and/or structured content.
+type InvokeToolResult struct {
+	Content           string          `json:"content,omitempty"`
+	StructuredContent json.RawMessage `json:"structured_content,omitempty"`
+	IsError           bool            `json:"is_error,omitempty"`
+}
+
 // RegisterParams is the sidecar's first message.
 type RegisterParams struct {
 	Name            string          `json:"name"`

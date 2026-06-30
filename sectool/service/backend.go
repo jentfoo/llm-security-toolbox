@@ -21,11 +21,6 @@ var ErrNotFound = errors.New("not found")
 // ErrNotSupported is returned when a backend cannot perform an operation.
 var ErrNotSupported = errors.New("not supported by backend")
 
-// RuleAdapterBuiltin is the reserved rule adapter scope naming the in-process proxy.
-// A rule with this scope (or an empty scope) is applied in-process and is never pushed
-// to sidecars.
-const RuleAdapterBuiltin = "sectool"
-
 const sinceLast = "last"
 
 // isWSType returns true if the type is a WebSocket type (ws: prefix).

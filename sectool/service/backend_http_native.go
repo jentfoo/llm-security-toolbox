@@ -135,7 +135,7 @@ func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, storage
 // core_query method; it resolves the read-side tools lazily so it can be supplied
 // before the MCP server exists.
 func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sidecar.CoreQuerier) error {
-	cfg.ReservedNames = []string{types.ProtocolHTTP11, types.ProtocolH2, types.ProtocolTagWS, RuleAdapterBuiltin}
+	cfg.ReservedNames = []string{types.ProtocolHTTP11, types.ProtocolH2, types.ProtocolTagWS, types.AdapterScopeCore}
 	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry(), b.server.History(), coreQuery, b)
 	lst, err := sidecar.NewListener(cfg, b.sidecarManager)
 	if err != nil {
@@ -143,6 +143,11 @@ func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sideca
 	}
 	b.sidecarListener = lst
 	return nil
+}
+
+// SidecarManager returns the sidecar registry, or nil when sidecars are not enabled.
+func (b *NativeProxyBackend) SidecarManager() *sidecar.Manager {
+	return b.sidecarManager
 }
 
 // SetCaptureFilter configures the proxy to skip storing entries that the filter rejects.
@@ -589,7 +594,7 @@ func (b *NativeProxyBackend) hasRequestRules() bool {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 	for _, rule := range b.httpRules {
-		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+		if rule.Adapter != "" && rule.Adapter != types.AdapterScopeCore {
 			continue
 		}
 		if rule.Type == wire.RuleTypeRequestHeader || rule.Type == wire.RuleTypeRequestBody {
@@ -625,7 +630,7 @@ func (b *NativeProxyBackend) ApplyRequestRules(req *types.RawHTTP1Request) *type
 	var headerRules, bodyRules []nativeStoredRule
 	var hasRespBodyRules bool
 	for _, rule := range b.httpRules {
-		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+		if rule.Adapter != "" && rule.Adapter != types.AdapterScopeCore {
 			continue
 		}
 		switch rule.Type {
@@ -668,7 +673,7 @@ func (b *NativeProxyBackend) ApplyResponseRules(resp *types.RawHTTP1Response) *t
 
 	var headerRules, bodyRules []nativeStoredRule
 	for _, rule := range b.httpRules {
-		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+		if rule.Adapter != "" && rule.Adapter != types.AdapterScopeCore {
 			continue
 		}
 		switch rule.Type {
@@ -698,7 +703,7 @@ func (b *NativeProxyBackend) ApplyWSRules(payload []byte, direction string) []by
 	defer b.rulesMu.RUnlock()
 
 	for _, rule := range b.wsRules {
-		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+		if rule.Adapter != "" && rule.Adapter != types.AdapterScopeCore {
 			continue
 		}
 		if rule.Type != wire.RuleTypeWSBoth && rule.Type != direction {
@@ -721,7 +726,7 @@ func (b *NativeProxyBackend) HasBodyRules(isRequest bool) bool {
 	}
 
 	for _, rule := range b.httpRules {
-		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+		if rule.Adapter != "" && rule.Adapter != types.AdapterScopeCore {
 			continue
 		}
 		if rule.Type == targetType {
@@ -740,7 +745,7 @@ func (b *NativeProxyBackend) ApplyRequestBodyOnlyRules(body []byte, headers type
 
 	var bodyRules []nativeStoredRule
 	for _, rule := range b.httpRules {
-		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+		if rule.Adapter != "" && rule.Adapter != types.AdapterScopeCore {
 			continue
 		}
 		if rule.Type == wire.RuleTypeRequestBody {
@@ -766,7 +771,7 @@ func (b *NativeProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers typ
 
 	var bodyRules []nativeStoredRule
 	for _, rule := range b.httpRules {
-		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+		if rule.Adapter != "" && rule.Adapter != types.AdapterScopeCore {
 			continue
 		}
 		if rule.Type == wire.RuleTypeResponseBody {

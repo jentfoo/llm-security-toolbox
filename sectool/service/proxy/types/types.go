@@ -20,6 +20,11 @@ const (
 	ProtocolTagWS      = "websocket"       // upgrade handshake flow
 	ProtocolTagWSFrame = "websocket.frame" // per-frame child flow
 
+	// AdapterScopeCore is the reserved scope naming the in-process proxy (HTTP/1.1,
+	// HTTP/2, WebSocket) and Burp. It scopes rules and attributes core tools;
+	// sidecars may not register under it.
+	AdapterScopeCore = "sectool"
+
 	SchemeHTTP  = "http"
 	SchemeHTTPS = "https"
 

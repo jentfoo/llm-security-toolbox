@@ -67,6 +67,14 @@ type SendHandler interface {
 	OnSidecarSend(wire.SidecarSendParams) (wire.SidecarSendResult, error)
 }
 
+// InvokeToolHandler is the optional callback surface for a sidecar that registers
+// MCP tools (Registration.MCPTools). It receives a validated tool call delegated
+// from an MCP client and returns the result content. The handler may read sectool
+// state (Conn.CoreQuery) and emit flows (Conn.PushFlow) while running.
+type InvokeToolHandler interface {
+	OnInvokeTool(wire.InvokeToolParams) (wire.InvokeToolResult, error)
+}
+
 // ShutdownFunc adapts a function to Handler.
 type ShutdownFunc func(drainSeconds int)
 

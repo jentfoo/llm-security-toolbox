@@ -1511,7 +1511,7 @@ func TestNativeProxyBackend_RuleSnapshot(t *testing.T) {
 	add("r-empty", "")
 	add("r-alpha", "alpha")
 	add("r-beta", "beta")
-	add("r-sectool", RuleAdapterBuiltin)
+	add("r-sectool", types.AdapterScopeCore)
 
 	// alpha receives empty-scoped and its own rules; beta and sectool are excluded.
 	version, rules := backend.RuleSnapshot("alpha")

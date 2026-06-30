@@ -27,4 +27,5 @@ const (
 	MethodSyncRules     = "sync_rules"
 	MethodSidecarSend   = "sidecar_send"
 	MethodInvokeAdapter = "invoke_adapter"
+	MethodInvokeTool    = "invoke_tool"
 )

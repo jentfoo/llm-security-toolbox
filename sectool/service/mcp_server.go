@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,10 +44,25 @@ type mcpServer struct {
 	// "test-report" - test-report instructions, no crawl tools
 	workflowMode        string
 	workflowInitialized atomic.Bool
+
+	// coreTools is the static core tool name set captured after registerTools,
+	// used to collision-check sidecar tool names.
+	coreTools []string
+
+	// sidecar tool composition: global registrations synced to the connected
+	// adapter set, guarded so concurrent registry changes serialize.
+	sidecarMu         sync.Mutex
+	sidecarToolNames  map[string]struct{}
+	sidecarCoreParams bool
 }
 
 // newMCPServer creates a new MCP server instance.
 func newMCPServer(svc *Server, workflowMode string) *mcpServer {
+	m := &mcpServer{
+		service:      svc,
+		workflowMode: workflowMode,
+	}
+
 	// define server hooks to hide internal tools from tools list while leaving them callable
 	hooks := &server.Hooks{}
 	hooks.AddAfterListTools(func(_ context.Context, _ any, _ *mcp.ListToolsRequest, result *mcp.ListToolsResult) {
@@ -84,15 +100,11 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 		opts = append(opts, server.WithInstructions(instructions))
 	}
 
-	mcpSrv := server.NewMCPServer("sectool", config.Version, opts...)
-
-	m := &mcpServer{
-		server:       mcpSrv,
-		service:      svc,
-		workflowMode: workflowMode,
-	}
+	m.server = server.NewMCPServer("sectool", config.Version, opts...)
 
 	m.registerTools()
+	// Snapshot the core tool names before any sidecar tools are registered.
+	m.coreTools = bulk.MapKeysSlice(m.server.ListTools())
 
 	return m
 }
@@ -332,6 +344,7 @@ func (m *mcpServer) handleWorkflow(ctx context.Context, req mcp.CallToolRequest)
 	if m.service.notesEnabled {
 		content += workflowNotesSection
 	}
+	content += m.sidecarToolsSection()
 
 	m.workflowInitialized.Store(true)
 	log.Printf("workflow: initialized task=%s", task)

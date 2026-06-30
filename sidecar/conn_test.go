@@ -85,6 +85,63 @@ func TestDial(t *testing.T) {
 	})
 }
 
+type toolTestHandler struct {
+	gotName string
+	gotArgs json.RawMessage
+}
+
+func (*toolTestHandler) OnShutdown(int) {}
+
+func (h *toolTestHandler) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResult, error) {
+	h.gotName = p.Name
+	h.gotArgs = p.Arguments
+	return wire.InvokeToolResult{Content: "ran " + p.Name, StructuredContent: json.RawMessage(`{"ok":true}`)}, nil
+}
+
+func TestConnInvokeTool(t *testing.T) {
+	t.Parallel()
+
+	t.Run("delegates_to_handler", func(t *testing.T) {
+		addr, peerCh := fakeServer(t, registerOK)
+		conn, err := Dial(addr, Registration{Name: "demo"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		srv := <-peerCh
+
+		h := &toolTestHandler{}
+		go func() { _ = conn.Serve(t.Context(), h) }()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		var res wire.InvokeToolResult
+		rpcErr := srv.Call(ctx, wire.MethodInvokeTool,
+			wire.InvokeToolParams{Name: "ts_inject", Arguments: json.RawMessage(`{"a":1}`)}, &res)
+		require.Nil(t, rpcErr)
+		assert.Equal(t, "ran ts_inject", res.Content)
+		assert.JSONEq(t, `{"ok":true}`, string(res.StructuredContent))
+		assert.Equal(t, "ts_inject", h.gotName)
+		assert.JSONEq(t, `{"a":1}`, string(h.gotArgs))
+	})
+
+	t.Run("no_tool_handler", func(t *testing.T) {
+		addr, peerCh := fakeServer(t, registerOK)
+		conn, err := Dial(addr, Registration{Name: "demo"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		srv := <-peerCh
+
+		// ShutdownFunc satisfies Handler but not InvokeToolHandler.
+		go func() { _ = conn.Serve(t.Context(), ShutdownFunc(func(int) {})) }()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		var res wire.InvokeToolResult
+		rpcErr := srv.Call(ctx, wire.MethodInvokeTool, wire.InvokeToolParams{Name: "x"}, &res)
+		require.NotNil(t, rpcErr)
+		assert.Equal(t, wire.CodeTransportInternal, rpcErr.Code)
+	})
+}
+
 func TestConnHeartbeatAndShutdown(t *testing.T) {
 	t.Parallel()
 

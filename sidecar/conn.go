@@ -160,6 +160,18 @@ func (h connHandler) HandleRequest(_ context.Context, method string, params json
 			return nil, wire.NewError(wire.CodeTransportInternal, "sidecar_send: "+err.Error())
 		}
 		return res, nil
+	case wire.MethodInvokeTool:
+		th, ok := h.c.currentHandler().(InvokeToolHandler)
+		if !ok {
+			return nil, wire.NewError(wire.CodeTransportInternal, "invoke_tool: no tool handler")
+		}
+		var p wire.InvokeToolParams
+		_ = json.Unmarshal(params, &p)
+		res, err := th.OnInvokeTool(p)
+		if err != nil {
+			return nil, wire.NewError(wire.CodeTransportInternal, "invoke_tool: "+err.Error())
+		}
+		return res, nil
 	case wire.MethodPing:
 		return struct{}{}, nil
 	default:

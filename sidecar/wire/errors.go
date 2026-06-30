@@ -23,6 +23,7 @@ const (
 	CodeMajorVersionMismatch  = -33001
 	CodeDuplicateRegistration = -33002
 	CodeCapabilityConflict    = -33003
+	CodeToolNameConflict      = -33004
 	CodeNotRegistered         = -33005
 )
 

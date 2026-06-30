@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
@@ -42,6 +43,8 @@ type Manager struct {
 	records     map[string]*Record
 	byInstance  map[string]*Record
 	resumeState map[string]*resumeEntry
+
+	toolsChanged atomic.Pointer[func()]
 }
 
 // NewManager creates a Manager. registry is the native proxy's claim registry
@@ -66,6 +69,20 @@ func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQue
 		records:     map[string]*Record{},
 		byInstance:  map[string]*Record{},
 		resumeState: map[string]*resumeEntry{},
+	}
+}
+
+// SetToolsChangedHook registers a callback invoked when the set of connected
+// adapters changes, so the MCP server can recompose the advertised tool list.
+func (m *Manager) SetToolsChangedHook(fn func()) {
+	m.toolsChanged.Store(&fn)
+}
+
+// notifyToolsChanged invokes the change hook off the caller's goroutine so it can
+// read the registry without contending the lock the caller may hold.
+func (m *Manager) notifyToolsChanged() {
+	if fn := m.toolsChanged.Load(); fn != nil {
+		go (*fn)()
 	}
 }
 
@@ -151,6 +168,7 @@ func (m *Manager) detachSession(s *session) {
 	if rec.resume && rec.InstanceID != "" {
 		m.resumeState[rec.InstanceID] = &resumeEntry{ownedFlows: rec.ownedFlows, inFlight: rec.inFlight}
 	}
+	m.notifyToolsChanged()
 }
 
 // removeLocked drops a record and closes its connection; callers hold mu.
@@ -226,6 +244,7 @@ func (s *session) HandleRequest(ctx context.Context, method string, params json.
 		s.mu.Lock()
 		s.rec = rec
 		s.mu.Unlock()
+		s.m.notifyToolsChanged()
 		return res, nil
 	case wire.MethodPushFlow:
 		var p wire.Flow

@@ -174,6 +174,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.mcpServer = newMCPServer(s, s.mcpWorkflowMode)
 	s.mcpReady.Store(s.mcpServer)
+	// Compose sidecar-contributed tools into the advertised list, and keep it in
+	// sync as adapters connect and disconnect.
+	if mgr := s.mcpServer.sidecarManager(); mgr != nil {
+		mgr.SetToolsChangedHook(s.mcpServer.syncSidecarTools)
+		s.mcpServer.syncSidecarTools()
+	}
 	if err := s.mcpServer.Start(s.mcpPort); err != nil {
 		return fmt.Errorf("failed to start MCP server: %w", err)
 	}
@@ -233,6 +239,17 @@ func (s *Server) CoreQuery(ctx context.Context, tool string, params json.RawMess
 		return "", false, errors.New("core tools not ready")
 	}
 	return m.CoreQuery(ctx, tool, params)
+}
+
+// CoreToolNames returns the names of the registered core MCP tools, or nil before
+// the MCP server is built. It lets the sidecar registry reject a tool-name
+// collision against core tools.
+func (s *Server) CoreToolNames() []string {
+	m := s.mcpReady.Load()
+	if m == nil {
+		return nil
+	}
+	return m.coreToolNames()
 }
 
 // RequestShutdown initiates server shutdown.
