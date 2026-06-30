@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-analyze/bulk"
 
-	"github.com/go-appsec/toolbox/sidecar/mutate"
+	"github.com/go-appsec/toolbox/pkg/mutate"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 

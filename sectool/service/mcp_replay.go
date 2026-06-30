@@ -14,13 +14,13 @@ import (
 	"github.com/go-analyze/bulk"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/go-appsec/toolbox/pkg/mutate"
 	"github.com/go-appsec/toolbox/sectool/config"
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
-	"github.com/go-appsec/toolbox/sidecar/mutate"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 

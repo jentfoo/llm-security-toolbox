@@ -18,9 +18,10 @@ import (
 	"time"
 
 	"github.com/go-analyze/bulk"
-	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
-	"github.com/go-appsec/toolbox/sidecar/mutate"
 	"golang.org/x/net/http2"
+
+	"github.com/go-appsec/toolbox/pkg/mutate"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 const maxRedirects = 10
