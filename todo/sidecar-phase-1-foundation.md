@@ -77,8 +77,8 @@ in Phase 2, the out-of-process sidecar surface — scoped to the native backend.
   field-correspondence guide for the in-code swap — there is no runtime migration,
   the store is ephemeral), §3.2 session/tunnel envelope, §3.3 streams (data-model
   shapes the `Flow` type must support).
-- §3.5 Rule targeting (only the parts needed to keep existing rules working; the full
-  tuple/`owner` generalization is **Phase 7**).
+- §3.5 Rule targeting (only the parts needed to keep existing rules working; the
+  optional `adapter` scope and rule push to sidecars are **Phase 7**).
 
 ## Scope — toolbox (server side)
 
@@ -198,12 +198,12 @@ introduced in **Phase 2** with the transport.
 
 ## Out of scope / deferred
 
-- Rule generalization to the §3.5 tuple form and the `owner` field → **Phase 7**.
+- The optional rule `adapter` scope (§3.5) and rule push to sidecars → **Phase 7**.
   Existing 7-type rules keep working unchanged on the refactored adapters.
 - MCP tool composition / adapter-typed tool split → **Phase 9**.
-- All sidecar-only registry fields (`capabilities`, `mutation_ops`, `owned_rules`,
-  `liveness`) → declared/stored in **Phase 2**, fired in later phases. The Phase 1
-  registry holds only claim/dispatch.
+- All sidecar-only registry fields (`capabilities`, `mcp_tools`, `liveness`) →
+  declared/stored in **Phase 2**, fired in later phases. The Phase 1 registry holds
+  only claim/dispatch.
 - Any out-of-process transport, RPC, or wire types → **Phase 2**. The registry (and
   the sidecar surface built atop it) is native-backend-only; gating it off under the
   Burp backend is carried by **Phase 2**.

@@ -107,12 +107,6 @@ stores per-adapter:
   adapters register `http/1.1`, `http/2`, and `websocket` the same way
   (§2.4).
 - `capabilities` — declared seams the adapter subscribes to (see §5.3).
-- `mutation_ops` — declared mutation operations and their parameter
-  schemas, used by the rules engine and the replay grammar to expose
-  the right MCP tool options to agents.
-- `owned_rules` — rules the adapter pushed at registration time (§6a.1,
-  `owned_rules`). Removed from the central rule list when the adapter
-  unregisters.
 - `liveness` — bookkeeping for heartbeat, last activity, and process
   identity (PID + local socket fingerprint for out-of-process).
 
@@ -123,8 +117,6 @@ The registry is consulted when:
 - An agent calls `replay_send`, or invokes a sidecar-registered tool
   (§9.2) — to route the operation to the adapter that owns the source
   flow or target.
-- An agent calls a mutation MCP tool — to validate the requested
-  mutation against the adapter's declared `mutation_ops`.
 - A sidecar requests an upstream dial via `dial_upstream` (§6a.6) —
   to apply scope policy and open the TCP connection on the sidecar's
   behalf.
@@ -433,13 +425,12 @@ Each child flow is independently:
   collapsed into a single replay where the destination accepts that
   framing (§6b.2 `stream_strategy`).
 
-### 3.4 Mutation grammar
+### 3.4 Request-mutation grammar
 
-Mutations are a list of typed operations. The op set is small and shared
-across adapters:
+Mutations are a **replay/origination** concern, not a rule concern (§3.5).
+They are the existing `replay_send` / `request_send` operation set, applied
+when an agent actively re-sends or originates a message:
 
-- `regex_replace { scope, find, replace }` — RE2 against a designated
-  region. `scope` is `body`, `headers`, or `raw`.
 - `set_header { name, value }` / `remove_header { name }` — operate on
   the headers list. Casing preserved as today.
 - `set_json { path, value }` / `remove_json { path }` — operate on a
@@ -447,64 +438,38 @@ across adapters:
 - `set_form { name, value }` / `remove_form { name }` — operate on a
   form-encoded body.
 - `set_query { name, value }` / `remove_query { name }` — operate on a
-  single query parameter; `set_query_string { query }` replaces the whole
-  query string. Matches the existing `replay_send` `set_query` /
-  `remove_query` / `query` parameters.
-- `set_method { method }` / `set_path { path }` / `set_target { scheme,
-  host, port }` — message routing fields.
-- `set_body { bytes }` — wholesale body replacement.
+  single query parameter; `query` replaces the whole query string.
+- `method` / `path` / `target` — message routing fields.
+- `body` — wholesale body replacement.
 
-Adapters may declare additional named ops via the `mutation_ops` array (§6a.1)
-for cases the shared set cannot express — e.g., `set_zstd_chunk` for
-zstd-framed stream chunks where the adapter must recompress, or
-`resign_register_request` for protocol-specific signature recomputation.
-Each adapter-declared op carries a name, a JSON-Schema parameter shape,
-and a list of `protocol_tag`s it applies to.
+This is a fixed set. When a sidecar-owned flow is replayed (§6b.2), the
+owning adapter applies these logical mutations and then re-establishes any
+cryptographic wrapping, compression, framing, or signature binding at the
+wire per its connection-time configuration — sectool models nothing about
+those bindings.
 
-The **owning adapter applies the mutation list in its own order**, and
-applies any rebind/finalizer ops (ops that recompute integrity over the
-final message, such as a signature recomputation) **after** all content
-mutations regardless of their position in the list — a finalizer that ran
-before the fields it covers were mutated would re-bind stale content. The
-fixed ordering documented for the in-process HTTP adapter (§8) is that
-adapter's convention, not a universal cross-adapter guarantee.
-
-Each operation carries an optional `label` (unique within a rule list)
-and an `is_regex` flag where the operation supports both literal and
-regex matching.
+The shared JSON and form helpers live in the `sidecar/mutate` package (no
+`sectool/` dependency) so the in-process HTTP path and sidecar replay share
+one implementation. The in-process HTTP adapter's documented mutation order
+(§8) is that adapter's convention.
 
 ### 3.5 Rule targeting
 
-Rules generalize from the current type enum (`request_header`,
+Rules are unchanged from the current type enum (`request_header`,
 `request_body`, `response_header`, `response_body`, `ws:to-server`,
-`ws:to-client`, `ws:both`) to a tuple:
+`ws:to-client`, `ws:both`) with regex/literal find-replace
+(`find`/`replace`/`is_regex`/`label`/`rule_id`). The **only** addition is
+an optional `adapter` field:
 
-`(adapter, message_type, op, params, scope_filter, label, rule_id,
-owner)`
+- `adapter` (optional) — empty applies the rule to all adapters (today's
+  behavior; HTTP/1.1, HTTP/2, WebSocket); a named adapter scopes the rule
+  to flows on that adapter only.
 
-- `adapter` — name. `*` matches any.
-- `message_type` — `request` | `response` | `chunk` | `tunnel` |
-  `frame`. `*` matches any.
-- `op` — declared mutation operation name (shared or adapter-declared).
-- `params` — operation-specific parameters.
-- `scope_filter` — optional predicate narrowing applicability: host
-  pattern, path pattern, parent_flow_id (matches the session/tunnel
-  envelope or stream parent a flow nests under),
-  protocol_tag, byte-length range.
-- `label` — unique across the entire rule list (current behavior
-  preserved).
-- `rule_id` — base62 unique identifier.
-- `owner` — `user` (created via `proxy_rule_add`) or
-  `adapter:<name>` (pushed via `owned_rules`, §6a.1). Adapter-owned
-  rules cannot be deleted via `proxy_rule_delete`; they are released
-  when the adapter unregisters.
-
-Existing rule types map onto this tuple deterministically. Migration
-defaults: existing rules become `adapter=*`, `op` derived from the type
-name (`request_header` → `set_header` or `regex_replace` with
-`scope=headers`, etc.). The migration is a labeling change, not a
-semantic change; existing rules continue to apply to both HTTP/1.1 and
-HTTP/2 traffic as they do today.
+Each party applies the rules it can: the in-process backend applies rules
+with an empty (or HTTP/WS) adapter as today; a sidecar applies rules naming
+it (or empty) whose type it supports. A passive structured rewrite (e.g. a
+JSON field substitution on a response) is expressed as a regex rule;
+structured-op edits are a replay concern (§3.4).
 
 ---
 
@@ -688,11 +653,6 @@ On connect, the sidecar's first message is `register`
 - `protocol_version` — the contract `major.minor` the sidecar speaks.
 - `protocols` — list of protocol identifiers the sidecar provides.
 - `capabilities` — see §5.3.
-- `mutation_ops` — array of declared operations and their parameter
-  schemas (when adapter declares ops beyond the shared set).
-- `owned_rules` — rules the adapter wants merged into the central rule
-  list for the lifetime of its registration; declaring any makes the
-  adapter a rule provider (§5.3).
 - `instance_id` — sidecar-supplied UUID stable across restarts when
   the sidecar wants to claim in-flight state on reconnect.
 
@@ -737,27 +697,14 @@ a parameter object scoping when it applies.
   (§9.2) or by another adapter via `invoke_adapter` (§6a.8). The schema
   describes which target parameters the sidecar accepts (e.g.,
   URL/host/port, tunnel ID, endpoint path, custom routing).
-The three capabilities above are the only ones carrying parameters. Three
-roles from earlier drafts are now **derived from the `register` payload,
-not declared as capabilities**: a sidecar that declares any `mutation_ops`
-(§6a.1) is a mutation provider; one that declares any `owned_rules` (§6a.1)
-is a rule provider; and any sidecar may emit flows via `push_flow`.
-Adapter-owned rules (`owned_rules`) are merged into sectool's central rule
-list with `owner = adapter:<name>`, visible to agents but not deletable via
-`proxy_rule_delete` (released when the adapter unregisters); they MAY target
-any registered adapter, not only the declaring one (e.g., the Tailscale
-sidecar's `/key` rule targets `adapter=http/1.1`), and every cross-adapter
-rule is written to the audit log at registration with both the owning and
-target adapter named. These rules are used for adapter-supplied rewrites
-such as the Tailscale adapter's `/key` pubkey substitution.
+The three capabilities above are the only ones carrying parameters. Any
+sidecar may emit flows via `push_flow` and apply the rules sectool pushes
+via `sync_rules` (§6b.1); neither is a declared capability.
 
 `stream_takeover` (per-HTTP/2-stream claiming) is intentionally deferred
 to a future version; it is unneeded for any v1 adapter and adds
-implementation complexity. `response_intercept`, `post_connect_takeover`,
-and `canned_response_provider` from earlier drafts are subsumed:
-`response_intercept` and `canned_response_provider` are now adapter-owned
-rules via `owned_rules`; `post_connect_takeover` is `upgrade_claim`
-with `upgrade_signal=connect`.
+implementation complexity. `post_connect_takeover` from earlier drafts is
+`upgrade_claim` with `upgrade_signal=connect`.
 
 #### 5.3.1 Capability precedence and conflict resolution
 
@@ -792,9 +739,6 @@ Per-capability rules:
   one or narrows the matchers.
 - **`injection_target`** — scoped to the declaring adapter's own flows.
   No inter-sidecar conflict possible by construction.
-- **Adapter-owned rules** (`owned_rules`) participate in the same label
-  uniqueness check as user-owned rules. A label collision rejects the
-  registration.
 
 In every "rejected as ambiguous" case, the rejection error names both
 registrations and the specific clash, so the operator can diagnose and
@@ -858,14 +802,6 @@ Issued exactly once at the start of the connection.
 - `protocols` (array of string, required) — protocol identifiers.
 - `capabilities` (object, required) — keyed by capability name, value
   is the parameter object for that capability.
-- `mutation_ops` (array, optional) — each entry `{name, params_schema,
-  applies_to: [protocol_tag...]}`. Declaring any op makes the adapter a
-  mutation provider (§5.3); this array is the authoritative declaration of
-  the adapter's ops.
-- `owned_rules` (array, optional) — rules to merge into the central rule
-  list with `owner=adapter:<name>`. Declaring any rule makes the adapter a
-  rule provider (§5.3); this array is the authoritative declaration of the
-  adapter's rules.
 - `mcp_tools` (array, optional) — MCP tool definitions the sidecar
   provides, each `{name, description, input_schema, annotations?}`.
   Sectool exposes these to MCP clients and delegates their invocation to
@@ -1011,17 +947,11 @@ the HTTP adapter.
 Every `invoke_adapter` call is recorded in history with the caller
 sidecar attributed in `annotations.invoked_by`. Scope policy
 (`allowed_domains` / `exclude_domains`) and the destination adapter's
-own validation apply exactly as for agent-driven injection.
-
-**Self-loop exemption.** A flow originated via `invoke_adapter` by adapter X
-is exempt from `owned_rules` whose `owner` is `adapter:X` (matched via
-`annotations.invoked_by`). User rules and every other adapter's `owned_rules`
-still fire. This stops an adapter's own rewrite rules from clobbering its own
-outbound fetches — e.g. the Tailscale sidecar's upstream `/key` fetch must
-not be hit by that same sidecar's `/key` substitution rule (which would make
-it learn its own substitute key and fail the upstream handshake). The
-exemption is scoped to the originating adapter only; it does not weaken any
-other party's rules.
+own validation apply exactly as for agent-driven injection. A sidecar that
+must keep one of its own outbound fetches clear of a rule (e.g. an upstream
+control-plane fetch that a substitution rule would otherwise clobber) routes
+that fetch so the rule's `adapter` scope does not match it, or handles the
+substitution internally rather than via a rule.
 
 #### 6a.9 `core_query`
 
@@ -1068,12 +998,12 @@ down-sample routine keepalives to keep history readable.
 
 #### 6b.1 `sync_rules`
 
-Push the full ordered rule list to the sidecar. The sidecar is the only
-party that applies protocol-specific mutations (since only it knows how
-to mutate adapter-specific bytes), so sectool sends the authoritative
-list and the sidecar replaces its local cache atomically. This matches
-the native HTTP backend's RWMutex-protected slice model: the central
-side owns ordering, the applying side iterates under a read lock.
+Push the full ordered rule list to the sidecar so it can apply the rules
+it is capable of applying on its hot path (regex/literal find-replace,
+exactly as the in-process HTTP proxy does). Sectool sends the
+authoritative list and the sidecar replaces its local cache atomically.
+This matches the native HTTP backend's RWMutex-protected slice model: the
+central side owns ordering, the applying side iterates under a read lock.
 
 **Params**:
 
@@ -1082,10 +1012,9 @@ side owns ordering, the applying side iterates under a read lock.
   increases.
 - `rules` (array of Rule objects, required) — the full ordered rule
   list as the sidecar should apply it, in the order rules must fire.
-  Rules whose `adapter` field does not name this sidecar (or `*`) may
-  be omitted by sectool as an optimization. Adapter-owned rules
-  (`owner = adapter:<name>`) belonging to this sidecar are always
-  included.
+  Each rule is the 7-type form plus the optional `adapter` scope (§3.5).
+  Rules whose `adapter` does not name this sidecar (and is not empty) may
+  be omitted by sectool as an optimization.
 
 **Returns**: `{ack: true, applied_version}` where `applied_version`
 equals the `snapshot_version` from params on success; or an error if
@@ -1104,9 +1033,7 @@ is needed on the flow stream.
 - Adds, edits, and deletes all result in a full re-push with an
   incremented `snapshot_version`. v1 explicitly does not optimize
   this — local deployment makes the bandwidth cost irrelevant.
-- When applying the list to a flow originated via `invoke_adapter`, the
-  applying adapter skips rules `owned` by the originating adapter — the
-  self-loop exemption (§6a.8). All other rules apply normally.
+- The sidecar applies only the rules it can (§3.5) and ignores the rest.
 
 #### 6b.2 `sidecar_send`
 
@@ -1317,13 +1244,13 @@ section maps each to its post-refactor representation.
 |---|---|
 | `proxy_poll` (host, path, method, status, search_header, search_body, since, exclude_host, exclude_path, limit, offset, summary/flows modes) | Unchanged tool surface. Results include flows from any adapter. Filter expressions add `adapter`, `protocol_tag`, `parent_flow_id` as filterable fields. Host/path filters apply to the HTTP-shaped Flow's `path` and `headers["Host"]` fields, which every adapter populates. |
 | `flow_get` (request, response, request_headers, response_headers, request_body, response_body, all; pattern regex) | Unchanged. Scopes resolve against the Flow's `method`/`path`/`headers`/`body` fields, which every adapter populates. |
-| `proxy_rule_list` (type_filter http/websocket/all, limit) | Unchanged. `type_filter` accepts adapter names; `all` returns rules across all adapters. Adapter-owned rules are shown with `owner=adapter:<name>`. |
-| `proxy_rule_add` (type, find, replace, label, is_regex) | Unchanged for the existing 7 type values; under the hood, each maps to the §3.5 tuple form with `owner=user`. New form accepts `adapter`, `message_type`, `op`, `params` for adapter-typed operations. Label uniqueness preserved across the entire rule list. |
-| `proxy_rule_delete` (rule_id or label) | Unchanged. Adapter-owned rules cannot be deleted via this tool — the error names the owning adapter and instructs the operator to unregister the sidecar to remove them. |
+| `proxy_rule_list` (type_filter http/websocket/all, limit) | Unchanged. Listings additionally show each rule's optional `adapter` scope (§3.5). |
+| `proxy_rule_add` (type, find, replace, label, is_regex) | Unchanged 7-type form. Adds one optional `adapter` argument scoping the rule to a named adapter (empty = all adapters, today's behavior). Label uniqueness preserved across the entire rule list. |
+| `proxy_rule_delete` (rule_id or label) | Unchanged. |
 | `cookie_jar` (detail mode, name/domain filters, JWT decode) | HTTP-adapter-specific tool, unchanged shape. Cookies extracted only from flows whose adapter declares HTTP semantics. |
 | `_internal_history_delete` | Unchanged; respects notes references regardless of adapter. |
-| `proxy_respond_add` / `proxy_respond_delete` / `proxy_respond_list` | Implemented as adapter-owned rules with `op=set_body` / `set_header` scoped by host + path. The HTTP adapter retains the current matcher schema; the same tool surface continues to work and writes user-owned rules with the responder semantics. |
-| `replay_send` (full mutation grammar: set_headers, remove_headers, set_json, remove_json, set_form, remove_form, set_query, remove_query, method, body, target, path, follow_redirects, force) | Unchanged tool surface. Each parameter is translated to a §3.4 typed operation and validated against the flow's adapter `mutation_ops`. For HTTP adapter flows, the existing parameter set is supported identically. For non-HTTP flows, mutations the adapter does not declare return a validation error unless `force=true`. The mutation execution order documented in `mcp_replay.go` (remove → set → set_json/remove_json → set_form/remove_form → remove_query → set_query → body → compression) is preserved for HTTP and is that in-process adapter's convention, not a universal cross-adapter guarantee (§3.4); each adapter orders its own ops and runs rebind/finalizer ops last. The owning adapter re-establishes any cryptographic binding automatically per its connection-time configuration (§6b.2); there is no core auto-prepend step. |
+| `proxy_respond_add` / `proxy_respond_delete` / `proxy_respond_list` | Unchanged. The in-process HTTP responder store and matcher schema are retained as-is. |
+| `replay_send` (full mutation grammar: set_headers, remove_headers, set_json, remove_json, set_form, remove_form, set_query, remove_query, method, body, target, path, follow_redirects, force) | Unchanged tool surface and mutation grammar (§3.4). For HTTP adapter flows the existing parameter set is supported identically. For a sidecar-owned flow the mutations are routed to the owning adapter (§6b.2), which applies the same logical edits via the shared `sidecar/mutate` helpers and re-encodes/re-wraps/re-signs at the wire per its connection-time configuration. The mutation execution order documented in `mcp_replay.go` (remove → set → set_json/remove_json → set_form/remove_form → remove_query → set_query → body → compression) is preserved for HTTP and is that in-process adapter's convention. |
 | `request_send` (url, method, headers, body, follow_redirects, force) | Routed via `sidecar_send` with no base flow (§6b.2). Surface unchanged. |
 | `diff_flow` (text/JSON/binary modes, max_diff_lines) | Operates on `headers` and `body` of both flows. JSON and text modes detect from Content-Type; binary mode is the default for unrecognized content. |
 | `find_reflected` (variants: url_query, url_path, html_entity, js_unicode, js_hex, html_decimal, html_hex) | Generalized. Default behavior unchanged for HTTP flows. For any pair of flows on the same adapter (or sharing a `parent_flow_id`), the tool searches request-side parameters reflected in response-side body. Variant encodings remain HTTP-specific; per-adapter encoding variants may be added. |
@@ -1346,17 +1273,17 @@ When no sidecar is connected, the MCP tool surface and its behavior are
 **identical to today's**. Sectool adds **no** default, global, or
 always-on tools, and existing tools (`proxy_poll`, `flow_get`,
 `replay_send`, `proxy_rule_add`, …) behave exactly as they do now. The
-generalized rule/replay forms that target adapter-owned flows (§3.4–§3.5)
-are inert without a sidecar to own such flows. Everything in §9.2–§9.3 is
-contingent on a connected sidecar.
+optional rule `adapter` scope and replay routing to a sidecar (§3.5, §6b.1,
+§6b.2) are inert without a sidecar to own such flows. Everything in §9.2–§9.3
+is contingent on a connected sidecar.
 
 When a sidecar is connected, existing core tools also operate on its
 flows without changing their schema: `replay_send` and rules that target
 a sidecar-owned flow are routed to the owning adapter internally (§6b.1,
-§6b.2), and the shared op set (§3.4) works because the adapter re-encodes
-the logical body to the wire (§3.1, §6b.2). Operations a protocol needs
-beyond the shared set are exposed as sidecar-registered tools (§9.2), not
-as new parameters on core tools.
+§6b.2), and the shared mutation grammar (§3.4) works because the adapter
+re-encodes the logical body to the wire (§3.1, §6b.2). Operations a protocol
+needs beyond the shared set are exposed as sidecar-registered tools (§9.2),
+not as new parameters on core tools.
 
 ### 9.2 Sidecar-registered tools
 
@@ -1444,18 +1371,10 @@ adapter-enumeration tool is required in v1.
   at the stream parent (preserving order), while
   `annotations.parent_flow_id` points at the `captured` child's flow_id
   to link the pair — the same fields used for any captured/mutated pair.
-- **Adapter-declared mutations are advisory.** Sectool validates
-  rule shape against the adapter's declared `mutation_ops` schema
-  before pushing the rule list via `sync_rules`; a sidecar cannot
-  expand its declared op set at runtime to perform unexpected
-  mutations. When a sidecar reports an op it did not declare in
-  `fired_rules`, sectool logs a warning and surfaces the divergence
-  to the agent.
-- **Adapter-owned rules cannot be added at runtime.** A sidecar's
-  `owned_rules` are fixed at registration; expanding them requires
-  re-registration. This prevents a compromised sidecar from quietly
-  injecting new rewrite rules after the operator inspected the
-  registration.
+- **Rules are operator-authored.** The rule list is created via
+  `proxy_rule_add` and pushed to sidecars via `sync_rules` (§6b.1); a
+  sidecar applies only the rules it can and cannot inject its own, so the
+  operator's inspected list is authoritative.
 - **No execution of arbitrary code from sidecar metadata.** Schemas
   registered by sidecars are descriptive only; sectool does not eval
   or load code based on registration payload.
@@ -1482,9 +1401,8 @@ the reserved range `-33000` to `-33999`:
 - `-33000` to `-33099` — registration and lifecycle: registration
   rejected, **major version mismatch** (§4.3), unknown adapter,
   capability conflict, duplicate registration.
-- `-33100` to `-33199` — mutation and rule: validation failure,
-  unknown op, op not applicable to flow's `protocol_tag`,
-  adapter-owned-rule deletion attempt, snapshot version mismatch.
+- `-33100` to `-33199` — rule and flow: rule shape rejected, snapshot
+  version mismatch, flow emission rejected, `core_query` validation.
 - `-33200` to `-33299` — transport: framing violation, oversized
   message, unknown `stream_id`, `claim_probe` fault (a probe that errors
   rather than returning `{claim}`). A `claim_probe` returning

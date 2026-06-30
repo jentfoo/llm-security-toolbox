@@ -109,29 +109,29 @@ flags are parsed in `sectool/service/flags.go`.
   (§4.2 deadlock-freedom — required, not deferred).
 - **Registration handshake** (§5.2, §6a.1): handle the sidecar's first `register`
   message. Store in the registry the declared `name`, `protocols`, `capabilities`,
-  `mutation_ops`, `owned_rules`, `mcp_tools`, `instance_id`, `resume`. Reject
-  duplicate `name`. Return effective `protocol_version`, `assigned_seams`,
-  `rules_snapshot` (may be empty until Phase 7), `server_time`. The `mcp_tools` field
-  is **stored only** here; the per-tool **name-collision** check (vs core tools and
-  other sidecars, §9.2) extends this same registration handler in **Phase 9** — Phase
-  2 enforces only `name`/capability/`owned_rules`-label conflicts.
+  `mcp_tools`, `instance_id`, `resume`. Reject duplicate `name`. Return effective
+  `protocol_version`, `assigned_seams`, `rules_snapshot` (may be empty until Phase 7),
+  `server_time`. The `mcp_tools` field is **stored only** here; the per-tool
+  **name-collision** check (vs core tools and other sidecars, §9.2) extends this same
+  registration handler in **Phase 9** — Phase 2 enforces only `name`/capability
+  conflicts.
 - **Version negotiation** (§4.3): major mismatch is a fast fail (registration
   rejected, error in the §11 range); within a shared major run at
   `min(sectool.minor, sidecar.minor)`.
 - **Error-code taxonomy** (§11): this phase **defines** the sectool-specific
   JSON-RPC error codes — the reserved `-33000…-33999` range and its partitioning
-  (`-33000…-33099` registration/lifecycle, `-33100…-33199` mutation/rule,
+  (`-33000…-33099` registration/lifecycle, `-33100…-33199` rule/flow,
   `-33200…-33299` transport, `-33300…-33399` `dial_upstream`, `-33400…-33499`
   `invoke_adapter`) — plus the structured `data` convention (adapter name and any
   relevant `flow_id`/`rule_id`/`stream_id`/`snapshot_version`). These constants live
   in the **shared `sidecar` wire package** so both ends use one definition; later
   phases (4, 5, 7, 8) reference them rather than minting their own. Phase 2 itself
   uses the registration/lifecycle and transport ranges (major-mismatch, duplicate
-  registration, capability/label conflict, framing/oversize violations).
+  registration, capability conflict, framing/oversize violations).
 - **Capability conflict resolution at registration** (§5.3.1): validate declared
   capability claims against already-registered sidecars and the native adapters —
   disjoint `early_claim` port ranges / non-overlapping matchers, `upgrade_claim`
-  most-specific-wins with ambiguity rejected, `owned_rules` label uniqueness. Reject
+  most-specific-wins with ambiguity rejected. Reject
   with an error naming both registrations and the specific clash. (This phase only
   *validates and stores* capabilities; firing them is later phases.)
 - **Heartbeat** (§5.4): send `ping` at a configurable interval (default 10s); mark a

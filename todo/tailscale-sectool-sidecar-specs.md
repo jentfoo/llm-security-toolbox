@@ -364,15 +364,12 @@ upstream server's key. It registers with sectool per Spec 1 §6a.1 with:
     include Headscale instances or custom coordinators) with
     `upgrade_signal=http_101`.
   - `injection_target` with the schema described in §4.7.
-- `mutation_ops`: the adapter-specific operations in §4.6 (which make the
-  adapter a mutation provider).
-- `owned_rules`: the `/key` substitution rule (§4.3, omitted under the
-  `borrow` strategy, §4.4.1) and any other adapter-supplied rewrites the
-  operator wants active for the lifetime of the sidecar (which make it a
-  rule provider).
 
 The sidecar emits the inner HTTP/2 captures and tunnel envelopes via
-`push_flow`.
+`push_flow`. The protocol-specific re-encoding and re-signing of §4.6 are
+the adapter's internal concern on replay (Spec 1 §6b.2), not declared to
+sectool. The `/key` substitution (§4.3) is operator-configured rather than
+a pushed rule.
 
 The sidecar's cryptographic bindings (`register_signature`,
 `hardware_attestation`, `map_session`, `early_noise_challenge`) are its
@@ -403,74 +400,42 @@ match Spec 1 §6a.1):
     },
     "injection_target": { "/* see §4.7 */": null }
   },
-  "mutation_ops": [
-    {"name": "resign_register_request",
-     "params_schema": {"device_cert_path?": "string",
-                       "device_key_path?": "string"},
-     "applies_to": ["tailscale.control"]},
-    {"name": "resign_hardware_attestation",
-     "params_schema": {"hw_key_path?": "string"},
-     "applies_to": ["tailscale.control"]},
-    {"name": "reset_map_session",
-     "params_schema": {},
-     "applies_to": ["tailscale.control"]},
-    {"name": "set_zstd_chunk",
-     "params_schema": {"chunk_flow_id": "string",
-                       "mutated_json": "object"},
-     "applies_to": ["tailscale.control.map.stream"]}
-  ],
-  "owned_rules": [ "/* see §4.3 */" ],
   "instance_id": "/* sidecar-supplied UUID, stable across restarts */"
 }
 ```
 
-### 4.3 /key rewrite via adapter-owned rule
+### 4.3 /key substitution (full-substitution path only)
 
 The sidecar does not sit in the byte path for `/key` — that is plain
-JSON over HTTPS, and sectool's existing HTTP machinery handles it.
-Instead, the sidecar pushes an adapter-owned rule at registration
-(Spec 1 §6a.1 `owned_rules`):
+JSON over HTTPS, and sectool's existing HTTP machinery handles it. Full
+`/key` substitution is needed only for the production-fidelity path (§3.3.1
+path 3); the development/test paths (`tsnet ControlURL`, `--login-server`)
+and the `borrow` strategy (§4.4.1) avoid it. Spec 1 does not support
+adapter-pushed (`owned`) rules, so substitution is operator-configured one
+of two ways:
 
-```
-{
-  "adapter": "http/1.1",
-  "message_type": "response",
-  "op": "set_json",
-  "params": {
-    "path": "publicKey",
-    "value": "mkey:<hex of sidecar's substituted Noise pubkey>"
-  },
-  "scope_filter": {
-    "host_pattern": "controlplane.tailscale.com",
-    "path_pattern": "/key",
-    "method_set": ["GET"]
-  },
-  "label": "tailscale-key-substitute",
-  "owner": "adapter:tailscale.client.mitm"
-}
-```
+- An operator-created user rule (`proxy_rule_add`, optional
+  `adapter=http/1.1`): a `response_body` `regex_replace` over the `publicKey`
+  value, rewriting it to `mkey:<hex of the sidecar's substituted Noise
+  pubkey>`. 7-type rules carry no host/path scope, but a regex anchored on the
+  `publicKey` (`mkey:<hex>`) field matches only `/key` responses in practice.
+- Or the sidecar substitutes the pubkey internally: under `substitute`
+  (§4.4.1) it learns the real upstream key via its own direct fetch and serves
+  its substitute trust anchor to the client directly, so no rule on the
+  client-facing `/key` is required (the simpler, recommended path).
 
-The rule targets `publicKey`, the Noise control-plane key in
+The substituted value targets `publicKey`, the Noise control-plane key in
 `OverTLSPublicKeyResponse` (§2.2); its wire form is the `key.MachinePublic`
 text encoding `mkey:<hex>`, not base64. The legacy NaCl field
 `legacyPublicKey`, served only to very old clients, is out of scope.
 
-Sectool's HTTP path captures the `/key` request and response as normal
-flows. When the rule fires, sectool's existing `set_json` machinery
-rewrites the response body. The captured flow records both the
-original `publicKey` (in `annotations.pre_rule_payload`) and the
-substituted value, so the agent can see exactly what was changed.
-
-No new mechanism, no per-response RPC, no special-case sectool code.
-The sidecar's only responsibility is generating the substituted
-pubkey at startup and publishing the rule at registration.
-
-Because this rule is adapter-owned by the sidecar, the sidecar's own
-upstream `/key` fetch (§4.4 step 3) is exempt from it per Spec 1 §6a.8
-(self-loop exemption): only the client-facing fetch is rewritten. Without
-the exemption the sidecar would read back its own substitute key, initiate
-Noise upstream against the wrong responder static key, and fail the upstream
-handshake — a self-defeating loop.
+The sidecar's own upstream `/key` fetch (§4.4 step 3) must read the **real**
+key. Because a user rule cannot be host/path-scoped, the internal-substitution
+path avoids the hazard entirely; when a user rule is used instead, the sidecar
+issues its upstream fetch directly to the real control server (attributable
+via `invoked_by`) and reads the response before the rule's regex would rewrite
+it. Otherwise the sidecar would read back its own substitute key, initiate
+Noise upstream against the wrong responder static key, and fail the handshake.
 
 If the upstream `/key` call fails, sectool returns the failure
 unchanged. The sidecar can observe the failure via `proxy_poll` if it
@@ -503,10 +468,11 @@ upstream), the sidecar's `upgrade_claim` fires:
    targeting the HTTP adapter for an upstream `GET /key?v=<capability-version>`
    (the version the client advertised, recovered from the decoded initiation
    — §2.1; a coordinator gates the response on `v` and may 400 a missing one)
-   against the real control server, learning the real upstream Noise pubkey. Because
-   this fetch is `invoked_by` the sidecar, its own `/key` substitution rule
-   (§4.3) does not apply to it (Spec 1 §6a.8 self-loop exemption), so the
-   sidecar reads the **real** upstream key. The resulting flow lands in
+   against the real control server, learning the real upstream Noise pubkey. This
+   fetch is issued directly to the real control server and is attributable via
+   `invoked_by`, so it is outside the scope of any client-facing `/key`
+   substitution rule (§4.3) and the sidecar reads the **real** upstream key.
+   The resulting flow lands in
    sectool history under the HTTP adapter and is visible in `proxy_poll` —
    preserving agent visibility into upstream pubkey rotation, server errors,
    and future pinning behavior. (This step is skipped under the borrowed-key
@@ -554,11 +520,11 @@ both; the operator picks via `key_strategy` (§7.2):
 - **Strategy A — synthetic substitute (default; works against any upstream,
   including production `controlplane.tailscale.com`).** The sidecar mints a
   fresh keypair at startup (or loads a persistent one from
-  `noise_keypair_path`) and publishes its public half via the `/key`
-  substitution rule (§4.3), holding the private half as responder. It learns
-  the real upstream key via the exempt `/key` fetch (§4.4 step 3). The only
-  strategy possible when the operator cannot obtain the real server's private
-  key.
+  `noise_keypair_path`) and serves its public half as the substitute trust
+  anchor (via the §4.3 substitution path), holding the private half as
+  responder. It learns the real upstream key via its own direct `/key` fetch
+  (§4.4 step 3). The only strategy possible when the operator cannot obtain
+  the real server's private key.
 - **Strategy B — borrowed server key (operator-controlled upstream only:
   the §5 server-side adapter, Headscale, or any self-hosted coordinator).**
   The operator supplies the real upstream server's Noise private key. The
@@ -696,8 +662,9 @@ framed by 4-byte little-endian lengths
    children per Spec 1 §11.
 4. The sidecar re-encodes the (possibly mutated) JSON: recompress to
    zstd, prepend the updated 4-byte length, and write to the
-   client-facing tunnel. The `set_zstd_chunk` typed op (§4.6) makes this
-   re-encoding explicit when an agent rewrites a chunk directly.
+   client-facing tunnel. This re-encoding is internal to the adapter and
+   runs automatically whenever a chunk's JSON is mutated (hot-path rule or
+   replay), §4.6.
 5. On stream close (upstream sends end-of-stream, or either side
    tears down), the sidecar re-emits the stream parent via `push_flow`
    (two-phase, `completed_at` set) to record the close.
@@ -710,42 +677,40 @@ preserved.
 
 ### 4.6 Mutation surface
 
-The sidecar relies on the shared op set in Spec 1 §3.4 for the bulk of
-its mutations: `set_header`, `remove_header`, `set_json`,
-`remove_json`, `regex_replace`, `set_body`. Agents using these against
-a `tailscale.control` flow have the same UX as against any HTTP/2
-flow.
+Agents mutate `tailscale.control` flows with the shared §3.4 request-mutation
+grammar on `replay_send` — `set_header`, `remove_header`, `set_json`,
+`remove_json`, `set_form`, `remove_form`, `body` — with the same UX as any
+HTTP/2 flow. Spec 1 has no adapter-declared mutation ops; the
+protocol-specific re-encoding and re-binding below are the adapter's
+**internal** concern, applied automatically on replay (Spec 1 §6b.2) after
+the logical mutations, not declared to sectool or invoked directly by agents:
 
-Adapter-declared operations specific to this adapter:
+- MapResponse chunk re-encode — on replay of a streamed MapResponse chunk
+  the adapter re-encodes the mutated JSON to zstd and adjusts the frame
+  length.
+- `register_signature` rebind (§4.6.1) — recompute over the `tailscale.control`
+  RegisterRequest.
+- `hardware_attestation` rebind (§4.6.1).
+- `map_session` rebind (§4.6.1).
+- EarlyNoise pass-through (§4.6.1).
 
-- `set_zstd_chunk { chunk_flow_id, mutated_json }` — operates on an
-  individual streamed MapResponse chunk; the sidecar re-encodes to
-  zstd and adjusts the frame length. Exposed as a typed op so an agent
-  can rewrite a specific chunk on replay.
-- `resign_register_request { device_cert_path?, device_key_path? }`
-  — rebind op for the `register_signature` binding (§4.6.1).
-- `resign_hardware_attestation { hw_key_path? }` — rebind op for
-  the `hardware_attestation` binding.
-- `reset_map_session {}` — rebind op for the `map_session` binding.
-- `forward_early_noise_verbatim {}` — explicit no-op confirming
-  pass-through (§4.6.1).
-
-Note: machine-key selection is **not** a per-message mutation
-operation. The client-facing responder key and the sidecar's own
-client-side machine key are configured at tunnel-establishment time
-(§4.4.1). Per-message machine-key references inside payloads (e.g.,
-the `MachineKey` field of an inner request) may still be mutated via
-the generic `set_json` op against `body.MachineKey`.
+Note: machine-key selection is configured at tunnel-establishment time
+(§4.4.1), not per message. Per-message machine-key references inside payloads
+(e.g. the `MachineKey` field of an inner request) are mutated via the generic
+`set_json` op against `body.MachineKey`.
 
 #### 4.6.1 Concrete rebind operations
 
-Each rebind op recomputes message integrity after either a field-level
-mutation or a replay-across-tunnels condition. Each is referenced as
-the `rebind_op` for a binding in §4.6.2. On replay the sidecar
-runs these as finalizers — after all content mutations — so they bind the
-final message (Spec 1 §3.4).
+These are the sidecar's **internal** rebind operations, not ops declared to
+sectool or invoked by agents (Spec 1 §6b.2). Each recomputes message
+integrity after a field-level mutation or a replay-across-tunnels condition,
+is referenced as the `rebind_op` for a binding in §4.6.2, and draws its key
+material from the sidecar's connection-time configuration (§7.2). On replay
+the sidecar runs them after all content mutations so they bind the final
+message.
 
-- **`resign_register_request { device_cert_path?, device_key_path? }`**
+- **`resign_register_request`** (key material: `device_cert_path` /
+  `device_key_path` from config, §7.2)
   — recomputes the SHA-256 hash over (`Timestamp`, `ServerURL`,
   `DeviceCert`, `serverPubKey`, `machinePubKey`) — server key **before**
   machine key — and re-signs with RSA-PSS/SHA-256 as `SignatureV2`
@@ -772,7 +737,8 @@ final message (Spec 1 §3.4).
   `SaltLength = rsa.PSSSaltLengthEqualsHash` and `crypto.SHA256`; the five
   fields are concatenated with no separators and `Timestamp` is RFC3339 UTC
   at second granularity (`RegisterRequest.Timestamp` is a `*time.Time`).
-- **`resign_hardware_attestation { hw_key_path? }`** — recomputes
+- **`resign_hardware_attestation`** (key material: `hw_key_path` from
+  config, §7.2) — recomputes
   `SHA256("<unix-seconds>|<nodekey:hex>")` per
   `control/controlclient/direct.go:1145-1161`, updates
   `MapRequest.HardwareAttestationKeySignatureTimestamp` to the current
@@ -791,12 +757,10 @@ final message (Spec 1 §3.4).
   resets `MapRequest.MapSessionSeq` to `0`. Used when replaying a
   captured MapRequest as the start of a new session rather than
   resuming an existing one.
-- **`forward_early_noise_verbatim`** — explicit no-op confirming
+- **`forward_early_noise_verbatim`** — internal no-op confirming
   pass-through. Mutation of `EarlyNoise` content (including
-  `NodeKeyChallenge`) remains out of scope for v1; declaring this op
-  formalizes the intent so the sidecar's declared ops (surfaced through
-  its own registered introspection tools and per-flow annotations) show
-  that EarlyNoise is observed but not mutated.
+  `NodeKeyChallenge`) is out of scope for v1; the sidecar records via
+  per-flow annotations that EarlyNoise is observed but not mutated.
 
 #### 4.6.2 Internal cryptographic bindings
 
@@ -964,14 +928,11 @@ The adapter registers per Spec 1 §6a.1 with:
   "tailscale.control.map.stream"]`.
 - `capabilities`:
   - `injection_target` — see §5.5.
-- `mutation_ops` — the same operations as the client-side sidecar (§4.6);
-  tunnel-crossing rebinds typically execute on the client-side MITM during
-  replay.
-- `owned_rules` — optional, for any server-side response rewrites the
-  adapter wants registered up-front.
 
 The adapter is the source of truth for flows on this side (sectool does not
-sit in the data path), emitting them via `push_flow`.
+sit in the data path), emitting them via `push_flow`. Its protocol-specific
+re-encoding/re-binding (§4.6) is internal to the adapter; tunnel-crossing
+rebinds typically execute on the client-side MITM during replay.
 
 The adapter performs no Noise MITM — clients handshake with it using its
 own real keypair, well-known to the operator running the test deployment,
@@ -979,12 +940,12 @@ so it registers no tunnel envelope. Its cryptographic bindings are the
 same as the client-side sidecar's (§4.6.2) and, as there, internal to the
 adapter.
 
-The server-side adapter emits flows and applies the pushed rule list (a
-mutation provider): it receives the list via `sync_rules` (Spec 1 §6b.1)
-and mutates its outbound responses inline on the hot path, and it
-originates unsolicited messages via `injection_target` (§5.5). There is no
-interactive per-message hold — adversarial scenarios are driven by
-pre-registered rules, fault-injection config (§5.4), and injection.
+The server-side adapter emits flows and applies the pushed rule list: it
+receives the list via `sync_rules` (Spec 1 §6b.1) and applies the rules it
+can to its outbound responses inline on the hot path, and it originates
+unsolicited messages via `injection_target` (§5.5). There is no interactive
+per-message hold — adversarial scenarios are driven by operator-authored
+rules, fault-injection config (§5.4), and injection.
 
 ### 5.3 Hook points
 
@@ -1125,14 +1086,16 @@ body length, and adjusts headers as needed.
 
 ### 6.2 Streaming MapResponse
 
-Per-chunk mutation works via the pushed rule list applied on the hot path
-(Spec 1 §6b.1) or via the typed `set_zstd_chunk` operation (§4.6).
+Two mutation paths exist, both decompressing each chunk to JSON first and
+re-encoding to zstd internally (§4.5.1):
 
-Rule targeting against streams supports:
-
-- `parent_flow_id` — match all chunks of a specific stream.
-- `body` predicate on the chunk's decompressed JSON (e.g., match a
-  chunk only if it contains a non-empty `Peers` array).
+- **Hot path** — a pushed `response_body` rule (Spec 1 §6b.1) find/replaces
+  over the decompressed chunk JSON; like any 7-type rule it applies to every
+  chunk it matches, with no per-stream or conditional scoping.
+- **Replay** — `replay_send` against a specific captured chunk flow
+  (addressed by its own `flow_id`) applies the structured §3.4 grammar
+  (e.g. `set_json`) to that one chunk; this is how an agent targets a single
+  chunk or mutates conditionally.
 
 Replay of a streamed MapResponse offers two strategies (Spec 1 §6b.2
 `stream_strategy` parameter):
@@ -1238,14 +1201,21 @@ file:
   upstream than the host the client thinks it is talking to (useful
   for routing test traffic to a controlled coordinator).
 - `key_strategy`: `substitute` (default) | `borrow` (§4.4.1). Under
-  `substitute` the sidecar mints/serves its own keypair and publishes the
-  `/key` rewrite rule; under `borrow` it serves the operator-supplied real
-  server key and omits the `/key` rule (valid only against an
-  operator-controlled upstream).
+  `substitute` the sidecar mints/serves its own keypair and serves it to the
+  client as the substitute trust anchor (operator `/key` rule or sidecar-
+  internal, §4.3); under `borrow` it serves the operator-supplied real server
+  key with no substitution (valid only against an operator-controlled
+  upstream).
 - `noise_keypair_path`: under `substitute`, optional persistent location for
   the substituted Noise keypair (default ephemeral per startup); under
   `borrow`, the path to the real upstream server's Noise private key
   (required).
+- `device_cert_path` / `device_key_path`: optional device certificate and
+  key used to rebind `register_signature` on replay (§4.6.1). Absent, the
+  signature fields are stripped and annotated.
+- `hw_key_path`: optional hardware-attestation private key used to rebind
+  `hardware_attestation` on replay (§4.6.1). Absent, the attestation fields
+  are stripped and annotated.
 - `machine_identity`: `auto` | `path:<file>` | `pool:<directory>`.
 - `replay_safe_mode`: `dry_run` | `live` | `confined`. Default
   `dry_run`.
@@ -1339,11 +1309,12 @@ operator to begin testing.
 - JSON-RPC contract tests against a sectool stub: register, push
   flow (parent and child flows for streams), `dial_upstream`, and the
   `stream_open` / `stream_deliver` → Response `writes` byte echo.
-- Mutation-op execution tests for each declared op against synthetic
-  HTTP-shaped flows.
-- Rule-provider round-trip: register with an owned `set_json` rule,
-  verify sectool's central rule list contains it with the correct
-  owner, verify it is removed on unregister.
+- Internal rebind-operation tests (§4.6.1) against synthetic HTTP-shaped
+  flows: each binding re-signs with configured key material and strips +
+  annotates without it.
+- `sync_rules` round-trip: receive a pushed rule list, apply a matching
+  `response_body` rule on the hot path, and confirm the `applied_version`
+  ack matches the `snapshot_version`.
 
 ### 9.2 End-to-end client-side
 
@@ -1352,12 +1323,12 @@ operator to begin testing.
 2. Configure a `tsnet` test client to use the Headscale control URL
    with sectool as the HTTPS proxy.
 3. Install sectool's fake CA in the test client's trust store.
-4. Launch sectool with the client-side MITM sidecar (which pushes its
-   `/key` substitution rule at registration).
+4. Launch sectool with the client-side MITM sidecar under `substitute`
+   (internal `/key` substitution), or add the operator `/key` rule (§4.3).
 5. Start the test client; observe in sectool history:
-   - The client-facing `/key` request/response flow, with the response
-     body's `publicKey` field rewritten and the original recorded in
-     `annotations.pre_rule_payload`.
+   - The client-facing `/key` request/response flow with the response
+     body's `publicKey` field substituted; the original is visible in the
+     `captured` flow of the captured/mutated pair (Spec 1 §11).
    - The `POST /ts2021` request flow and synthesized 101 response.
    - The tunnel envelope flow with handshake metadata.
    - The `POST /machine/register` request and response flows as
@@ -1368,9 +1339,12 @@ operator to begin testing.
      real-pubkey fetch and upstream Noise dial.
    - The sidecar's own upstream `/key` fetch flow (`invoked_by` the
      sidecar), whose `publicKey` is the **real** upstream key, not the
-     substitute — confirming the §6a.8 self-loop exemption.
-6. Apply a `set_json path="Hostinfo.OS" value="darwin"` rule against
-   the next MapRequest.
+     substitute — confirming the direct fetch is outside the client-facing
+     substitution rule's scope.
+6. Add an operator rule (regex find/replace on the request body) that
+   rewrites the `Hostinfo.OS` value to `darwin`, applied to the next
+   MapRequest on the sidecar hot path. (A structured `set_json` edit of the
+   same field is also available via `replay_send`.)
 7. Confirm Headscale's logs show the mutated `OS` field arriving on
    its side.
 8. Confirm the test client subsequently registers as a `darwin` host
@@ -1469,9 +1443,9 @@ operator to begin testing.
 4. Delete the rule, confirm `sync_rules` is re-pushed with the
    updated `snapshot_version`, and confirm subsequent requests are
    not mutated.
-5. Confirm the sidecar's adapter-owned `/key` rule cannot be deleted
-   via `proxy_rule_delete` — the call returns an error naming the
-   owning adapter.
+5. Confirm the `/key` substitution is operator-configured (a user rule
+   scoped to `adapter=http/1.1`, or handled internally by the sidecar) —
+   it is an ordinary user rule with no special delete protection.
 
 ### 9.8 Cross-tunnel replay with auto-rebind
 

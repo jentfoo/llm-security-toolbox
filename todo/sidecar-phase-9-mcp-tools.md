@@ -65,8 +65,8 @@ introspection tool is needed.
   sidecar is connected (§9.1).
 - **Namespacing + collision rejection** (at registration, §9.2): **extend the Phase 2
   registration handler** with the per-tool name-collision check — Phase 2 *stored*
-  `mcp_tools` but did not collision-check them (it only enforced `name`/capability/
-  `owned_rules`-label conflicts). Reject a sidecar whose tool name collides with a core
+  `mcp_tools` but did not collision-check them (it only enforced `name`/capability
+  conflicts). Reject a sidecar whose tool name collides with a core
   tool or another sidecar's tool, naming both owners (error in the §11 registration
   range).
 - **`invoke_tool` delegation** (§6b.7): on an MCP client call to a sidecar tool,
