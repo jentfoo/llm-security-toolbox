@@ -20,17 +20,10 @@ var ErrNotFound = errors.New("not found")
 // ErrNotSupported is returned when a backend cannot perform an operation.
 var ErrNotSupported = errors.New("not supported by backend")
 
-// Rule type constants for find/replace rules.
-const (
-	RuleTypeRequestHeader  = "request_header"
-	RuleTypeRequestBody    = "request_body"
-	RuleTypeResponseHeader = "response_header"
-	RuleTypeResponseBody   = "response_body"
-
-	RuleTypeWSToServer = "ws:to-server"
-	RuleTypeWSToClient = "ws:to-client"
-	RuleTypeWSBoth     = "ws:both"
-)
+// RuleAdapterBuiltin is the reserved rule adapter scope naming the in-process proxy.
+// A rule with this scope (or an empty scope) is applied in-process and is never pushed
+// to sidecars.
+const RuleAdapterBuiltin = "sectool"
 
 const sinceLast = "last"
 

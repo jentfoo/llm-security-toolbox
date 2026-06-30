@@ -35,6 +35,7 @@ type Manager struct {
 	registry  *protocol.Registry
 	flows     FlowSink
 	coreQuery CoreQuerier
+	rules     RuleSource
 	now       func() time.Time
 
 	mu          sync.Mutex
@@ -45,9 +46,10 @@ type Manager struct {
 
 // NewManager creates a Manager. registry is the native proxy's claim registry
 // used to dispatch connections to sidecar adapters; flows is the history sink
-// for push_flow; coreQuery dispatches read-side core tools for core_query. flows
-// and coreQuery may be nil in tests.
-func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQuery CoreQuerier) *Manager {
+// for push_flow; coreQuery dispatches read-side core tools for core_query; rules
+// supplies the rule snapshot pushed via sync_rules. flows, coreQuery, and rules may
+// be nil in tests.
+func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQuery CoreQuerier, rules RuleSource) *Manager {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = 10 * time.Second
 	}
@@ -59,6 +61,7 @@ func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQue
 		registry:    registry,
 		flows:       flows,
 		coreQuery:   coreQuery,
+		rules:       rules,
 		now:         time.Now,
 		records:     map[string]*Record{},
 		byInstance:  map[string]*Record{},

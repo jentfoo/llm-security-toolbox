@@ -20,6 +20,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/mcp"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	"github.com/go-appsec/toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
 const burpFlowIndexKeyPrefix = "b:off:"
@@ -934,9 +935,9 @@ func applyRequestRulesToRaw(rawRequest []byte, rules []protocol.RuleEntry) []byt
 			stored.compiled = compiled
 		}
 		switch r.Type {
-		case RuleTypeRequestHeader:
+		case wire.RuleTypeRequestHeader:
 			headerRules = append(headerRules, stored)
-		case RuleTypeRequestBody:
+		case wire.RuleTypeRequestBody:
 			bodyRules = append(bodyRules, stored)
 		}
 	}

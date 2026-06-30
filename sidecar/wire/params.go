@@ -76,10 +76,45 @@ type RegisterParams struct {
 
 // RegisterResult is sectool's response to register.
 type RegisterResult struct {
-	ProtocolVersion ProtocolVersion   `json:"protocol_version"`
-	AssignedSeams   []string          `json:"assigned_seams"`
-	RulesSnapshot   []json.RawMessage `json:"rules_snapshot"`
-	ServerTime      string            `json:"server_time"`
+	ProtocolVersion ProtocolVersion `json:"protocol_version"`
+	AssignedSeams   []string        `json:"assigned_seams"`
+	RulesSnapshot   []Rule          `json:"rules_snapshot"`
+	ServerTime      string          `json:"server_time"`
+}
+
+// Rule type values for the Type field, shared by sectool and sidecars.
+const (
+	RuleTypeRequestHeader  = "request_header"
+	RuleTypeRequestBody    = "request_body"
+	RuleTypeResponseHeader = "response_header"
+	RuleTypeResponseBody   = "response_body"
+	RuleTypeWSToServer     = "ws:to-server"
+	RuleTypeWSToClient     = "ws:to-client"
+	RuleTypeWSBoth         = "ws:both"
+)
+
+// Rule is a find/replace rule the sidecar applies on its hot path. Adapter scopes the
+// rule: empty applies to every adapter, otherwise it names the owning sidecar.
+type Rule struct {
+	RuleID  string `json:"rule_id"`
+	Type    string `json:"type"`
+	Label   string `json:"label,omitempty"`
+	IsRegex bool   `json:"is_regex,omitempty"`
+	Find    string `json:"find,omitempty"`
+	Replace string `json:"replace,omitempty"`
+	Adapter string `json:"adapter,omitempty"`
+}
+
+// SyncRulesParams pushes the full ordered rule list a sidecar should apply.
+type SyncRulesParams struct {
+	SnapshotVersion uint64 `json:"snapshot_version"`
+	Rules           []Rule `json:"rules"`
+}
+
+// SyncRulesResult acks a sync_rules push with the version the sidecar applied.
+type SyncRulesResult struct {
+	Ack            bool   `json:"ack"`
+	AppliedVersion uint64 `json:"applied_version"`
 }
 
 // ShutdownParams requests a graceful close.

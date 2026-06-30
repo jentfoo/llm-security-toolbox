@@ -30,6 +30,7 @@ const (
 const (
 	CodeFlowRejected      = -33100
 	CodeCoreQueryRejected = -33101
+	CodeRuleRejected      = -33102
 )
 
 // Transport codes.

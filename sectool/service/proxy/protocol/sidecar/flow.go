@@ -27,6 +27,13 @@ type CoreQuerier interface {
 	CoreQuery(ctx context.Context, tool string, params json.RawMessage) (content string, isErr bool, err error)
 }
 
+// RuleSource returns the current rule snapshot for a named adapter: the monotonic
+// version and the rules whose scope is empty or equals the adapter name. It backs the
+// register-time snapshot and sync_rules pushes.
+type RuleSource interface {
+	RuleSnapshot(adapter string) (version uint64, rules []wire.Rule)
+}
+
 func (s *session) handlePushFlow(p *wire.Flow) (any, *wire.Error) {
 	rec := s.record()
 	if rec == nil {

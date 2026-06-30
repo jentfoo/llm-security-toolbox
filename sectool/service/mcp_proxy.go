@@ -21,6 +21,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sectool/util"
+	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
 func (m *mcpServer) proxyPollTool() mcp.Tool {
@@ -50,8 +51,9 @@ Results include both proxy-captured traffic (source=proxy) and replay-sent traff
 		mcp.WithString("since", mcp.Description(sinceDesc)),
 		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob (*, ?)")),
 		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob (*, ?)")),
-		mcp.WithString("adapter", mcp.Description("Filter by emitting adapter name glob (*, ?), e.g. 'http/1.1' or a sidecar name")),
-		mcp.WithString("protocol_tag", mcp.Description("Filter by protocol tag glob (*, ?), e.g. 'http/1.1' or 'http/2'")),
+		// TODO - adapter and protocol_tag should only be documented in API when sidecar is connected
+		//mcp.WithString("adapter", mcp.Description("Filter by emitting adapter name glob (*, ?), e.g. 'http/1.1' or a sidecar name")),
+		//mcp.WithString("protocol_tag", mcp.Description("Filter by protocol tag glob (*, ?), e.g. 'http/1.1' or 'http/2'")),
 		mcp.WithString("parent_flow_id", mcp.Description("Filter to child flows of this parent flow_id (stream children, session inner flows)")),
 		mcp.WithNumber("limit", mcp.Description("Max results to return")),
 		mcp.WithNumber("offset", mcp.Description("Skip first N results (flows mode, applied after filtering)")),
@@ -101,6 +103,7 @@ To modify a rule, delete it with proxy_rule_delete and recreate.`),
 		mcp.WithString("replace", mcp.Description("Replacement text. Use without find to append instead of replace.")),
 		mcp.WithString("label", mcp.Description("Optional unique label (usable as rule_id)")),
 		mcp.WithBoolean("is_regex", mcp.Description("Treat find as regex pattern (RE2)")),
+		// TODO - describe adapter parameter only when a sidecar is connected (include sidecar name as option and "sectool")
 	)
 }
 
@@ -628,6 +631,7 @@ func (m *mcpServer) handleProxyRuleAdd(ctx context.Context, req mcp.CallToolRequ
 		IsRegex: isRegex,
 		Find:    find,
 		Replace: replace,
+		Adapter: req.GetString("adapter", ""),
 	})
 	if err != nil {
 		if errors.Is(err, ErrConfigEditDisabled) {
@@ -921,14 +925,14 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID st
 
 var validRuleTypes = map[string]bool{
 	// HTTP types
-	RuleTypeRequestHeader:  true,
-	RuleTypeRequestBody:    true,
-	RuleTypeResponseHeader: true,
-	RuleTypeResponseBody:   true,
+	wire.RuleTypeRequestHeader:  true,
+	wire.RuleTypeRequestBody:    true,
+	wire.RuleTypeResponseHeader: true,
+	wire.RuleTypeResponseBody:   true,
 	// WebSocket types
-	RuleTypeWSToServer: true,
-	RuleTypeWSToClient: true,
-	RuleTypeWSBoth:     true,
+	wire.RuleTypeWSToServer: true,
+	wire.RuleTypeWSToClient: true,
+	wire.RuleTypeWSBoth:     true,
 }
 
 func validateRuleTypeAny(t string) error {

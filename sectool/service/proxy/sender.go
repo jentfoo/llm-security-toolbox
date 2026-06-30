@@ -19,21 +19,14 @@ import (
 
 	"github.com/go-analyze/bulk"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
+	"github.com/go-appsec/toolbox/sidecar/mutate"
 	"golang.org/x/net/http2"
 )
 
 const maxRedirects = 10
 
-// JSONModifier modifies JSON body with set/remove operations.
-// Provided by service layer to avoid circular imports.
-type JSONModifier func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error)
-
 // Sender sends HTTP requests with wire-level fidelity.
 type Sender struct {
-	// JSONModifier is called to apply JSON modifications to request body.
-	// If nil, SetJSON/RemoveJSON modifications are ignored.
-	JSONModifier JSONModifier
-
 	// RequestRuleApplier applies find/replace rules to each request before sending.
 	// Called for every request including redirect hops. If nil, no rules are applied.
 	RequestRuleApplier func(req *types.RawHTTP1Request) *types.RawHTTP1Request
@@ -383,18 +376,16 @@ func (s *Sender) applyModifications(req *types.RawHTTP1Request, mods *Modificati
 			req.SetHeader("Content-Length", strconv.Itoa(len(mods.Body)))
 		}
 	} else if len(mods.SetJSON) > 0 || len(mods.RemoveJSON) > 0 {
-		if s.JSONModifier != nil {
-			if len(req.Body) == 0 && len(mods.SetJSON) > 0 {
-				req.SetBody([]byte("{}"))
-			}
-			modified, err := s.JSONModifier(req.Body, mods.SetJSON, mods.RemoveJSON)
-			if err != nil {
-				return fmt.Errorf("JSON modification failed: %w", err)
-			}
-			req.SetBody(modified)
-			if shouldAutoUpdateCL {
-				req.SetHeader("Content-Length", strconv.Itoa(len(modified)))
-			}
+		if len(req.Body) == 0 && len(mods.SetJSON) > 0 {
+			req.SetBody([]byte("{}"))
+		}
+		modified, err := mutate.JSON(req.Body, mods.SetJSON, mods.RemoveJSON)
+		if err != nil {
+			return fmt.Errorf("JSON modification failed: %w", err)
+		}
+		req.SetBody(modified)
+		if shouldAutoUpdateCL {
+			req.SetHeader("Content-Length", strconv.Itoa(len(modified)))
 		}
 	}
 

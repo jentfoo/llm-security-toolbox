@@ -24,4 +24,5 @@ const (
 	MethodStreamWrite   = "stream_write"
 	MethodClaimProbe    = "claim_probe"
 	MethodDialUpstream  = "dial_upstream"
+	MethodSyncRules     = "sync_rules"
 )

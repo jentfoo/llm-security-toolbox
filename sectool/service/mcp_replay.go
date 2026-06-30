@@ -18,6 +18,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sidecar/mutate"
 )
 
 func (m *mcpServer) replaySendTool() mcp.Tool {
@@ -221,7 +222,7 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 				"request body is application/x-www-form-urlencoded; use 'set_form'/'remove_form' to modify fields or 'body' to replace the raw payload. 'set_json' only applies to JSON bodies.",
 			), nil
 		}
-		modifiedBody, err := modifyJSONBodyMap(reqBody, mods.SetJSON, mods.RemoveJSON)
+		modifiedBody, err := mutate.JSON(reqBody, mods.SetJSON, mods.RemoveJSON)
 		if err != nil {
 			return errorResult("JSON body modification failed: " + err.Error()), nil
 		}
@@ -229,7 +230,7 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 		bodyModified = true
 	}
 	if len(mods.SetForm) > 0 || len(mods.RemoveForm) > 0 {
-		modifiedBody, err := modifyFormBodyMap(reqBody, mods.SetForm, mods.RemoveForm)
+		modifiedBody, err := mutate.Form(reqBody, mods.SetForm, mods.RemoveForm)
 		if err != nil {
 			return errorResult("form body modification failed: " + err.Error()), nil
 		}

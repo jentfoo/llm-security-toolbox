@@ -21,6 +21,46 @@ func (c *Conn) PushFlow(ctx context.Context, flow wire.Flow) (string, error) {
 	return res.FlowID, nil
 }
 
+// Annotation keys and phase values for captured/mutated audit pairs.
+const (
+	annotationPhase        = "phase"
+	annotationFiredRules   = "fired_rules"
+	annotationParentFlowID = "parent_flow_id"
+	phaseCaptured          = "captured"
+	phaseMutated           = "mutated"
+)
+
+// EmitMutatedPair emits the captured (pre-mutation) and mutated (post-mutation) audit
+// pair for a message a rule changed on the hot path. The captured flow is tagged
+// phase=captured; the mutated flow is tagged phase=mutated with firedRules and an
+// annotations.parent_flow_id link back to the captured flow (skipped when the captured
+// flow was filtered out). Any structural ParentFlowID set on the inputs (e.g. a stream
+// parent) is preserved. Returns the assigned flow ids.
+func (c *Conn) EmitMutatedPair(ctx context.Context, captured, mutated wire.Flow, firedRules []string) (capturedID, mutatedID string, err error) {
+	if captured.Annotations == nil {
+		captured.Annotations = map[string]any{}
+	}
+	captured.Annotations[annotationPhase] = phaseCaptured
+	capturedID, err = c.PushFlow(ctx, captured)
+	if err != nil {
+		return "", "", err
+	}
+
+	if mutated.Annotations == nil {
+		mutated.Annotations = map[string]any{}
+	}
+	mutated.Annotations[annotationPhase] = phaseMutated
+	mutated.Annotations[annotationFiredRules] = firedRules
+	if capturedID != "" {
+		mutated.Annotations[annotationParentFlowID] = capturedID
+	}
+	mutatedID, err = c.PushFlow(ctx, mutated)
+	if err != nil {
+		return capturedID, "", err
+	}
+	return capturedID, mutatedID, nil
+}
+
 // CompleteFlow attaches a late response and/or completion to flowID: the
 // two-phase form for deferred responses and session/stream teardown.
 func (c *Conn) CompleteFlow(ctx context.Context, flowID string, resp *wire.FlowMessage, completedAt time.Time) error {

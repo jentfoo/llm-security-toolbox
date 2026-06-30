@@ -24,7 +24,7 @@ func testManager(cfg Config) *Manager {
 	if cfg.ReservedNames == nil {
 		cfg.ReservedNames = []string{"http/1.1", "http/2", "websocket"}
 	}
-	return NewManager(cfg, &protocol.Registry{}, nil, nil)
+	return NewManager(cfg, &protocol.Registry{}, nil, nil, nil)
 }
 
 // dialManager connects a client wire.Peer to the manager over net.Pipe. When

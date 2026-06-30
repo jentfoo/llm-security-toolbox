@@ -152,13 +152,9 @@ func TestSender_Send(t *testing.T) {
 	})
 
 	t.Run("json_modifier_error", func(t *testing.T) {
-		sender := &Sender{
-			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
-				return nil, assert.AnError
-			},
-		}
+		sender := &Sender{}
 
-		rawReq := []byte("POST /api HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n{}")
+		rawReq := []byte("POST /api HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 8\r\n\r\nnot json")
 		_, err := sender.Send(t.Context(), SendOptions{
 			RawRequest: rawReq,
 			Target: types.Target{
@@ -187,11 +183,7 @@ func TestSender_Send(t *testing.T) {
 		serverURL, _ := url.Parse(testServer.URL)
 		port, _ := strconv.Atoi(serverURL.Port())
 
-		sender := &Sender{
-			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
-				return []byte(`{"modified":"true"}`), nil
-			},
-		}
+		sender := &Sender{}
 
 		rawReq := []byte("POST /api HTTP/1.1\r\nHost: " + serverURL.Host + "\r\nContent-Length: 2\r\n\r\n{}")
 		_, err := sender.Send(t.Context(), SendOptions{
@@ -202,7 +194,7 @@ func TestSender_Send(t *testing.T) {
 				UsesHTTPS: false,
 			},
 			Modifications: &Modifications{
-				SetJSON: map[string]any{"key": "value"},
+				SetJSON: map[string]any{"modified": "true"},
 			},
 			Force: false, // Content-Length should auto-update to match modified body
 		})
@@ -1527,11 +1519,7 @@ func TestApplyModifications(t *testing.T) {
 			Body:    []byte(`{"key":"old"}`),
 		}
 
-		sender := &Sender{
-			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
-				return []byte(`{"key":"new"}`), nil
-			},
-		}
+		sender := &Sender{}
 		err := sender.applyModifications(req, &Modifications{
 			SetJSON: map[string]any{"key": "new"},
 		}, false)
@@ -1550,11 +1538,7 @@ func TestApplyModifications(t *testing.T) {
 			Body:    []byte(`{"keep":"yes","drop":"no"}`),
 		}
 
-		sender := &Sender{
-			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
-				return []byte(`{"keep":"yes"}`), nil
-			},
-		}
+		sender := &Sender{}
 		err := sender.applyModifications(req, &Modifications{
 			RemoveJSON: []string{"drop"},
 		}, false)
@@ -1573,12 +1557,7 @@ func TestApplyModifications(t *testing.T) {
 			Body:    nil,
 		}
 
-		sender := &Sender{
-			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
-				assert.Equal(t, []byte("{}"), body)
-				return []byte(`{"new":"value"}`), nil
-			},
-		}
+		sender := &Sender{}
 		err := sender.applyModifications(req, &Modifications{
 			SetJSON: map[string]any{"new": "value"},
 		}, false)
@@ -1679,11 +1658,7 @@ func TestApplyModifications(t *testing.T) {
 			Body:    []byte("{}"),
 		}
 
-		sender := &Sender{
-			JSONModifier: func(body []byte, setJSON map[string]any, removeJSON []string) ([]byte, error) {
-				return []byte(`{"key":"value"}`), nil // 15 bytes
-			},
-		}
+		sender := &Sender{}
 		err := sender.applyModifications(req, &Modifications{
 			SetJSON:    map[string]any{"key": "value"},
 			SetHeaders: []string{"Content-Length: 999"},

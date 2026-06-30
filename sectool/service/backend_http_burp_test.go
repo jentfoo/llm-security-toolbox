@@ -11,6 +11,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/mcp"
 	"github.com/go-appsec/toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
 func TestFormatSectoolComment(t *testing.T) {
@@ -364,7 +365,7 @@ func TestBurpBackendSendRequest(t *testing.T) {
 		backend, _ := newTestBurpBackend(t)
 
 		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
-			Type:    RuleTypeRequestHeader,
+			Type:    wire.RuleTypeRequestHeader,
 			Replace: "X-Injected: from-rule\r\n",
 		})
 		require.NoError(t, err)
@@ -382,7 +383,7 @@ func TestBurpBackendSendRequest(t *testing.T) {
 		backend, _ := newTestBurpBackend(t)
 
 		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
-			Type:    RuleTypeRequestHeader,
+			Type:    wire.RuleTypeRequestHeader,
 			Find:    "X-Nonexistent: value",
 			Replace: "X-Replaced: value",
 		})
@@ -881,7 +882,7 @@ func TestApplyRequestRulesToRaw(t *testing.T) {
 	t.Run("header_literal", func(t *testing.T) {
 		raw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\nX-Old: value\r\n\r\n")
 		rules := []protocol.RuleEntry{{
-			Type:    RuleTypeRequestHeader,
+			Type:    wire.RuleTypeRequestHeader,
 			Find:    "X-Old",
 			Replace: "X-New",
 		}}
@@ -894,7 +895,7 @@ func TestApplyRequestRulesToRaw(t *testing.T) {
 	t.Run("header_append", func(t *testing.T) {
 		raw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 		rules := []protocol.RuleEntry{{
-			Type:    RuleTypeRequestHeader,
+			Type:    wire.RuleTypeRequestHeader,
 			Replace: "X-Added: injected\r\n",
 		}}
 
@@ -906,7 +907,7 @@ func TestApplyRequestRulesToRaw(t *testing.T) {
 		body := `{"token":"abc123"}`
 		raw := []byte("POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body)
 		rules := []protocol.RuleEntry{{
-			Type:    RuleTypeRequestBody,
+			Type:    wire.RuleTypeRequestBody,
 			IsRegex: true,
 			Find:    `"token":"[^"]*"`,
 			Replace: `"token":"REDACTED"`,
@@ -920,7 +921,7 @@ func TestApplyRequestRulesToRaw(t *testing.T) {
 	t.Run("no_request_rules", func(t *testing.T) {
 		raw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 		rules := []protocol.RuleEntry{{
-			Type:    RuleTypeResponseHeader,
+			Type:    wire.RuleTypeResponseHeader,
 			Find:    "Server",
 			Replace: "Hidden",
 		}}

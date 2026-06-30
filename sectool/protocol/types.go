@@ -199,7 +199,9 @@ type RuleListResponse struct {
 	Rules []RuleEntry `json:"rules"`
 }
 
-// RuleEntry represents a find/replace rule.
+// RuleEntry represents a find/replace rule. Adapter scopes the rule: empty applies
+// everywhere, "sectool" scopes it to the in-process proxy, any other value names a
+// sidecar adapter.
 type RuleEntry struct {
 	RuleID  string `json:"rule_id"`
 	Type    string `json:"type"`
@@ -207,6 +209,7 @@ type RuleEntry struct {
 	IsRegex bool   `json:"is_regex,omitempty"`
 	Find    string `json:"find,omitempty"`
 	Replace string `json:"replace,omitempty"`
+	Adapter string `json:"adapter,omitempty"`
 }
 
 // =============================================================================

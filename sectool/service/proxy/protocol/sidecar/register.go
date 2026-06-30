@@ -1,7 +1,6 @@
 package sidecar
 
 import (
-	"encoding/json"
 	"fmt"
 	"slices"
 	"time"
@@ -103,10 +102,17 @@ func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.Re
 		m.reorderUpgradeClaims()
 	}
 
+	var snapshot []wire.Rule
+	if m.rules != nil {
+		var version uint64
+		version, snapshot = m.rules.RuleSnapshot(rec.Name)
+		rec.appliedVersion.Store(version)
+	}
+
 	return rec, &wire.RegisterResult{
 		ProtocolVersion: rec.ProtoVersion,
 		AssignedSeams:   rec.AssignedSeams,
-		RulesSnapshot:   []json.RawMessage{},
+		RulesSnapshot:   snapshot,
 		ServerTime:      now.Format(time.RFC3339Nano),
 	}, nil
 }

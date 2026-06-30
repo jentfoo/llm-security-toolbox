@@ -77,10 +77,10 @@ MCP Agent  → MCP Server → Backends (Built-in Proxy or Burp MCP, OAST, Crawle
 - `sectool/service/smtputil.go` - SMTP email header parsing utilities
 - `sectool/service/backend_crawler_colly.go` - Colly-based crawler implementation
 - `sectool/service/capture_filter.go` - BuildCaptureFilter: compiles proxy exclusion patterns from config
-- `sectool/service/formutil.go` - Form parsing utilities
+- `sidecar/mutate/` - Shared JSON/form request-mutation helpers (`mutate.JSON`/`mutate.Form`); no `sectool/` dependency, consumed by replay and the sidecar SDK
 - `sectool/service/search.go` - RE2 pattern compilation with LLM-friendly double-escape correction; flow content matching
 - `sectool/service/httputil.go` - HTTP request/response parsing utilities
-- `sectool/service/jsonutil.go` - JSON field modification utilities
+- `sectool/service/jsonutil.go` - JSON read/analysis helpers (flatten, parse list)
 - `sectool/service/types.go` - Service-specific request and internal types
 
 ### Proxy Package

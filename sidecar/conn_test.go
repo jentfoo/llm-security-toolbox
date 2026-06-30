@@ -42,7 +42,7 @@ func registerOK(method string, _ json.RawMessage) (any, *wire.Error) {
 		return wire.RegisterResult{
 			ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
 			AssignedSeams:   []string{},
-			RulesSnapshot:   []json.RawMessage{},
+			RulesSnapshot:   []wire.Rule{},
 			ServerTime:      "2026-06-28T00:00:00Z",
 		}, nil
 	}

@@ -22,8 +22,10 @@ const registerTimeout = 10 * time.Second
 // Conn is a registered connection to sectool.
 type Conn struct {
 	peer       *wire.Peer
+	name       string
 	negotiated wire.ProtocolVersion
 	seams      []string
+	rules      *RuleCache
 
 	mu      sync.Mutex
 	handler Handler
@@ -39,7 +41,7 @@ func Dial(addr string, reg Registration) (*Conn, error) {
 		return nil, fmt.Errorf("sidecar: dial %s %s: %w", network, addr, err)
 	}
 
-	c := &Conn{handler: nopHandler{}}
+	c := &Conn{handler: nopHandler{}, name: reg.Name, rules: newRuleCache(reg.Name)}
 	c.peer = wire.NewPeer(raw, connHandler{c})
 	go func() { _ = c.peer.Run(context.Background()) }()
 
@@ -56,6 +58,8 @@ func Dial(addr string, reg Registration) (*Conn, error) {
 
 	c.negotiated = result.ProtocolVersion
 	c.seams = result.AssignedSeams
+	// Seed the hot-path rule cache from the registration snapshot.
+	_ = c.rules.replace(0, result.RulesSnapshot)
 	return c, nil
 }
 
@@ -78,6 +82,12 @@ func (c *Conn) Serve(ctx context.Context, h Handler) error {
 		return nil
 	}
 }
+
+// AdapterName returns the adapter name this connection registered under.
+func (c *Conn) AdapterName() string { return c.name }
+
+// Rules returns the hot-path rule cache, kept current by sectool's sync_rules pushes.
+func (c *Conn) Rules() *RuleCache { return c.rules }
 
 // Negotiated returns the effective contract version agreed at registration.
 func (c *Conn) Negotiated() wire.ProtocolVersion { return c.negotiated }
@@ -129,6 +139,15 @@ func (h connHandler) HandleRequest(_ context.Context, method string, params json
 			return nil, wire.NewError(wire.CodeClaimProbeFault, "claim_probe: "+err.Error())
 		}
 		return wire.ClaimProbeResult{Claim: claim}, nil
+	case wire.MethodSyncRules:
+		var p wire.SyncRulesParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, wire.NewError(wire.CodeRuleRejected, "sync_rules: invalid params")
+		}
+		if err := h.c.rules.replace(p.SnapshotVersion, p.Rules); err != nil {
+			return nil, wire.NewError(wire.CodeRuleRejected, "sync_rules: "+err.Error())
+		}
+		return wire.SyncRulesResult{Ack: true, AppliedVersion: p.SnapshotVersion}, nil
 	case wire.MethodPing:
 		return struct{}{}, nil
 	default:

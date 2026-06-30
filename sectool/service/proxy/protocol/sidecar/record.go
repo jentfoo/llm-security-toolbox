@@ -23,6 +23,8 @@ type Record struct {
 	bridge  *bridge
 	resume  bool
 	healthy atomic.Bool
+	// appliedVersion is the rule snapshot version the sidecar last acked.
+	appliedVersion atomic.Uint64
 
 	mu       sync.Mutex
 	liveness Liveness

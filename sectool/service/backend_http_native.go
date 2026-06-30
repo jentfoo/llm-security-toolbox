@@ -20,6 +20,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
 const (
@@ -39,6 +40,8 @@ type NativeProxyBackend struct {
 	httpRules   []nativeStoredRule
 	wsRules     []nativeStoredRule
 	ruleStorage store.Storage
+	// snapshotVersion increments on every rule change; pushed to sidecars via sync_rules.
+	snapshotVersion uint64
 
 	// Responders: cached from responderStorage for hot path access
 	respondersMu     sync.RWMutex
@@ -60,6 +63,7 @@ type nativeStoredRule struct {
 	IsRegex bool   `json:"is_regex" msgpack:"ir"`
 	Find    string `json:"find" msgpack:"f"`
 	Replace string `json:"replace" msgpack:"r"`
+	Adapter string `json:"adapter,omitempty" msgpack:"a,omitempty"`
 
 	// compiled is the pre-compiled regex (nil if not a regex rule)
 	compiled *regexp.Regexp `msgpack:"-"`
@@ -131,8 +135,8 @@ func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, storage
 // core_query method; it resolves the read-side tools lazily so it can be supplied
 // before the MCP server exists.
 func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sidecar.CoreQuerier) error {
-	cfg.ReservedNames = []string{types.ProtocolHTTP11, types.ProtocolH2, types.ProtocolTagWS}
-	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry(), b.server.History(), coreQuery)
+	cfg.ReservedNames = []string{types.ProtocolHTTP11, types.ProtocolH2, types.ProtocolTagWS, RuleAdapterBuiltin}
+	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry(), b.server.History(), coreQuery, b)
 	lst, err := sidecar.NewListener(cfg, b.sidecarManager)
 	if err != nil {
 		return err
@@ -356,8 +360,7 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 	}
 
 	sender := &proxy.Sender{
-		JSONModifier: ModifyJSONBodyMap,
-		Timeouts:     b.timeouts,
+		Timeouts: b.timeouts,
 	}
 	if b.hasRequestRules() {
 		sender.RequestRuleApplier = b.ApplyRequestRules
@@ -407,12 +410,24 @@ func (b *NativeProxyBackend) ListRules(ctx context.Context, websocket bool) ([]p
 			IsRegex: r.IsRegex,
 			Find:    r.Find,
 			Replace: r.Replace,
+			Adapter: r.Adapter,
 		})
 	}
 	return result, nil
 }
 
 func (b *NativeProxyBackend) AddRule(ctx context.Context, input protocol.RuleEntry) (*protocol.RuleEntry, error) {
+	out, err := b.addRuleLocked(input)
+	if err != nil {
+		return nil, err
+	}
+	b.pushRules(ctx)
+	return out, nil
+}
+
+// addRuleLocked validates, persists, and caches a rule, bumping the snapshot version.
+// Returns before the sidecar push so the caller pushes outside rulesMu.
+func (b *NativeProxyBackend) addRuleLocked(input protocol.RuleEntry) (*protocol.RuleEntry, error) {
 	// Validate type (both HTTP and WebSocket types)
 	if !validRuleTypes[input.Type] {
 		return nil, fmt.Errorf("invalid rule type: %q", input.Type)
@@ -444,6 +459,7 @@ func (b *NativeProxyBackend) AddRule(ctx context.Context, input protocol.RuleEnt
 		IsRegex:  input.IsRegex,
 		Find:     input.Find,
 		Replace:  input.Replace,
+		Adapter:  input.Adapter,
 		compiled: compiled,
 	}
 
@@ -459,6 +475,7 @@ func (b *NativeProxyBackend) AddRule(ctx context.Context, input protocol.RuleEnt
 		return nil, fmt.Errorf("persist rule: %w", err)
 	}
 	*target = updated
+	b.snapshotVersion++
 
 	return &protocol.RuleEntry{
 		RuleID:  rule.ID,
@@ -467,10 +484,21 @@ func (b *NativeProxyBackend) AddRule(ctx context.Context, input protocol.RuleEnt
 		IsRegex: rule.IsRegex,
 		Find:    rule.Find,
 		Replace: rule.Replace,
+		Adapter: rule.Adapter,
 	}, nil
 }
 
 func (b *NativeProxyBackend) DeleteRule(ctx context.Context, idOrLabel string) error {
+	if err := b.deleteRuleLocked(idOrLabel); err != nil {
+		return err
+	}
+	b.pushRules(ctx)
+	return nil
+}
+
+// deleteRuleLocked removes a rule by id or label, bumping the snapshot version.
+// Returns ErrNotFound when no rule matches, before any sidecar push.
+func (b *NativeProxyBackend) deleteRuleLocked(idOrLabel string) error {
 	b.rulesMu.Lock()
 	defer b.rulesMu.Unlock()
 
@@ -481,6 +509,7 @@ func (b *NativeProxyBackend) DeleteRule(ctx context.Context, idOrLabel string) e
 				return fmt.Errorf("persist rule: %w", err)
 			}
 			b.httpRules = updated
+			b.snapshotVersion++
 			return nil
 		}
 	}
@@ -491,10 +520,45 @@ func (b *NativeProxyBackend) DeleteRule(ctx context.Context, idOrLabel string) e
 				return fmt.Errorf("persist rule: %w", err)
 			}
 			b.wsRules = updated
+			b.snapshotVersion++
 			return nil
 		}
 	}
 	return ErrNotFound
+}
+
+// pushRules re-pushes the rule snapshot to connected sidecars after a change.
+func (b *NativeProxyBackend) pushRules(ctx context.Context) {
+	if b.sidecarManager != nil {
+		b.sidecarManager.PushRules(ctx)
+	}
+}
+
+// RuleSnapshot returns the current snapshot version and the rules scoped to the named
+// adapter (scope empty or equal to the name), in apply order (HTTP rules then WS).
+func (b *NativeProxyBackend) RuleSnapshot(adapter string) (uint64, []wire.Rule) {
+	b.rulesMu.RLock()
+	defer b.rulesMu.RUnlock()
+
+	var out []wire.Rule
+	appendScoped := func(rules []nativeStoredRule) {
+		for _, r := range rules {
+			if r.Adapter == "" || r.Adapter == adapter {
+				out = append(out, wire.Rule{
+					RuleID:  r.ID,
+					Type:    r.Type,
+					Label:   r.Label,
+					IsRegex: r.IsRegex,
+					Find:    r.Find,
+					Replace: r.Replace,
+					Adapter: r.Adapter,
+				})
+			}
+		}
+	}
+	appendScoped(b.httpRules)
+	appendScoped(b.wsRules)
+	return b.snapshotVersion, out
 }
 
 // hasRequestRules returns true if any request header or body rules exist.
@@ -502,7 +566,10 @@ func (b *NativeProxyBackend) hasRequestRules() bool {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 	for _, rule := range b.httpRules {
-		if rule.Type == RuleTypeRequestHeader || rule.Type == RuleTypeRequestBody {
+		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+			continue
+		}
+		if rule.Type == wire.RuleTypeRequestHeader || rule.Type == wire.RuleTypeRequestBody {
 			return true
 		}
 	}
@@ -535,12 +602,15 @@ func (b *NativeProxyBackend) ApplyRequestRules(req *types.RawHTTP1Request) *type
 	var headerRules, bodyRules []nativeStoredRule
 	var hasRespBodyRules bool
 	for _, rule := range b.httpRules {
+		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+			continue
+		}
 		switch rule.Type {
-		case RuleTypeRequestHeader:
+		case wire.RuleTypeRequestHeader:
 			headerRules = append(headerRules, rule)
-		case RuleTypeRequestBody:
+		case wire.RuleTypeRequestBody:
 			bodyRules = append(bodyRules, rule)
-		case RuleTypeResponseBody:
+		case wire.RuleTypeResponseBody:
 			hasRespBodyRules = true
 		}
 	}
@@ -575,10 +645,13 @@ func (b *NativeProxyBackend) ApplyResponseRules(resp *types.RawHTTP1Response) *t
 
 	var headerRules, bodyRules []nativeStoredRule
 	for _, rule := range b.httpRules {
+		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+			continue
+		}
 		switch rule.Type {
-		case RuleTypeResponseHeader:
+		case wire.RuleTypeResponseHeader:
 			headerRules = append(headerRules, rule)
-		case RuleTypeResponseBody:
+		case wire.RuleTypeResponseBody:
 			bodyRules = append(bodyRules, rule)
 		}
 	}
@@ -602,7 +675,10 @@ func (b *NativeProxyBackend) ApplyWSRules(payload []byte, direction string) []by
 	defer b.rulesMu.RUnlock()
 
 	for _, rule := range b.wsRules {
-		if rule.Type != RuleTypeWSBoth && rule.Type != direction {
+		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+			continue
+		}
+		if rule.Type != wire.RuleTypeWSBoth && rule.Type != direction {
 			continue
 		}
 		payload = applyMatchReplaceRule(payload, rule, false) // body content is case-sensitive
@@ -616,12 +692,15 @@ func (b *NativeProxyBackend) HasBodyRules(isRequest bool) bool {
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
-	targetType := RuleTypeResponseBody
+	targetType := wire.RuleTypeResponseBody
 	if isRequest {
-		targetType = RuleTypeRequestBody
+		targetType = wire.RuleTypeRequestBody
 	}
 
 	for _, rule := range b.httpRules {
+		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+			continue
+		}
 		if rule.Type == targetType {
 			return true
 		}
@@ -638,7 +717,10 @@ func (b *NativeProxyBackend) ApplyRequestBodyOnlyRules(body []byte, headers type
 
 	var bodyRules []nativeStoredRule
 	for _, rule := range b.httpRules {
-		if rule.Type == RuleTypeRequestBody {
+		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+			continue
+		}
+		if rule.Type == wire.RuleTypeRequestBody {
 			bodyRules = append(bodyRules, rule)
 		}
 	}
@@ -661,7 +743,10 @@ func (b *NativeProxyBackend) ApplyResponseBodyOnlyRules(body []byte, headers typ
 
 	var bodyRules []nativeStoredRule
 	for _, rule := range b.httpRules {
-		if rule.Type == RuleTypeResponseBody {
+		if rule.Adapter != "" && rule.Adapter != RuleAdapterBuiltin {
+			continue
+		}
+		if rule.Type == wire.RuleTypeResponseBody {
 			bodyRules = append(bodyRules, rule)
 		}
 	}
