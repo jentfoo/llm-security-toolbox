@@ -41,7 +41,6 @@ func registerOK(method string, _ json.RawMessage) (any, *wire.Error) {
 	if method == wire.MethodRegister {
 		return wire.RegisterResult{
 			ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
-			AssignedSeams:   []string{},
 			RulesSnapshot:   []wire.Rule{},
 			ServerTime:      "2026-06-28T00:00:00Z",
 		}, nil
@@ -68,7 +67,6 @@ func TestDial(t *testing.T) {
 		t.Cleanup(func() { _ = conn.Close() })
 
 		assert.Equal(t, "demo", gotName)
-		assert.Equal(t, wire.VersionMajor, conn.Negotiated().Major)
 	})
 
 	t.Run("major_mismatch", func(t *testing.T) {

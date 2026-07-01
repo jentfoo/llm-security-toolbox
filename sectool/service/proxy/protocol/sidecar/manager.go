@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-analyze/bulk"
+
 	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -50,8 +52,7 @@ type Manager struct {
 // NewManager creates a Manager. registry is the native proxy's claim registry
 // used to dispatch connections to sidecar adapters; flows is the history sink
 // for push_flow; coreQuery dispatches read-side core tools for core_query; rules
-// supplies the rule snapshot pushed via sync_rules. flows, coreQuery, and rules may
-// be nil in tests.
+// supplies the rule snapshot pushed via sync_rules.
 func NewManager(cfg Config, registry *protocol.Registry, flows FlowSink, coreQuery CoreService, rules RuleSource) *Manager {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = 10 * time.Second
@@ -111,7 +112,7 @@ func (m *Manager) hasResumeState(instanceID string) bool {
 
 // HandleConn drives one accepted sidecar connection until it closes.
 func (m *Manager) HandleConn(ctx context.Context, conn net.Conn) {
-	s := &session{m: m, fingerprint: conn.RemoteAddr().String()}
+	s := &session{m: m}
 	s.peer = wire.NewPeer(conn, s)
 
 	hbCtx, cancel := context.WithCancel(ctx)
@@ -138,11 +139,9 @@ func (m *Manager) heartbeatLoop(ctx context.Context, s *session) {
 			if rec == nil {
 				continue
 			}
-			now := m.now()
-			if now.Sub(rec.lastPong()) > m.cfg.HeartbeatTimeout {
+			if m.now().Sub(rec.lastPong()) > m.cfg.HeartbeatTimeout {
 				rec.healthy.Store(false)
 			}
-			rec.recordPingSent(now)
 			_ = s.peer.Notify(wire.MethodPing, nil)
 		}
 	}
@@ -192,10 +191,7 @@ func (m *Manager) releaseClaims(rec *Record) {
 // Shutdown requests a graceful close of every sidecar and waits briefly.
 func (m *Manager) Shutdown(ctx context.Context) {
 	m.mu.Lock()
-	recs := make([]*Record, 0, len(m.records))
-	for _, r := range m.records {
-		recs = append(recs, r)
-	}
+	recs := bulk.MapValuesSlice(m.records)
 	m.mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -216,9 +212,8 @@ func (m *Manager) Shutdown(ctx context.Context) {
 // session is the per-connection JSON-RPC handler. It processes register, then
 // tracks the resulting record for heartbeats.
 type session struct {
-	m           *Manager
-	peer        *wire.Peer
-	fingerprint string
+	m    *Manager
+	peer *wire.Peer
 
 	mu  sync.Mutex
 	rec *Record
@@ -237,7 +232,7 @@ func (s *session) HandleRequest(ctx context.Context, method string, params json.
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, wire.NewError(wire.CodeRegistrationRejected, "register: invalid params")
 		}
-		rec, res, rpcErr := s.m.handleRegister(s.peer, s.fingerprint, &p)
+		rec, res, rpcErr := s.m.handleRegister(s.peer, &p)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}

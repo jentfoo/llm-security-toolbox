@@ -33,11 +33,8 @@ func (r *Registry) InsertEarly(a EarlyAdapter) {
 func (r *Registry) RemoveEarly(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i, a := range r.Early {
-		if a.Name() == name {
-			r.Early = append(r.Early[:i], r.Early[i+1:]...)
-			return
-		}
+	if i := slices.IndexFunc(r.Early, func(a EarlyAdapter) bool { return a.Name() == name }); i >= 0 {
+		r.Early = slices.Delete(r.Early, i, i+1)
 	}
 }
 
@@ -54,11 +51,8 @@ func (r *Registry) InsertUpgrade(a UpgradeAdapter) {
 func (r *Registry) RemoveUpgrade(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i, a := range r.Upgrade {
-		if a.Name() == name {
-			r.Upgrade = append(r.Upgrade[:i], r.Upgrade[i+1:]...)
-			return
-		}
+	if i := slices.IndexFunc(r.Upgrade, func(a UpgradeAdapter) bool { return a.Name() == name }); i >= 0 {
+		r.Upgrade = slices.Delete(r.Upgrade, i, i+1)
 	}
 }
 

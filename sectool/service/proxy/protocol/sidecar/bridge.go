@@ -38,8 +38,8 @@ func (b *bridge) ClaimEarly(c *protocol.EarlyClaimCtx) bool {
 	if ec == nil || !b.rec.Healthy() {
 		return false
 	}
-	// The pre-handshake SNI/host/port gate already matched for a TLS re-entry; a
-	// raw accept matches the connection's local port here.
+	// Pre-handshake SNI/host/port gate already matched for a TLS re-entry; a raw
+	// accept matches the connection's local port here
 	if !c.TLSTerminated && !portInRange(localPort(c.ClientConn), ec.PortRange) {
 		return false
 	}
@@ -91,15 +91,13 @@ func (b *bridge) ClaimUpgrade(c *protocol.UpgradeClaimCtx) bool {
 // ServeUpgrade captures the triggering request as a flow, synthesizes the upgrade
 // response, and hands the post-upgrade bytes to the sidecar as a stream.
 func (b *bridge) ServeUpgrade(ctx context.Context, c *protocol.UpgradeClaimCtx, conns protocol.UpgradeConns) {
-	// The sidecar drives its own upstream via dial_upstream; release any the proxy
-	// pre-dialed on the TLS path.
+	// Sidecar drives its own upstream via dial_upstream; release any the proxy pre-dialed on the TLS path
 	if conns.UpstreamConn != nil {
 		_ = conns.UpstreamConn.Close()
 	}
 	resp := upgradeResponse(c)
 	flowID := b.captureUpgrade(c, resp)
-	// The http_101 response is synthesized here; the connect 200 was already sent
-	// by the CONNECT handler.
+	// http_101 response synthesized here; the connect 200 was already sent by the CONNECT handler
 	if c.Signal != "connect" {
 		var buf bytes.Buffer
 		if _, err := conns.ClientConn.Write(resp.SerializeRaw(&buf)); err != nil {
@@ -113,9 +111,6 @@ func (b *bridge) ServeUpgrade(ctx context.Context, c *protocol.UpgradeClaimCtx, 
 // captureUpgrade records the triggering request (with the synthesized response) as
 // a normal flow, returning its flow_id or "" when the capture filter excludes it.
 func (b *bridge) captureUpgrade(c *protocol.UpgradeClaimCtx, resp *types.RawHTTP1Response) string {
-	if b.flows == nil {
-		return ""
-	}
 	var port int
 	scheme := types.SchemeHTTP
 	if c.Target != nil {

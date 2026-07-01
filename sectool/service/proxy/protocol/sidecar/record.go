@@ -10,14 +10,13 @@ import (
 
 // Record is the registry entry for one connected sidecar adapter.
 type Record struct {
-	Name          string
-	Version       string
-	ProtoVersion  wire.ProtocolVersion
-	Protocols     []string
-	Capabilities  wire.Capabilities
-	MCPTools      []wire.MCPTool // tool definitions the sidecar provides
-	InstanceID    string
-	AssignedSeams []string
+	Name         string
+	Version      string
+	ProtoVersion wire.ProtocolVersion
+	Protocols    []string
+	Capabilities wire.Capabilities
+	MCPTools     []wire.MCPTool // tool definitions the sidecar provides
+	InstanceID   string
 
 	peer    *wire.Peer
 	bridge  *bridge
@@ -33,12 +32,9 @@ type Record struct {
 	inFlight   map[string]struct{}
 }
 
-// Liveness tracks heartbeat and process identity.
+// Liveness tracks heartbeat responses.
 type Liveness struct {
-	LastPingSent      time.Time
-	LastPongRecv      time.Time
-	LastActivity      time.Time
-	SocketFingerprint string
+	LastPongRecv time.Time
 }
 
 // resumeEntry stashes a disconnected sidecar's bookkeeping so a reconnect with
@@ -52,24 +48,13 @@ type resumeEntry struct {
 // sidecar must not claim new connections.
 func (r *Record) Healthy() bool { return r.healthy.Load() }
 
-// Bridge returns the proxy claim adapter backing this sidecar, for the manager
-// to register into the proxy claim registry.
-func (r *Record) Bridge() Adapter { return r.bridge }
-
 func (r *Record) alive() bool { return r.peer != nil && !r.peer.Closed() }
 
 func (r *Record) recordPong(now time.Time) {
 	r.mu.Lock()
 	r.liveness.LastPongRecv = now
-	r.liveness.LastActivity = now
 	r.mu.Unlock()
 	r.healthy.Store(true)
-}
-
-func (r *Record) recordPingSent(now time.Time) {
-	r.mu.Lock()
-	r.liveness.LastPingSent = now
-	r.mu.Unlock()
 }
 
 func (r *Record) lastPong() time.Time {

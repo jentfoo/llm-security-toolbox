@@ -56,7 +56,7 @@ func (s *session) resolveDest(rec *Record, p *wire.DialUpstreamParams) (host str
 	if host != "" && port != 0 {
 		return host, port, scheme, nil
 	}
-	if p.ParentFlowID == "" || s.m.flows == nil {
+	if p.ParentFlowID == "" {
 		return "", 0, "", wire.NewError(wire.CodeDialFailed, "dial_upstream: host/port required without parent_flow_id").
 			WithData(&wire.ErrorData{Adapter: rec.Name})
 	}
@@ -141,9 +141,6 @@ func (s *session) dial(ctx context.Context, rec *Record, host string, port int, 
 // every sidecar egress is surfaced in history. Stored unconditionally (no capture
 // filter) so audit is never dropped.
 func (s *session) recordDial(rec *Record, parentFlowID, host string, port int, scheme string, tlsEnabled bool) {
-	if s.m.flows == nil {
-		return
-	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	s.m.flows.Store(&types.Flow{
 		Adapter:      rec.Name,

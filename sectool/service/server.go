@@ -235,15 +235,16 @@ func (s *Server) CoreQuery(ctx context.Context, tool string, params json.RawMess
 	return m.CoreQuery(ctx, tool, params)
 }
 
-// CoreToolNames returns the names of the registered core MCP tools, or nil before
-// the MCP server is built. It lets the sidecar registry reject a tool-name
-// collision against core tools.
+// CoreToolNames returns the static core MCP tool names captured at construction,
+// or nil before the MCP server is built. It lets the sidecar registry reject a
+// tool-name collision against core tools; connected sidecars' tool names are
+// checked separately, so this stays the genuine core set.
 func (s *Server) CoreToolNames() []string {
 	m := s.mcpReady.Load()
 	if m == nil {
 		return nil
 	}
-	return m.coreToolNames()
+	return m.coreTools
 }
 
 // RequestShutdown initiates server shutdown.

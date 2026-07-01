@@ -80,7 +80,7 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 	}
 	m.sidecars = svc.httpBackend.Sidecars()
 
-	// define server hooks to hide internal tools from tools list while leaving them callable
+	// hide internal tools from tools/list while leaving them callable
 	hooks := &server.Hooks{}
 	hooks.AddAfterListTools(func(_ context.Context, _ any, _ *mcp.ListToolsRequest, result *mcp.ListToolsResult) {
 		result.Tools = bulk.SliceFilterInPlace(func(t mcp.Tool) bool {
@@ -120,12 +120,11 @@ func newMCPServer(svc *Server, workflowMode string) *mcpServer {
 	m.server = server.NewMCPServer("sectool", config.Version, opts...)
 
 	m.registerTools()
-	// Snapshot the core tool names before any sidecar tools are registered.
+	// Snapshot core tool names before any sidecar tools are registered
 	m.coreTools = bulk.MapKeysSlice(m.server.ListTools())
 	m.coreQueryDispatch = m.coreQueryHandlers()
 
-	// Compose sidecar-contributed tools and keep the advertised list in sync as
-	// adapters connect and disconnect.
+	// Compose sidecar tools; keep the advertised list in sync as adapters connect/disconnect
 	if m.sidecars != nil {
 		m.sidecars.SetToolsChangedHook(m.syncSidecarTools)
 		m.syncSidecarTools()

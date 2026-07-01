@@ -28,7 +28,7 @@ func toolManager(coreNames []string) *Manager {
 		HeartbeatTimeout:  time.Hour,
 		ReservedNames:     []string{"http/1.1", "http/2", "websocket"},
 	}
-	return NewManager(cfg, &protocol.Registry{}, nil, fakeCoreTools{names: coreNames}, nil)
+	return NewManager(cfg, &protocol.Registry{}, newFakeFlows(), fakeCoreTools{names: coreNames}, fakeRules{})
 }
 
 func toolParams(name string, toolNames ...string) wire.RegisterParams {

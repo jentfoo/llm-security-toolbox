@@ -26,7 +26,18 @@ func (m *Manager) AdapterTools() map[string][]wire.MCPTool {
 // returns the tool's result. The tool name is resolved to the adapter that
 // declared it; arguments are validated by the caller before delegation.
 func (m *Manager) InvokeTool(ctx context.Context, name string, args json.RawMessage) (wire.InvokeToolResult, *wire.Error) {
-	rec := m.toolOwner(name)
+	m.mu.Lock()
+	var rec *Record
+	for _, r := range m.records {
+		if !r.Healthy() {
+			continue
+		}
+		if slices.ContainsFunc(r.MCPTools, func(t wire.MCPTool) bool { return t.Name == name }) {
+			rec = r
+			break
+		}
+	}
+	m.mu.Unlock()
 	if rec == nil {
 		return wire.InvokeToolResult{}, wire.NewError(wire.CodeUnknownDestAdapter, "invoke_tool: unknown tool: "+name)
 	}
@@ -35,21 +46,4 @@ func (m *Manager) InvokeTool(ctx context.Context, name string, args json.RawMess
 		return wire.InvokeToolResult{}, rpcErr
 	}
 	return res, nil
-}
-
-// toolOwner returns the healthy adapter that declared a tool by name, or nil.
-func (m *Manager) toolOwner(name string) *Record {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, r := range m.records {
-		if !r.Healthy() {
-			continue
-		}
-		for _, t := range r.MCPTools {
-			if t.Name == name {
-				return r
-			}
-		}
-	}
-	return nil
 }

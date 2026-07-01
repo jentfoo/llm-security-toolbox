@@ -55,7 +55,7 @@ func (l *Listener) Serve() error {
 	}
 }
 
-// Close stops accepting, shuts the registered sidecars down, and removes the
+// Close stops accepting, shuts the registered sidecars down, and releases the
 // socket.
 func (l *Listener) Close() error {
 	if l.closed.Swap(true) {

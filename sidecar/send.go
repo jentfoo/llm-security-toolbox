@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/go-analyze/bulk"
@@ -30,9 +31,16 @@ func ApplyMutations(msg *wire.FlowMessage, muts []wire.Mutation) error {
 	for _, m := range muts {
 		switch m.Op {
 		case "set_header":
-			msg.Headers = setHeader(msg.Headers, m.Name, m.Value)
+			if i := slices.IndexFunc(msg.Headers, func(h wire.Header) bool {
+				return strings.EqualFold(h.Name, m.Name)
+			}); i >= 0 {
+				msg.Headers[i].Value = m.Value
+			} else {
+				msg.Headers = append(msg.Headers, wire.Header{Name: m.Name, Value: m.Value})
+			}
 		case "remove_header":
-			msg.Headers = removeHeader(msg.Headers, m.Name)
+			name := m.Name
+			msg.Headers = bulk.SliceFilterInPlace(func(h wire.Header) bool { return !strings.EqualFold(h.Name, name) }, msg.Headers)
 		case "set_json":
 			b, err := mutate.JSON(msg.Body, map[string]interface{}{m.Name: m.Value}, nil)
 			if err != nil {
@@ -58,9 +66,13 @@ func ApplyMutations(msg *wire.FlowMessage, muts []wire.Mutation) error {
 			}
 			msg.Body = b
 		case "set_query":
-			msg.Query = setQueryParam(msg.Query, m.Name, m.Value)
+			vals, _ := url.ParseQuery(msg.Query)
+			vals.Set(m.Name, m.Value)
+			msg.Query = vals.Encode()
 		case "remove_query":
-			msg.Query = removeQueryParam(msg.Query, m.Name)
+			vals, _ := url.ParseQuery(msg.Query)
+			vals.Del(m.Name)
+			msg.Query = vals.Encode()
 		case "query":
 			msg.Query = m.Value
 		case "method":
@@ -74,32 +86,4 @@ func ApplyMutations(msg *wire.FlowMessage, muts []wire.Mutation) error {
 		}
 	}
 	return nil
-}
-
-// setHeader replaces the first case-insensitive match in place, else appends.
-func setHeader(hs []wire.Header, name, value string) []wire.Header {
-	for i := range hs {
-		if strings.EqualFold(hs[i].Name, name) {
-			hs[i].Value = value
-			return hs
-		}
-	}
-	return append(hs, wire.Header{Name: name, Value: value})
-}
-
-// removeHeader drops every case-insensitive match.
-func removeHeader(hs []wire.Header, name string) []wire.Header {
-	return bulk.SliceFilterInPlace(func(h wire.Header) bool { return !strings.EqualFold(h.Name, name) }, hs)
-}
-
-func setQueryParam(query, name, value string) string {
-	vals, _ := url.ParseQuery(query)
-	vals.Set(name, value)
-	return vals.Encode()
-}
-
-func removeQueryParam(query, name string) string {
-	vals, _ := url.ParseQuery(query)
-	vals.Del(name)
-	return vals.Encode()
 }

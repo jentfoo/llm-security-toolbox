@@ -52,7 +52,6 @@ func TestAggregateByTuple(t *testing.T) {
 			return e.host, e.path, e.method, e.status
 		})
 
-		// Should have 3 unique tuples
 		assert.Len(t, result, 3)
 
 		// First entry should have highest count (3)

@@ -85,9 +85,9 @@ type ProxyConfig struct {
 
 // SidecarsConfig holds declarative settings for out-of-process protocol
 // sidecars. Sidecars are operator-launched (attached) and dial SidecarSocket;
-// sectool does not spawn them. The listener is created only when Enabled and
-// only under the native proxy backend.
+// sectool does not spawn them.
 type SidecarsConfig struct {
+	// Enabled gates the listener, created only under the native proxy backend.
 	Enabled               *bool `json:"enabled"`
 	HeartbeatIntervalSecs int   `json:"heartbeat_interval_secs"`
 	HeartbeatTimeoutSecs  int   `json:"heartbeat_timeout_secs"`

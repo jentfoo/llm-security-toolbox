@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
@@ -15,12 +16,10 @@ import (
 // registered sidecars. Callers hold m.mu. The same-name record (if any) is
 // already resolved by handleRegister before this runs.
 func (m *Manager) checkConflicts(p *wire.RegisterParams) *wire.Error {
-	for _, rn := range m.cfg.ReservedNames {
-		if rn == p.Name {
-			return wire.NewError(wire.CodeDuplicateRegistration,
-				"adapter name conflicts with a built-in adapter: "+p.Name).
-				WithData(&wire.ErrorData{Adapter: p.Name, ConflictAdapter: rn})
-		}
+	if slices.Contains(m.cfg.ReservedNames, p.Name) {
+		return wire.NewError(wire.CodeDuplicateRegistration,
+			"adapter name conflicts with a built-in adapter: "+p.Name).
+			WithData(&wire.ErrorData{Adapter: p.Name, ConflictAdapter: p.Name})
 	}
 	if ec := p.Capabilities.EarlyClaim; ec != nil {
 		if err := m.checkEarlyClaim(p.Name, ec); err != nil {
@@ -42,11 +41,9 @@ func (m *Manager) checkToolNames(p *wire.RegisterParams) *wire.Error {
 	if len(p.MCPTools) == 0 {
 		return nil
 	}
-	owner := map[string]string{} // tool name -> owning adapter (core scope for core tools)
-	if m.coreQuery != nil {
-		for _, n := range m.coreQuery.CoreToolNames() {
-			owner[n] = types.AdapterScopeCore
-		}
+	owner := map[string]string{} // tool name -> owning adapter
+	for _, n := range m.coreQuery.CoreToolNames() {
+		owner[n] = types.AdapterScopeCore
 	}
 	for _, r := range m.records {
 		for _, t := range r.MCPTools {

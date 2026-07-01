@@ -21,11 +21,9 @@ const registerTimeout = 10 * time.Second
 
 // Conn is a registered connection to sectool.
 type Conn struct {
-	peer       *wire.Peer
-	name       string
-	negotiated wire.ProtocolVersion
-	seams      []string
-	rules      *RuleCache
+	peer  *wire.Peer
+	name  string
+	rules *RuleCache
 
 	mu      sync.Mutex
 	handler Handler
@@ -41,7 +39,7 @@ func Dial(addr string, reg Registration) (*Conn, error) {
 		return nil, fmt.Errorf("sidecar: dial %s %s: %w", network, addr, err)
 	}
 
-	c := &Conn{handler: BaseHandler{}, name: reg.Name, rules: newRuleCache(reg.Name)}
+	c := &Conn{handler: BaseHandler{}, name: reg.Name, rules: &RuleCache{adapter: reg.Name}}
 	c.peer = wire.NewPeer(raw, connHandler{c})
 	go func() { _ = c.peer.Run(context.Background()) }()
 
@@ -56,9 +54,7 @@ func Dial(addr string, reg Registration) (*Conn, error) {
 		return nil, fmt.Errorf("sidecar: register: %w", rpcErr)
 	}
 
-	c.negotiated = result.ProtocolVersion
-	c.seams = result.AssignedSeams
-	// Seed the hot-path rule cache from the registration snapshot.
+	// Seed the hot-path rule cache from the registration snapshot
 	_ = c.rules.replace(0, result.RulesSnapshot)
 	return c, nil
 }
@@ -83,21 +79,8 @@ func (c *Conn) Serve(ctx context.Context, h Handler) error {
 	}
 }
 
-// AdapterName returns the adapter name this connection registered under.
-func (c *Conn) AdapterName() string { return c.name }
-
 // Rules returns the hot-path rule cache, kept current by sectool's sync_rules pushes.
 func (c *Conn) Rules() *RuleCache { return c.rules }
-
-// Negotiated returns the effective contract version agreed at registration.
-func (c *Conn) Negotiated() wire.ProtocolVersion { return c.negotiated }
-
-// Seams returns the capability claims sectool accepted at registration.
-func (c *Conn) Seams() []string { return c.seams }
-
-// Peer exposes the underlying JSON-RPC peer for advanced use (e.g. originating
-// notifications). Most adapters only need Serve.
-func (c *Conn) Peer() *wire.Peer { return c.peer }
 
 // Close terminates the connection.
 func (c *Conn) Close() error { return c.peer.Close() }

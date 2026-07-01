@@ -96,7 +96,6 @@ func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.C
 
 	// seed backend with some dummy requests
 	if nb, ok := httpBackend.(*service.NativeProxyBackend); ok {
-		// Create a local test server
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case "POST":
@@ -324,7 +323,7 @@ func TestIntegration_ProxySummaryWithFilters(t *testing.T) {
 			resp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "summary"})
 			require.NoError(t, err)
 
-			// Summary mode should not return flows (flows should be nil/empty)
+			// Summary mode should not return flows
 			assert.Empty(t, resp.Flows)
 			t.Logf("summary mode: %d aggregates, %d flows", len(resp.Aggregates), len(resp.Flows))
 		})
@@ -381,7 +380,7 @@ func TestIntegration_ProxyList(t *testing.T) {
 			resp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Method: "GET", Limit: 5})
 			require.NoError(t, err)
 
-			// List mode should not return aggregates (aggregates should be nil/empty)
+			// List mode should not return aggregates
 			assert.Empty(t, resp.Aggregates)
 			t.Logf("list mode: %d flows, %d aggregates", len(resp.Flows), len(resp.Aggregates))
 		})
@@ -394,7 +393,6 @@ func TestIntegration_FlowGet(t *testing.T) {
 	runForAllBackends(t, func(t *testing.T, client *mcpclient.Client) {
 		t.Helper()
 
-		// Get a flow ID first
 		listResp, err := client.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Method: "GET", Limit: 1})
 		require.NoError(t, err)
 

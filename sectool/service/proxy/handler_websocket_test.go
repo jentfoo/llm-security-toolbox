@@ -628,7 +628,7 @@ func TestEncodeWSFrame_LargePayloadLengthEncoding(t *testing.T) {
 	t.Parallel()
 
 	t.Run("16bit_length_boundary", func(t *testing.T) {
-		// Test payload length at 16-bit boundary (65535)
+		// Payload length at 16-bit boundary (65535)
 		payload := bytes.Repeat([]byte{'x'}, 65535)
 		frame := &wsFrame{
 			fin:     true,

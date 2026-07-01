@@ -14,6 +14,11 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
+// fakeRules is a no-op RuleSource returning an empty snapshot.
+type fakeRules struct{}
+
+func (fakeRules) RuleSnapshot(string) (uint64, []wire.Rule) { return 0, nil }
+
 func testManager(cfg Config) *Manager {
 	if cfg.HeartbeatInterval == 0 {
 		cfg.HeartbeatInterval = time.Hour // effectively disable unless overridden
@@ -24,7 +29,7 @@ func testManager(cfg Config) *Manager {
 	if cfg.ReservedNames == nil {
 		cfg.ReservedNames = []string{"http/1.1", "http/2", "websocket"}
 	}
-	return NewManager(cfg, &protocol.Registry{}, nil, nil, nil)
+	return NewManager(cfg, &protocol.Registry{}, newFakeFlows(), fakeCoreTools{}, fakeRules{})
 }
 
 // dialManager connects a client wire.Peer to the manager over net.Pipe. When
@@ -74,7 +79,6 @@ func TestManagerRegister(t *testing.T) {
 		res, err := register(t, p, baseParams("demo"))
 		require.Nil(t, err)
 		assert.Equal(t, wire.VersionMajor, res.ProtocolVersion.Major)
-		assert.Empty(t, res.AssignedSeams)
 		assert.Empty(t, res.RulesSnapshot)
 		_, perr := time.Parse(time.RFC3339Nano, res.ServerTime)
 		require.NoError(t, perr)

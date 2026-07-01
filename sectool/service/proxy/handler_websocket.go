@@ -165,7 +165,6 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 		return
 	}
 
-	// Read upstream response
 	resp, err := parseResponse(upstreamReader, req.Method)
 	if err != nil {
 		log.Printf("proxy: websocket upgrade response parse failed: %v", err)
@@ -173,9 +172,8 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 		return
 	}
 
-	// Check for 101 Switching Protocols
+	// Require 101 Switching Protocols
 	if resp.StatusCode != 101 {
-		// Apply response rules to error response
 		if h.ruleApplier != nil {
 			resp = h.ruleApplier.ApplyResponseRules(resp)
 		}
@@ -193,7 +191,7 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 		resp = h.ruleApplier.ApplyResponseRules(resp)
 	}
 
-	// Strip extensions from response (after rules, to ensure no compression)
+	// Strip extensions after rules, to ensure no compression
 	h.stripResponseExtensions(resp)
 
 	// Store upgrade handshake; frames reference its flow_id as their parent
@@ -331,7 +329,7 @@ func (p *wsProxy) proxyFrames(src *bufio.Reader, dst net.Conn, direction string,
 		// Set masking for output per RFC 6455
 		frame.masked = outputMasked
 		if outputMasked {
-			// Generate fresh random mask for outgoing masked frames
+			// Fresh random mask for outgoing masked frames
 			if _, err := io.ReadFull(rand.Reader, frame.mask[:]); err != nil {
 				p.close()
 				return
@@ -344,7 +342,7 @@ func (p *wsProxy) proxyFrames(src *bufio.Reader, dst net.Conn, direction string,
 			return
 		}
 
-		// Handle close frame (opcode 8)
+		// Handle close frame
 		if frame.opcode == 8 {
 			p.close()
 			return
@@ -489,7 +487,7 @@ func encodeWSFrame(frame *wsFrame) []byte {
 		_ = binary.Write(&buf, binary.BigEndian, uint64(length))
 	}
 
-	// Mask key and masked payload (if masked)
+	// Mask key and masked payload
 	if frame.masked {
 		buf.Write(frame.mask[:])
 		masked := make([]byte, length)

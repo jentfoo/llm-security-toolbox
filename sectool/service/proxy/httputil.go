@@ -45,7 +45,6 @@ func ExtractMethod(raw []byte) string {
 	if idx := bytes.IndexByte(raw, '\n'); idx >= 0 {
 		line = raw[:idx]
 	}
-	// Trim trailing CR if present
 	line = bytes.TrimRight(line, "\r")
 	// Extract method (first token before space)
 	if idx := bytes.IndexByte(line, ' '); idx > 0 {

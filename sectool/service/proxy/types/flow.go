@@ -47,9 +47,6 @@ type Flow struct {
 
 	// Annotations is open-ended typed metadata attached to the flow.
 	Annotations map[string]any `json:"annotations,omitempty" msgpack:"an,omitempty"`
-
-	// SizeHint is the content length when known, for fast list pagination.
-	SizeHint int `json:"size_hint,omitempty" msgpack:"sh,omitempty"`
 }
 
 // ExtractMeta builds HistoryMeta from a Flow using its accessor methods.

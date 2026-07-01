@@ -101,9 +101,8 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		return errResult, nil
 	}
 
-	// A flow owned by a connected sidecar replays through that adapter, which
-	// re-encodes/re-wraps and sends. Built-in HTTP flows fall through to the
-	// native path below.
+	// Sidecar-owned flows replay through their adapter (re-encode/re-wrap/send);
+	// built-in HTTP flows fall through to the native path below
 	if resolved.Adapter != "" && m.sidecars != nil && m.sidecars.HasAdapter(resolved.Adapter) {
 		return m.replaySidecar(ctx, req, resolved.Adapter, flowID)
 	}
@@ -169,7 +168,14 @@ func (m *mcpServer) replaySidecar(ctx context.Context, req mcp.CallToolRequest, 
 
 	out := protocol.ReplaySendResponse{FlowID: res.NewFlowIDs[0]}
 	if r := res.Response; r != nil {
-		headers := formatWireHeaders(r.Headers)
+		var hb strings.Builder
+		for _, h := range r.Headers {
+			hb.WriteString(h.Name)
+			hb.WriteString(": ")
+			hb.WriteString(h.Value)
+			hb.WriteString("\r\n")
+		}
+		headers := hb.String()
 		out.ResponseDetails = protocol.ResponseDetails{
 			Status:      r.StatusCode,
 			RespHeaders: headers,
@@ -196,12 +202,22 @@ func buildMutations(req mcp.CallToolRequest) []wire.Mutation {
 			muts = append(muts, wire.Mutation{Op: "set_header", Name: name, Value: value})
 		}
 	}
-	// Sorted so the emitted mutation array is deterministic across calls.
+	// Sorted for a deterministic mutation array across calls
 	setJSON := getJSONArg(req)
 	jsonPaths := bulk.MapKeysSlice(setJSON)
 	slices.Sort(jsonPaths)
 	for _, path := range jsonPaths {
-		muts = append(muts, wire.Mutation{Op: "set_json", Name: path, Value: jsonValueString(setJSON[path])})
+		// strings pass through (adapter-side type inference applies); others are JSON-encoded
+		val := setJSON[path]
+		sv, ok := val.(string)
+		if !ok {
+			if b, err := json.Marshal(val); err == nil {
+				sv = string(b)
+			} else {
+				sv = fmt.Sprint(val)
+			}
+		}
+		muts = append(muts, wire.Mutation{Op: "set_json", Name: path, Value: sv})
 	}
 	for _, path := range req.GetStringSlice("remove_json", nil) {
 		muts = append(muts, wire.Mutation{Op: "remove_json", Name: path})
@@ -238,18 +254,6 @@ func buildMutations(req mcp.CallToolRequest) []wire.Mutation {
 	return muts
 }
 
-// jsonValueString renders a set_json value as the string ApplyMutations expects:
-// strings pass through (adapter-side type inference applies), others are JSON-encoded.
-func jsonValueString(v interface{}) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	if b, err := json.Marshal(v); err == nil {
-		return string(b)
-	}
-	return fmt.Sprint(v)
-}
-
 // splitPair splits s on the first sep into a trimmed name and value.
 func splitPair(s, sep string) (name, value string, ok bool) {
 	idx := strings.Index(s, sep)
@@ -257,18 +261,6 @@ func splitPair(s, sep string) (name, value string, ok bool) {
 		return "", "", false
 	}
 	return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+len(sep):]), true
-}
-
-// formatWireHeaders renders a wire header list as CRLF-terminated header lines.
-func formatWireHeaders(headers []wire.Header) string {
-	var b strings.Builder
-	for _, h := range headers {
-		b.WriteString(h.Name)
-		b.WriteString(": ")
-		b.WriteString(h.Value)
-		b.WriteString("\r\n")
-	}
-	return b.String()
 }
 
 func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

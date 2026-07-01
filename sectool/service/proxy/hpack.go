@@ -142,7 +142,6 @@ func (h *h2Conn) decodeHeaders(block []byte) (pseudos map[string]string, headers
 
 	for _, f := range fields {
 		if len(f.Name) > 0 && f.Name[0] == ':' {
-			// Pseudo-header
 			pseudos[f.Name] = f.Value
 		} else {
 			headers = append(headers, types.Header{Name: f.Name, Value: f.Value})
@@ -174,9 +173,7 @@ func (h *h2Conn) encodeHeaders(pseudos map[string]string, headers types.Headers)
 
 	h.hpackBuf.Reset()
 
-	// Encode pseudo-headers first (order matters per spec)
-	// Canonical order: :method, :scheme, :authority, :path for requests
-	// :status for responses
+	// Pseudo-headers first; canonical order per spec: :method, :scheme, :authority, :path (requests), :status (responses)
 	pseudoOrder := []string{":method", ":scheme", ":authority", ":path", ":status"}
 	for _, name := range pseudoOrder {
 		if value, ok := pseudos[name]; ok {
@@ -195,8 +192,7 @@ func (h *h2Conn) encodeHeaders(pseudos map[string]string, headers types.Headers)
 		}
 	}
 
-	// Encode regular headers
-	// HTTP/2 requires lowercase header names and forbids connection-specific headers
+	// HTTP/2 requires lowercase names and forbids connection-specific headers
 	for _, hdr := range headers {
 		lowerName := strings.ToLower(hdr.Name)
 
@@ -210,8 +206,7 @@ func (h *h2Conn) encodeHeaders(pseudos map[string]string, headers types.Headers)
 			continue
 		}
 
-		// Host header is redundant in HTTP/2 (:authority is the authority).
-		// Strip it to avoid odd upstream behavior if it differs from :authority.
+		// Host is redundant in HTTP/2 (:authority); strip to avoid upstream mismatch
 		if lowerName == "host" {
 			continue
 		}
@@ -224,9 +219,8 @@ func (h *h2Conn) encodeHeaders(pseudos map[string]string, headers types.Headers)
 	return slices.Clone(h.hpackBuf.Bytes()), nil
 }
 
-// updateSettings updates cached settings from peer (except INITIAL_WINDOW_SIZE).
-// Note: INITIAL_WINDOW_SIZE is handled by updateSendWindowFromSettings() under flowMu
-// to avoid data races with flow control logic that reads initialWindowSize.
+// updateSettings updates cached settings from peer. INITIAL_WINDOW_SIZE is
+// excluded here; it is applied by updateSendWindowFromSettings.
 func (h *h2Conn) updateSettings(settings []http2.Setting) {
 	h.settingsMu.Lock()
 	defer h.settingsMu.Unlock()

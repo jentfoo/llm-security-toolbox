@@ -88,7 +88,7 @@ func TestRuleCacheApplyBody(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newRuleCache("alpha")
+			c := &RuleCache{adapter: "alpha"}
 			require.NoError(t, c.replace(1, tc.rules))
 			out, fired := c.ApplyBody([]byte(tc.input), tc.ruleType)
 			assert.Equal(t, tc.want, string(out))
@@ -100,7 +100,7 @@ func TestRuleCacheApplyBody(t *testing.T) {
 func TestRuleCacheApplyHeaders(t *testing.T) {
 	t.Parallel()
 
-	c := newRuleCache("alpha")
+	c := &RuleCache{adapter: "alpha"}
 	require.NoError(t, c.replace(1, []wire.Rule{
 		{RuleID: "rewrite", Type: wire.RuleTypeRequestHeader, Find: "secret: a", Replace: "Secret: b"},
 		{RuleID: "append", Type: wire.RuleTypeRequestHeader, Replace: "X-Added: 1"},
@@ -120,7 +120,7 @@ func TestRuleCacheApplyHeaders(t *testing.T) {
 func TestRuleCacheReplaceRejectsBadRegex(t *testing.T) {
 	t.Parallel()
 
-	c := newRuleCache("alpha")
+	c := &RuleCache{adapter: "alpha"}
 	require.NoError(t, c.replace(1, []wire.Rule{{RuleID: "ok", Type: wire.RuleTypeRequestBody, Find: "a", Replace: "b"}}))
 
 	err := c.replace(2, []wire.Rule{{RuleID: "bad", Type: wire.RuleTypeRequestBody, IsRegex: true, Find: "("}})

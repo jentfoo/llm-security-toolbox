@@ -18,14 +18,6 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
-// coreToolNames returns the static core tool names captured at construction, used
-// to reject a colliding sidecar tool name at registration. Connected sidecars'
-// tool names are checked separately against the live registry, so this stays the
-// genuine core set even after sidecar tools are registered.
-func (m *mcpServer) coreToolNames() []string {
-	return m.coreTools
-}
-
 // syncSidecarTools recomposes the advertised tool list to match the connected
 // adapter set: every connected sidecar's tools are registered, disconnected ones
 // removed, and the core tools gain sidecar-conditional params (proxy_poll
@@ -55,7 +47,7 @@ func (m *mcpServer) syncSidecarTools() {
 			}
 			schema, err := compileToolSchema(schemaRaw)
 			if err != nil {
-				// Expose the tool but skip validation when its schema does not compile.
+				// Expose the tool but skip validation when its schema does not compile
 				log.Printf("sidecar tool %q (%s): input_schema does not compile: %v", tool.Name, adapter, err)
 			}
 			add = append(add, server.ServerTool{
@@ -76,8 +68,15 @@ func (m *mcpServer) syncSidecarTools() {
 
 	switch {
 	case len(names) > 0:
-		m.server.AddTool(m.proxyPollTool(sidecarPollParams()...), m.handleProxyPoll)
-		m.server.AddTool(m.proxyRuleAddTool(ruleAdapterParam(names)), m.handleProxyRuleAdd)
+		pollParams := []mcp.ToolOption{
+			mcp.WithString("adapter", mcp.Description("Filter by emitting adapter name glob (*, ?), e.g. 'sectool' or a sidecar name")),
+			mcp.WithString("protocol_tag", mcp.Description("Filter by protocol tag glob (*, ?), e.g. 'http/1.1' or 'mqtt/3.publish'")),
+		}
+		ruleParam := mcp.WithString("adapter", mcp.Description(fmt.Sprintf(
+			"Adapter scope: empty applies to all adapters; %q targets the in-process proxy and Burp; or a sidecar name (%s)",
+			types.AdapterScopeCore, strings.Join(names, ", "))))
+		m.server.AddTool(m.proxyPollTool(pollParams...), m.handleProxyPoll)
+		m.server.AddTool(m.proxyRuleAddTool(ruleParam), m.handleProxyRuleAdd)
 		m.sidecarCoreParams = true
 	case m.sidecarCoreParams:
 		// last sidecar disconnected: restore the byte-identical core schema
@@ -154,22 +153,6 @@ func compileToolSchema(raw json.RawMessage) (*jsonschema.Schema, error) {
 		return nil, err
 	}
 	return c.Compile("tool.json")
-}
-
-// sidecarPollParams are the proxy_poll filters exposed only when a sidecar is connected.
-func sidecarPollParams() []mcp.ToolOption {
-	return []mcp.ToolOption{
-		mcp.WithString("adapter", mcp.Description("Filter by emitting adapter name glob (*, ?), e.g. 'sectool' or a sidecar name")),
-		mcp.WithString("protocol_tag", mcp.Description("Filter by protocol tag glob (*, ?), e.g. 'http/1.1' or 'mqtt/3.publish'")),
-	}
-}
-
-// ruleAdapterParam is the proxy_rule_add adapter scope, exposed only when a sidecar
-// is connected. Empty applies to all adapters.
-func ruleAdapterParam(names []string) mcp.ToolOption {
-	return mcp.WithString("adapter", mcp.Description(fmt.Sprintf(
-		"Adapter scope: empty applies to all adapters; %q targets the in-process proxy and Burp; or a sidecar name (%s)",
-		types.AdapterScopeCore, strings.Join(names, ", "))))
 }
 
 // sidecarToolsSection lists connected sidecars' tools for the workflow

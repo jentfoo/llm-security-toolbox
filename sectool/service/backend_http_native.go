@@ -69,7 +69,7 @@ type nativeStoredRule struct {
 	compiled *regexp.Regexp `msgpack:"-"`
 }
 
-// Compile-time checks that NativeProxyBackend implements interfaces.
+// Compile-time interface checks
 var _ HttpBackend = (*NativeProxyBackend)(nil)
 var _ types.RuleApplier = (*NativeProxyBackend)(nil)
 var _ proxy.ResponseInterceptor = (*NativeProxyBackend)(nil)
@@ -979,9 +979,7 @@ func equalFoldASCIIAt(input []byte, pos int, match string) bool {
 }
 
 // replaceCaseInsensitive replaces all occurrences of match in input using ASCII-only case folding.
-// Scanning the original buffer (not a Unicode-lowercased copy) keeps match length identical in both
-// spaces, so indices can't drift or run past the input. Non-ASCII bytes fold case-sensitively, which
-// is correct for HTTP headers.
+// Non-ASCII bytes fold case-sensitively, which is correct for HTTP headers.
 func replaceCaseInsensitive(input []byte, match, replace string) []byte {
 	if match == "" {
 		return input

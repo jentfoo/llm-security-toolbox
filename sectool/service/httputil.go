@@ -342,7 +342,7 @@ func isBinaryContentType(contentType string) bool {
 	if contentType == "" {
 		return false
 	}
-	// Strip parameters (e.g. "; charset=utf-8")
+	// Strip parameters
 	mediaType, _, _ := strings.Cut(contentType, ";")
 	mediaType = strings.TrimSpace(strings.ToLower(mediaType))
 
@@ -957,7 +957,6 @@ func validateRequest(raw []byte) []protocol.ValidationIssue {
 
 // validateContentLength checks if Content-Length header matches actual body length.
 func validateContentLength(headers, body []byte) string {
-	// Extract Content-Length header
 	clMatch := contentLengthValueRe.FindSubmatch(headers)
 	if clMatch == nil {
 		return "" // No Content-Length header, no validation needed
@@ -1056,7 +1055,6 @@ func extractRequestPath(raw []byte) string {
 	if idx := bytes.IndexByte(raw, '\n'); idx >= 0 {
 		line = raw[:idx]
 	}
-	// Trim trailing CR if present
 	line = bytes.TrimRight(line, "\r")
 	// Extract request-target (second token: METHOD <path> HTTP/1.x)
 	parts := bytes.SplitN(line, []byte(" "), 3)

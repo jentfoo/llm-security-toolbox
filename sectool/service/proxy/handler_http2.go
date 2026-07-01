@@ -98,8 +98,7 @@ type h2Stream struct {
 	respHeaders types.Headers
 	respBody    bytes.Buffer // history capture (limited to maxBodyBytes)
 
-	// Full body buffers for body rule application (when rules exist)
-	// These hold the complete body (up to maxBodyBytes) for modification
+	// Full body buffers holding the complete body (up to maxBodyBytes) for rule application
 	reqBodyFull  bytes.Buffer
 	respBodyFull bytes.Buffer
 
@@ -252,7 +251,6 @@ func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls
 		return
 	}
 
-	// Send preface to upstream
 	if _, err := upstreamConn.Write([]byte(h2Preface)); err != nil {
 		log.Printf("h2: failed to send upstream preface: %v", err)
 		return
@@ -275,10 +273,8 @@ func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls
 	go proxy.writeFrames(proxy.upstream, upstreamConn)
 	go proxy.writePump(proxy.client, proxy.upstream) // upstream -> client DATA
 
-	// Start cleanup goroutine
 	go proxy.cleanupStaleStreams()
 
-	// Wait for completion
 	proxy.wg.Wait()
 }
 
@@ -720,7 +716,6 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 		return
 	}
 
-	// Write HEADERS frame
 	p.writeHeadersFrame(buf, dst, streamID, encoded, endStream)
 
 	// Check if stream is complete (after unlock to avoid holding lock during history store)
@@ -1491,7 +1486,7 @@ func (p *h2Proxy) storeStreamInHistory(stream *h2Stream) {
 	}
 	_, port := ParseAuthority(stream.authority, scheme)
 
-	// Fold HTTP/2 pseudo-headers and the stream id ahead of the regular headers.
+	// Fold HTTP/2 pseudo-headers and the stream id ahead of regular headers
 	reqHeaders := make(types.Headers, 0, len(stream.reqHeaders)+5)
 	reqHeaders = append(reqHeaders,
 		types.Header{Name: ":method", Value: stream.method},

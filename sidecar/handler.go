@@ -6,17 +6,16 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
-// Registration declares the adapter's identity and capabilities for the
-// register handshake. ProtocolVersion defaults to the SDK's compiled contract
-// version when left zero.
+// Registration declares the adapter's identity and capabilities for the register handshake.
 type Registration struct {
-	Name            string
-	Version         string
-	Protocols       []string
-	Capabilities    wire.Capabilities
-	MCPTools        []wire.MCPTool
-	InstanceID      string
-	Resume          bool
+	Name         string
+	Version      string
+	Protocols    []string
+	Capabilities wire.Capabilities
+	MCPTools     []wire.MCPTool
+	InstanceID   string
+	Resume       bool
+	// ProtocolVersion defaults to the SDK's compiled contract version when left zero.
 	ProtocolVersion wire.ProtocolVersion
 }
 

@@ -24,7 +24,7 @@ type http1Handler struct {
 	maxBodyBytes        int
 	ruleApplier         types.RuleApplier   // optional, nil means no rules applied
 	responseInterceptor ResponseInterceptor // optional, nil means no interception
-	reg                 *protocol.Registry  // optional, for upgrade-claim dispatch
+	reg                 *protocol.Registry
 	timeouts            TimeoutConfig
 }
 
@@ -34,7 +34,7 @@ func (h *http1Handler) Handle(ctx context.Context, clientConn net.Conn, clientRe
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Close connection when context is cancelled to unblock blocking reads
+	// Close connection on cancel to unblock blocking reads
 	go func() {
 		<-connCtx.Done()
 		_ = clientConn.Close()
@@ -75,11 +75,10 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		return false
 	}
 
-	// Rewrite proxy-form to origin-form
 	h.rewriteToOriginForm(req, target)
 	req.Protocol = types.ProtocolHTTP11
 
-	// Check for response interception before rules and upstream dial
+	// Response interception before rules and upstream dial
 	if h.responseInterceptor != nil {
 		if intercepted := h.responseInterceptor.InterceptRequest(
 			target.Hostname, target.Port, PathWithoutQuery(req.Path), req.Method,
@@ -94,17 +93,15 @@ func (h *http1Handler) handleSinglePlainHTTP(ctx context.Context, clientConn net
 		}
 	}
 
-	// Apply request rules BEFORE WebSocket detection to affect Upgrade header, etc
+	// Apply request rules before upgrade detection to affect the Upgrade header
 	if h.ruleApplier != nil {
 		req = h.ruleApplier.ApplyRequestRules(req)
 	}
 
-	if h.reg != nil {
-		uc := &protocol.UpgradeClaimCtx{Req: req, Target: target, Signal: "http_101"}
-		if a, ok := h.reg.ClaimUpgrade(uc); ok {
-			a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{ClientConn: clientConn, ClientReader: clientReader})
-			return false // adapter takes over
-		}
+	uc := &protocol.UpgradeClaimCtx{Req: req, Target: target, Signal: "http_101"}
+	if a, ok := h.reg.ClaimUpgrade(uc); ok {
+		a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{ClientConn: clientConn, ClientReader: clientReader})
+		return false // adapter takes over
 	}
 
 	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
@@ -227,7 +224,7 @@ func (h *http1Handler) parseHostPort(hostPort string, usesHTTPS bool) (*types.Ta
 	host, portStr, err := net.SplitHostPort(hostPort)
 	if err != nil {
 		// No port specified, use default
-		// Handle IPv6 addresses with brackets but no port ("[::1]")
+		// Handle bracketed IPv6 with no port ("[::1]")
 		host = strings.TrimSuffix(strings.TrimPrefix(hostPort, "["), "]")
 		if usesHTTPS {
 			portStr = "443"
@@ -335,7 +332,7 @@ func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn n
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Close connections when context is cancelled to unblock blocking reads
+	// Close connections on cancel to unblock blocking reads
 	// parseRequest doesn't accept context, so closing is the only way to interrupt it
 	go func() {
 		<-connCtx.Done()
@@ -397,17 +394,15 @@ func (h *http1Handler) handleSingleTLS(ctx context.Context, clientConn, upstream
 		req = h.ruleApplier.ApplyRequestRules(req)
 	}
 
-	if h.reg != nil {
-		uc := &protocol.UpgradeClaimCtx{Req: req, Target: target, Signal: "http_101"}
-		if a, ok := h.reg.ClaimUpgrade(uc); ok {
-			a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{
-				ClientConn:     clientConn,
-				ClientReader:   clientReader,
-				UpstreamConn:   upstreamConn,
-				UpstreamReader: upstreamReader,
-			})
-			return false // adapter takes over
-		}
+	uc := &protocol.UpgradeClaimCtx{Req: req, Target: target, Signal: "http_101"}
+	if a, ok := h.reg.ClaimUpgrade(uc); ok {
+		a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{
+			ClientConn:     clientConn,
+			ClientReader:   clientReader,
+			UpstreamConn:   upstreamConn,
+			UpstreamReader: upstreamReader,
+		})
+		return false // adapter takes over
 	}
 
 	if h.timeouts.WriteTimeout > 0 {

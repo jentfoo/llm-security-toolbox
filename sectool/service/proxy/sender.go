@@ -233,7 +233,6 @@ func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*Send
 
 // sendRequestWithProtocol sends a single request with protocol preference.
 func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *types.RawHTTP1Request, target types.Target, protocol string) (*types.RawHTTP1Response, error) {
-	// Validate protocol value
 	switch protocol {
 	case "", types.ProtocolHTTP11, types.ProtocolH2:
 		// Valid values
@@ -339,12 +338,10 @@ func (s *Sender) applyModifications(req *types.RawHTTP1Request, mods *Modificati
 	// If so, we won't auto-update Content-Length on body changes.
 	userSetContentLength := ContainsHeader(mods.SetHeaders, "Content-Length")
 
-	// Method override
 	if mods.Method != "" {
 		req.Method = mods.Method
 	}
 
-	// Query parameter modifications
 	if len(mods.SetParams) > 0 || len(mods.RemoveParams) > 0 {
 		applyQueryModifications(req, mods)
 	}
@@ -611,7 +608,6 @@ func queryFromPath(p string) string {
 // sendH2Request sends a request using HTTP/2 protocol.
 // The connection must already be established with ALPN negotiating "h2".
 func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *types.RawHTTP1Request, target types.Target) (*types.RawHTTP1Response, error) {
-	// Create HTTP/2 connection wrapper
 	h2c := newH2Conn(conn)
 
 	// Create framer for writing
@@ -680,7 +676,6 @@ func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *types.Ra
 		return nil, err
 	}
 
-	// Initialize stream send window
 	h2c.initStreamSendWindow(streamID)
 
 	// Buffer frames read during flow control waiting (may include early responses)

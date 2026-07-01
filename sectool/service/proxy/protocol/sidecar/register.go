@@ -12,7 +12,7 @@ import (
 
 // handleRegister validates and stores a registration, returning the new record
 // and the result, or an error.
-func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.RegisterParams) (*Record, *wire.RegisterResult, *wire.Error) {
+func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Record, *wire.RegisterResult, *wire.Error) {
 	if p.Name == "" {
 		return nil, nil, wire.NewError(wire.CodeRegistrationRejected, "register: name is required")
 	}
@@ -45,9 +45,8 @@ func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.Re
 		}
 	}
 
-	// Handle an existing record for this name: a recognized reconnect or a stale
-	// (closed) record is replaced; a live record with a different instance is a
-	// duplicate-name conflict.
+	// Existing record for this name: a recognized reconnect or stale (closed) record
+	// is replaced; a live record with a different instance is a duplicate-name conflict
 	if existing, ok := m.records[p.Name]; ok {
 		reconnect := p.InstanceID != "" && existing.InstanceID == p.InstanceID
 		switch {
@@ -71,17 +70,16 @@ func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.Re
 
 	now := m.now()
 	rec := &Record{
-		Name:          p.Name,
-		Version:       p.Version,
-		ProtoVersion:  wire.ProtocolVersion{Major: wire.VersionMajor, Minor: effMinor},
-		Protocols:     p.Protocols,
-		Capabilities:  p.Capabilities,
-		MCPTools:      p.MCPTools,
-		InstanceID:    p.InstanceID,
-		AssignedSeams: assignedSeams(p.Capabilities),
-		peer:          peer,
-		resume:        p.Resume,
-		liveness:      Liveness{LastActivity: now, LastPongRecv: now, SocketFingerprint: fingerprint},
+		Name:         p.Name,
+		Version:      p.Version,
+		ProtoVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: effMinor},
+		Protocols:    p.Protocols,
+		Capabilities: p.Capabilities,
+		MCPTools:     p.MCPTools,
+		InstanceID:   p.InstanceID,
+		peer:         peer,
+		resume:       p.Resume,
+		liveness:     Liveness{LastPongRecv: now},
 	}
 	rec.healthy.Store(true)
 	rec.bridge = newBridge(rec, m.flows)
@@ -102,16 +100,11 @@ func (m *Manager) handleRegister(peer *wire.Peer, fingerprint string, p *wire.Re
 		m.reorderUpgradeClaims()
 	}
 
-	var snapshot []wire.Rule
-	if m.rules != nil {
-		var version uint64
-		version, snapshot = m.rules.RuleSnapshot(rec.Name)
-		rec.appliedVersion.Store(version)
-	}
+	version, snapshot := m.rules.RuleSnapshot(rec.Name)
+	rec.appliedVersion.Store(version)
 
 	return rec, &wire.RegisterResult{
 		ProtocolVersion: rec.ProtoVersion,
-		AssignedSeams:   rec.AssignedSeams,
 		RulesSnapshot:   snapshot,
 		ServerTime:      now.Format(time.RFC3339Nano),
 	}, nil
@@ -140,24 +133,8 @@ func (m *Manager) reorderUpgradeClaims() {
 	for _, r := range recs {
 		m.registry.RemoveUpgrade(r.Name)
 	}
-	// InsertUpgrade prepends, so inserting least-specific first leaves the
-	// most-specific at the front.
+	// InsertUpgrade prepends, so inserting least-specific first leaves the most-specific at the front
 	for i := len(recs) - 1; i >= 0; i-- {
 		m.registry.InsertUpgrade(recs[i].bridge)
 	}
-}
-
-// assignedSeams lists the capability claims that were accepted.
-func assignedSeams(c wire.Capabilities) []string {
-	seams := []string{}
-	if c.EarlyClaim != nil {
-		seams = append(seams, "early_claim")
-	}
-	if c.UpgradeClaim != nil {
-		seams = append(seams, "upgrade_claim")
-	}
-	if c.InjectionTarget != nil {
-		seams = append(seams, "injection_target")
-	}
-	return seams
 }

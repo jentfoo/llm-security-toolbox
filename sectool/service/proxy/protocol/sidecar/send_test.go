@@ -81,7 +81,7 @@ func managerWithFlows(flows FlowSink) *Manager {
 		HeartbeatInterval: time.Hour,
 		HeartbeatTimeout:  time.Hour,
 		ReservedNames:     []string{"http/1.1", "http/2", "websocket"},
-	}, &protocol.Registry{}, flows, nil, nil)
+	}, &protocol.Registry{}, flows, fakeCoreTools{}, fakeRules{})
 }
 
 // dialManagerReq connects a client peer that answers ping and dispatches inbound

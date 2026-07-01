@@ -42,10 +42,6 @@ func (s *session) handlePushFlow(p *wire.Flow) (any, *wire.Error) {
 	if rec == nil {
 		return nil, wire.NewError(wire.CodeNotRegistered, "push_flow: register first")
 	}
-	if s.m.flows == nil {
-		return nil, wire.NewError(wire.CodeFlowRejected, "push_flow: flow store unavailable").
-			WithData(&wire.ErrorData{Adapter: rec.Name})
-	}
 
 	// Re-targeting an existing flow: two-phase completion or session/stream teardown
 	if p.FlowID != "" {
@@ -63,9 +59,9 @@ func (s *session) handlePushFlow(p *wire.Flow) (any, *wire.Error) {
 
 	flow := wireFlowToFlow(rec, p, s.m.now())
 	if !s.m.flows.ShouldCapture(flow) {
-		// Excluded by the operator's capture filter: not stored, so no flow_id is
-		// minted. An empty flow_id (with no error) signals "not captured"; the
-		// sidecar must not attempt two-phase completion against it.
+		// Excluded by the operator's capture filter: not stored, no flow_id minted; an
+		// empty flow_id (no error) signals "not captured", so the sidecar must not
+		// attempt two-phase completion against it
 		return wire.PushFlowResult{}, nil
 	}
 	flowID := s.m.flows.Store(flow)
@@ -78,11 +74,7 @@ func (s *session) handleCoreQuery(ctx context.Context, p *wire.CoreQueryParams) 
 	if rec == nil {
 		return nil, wire.NewError(wire.CodeNotRegistered, "core_query: register first")
 	}
-	if s.m.coreQuery == nil {
-		return nil, wire.NewError(wire.CodeCoreQueryRejected, "core_query: unavailable").
-			WithData(&wire.ErrorData{Adapter: rec.Name})
-	}
-	// The querier enforces the read-only tool allowlist and rejects anything else
+	// Querier enforces the read-only tool allowlist, rejecting anything else
 	content, isErr, err := s.m.coreQuery.CoreQuery(ctx, p.Tool, p.Params)
 	if err != nil {
 		return nil, wire.NewError(wire.CodeCoreQueryRejected, "core_query: "+err.Error()).
@@ -208,7 +200,7 @@ func flowMessageToMessage(m *wire.FlowMessage) *types.Message {
 		return nil
 	}
 	// Default the HTTP version so the HTTP-shaped envelope serializes into a
-	// parseable request/status line for the read-side tools.
+	// parseable request/status line for the read-side tools
 	msg := &types.Message{
 		Method:     m.Method,
 		Path:       m.Path,

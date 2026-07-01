@@ -54,7 +54,7 @@ Results include both proxy-captured traffic (source=proxy) and replay-sent traff
 		mcp.WithString("since", mcp.Description(sinceDesc)),
 		mcp.WithString("exclude_host", mcp.Description("Exclude hosts matching glob (*, ?)")),
 		mcp.WithString("exclude_path", mcp.Description("Exclude paths matching glob (*, ?)")),
-		// adapter/protocol_tag filters are appended via extra in syncSidecarTools when a sidecar is connected
+		// adapter/protocol_tag filters appended via extra in syncSidecarTools when a sidecar is connected
 		mcp.WithString("parent_flow_id", mcp.Description("Filter to child flows of this parent flow_id (stream children, session inner flows)")),
 		mcp.WithNumber("limit", mcp.Description("Max results to return")),
 		mcp.WithNumber("offset", mcp.Description("Skip first N results (flows mode, applied after filtering)")),
@@ -107,7 +107,7 @@ To modify a rule, delete it with proxy_rule_delete and recreate.`),
 		mcp.WithString("replace", mcp.Description("Replacement text. Use without find to append instead of replace.")),
 		mcp.WithString("label", mcp.Description("Optional unique label (usable as rule_id)")),
 		mcp.WithBoolean("is_regex", mcp.Description("Treat find as regex pattern (RE2)")),
-		// adapter scope param is appended via extra in syncSidecarTools when a sidecar is connected
+		// adapter scope param appended via extra in syncSidecarTools when a sidecar is connected
 	}, extra...)...)
 }
 
@@ -296,8 +296,8 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	needsFullText := listReq.SearchHeader != "" || listReq.SearchBody != ""
-	// parent_flow_id targets nested children, which are excluded from the top-level
-	// listing and surfaced (in emission order) only through this dedicated path.
+	// parent_flow_id targets nested children: excluded from the top-level listing,
+	// surfaced in emission order only through this dedicated path
 	var allEntries []flowEntry
 	var err error
 	if listReq.ParentFlowID != "" {
@@ -916,7 +916,7 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID st
 			continue
 		}
 		// parent_flow_id is a source selector, not a row filter: when set, entries
-		// already come from fetchProxyChildren (only that parent's children).
+		// already come from fetchProxyChildren (only that parent's children)
 		if searchHeaderRe != nil || searchBodyRe != nil {
 			if !matchesFlowSearch([]byte(e.request), []byte(e.response), searchHeaderRe, searchBodyRe) {
 				continue

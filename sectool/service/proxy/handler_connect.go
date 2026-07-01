@@ -17,7 +17,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
-// ALPN protocol identifiers (RFC 7301): the on-the-wire tokens exchanged during TLS negotiation.
+// ALPN protocol identifiers (RFC 7301): on-the-wire tokens exchanged during TLS negotiation
 const (
 	alpnH2    = "h2"
 	alpnHTTP1 = "http/1.1"
@@ -32,9 +32,8 @@ type connectHandler struct {
 	history      *HistoryStore
 	maxBodyBytes int
 
-	// Server capability cache: host:port -> negotiated protocol ("h2" or "http/1.1")
-	// Avoids repeated probe latency for the same server
-	// TODO - Consider adding a 30-minute TTL on cache entries for long-running sessions
+	// Server capability cache: host:port -> negotiated protocol; avoids repeated probe latency
+	// TODO - Consider a 30-minute TTL on cache entries for long-running sessions
 	capsMu     sync.RWMutex
 	serverCaps map[string]string
 
@@ -76,24 +75,21 @@ func (h *connectHandler) Handle(ctx context.Context, clientConn net.Conn, client
 		return
 	}
 
-	// A connect-signal sidecar may claim the established tunnel before TLS, taking
-	// the raw post-CONNECT bytes.
-	if h.reg != nil {
-		hostPort := net.JoinHostPort(target.Hostname, strconv.Itoa(target.Port))
-		uc := &protocol.UpgradeClaimCtx{
-			Req: &types.RawHTTP1Request{
-				Method:  "CONNECT",
-				Path:    hostPort,
-				Version: "HTTP/1.1",
-				Headers: []types.Header{{Name: "Host", Value: hostPort}},
-			},
-			Target: target,
-			Signal: "connect",
-		}
-		if a, ok := h.reg.ClaimUpgrade(uc); ok {
-			a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{ClientConn: clientConn, ClientReader: clientReader})
-			return
-		}
+	// Connect-signal sidecar may claim the established tunnel before TLS, taking the raw post-CONNECT bytes
+	hostPort := net.JoinHostPort(target.Hostname, strconv.Itoa(target.Port))
+	uc := &protocol.UpgradeClaimCtx{
+		Req: &types.RawHTTP1Request{
+			Method:  "CONNECT",
+			Path:    hostPort,
+			Version: "HTTP/1.1",
+			Headers: []types.Header{{Name: "Host", Value: hostPort}},
+		},
+		Target: target,
+		Signal: "connect",
+	}
+	if a, ok := h.reg.ClaimUpgrade(uc); ok {
+		a.ServeUpgrade(ctx, uc, protocol.UpgradeConns{ClientConn: clientConn, ClientReader: clientReader})
+		return
 	}
 
 	h.handleTLS(ctx, clientConn, clientReader, target)
@@ -134,7 +130,7 @@ func (h *connectHandler) parseConnectRequest(reader *bufio.Reader) (*types.Targe
 		return nil, fmt.Errorf("invalid port: %s", portStr)
 	}
 
-	// Read and discard remaining headers until empty line
+	// discard remaining headers until empty line
 	for {
 		headerLine, readErr := reader.ReadString('\n')
 		if readErr != nil {
@@ -155,8 +151,9 @@ func (h *connectHandler) parseConnectRequest(reader *bufio.Reader) (*types.Targe
 	}, nil
 }
 
-// handleTLS performs TLS handshake with delayed protocol probing.
-// The probe happens inside GetConfigForClient to ensure protocol matching.
+// handleTLS performs the client TLS handshake and routes the decrypted
+// post-CONNECT stream by negotiated protocol. Upstream protocol probing is
+// deferred until the client hello is seen so the presented ALPN can be matched.
 func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader, target *types.Target) {
 	targetAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
 
@@ -165,9 +162,8 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 	var negotiatedProto string
 	var probeErr error
 	var sni string
-	// tlsBridge is set when a sidecar claims this connection by SNI/target; sectool
-	// then terminates TLS with the fake CA and hands it the decrypted stream with no
-	// upstream dial.
+	// tlsBridge set when a sidecar claims by SNI/target: sectool terminates TLS with
+	// the fake CA and hands it the decrypted stream, no upstream dial
 	var tlsBridge protocol.TLSEarlyAdapter
 
 	// Create TLS config with GetConfigForClient for delayed protocol probing
@@ -184,7 +180,7 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 				log.Printf("proxy: SNI mismatch - CONNECT target=%s, SNI=%s (possible domain fronting)", target.Hostname, sni)
 			}
 
-			// A sidecar tls.terminate claim takes precedence: skip the upstream dial.
+			// A sidecar tls.terminate claim takes precedence: skip the upstream dial
 			if b, ok := h.reg.MatchTLS(sni, target.Hostname, target.Port); ok {
 				tlsBridge = b
 				cert, certErr := h.certManager.GetCertificate(sni)
@@ -236,9 +232,8 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 		return
 	}
 
-	// A sidecar claimed the connection: hand it the decrypted stream. The decrypted
-	// matchers may still decline, in which case we dial upstream now and fall through
-	// to the HTTP path.
+	// Sidecar claimed the connection: hand it the decrypted stream; decrypted matchers
+	// may still decline, then we dial upstream and fall through to the HTTP path
 	if tlsBridge != nil {
 		c := &protocol.EarlyClaimCtx{
 			TLSTerminated: true,
@@ -251,9 +246,8 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 			_ = clientTLS.Close()
 			return
 		}
-		// The client handshake already completed with no ALPN (the claim cert offered
-		// none), so the client speaks HTTP/1.1; dial upstream with no ALPN too to keep
-		// both ends on HTTP/1.1 rather than risk an h2/h1 split.
+		// Client handshake completed with no ALPN (claim cert offered none), so client
+		// speaks HTTP/1.1; dial upstream with no ALPN too to avoid an h2/h1 split
 		var err error
 		if upstreamConn, negotiatedProto, err = h.probeOrConnect(ctx, targetAddr, sni, nil); err != nil {
 			log.Printf("proxy: upstream probe failed: %v", err)

@@ -76,15 +76,15 @@ func NewBurpBackend(client *mcp.BurpClient, storage store.Provider) (*BurpBacken
 	}, nil
 }
 
-// burpFlowIndex maps Burp offsets, observation timestamps, and request fingerprints to flow_ids.
-// The fingerprint detects when a Burp UI delete shifts entries down into existing offsets so
-// flow_id identity is preserved across reshuffles via byFingerprint.
+// burpFlowIndex maps Burp offsets, observation timestamps, and request fingerprints to flow_ids,
+// preserving flow_id identity across Burp UI deletes that reshuffle offsets.
 type burpFlowIndex struct {
-	mu             sync.RWMutex
-	storage        store.Storage
-	byOffset       map[int]burpFlowEntry
-	byFlowID       map[string]int    // flow_id -> offset
-	byFingerprint  map[uint64]string // fp -> flow_id, used to relocate shifted entries
+	mu       sync.RWMutex
+	storage  store.Storage
+	byOffset map[int]burpFlowEntry
+	byFlowID map[string]int // flow_id -> offset
+	// byFingerprint relocates entries shifted down into existing offsets by a Burp UI delete.
+	byFingerprint  map[uint64]string // fp -> flow_id
 	maxObservedOff int
 	hasObserved    bool
 }
@@ -492,9 +492,8 @@ func (b *BurpBackend) SendRequest(ctx context.Context, name string, req SendRequ
 	return result, nil
 }
 
-// doSendRequest builds a closure that creates a Repeater tab for every request
-// (including redirect hops) and sends via the appropriate protocol.
-// Rules are applied per-hop inside the closure. firstHopRequest captures the
+// doSendRequest sends req via Burp, creating a Repeater tab and applying rules
+// for each request including redirect hops. firstHopRequest receives the
 // post-rule bytes of the initial request for ModifiedRequest tracking.
 func (b *BurpBackend) doSendRequest(ctx context.Context, name string, req SendRequestInput, firstHopRequest *[]byte) (*SendRequestResult, error) {
 	// Build descriptive tab name: st-domain/path [id]

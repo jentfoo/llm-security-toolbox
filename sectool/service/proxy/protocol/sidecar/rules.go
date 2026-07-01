@@ -9,14 +9,9 @@ import (
 
 // PushRules sends each connected sidecar its scoped rule snapshot via sync_rules and
 // records the acked version. Snapshots are read under mu (lock order mu -> rule store,
-// matching handleRegister) so a concurrent rule change cannot be lost; the blocking
-// calls run after mu is released. It waits for every push so the caller's ctx stays
-// valid for the duration and acks are recorded before it returns.
+// matching handleRegister) so a concurrent rule change can't be lost. It waits for every
+// push so the caller's ctx stays valid for the duration and acks are recorded before it returns.
 func (m *Manager) PushRules(ctx context.Context) {
-	if m.rules == nil {
-		return
-	}
-
 	type job struct {
 		rec     *Record
 		version uint64

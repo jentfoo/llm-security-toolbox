@@ -94,8 +94,7 @@ func JSON(body []byte, setJSON map[string]interface{}, removeJSON []string) ([]b
 		if err != nil {
 			return nil, fmt.Errorf("set_json %q: %w", keyPath, err)
 		}
-		// If value is a string, run through type inference for CLI parity
-		// (e.g., "5" -> 5, "true" -> true, "{}" -> object)
+		// String values run through type inference for CLI parity
 		if strVal, ok := value.(string); ok {
 			value = inferJSONValue(strVal)
 		}
@@ -202,7 +201,6 @@ func setValueAtPath(data interface{}, segments []pathSegment, value interface{})
 			if data == nil {
 				arr = make([]interface{}, 0)
 			} else if str, isString := data.(string); isString {
-				// Try to decode string as JSON
 				decoded, wasJSON := tryDecodeJSONString(str)
 				if wasJSON {
 					modified, err := setValueAtPath(decoded, segments, value)
@@ -245,7 +243,6 @@ func setValueAtPath(data interface{}, segments []pathSegment, value interface{})
 		if data == nil {
 			obj = make(map[string]interface{})
 		} else if str, isString := data.(string); isString {
-			// Try to decode string as JSON
 			decoded, wasJSON := tryDecodeJSONString(str)
 			if wasJSON {
 				modified, err := setValueAtPath(decoded, segments, value)
@@ -289,7 +286,6 @@ func removeKeyAtPath(data interface{}, segments []pathSegment) (interface{}, err
 		// Array access
 		arr, ok := data.([]interface{})
 		if !ok {
-			// Try to decode string as JSON array
 			if str, isString := data.(string); isString {
 				decoded, wasJSON := tryDecodeJSONString(str)
 				if wasJSON {
@@ -327,7 +323,6 @@ func removeKeyAtPath(data interface{}, segments []pathSegment) (interface{}, err
 	// Object access
 	obj, ok := data.(map[string]interface{})
 	if !ok {
-		// Try to decode string as JSON object
 		if str, isString := data.(string); isString {
 			decoded, wasJSON := tryDecodeJSONString(str)
 			if wasJSON {

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
@@ -20,7 +21,7 @@ func newTestHTTP1Handler(t *testing.T) *http1Handler {
 
 	history := newHistoryStore(store.NewMemStorage())
 	t.Cleanup(history.Close)
-	return &http1Handler{history: history}
+	return &http1Handler{history: history, reg: &protocol.Registry{}}
 }
 
 // firstEntry returns the oldest Flow in h. Test helper for offset-free assertions.

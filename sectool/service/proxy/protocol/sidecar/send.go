@@ -20,7 +20,7 @@ func (m *Manager) SidecarSend(ctx context.Context, adapter string, p wire.Sideca
 		return wire.SidecarSendResult{}, wire.NewError(wire.CodeUnknownDestAdapter, "sidecar_send: adapter unhealthy: "+adapter).
 			WithData(&wire.ErrorData{Adapter: adapter})
 	}
-	if p.FlowID != "" && p.Flow == nil && m.flows != nil {
+	if p.FlowID != "" && p.Flow == nil {
 		if f, ok := m.flows.Get(p.FlowID); ok {
 			p.Flow = flowToWireFlow(f)
 		}
@@ -66,10 +66,8 @@ func (s *session) handleInvokeAdapter(ctx context.Context, p *wire.InvokeAdapter
 		return nil, rpcErr
 	}
 
-	if s.m.flows != nil {
-		for _, id := range res.NewFlowIDs {
-			s.m.flows.Complete(id, nil, time.Time{}, map[string]any{"invoked_by": caller.Name})
-		}
+	for _, id := range res.NewFlowIDs {
+		s.m.flows.Complete(id, nil, time.Time{}, map[string]any{"invoked_by": caller.Name})
 	}
 	return wire.InvokeAdapterResult{NewFlowIDs: res.NewFlowIDs, Response: res.Response}, nil
 }

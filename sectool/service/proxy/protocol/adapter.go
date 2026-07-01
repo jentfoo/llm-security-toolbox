@@ -38,11 +38,11 @@ type UpgradeClaimCtx struct {
 }
 
 // UpgradeConns are the connections handed to an upgrade adapter when it serves.
-// UpstreamConn and UpstreamReader are non-nil on the TLS path (reusing the
-// existing upstream) and nil on the plain path (the adapter dials its own).
 type UpgradeConns struct {
-	ClientConn     net.Conn
-	ClientReader   *bufio.Reader
+	ClientConn   net.Conn
+	ClientReader *bufio.Reader
+	// UpstreamConn and UpstreamReader are non-nil on the TLS path (reusing the
+	// existing upstream) and nil on the plain path (the adapter dials its own).
 	UpstreamConn   net.Conn
 	UpstreamReader *bufio.Reader
 }

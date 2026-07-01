@@ -25,10 +25,6 @@ type RuleCache struct {
 	rules   []compiledRule
 }
 
-func newRuleCache(adapter string) *RuleCache {
-	return &RuleCache{adapter: adapter}
-}
-
 // replace swaps the cache for a new snapshot, compiling regex rules. A rule whose
 // pattern fails to compile leaves the previous cache intact and returns an error.
 func (c *RuleCache) replace(version uint64, rules []wire.Rule) error {

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/go-analyze/bulk"
+
 	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -109,9 +111,9 @@ func (ss *streamSet) runClient(ctx context.Context, rec *Record, id string, r io
 	if err := rec.peer.Call(ctx, wire.MethodStreamOpen, open, &res); err != nil {
 		return
 	}
-	// The stream is established: tell the sidecar when it ends however the loop
-	// exits. A peer disconnect makes the notify a no-op, but a mid-stream RPC error
-	// or a normal EOF must still release the sidecar's per-stream state.
+	// Stream established: notify the sidecar whenever the loop exits; a peer disconnect
+	// makes notify a no-op, but a mid-stream RPC error or normal EOF must still release
+	// the sidecar's per-stream state
 	defer ss.notifyEnded(rec, id)
 	if ss.applyWrites(res.Writes) != nil {
 		return
@@ -180,10 +182,7 @@ func (ss *streamSet) streamWrite(id string, data []byte) *wire.Error {
 // closeAll closes every open stream, unblocking their read loops.
 func (ss *streamSet) closeAll() {
 	ss.mu.Lock()
-	conns := make([]net.Conn, 0, len(ss.streams))
-	for _, c := range ss.streams {
-		conns = append(conns, c)
-	}
+	conns := bulk.MapValuesSlice(ss.streams)
 	ss.mu.Unlock()
 	for _, c := range conns {
 		_ = c.Close()

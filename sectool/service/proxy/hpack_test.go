@@ -201,7 +201,7 @@ func TestEncodeHeadersForbiddenFiltering(t *testing.T) {
 		{Name: "keep-alive", Value: "timeout=5"},
 		{Name: "transfer-encoding", Value: "chunked"},
 		{Name: "proxy-connection", Value: "keep-alive"},
-		{Name: "content-type", Value: "text/plain"}, // this should survive
+		{Name: "content-type", Value: "text/plain"}, // survives filtering
 	}
 
 	encoded, err := h.encodeHeaders(pseudos, headers)

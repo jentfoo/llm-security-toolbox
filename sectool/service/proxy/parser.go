@@ -105,7 +105,6 @@ func chunksBareFlags(chunks []types.ChunkFrame) (bareLF, bareCR bool) {
 func parseResponse(r io.Reader, requestMethod string) (*types.RawHTTP1Response, error) {
 	br := bufio.NewReader(r)
 
-	// Read status line
 	line, statusLineEnding, err := readLineWithEnding(br)
 	if err != nil {
 		if errors.Is(err, io.EOF) && len(line) == 0 {
