@@ -465,13 +465,14 @@ upstream), the sidecar's `upgrade_claim` fires:
    cleartext access to the client's inner HTTP/2 stream.
 3. In parallel (started as early as upgrade_claim fires for
    pipelining), the sidecar issues `invoke_adapter` (Spec 1 §6a.8)
-   targeting the HTTP adapter for an upstream `GET /key?v=<capability-version>`
+   targeting the reserved `sectool` adapter (the native HTTP proxy) for an
+   upstream `GET /key?v=<capability-version>`
    (the version the client advertised, recovered from the decoded initiation
    — §2.1; a coordinator gates the response on `v` and may 400 a missing one)
    against the real control server, learning the real upstream Noise pubkey. This
    fetch is issued directly to the real control server and is attributable via
-   `invoked_by`, so it is outside the scope of any client-facing `/key`
-   substitution rule (§4.3) and the sidecar reads the **real** upstream key.
+   the flow's `invoked_by` field, so it is outside the scope of any client-facing
+   `/key` substitution rule (§4.3) and the sidecar reads the **real** upstream key.
    The resulting flow lands in
    sectool history under the HTTP adapter and is visible in `proxy_poll` —
    preserving agent visibility into upstream pubkey rotation, server errors,
@@ -1338,10 +1339,10 @@ operator to begin testing.
      `protocol_tag=tailscale.control`.
    - The streaming `POST /machine/map` flow (request body `Stream:
      true`) with chunk sub-flows.
-   - An upstream-side `dial_upstream` annotation noting the sidecar's
+   - An upstream-side `dial_upstream` audit flow noting the sidecar's
      real-pubkey fetch and upstream Noise dial.
-   - The sidecar's own upstream `/key` fetch flow (`invoked_by` the
-     sidecar), whose `publicKey` is the **real** upstream key, not the
+   - The sidecar's own upstream `/key` fetch flow (its `invoked_by` field
+     names the sidecar), whose `publicKey` is the **real** upstream key, not the
      substitute — confirming the direct fetch is outside the client-facing
      substitution rule's scope.
 6. Add an operator rule (regex find/replace on the request body) that

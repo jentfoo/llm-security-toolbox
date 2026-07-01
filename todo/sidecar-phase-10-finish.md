@@ -23,10 +23,12 @@ everything a sidecar does that isn't visible in the request/response bytes:
 - Binding strips — when a sidecar cannot re-sign a cryptographically bound field
   on replay it strips the field and records `annotations.stripped_fields`,
   `annotations.binding`, `annotations.reason`.
-- Origination attribution — `annotations.invoked_by` names the sidecar that
-  originated a cross-adapter message; `annotations.dial_upstream` records a
-  sidecar-requested upstream dial; `annotations.sidecar_version` /
-  `annotations.sidecar_instance_id` attribute every emitted flow.
+- Origination attribution — carried as typed flow fields, not annotations:
+  `invoked_by` names the sidecar that originated a cross-adapter message;
+  `sidecar_version` / `sidecar_instance_id` attribute every emitted flow. A
+  sidecar-requested upstream dial is recorded as its own `dial_upstream` audit
+  flow. (`annotations` itself is exclusively sidecar-authored: the
+  captured/mutated pairing and binding strips below.)
 
 Sectool **stores** all of this correctly (it is serialized on the flow and
 merged on two-phase completion). The gap is on the **read** side: none of it is

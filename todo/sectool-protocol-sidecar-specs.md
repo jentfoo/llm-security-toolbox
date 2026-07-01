@@ -309,13 +309,20 @@ each `request` / `response` sub-object:
   envelope it was carried inside (§3.2). The sole nesting reference; a
   flow forms a tree by pointing at its immediate parent.
 - `started_at`, `completed_at` — monotonic + wall-clock pair.
-- `annotations` — open-ended map of typed metadata: rule hits,
-  notes references, OAST correlation IDs,
-  crawler depth/found-on, sidecar diagnostic info, and any
-  adapter-specific keys (e.g. a sidecar recording stripped fields when it
-  cannot rebind a signature on replay, §6b.2).
+- `annotations` — open-ended, **exclusively sidecar-authored** map of typed
+  metadata: the captured/mutated pairing (`phase`, `fired_rules`,
+  `parent_flow_id`), binding strips (`stripped_fields`, `binding`, `reason`,
+  §6b.2), and any adapter-specific keys. sectool stores and forwards this map
+  verbatim and never reads, writes, or reserves a key in it.
+- `invoked_by` — flow-level field naming the sidecar that originated a
+  cross-adapter message (§6a.8). Written by sectool, not an annotation.
+- `sidecar_version`, `sidecar_instance_id` — flow-level fields attributing an
+  emitted flow to its sidecar. Written by sectool, not annotations.
 - `size_hint` — content length when known, used for fast list
   pagination without payload deserialization.
+
+Rule of thumb: metadata sectool itself produces (attribution, origination) is a
+typed flow field; `annotations` is the sidecar's namespace alone.
 
 Wire-fidelity fields already present on the existing `Header`, `Wire`,
 `ChunkFrame`, and `LineEnding` types (see `proxy/types.go:10-86`) carry
@@ -913,9 +920,10 @@ sidecar's behalf and exchange bytes with the resulting socket as a stream
   (`allowed_domains` / `exclude_domains`), refused by the network, or
   fails TLS.
 
-The resulting flow is recorded as a `dial_upstream`-tagged annotation
-on `parent_flow_id` when supplied; sectool surfaces all such dials in
-history for audit.
+The dial is recorded as its own audit flow (`protocol_tag = dial_upstream`,
+method `DIAL`, destination in the flow's `path`/`port`/`scheme`), linked to
+`parent_flow_id` when supplied; sectool surfaces all such dials in history for
+audit.
 
 #### 6a.7 `close_stream`
 
@@ -949,9 +957,15 @@ the HTTP adapter.
 
 **Returns**: `{new_flow_ids, response?}`.
 
-Every `invoke_adapter` call is recorded in history with the caller
-sidecar attributed in `annotations.invoked_by`. Scope policy
-(`allowed_domains` / `exclude_domains`) and the destination adapter's
+The reserved destination `sectool` (`AdapterScopeCore`) originates through the
+in-process HTTP proxy's native send path rather than a registered record; its
+`target`/`payload` mirror `request_send` (`{url, method, headers, body,
+follow_redirects, force}`). The other built-in names (`http/1.1`, `http/2`,
+`websocket`) are not addressable origination destinations.
+
+Every `invoke_adapter` call is recorded in history with the caller sidecar
+attributed in the produced flow's `invoked_by` field (not an annotation). Scope
+policy (`allowed_domains` / `exclude_domains`) and the destination adapter's
 own validation apply exactly as for agent-driven injection. A sidecar that
 must keep one of its own outbound fetches clear of a rule (e.g. an upstream
 control-plane fetch that a substitution rule would otherwise clobber) routes
@@ -1364,12 +1378,14 @@ adapter-enumeration tool is required in v1.
   for proxied traffic and records every dial in history. Sidecars
   cannot bypass scope policy by dialing directly because they never
   see OS sockets.
-- **Sidecar identity in flow metadata.** Every flow records the
-  sidecar that emitted it, including version and instance_id. Agents
-  and humans can attribute every capture and every mutation.
+- **Sidecar identity in flow metadata.** Every flow records the sidecar that
+  emitted it via the typed `sidecar_version` / `sidecar_instance_id` fields
+  (sectool-written, not annotations). Agents and humans can attribute every
+  capture and every mutation.
 - **Mutation audit via paired flows.** The sidecar is the only party
-  that applies protocol-specific mutations. Audit trail is built by
-  the sidecar emitting **two flows per mutated message**:
+  that applies protocol-specific mutations, so the pairing keys below are
+  sidecar-authored annotations. Audit trail is built by the sidecar emitting
+  **two flows per mutated message**:
   - Phase `captured` — the pre-mutation form, exactly as observed on
     the wire. `annotations.phase = "captured"`.
   - Phase `mutated` — the post-mutation form actually sent.
@@ -1406,6 +1422,25 @@ adapter-enumeration tool is required in v1.
 
 ---
 
+## 10.1 Intentional non-additions
+
+Two fields the drafts hinted at are deliberately omitted:
+
+- **`stream_strategy` on `replay_send`.** No dedicated parameter. The default
+  `per_chunk` order-preserving replay is correct for every in-scope streamed
+  protocol (Tailscale MapResponse, MQTT pub/sub, WebSocket frames); `collapsed`
+  has no consumer. The unused wire field (`SidecarSendParams.stream_strategy`)
+  may stay reserved; a future merged-replay need is expressed as a generic
+  option/annotation rather than a typed enum, keeping the primitive
+  adapter-agnostic (§3.3, §6b.2).
+- **`assigned_seams` on the register response.** Registration is all-or-nothing:
+  `checkConflicts` hard-errors on any capability clash (naming both
+  registrations, §5.3.1), so a successful `register` already implies every
+  declared seam was accepted. An echo field would be redundant; revisit only if
+  partial seam acceptance is ever introduced.
+
+---
+
 ## 11. Appendix: error codes
 
 Standard JSON-RPC 2.0 error codes apply. Sectool-specific errors use
@@ -1423,8 +1458,9 @@ the reserved range `-33000` to `-33999`:
 - `-33300` to `-33399` — `dial_upstream`: scope rejection, dial
   failure, TLS handshake failure.
 - `-33400` to `-33499` — `invoke_adapter`: unknown destination
-  adapter, missing `injection_target`, target/payload schema
-  mismatch.
+  adapter (`-33400`), missing `injection_target` (`-33401`), native
+  origination failure (`-33402`: bad target/payload, scope rejection, or
+  send error), target/payload schema mismatch.
 
 Each error's `data` field carries the adapter name and any relevant
 identifiers (`flow_id`, `rule_id`, `stream_id`, `snapshot_version`)
