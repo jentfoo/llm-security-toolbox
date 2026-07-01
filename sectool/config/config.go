@@ -68,7 +68,6 @@ type Config struct {
 	ExcludeDomains      []string       `json:"exclude_domains"`
 	InteractshServerURL string         `json:"interactsh_server_url"` // empty = use default public servers
 	InteractshAuthToken string         `json:"interactsh_auth_token"` // optional, for protected servers; INTERACTSH_TOKEN env var used as fallback
-	SidecarSocket       string         `json:"sidecar_socket"`        // local IPC socket for protocol sidecars (UDS path or host:port)
 	Proxy               ProxyConfig    `json:"proxy"`
 	Crawler             CrawlerConfig  `json:"crawler"`
 	Sidecars            SidecarsConfig `json:"sidecars"`
@@ -84,13 +83,14 @@ type ProxyConfig struct {
 }
 
 // SidecarsConfig holds declarative settings for out-of-process protocol
-// sidecars. Sidecars are operator-launched (attached) and dial SidecarSocket;
+// sidecars. Sidecars are operator-launched (attached) and dial Socket;
 // sectool does not spawn them.
 type SidecarsConfig struct {
 	// Enabled gates the listener, created only under the native proxy backend.
-	Enabled               *bool `json:"enabled"`
-	HeartbeatIntervalSecs int   `json:"heartbeat_interval_secs"`
-	HeartbeatTimeoutSecs  int   `json:"heartbeat_timeout_secs"`
+	Enabled               *bool  `json:"enabled"`
+	Socket                string `json:"sidecar_socket"` // local IPC socket for protocol sidecars (UDS path or host:port)
+	HeartbeatIntervalSecs int    `json:"heartbeat_interval_secs"`
+	HeartbeatTimeoutSecs  int    `json:"heartbeat_timeout_secs"`
 }
 
 type CrawlerConfig struct {
@@ -118,9 +118,9 @@ func DefaultConfig() *Config {
 		IncludeSubdomains: &t,
 		AllowedDomains:    []string{},
 		ExcludeDomains:    []string{},
-		SidecarSocket:     DefaultSidecarSocket(),
 		Sidecars: SidecarsConfig{
-			Enabled:               &f,
+			Enabled:               &t,
+			Socket:                DefaultSidecarSocket(),
 			HeartbeatIntervalSecs: DefaultSidecarHeartbeatIntervalSecs,
 			HeartbeatTimeoutSecs:  DefaultSidecarHeartbeatTimeoutSecs,
 		},
@@ -178,8 +178,8 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.IncludeSubdomains == nil {
 		cfg.IncludeSubdomains = defaults.IncludeSubdomains
 	}
-	if cfg.SidecarSocket == "" {
-		cfg.SidecarSocket = defaults.SidecarSocket
+	if cfg.Sidecars.Socket == "" {
+		cfg.Sidecars.Socket = defaults.Sidecars.Socket
 	}
 	if cfg.Sidecars.Enabled == nil {
 		cfg.Sidecars.Enabled = defaults.Sidecars.Enabled

@@ -323,7 +323,7 @@ func (s *Server) loadOrCreateConfig() error {
 	if s.flagSidecarSocket != "" {
 		s.sidecarSocket = s.flagSidecarSocket
 	} else {
-		s.sidecarSocket = cfg.SidecarSocket
+		s.sidecarSocket = cfg.Sidecars.Socket
 	}
 
 	s.cfg = cfg
