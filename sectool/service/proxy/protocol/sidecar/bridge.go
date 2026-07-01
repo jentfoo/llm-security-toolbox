@@ -269,13 +269,8 @@ func localPort(c net.Conn) int {
 	return 0
 }
 
-// Adapter is the proxy claim surface a sidecar bridge fulfills: the early and
-// upgrade seams. The manager inserts a registered sidecar's Adapter into the
-// proxy claim registry to route matching connections to the sidecar.
-type Adapter interface {
-	protocol.EarlyAdapter
-	protocol.UpgradeAdapter
-}
-
-var _ Adapter = (*bridge)(nil)
+// A bridge fulfills both proxy claim seams: TLSEarlyAdapter (which embeds
+// EarlyAdapter) and UpgradeAdapter. The manager inserts it into the proxy claim
+// registry to route matching connections to the sidecar.
 var _ protocol.TLSEarlyAdapter = (*bridge)(nil)
+var _ protocol.UpgradeAdapter = (*bridge)(nil)

@@ -298,7 +298,7 @@ func (s *session) HandleNotification(_ context.Context, method string, params js
 			s.handleReportMetrics(&p)
 		}
 	case wire.MethodCloseStream:
-		var p wire.CloseStreamParams
+		var p wire.StreamEndedParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			log.Printf("sidecar[%s]: drop malformed %s notification: %v", s.adapterName(), method, err)
 		} else if rec := s.record(); rec != nil {

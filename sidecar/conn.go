@@ -108,7 +108,7 @@ func (h connHandler) HandleRequest(_ context.Context, method string, params json
 		_ = json.Unmarshal(params, &p)
 		return streamReply(handler.OnStreamOpen(p))
 	case wire.MethodStreamDeliver:
-		var p wire.StreamDeliverParams
+		var p wire.StreamWriteParams
 		_ = json.Unmarshal(params, &p)
 		return streamReply(handler.OnStreamDeliver(p))
 	case wire.MethodClaimProbe:

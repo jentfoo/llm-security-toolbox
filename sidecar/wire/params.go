@@ -249,29 +249,20 @@ type StreamOpenParams struct {
 	RequestHeaders []Header `json:"request_headers,omitempty"`
 }
 
-// StreamDeliverParams carries inbound socket bytes for a stream.
-type StreamDeliverParams struct {
-	StreamID string `json:"stream_id"`
-	Data     []byte `json:"data"`
-}
-
-// StreamEndedParams notifies the sidecar that a stream closed.
-type StreamEndedParams struct {
-	StreamID string `json:"stream_id"`
-	Reason   string `json:"reason,omitempty"`
-}
-
-// CloseStreamParams is a sidecar-initiated proactive stream close.
-type CloseStreamParams struct {
-	StreamID string `json:"stream_id"`
-	Reason   string `json:"reason,omitempty"`
-}
-
-// StreamWriteParams is a sidecar-initiated proactive write, for keepalives and
-// other timer-driven output outside an event Response.
+// StreamWriteParams carries stream bytes in either direction: sectool's
+// stream_deliver of inbound socket bytes to the sidecar, and the sidecar's
+// proactive stream_write for keepalives and other timer-driven output.
 type StreamWriteParams struct {
 	StreamID string `json:"stream_id"`
 	Data     []byte `json:"data"`
+}
+
+// StreamEndedParams signals a stream close in either direction: sectool's
+// stream_ended notification to the sidecar, and the sidecar's proactive
+// close_stream.
+type StreamEndedParams struct {
+	StreamID string `json:"stream_id"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // ClaimProbeParams asks the sidecar whether a buffered opening stream is its

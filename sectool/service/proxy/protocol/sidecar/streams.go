@@ -139,7 +139,7 @@ func (ss *streamSet) pump(ctx context.Context, rec *Record, id string, r io.Read
 		n, err := r.Read(buf)
 		if n > 0 {
 			var dres wire.StreamResult
-			if derr := rec.peer.Call(ctx, wire.MethodStreamDeliver, wire.StreamDeliverParams{
+			if derr := rec.peer.Call(ctx, wire.MethodStreamDeliver, wire.StreamWriteParams{
 				StreamID: id,
 				Data:     buf[:n],
 			}, &dres); derr != nil {

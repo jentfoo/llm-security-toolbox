@@ -56,7 +56,7 @@ type Handler interface {
 	// Inbound chunks are raw transport bytes, not aligned to protocol frames; use
 	// Reassembler to accumulate complete frames. OnStreamEnded reports teardown.
 	OnStreamOpen(wire.StreamOpenParams) ([]wire.StreamWrite, error)
-	OnStreamDeliver(wire.StreamDeliverParams) ([]wire.StreamWrite, error)
+	OnStreamDeliver(wire.StreamWriteParams) ([]wire.StreamWrite, error)
 	OnStreamEnded(wire.StreamEndedParams)
 
 	// OnClaimProbe decides a probe-based early_claim: true takes the connection,
@@ -88,7 +88,7 @@ func (BaseHandler) OnStreamOpen(wire.StreamOpenParams) ([]wire.StreamWrite, erro
 	return nil, nil
 }
 
-func (BaseHandler) OnStreamDeliver(wire.StreamDeliverParams) ([]wire.StreamWrite, error) {
+func (BaseHandler) OnStreamDeliver(wire.StreamWriteParams) ([]wire.StreamWrite, error) {
 	return nil, nil
 }
 

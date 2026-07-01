@@ -40,7 +40,7 @@ func (h *upgradeHandler) OnStreamOpen(p wire.StreamOpenParams) ([]wire.StreamWri
 	return nil, nil
 }
 
-func (h *upgradeHandler) OnStreamDeliver(p wire.StreamDeliverParams) ([]wire.StreamWrite, error) {
+func (h *upgradeHandler) OnStreamDeliver(p wire.StreamWriteParams) ([]wire.StreamWrite, error) {
 	return []wire.StreamWrite{{StreamID: p.StreamID, Data: p.Data}}, nil
 }
 

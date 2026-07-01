@@ -69,7 +69,7 @@ func (h *forwardHandler) OnStreamOpen(p wire.StreamOpenParams) ([]wire.StreamWri
 	return nil, err
 }
 
-func (h *forwardHandler) OnStreamDeliver(p wire.StreamDeliverParams) ([]wire.StreamWrite, error) {
+func (h *forwardHandler) OnStreamDeliver(p wire.StreamWriteParams) ([]wire.StreamWrite, error) {
 	h.mu.Lock()
 	dst := h.pair[p.StreamID]
 	h.mu.Unlock()
