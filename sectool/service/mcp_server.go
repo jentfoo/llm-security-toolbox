@@ -504,16 +504,21 @@ type resolvedFlow struct {
 	RawRequest       []byte
 	ModifiedRequest  []byte // post-rule request for display; nil if no rules applied
 	RawResponse      []byte
-	InterimResponses []string      // wire-formatted 1xx responses preceding RawResponse (proxy only)
-	Source           string        // "proxy", "replay", "crawl"
-	Adapter          string        // emitting adapter name (proxy flows; empty for built-in HTTP)
-	Scheme           string        // "http" or "https" (empty = infer from host)
-	Port             int           // original port (0 = infer from scheme)
-	Protocol         string        // "http/1.1", "http/2", or empty (defaults to http/1.1)
-	Duration         time.Duration // replay, crawl (zero = not available)
-	FoundOn          string        // crawl only
-	Depth            int           // crawl only
-	Truncated        bool          // crawl only
+	InterimResponses []string       // wire-formatted 1xx responses preceding RawResponse (proxy only)
+	Source           string         // "proxy", "replay", "crawl"
+	Adapter          string         // emitting adapter name (proxy flows; empty for built-in HTTP)
+	Scheme           string         // "http" or "https" (empty = infer from host)
+	Port             int            // original port (0 = infer from scheme)
+	Protocol         string         // "http/1.1", "http/2", or empty (defaults to http/1.1)
+	Duration         time.Duration  // replay, crawl (zero = not available)
+	FoundOn          string         // crawl only
+	Depth            int            // crawl only
+	Truncated        bool           // crawl only
+	Annotations      map[string]any // sidecar-authored metadata (proxy); nil otherwise
+
+	InvokedBy         string // originating sidecar (proxy, replay); empty otherwise
+	SidecarVersion    string // emitting sidecar version (proxy); empty otherwise
+	SidecarInstanceID string // emitting sidecar instance (proxy); empty otherwise
 }
 
 // DisplayRequest returns the request as shown when retrieved.
@@ -537,18 +542,24 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 			Port:            entry.Port,
 			Protocol:        entry.Protocol,
 			Duration:        entry.Duration,
+			Annotations:     entry.Annotations,
+			InvokedBy:       entry.InvokedBy,
 		}, nil
 	}
 	if entry, err := m.service.httpBackend.GetProxyEntry(ctx, flowID); err == nil && entry != nil {
 		return &resolvedFlow{
-			RawRequest:       []byte(entry.Request),
-			RawResponse:      []byte(entry.Response),
-			InterimResponses: entry.InterimResponses,
-			Source:           SourceProxy,
-			Adapter:          entry.Adapter,
-			Scheme:           entry.Scheme,
-			Port:             entry.Port,
-			Protocol:         entry.Protocol,
+			RawRequest:        []byte(entry.Request),
+			RawResponse:       []byte(entry.Response),
+			InterimResponses:  entry.InterimResponses,
+			Source:            SourceProxy,
+			Adapter:           entry.Adapter,
+			Scheme:            entry.Scheme,
+			Port:              entry.Port,
+			Protocol:          entry.Protocol,
+			Annotations:       entry.Annotations,
+			InvokedBy:         entry.InvokedBy,
+			SidecarVersion:    entry.SidecarVersion,
+			SidecarInstanceID: entry.SidecarInstanceID,
 		}, nil
 	} else if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, errorResultFromErr("failed to fetch flow: ", err)

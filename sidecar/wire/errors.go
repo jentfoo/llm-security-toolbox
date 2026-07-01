@@ -42,6 +42,7 @@ const (
 const (
 	CodeUnknownDestAdapter = -33400
 	CodeNoInjectionTarget  = -33401
+	CodeInjectSendFailed   = -33402
 )
 
 // ErrorData carries the adapter name plus any relevant identifiers on a

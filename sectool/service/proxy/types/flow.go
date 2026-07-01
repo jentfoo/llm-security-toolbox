@@ -45,8 +45,14 @@ type Flow struct {
 	StartedAt   time.Time `json:"started_at" msgpack:"ts"`
 	CompletedAt time.Time `json:"completed_at,omitempty" msgpack:"ca,omitempty"`
 
-	// Annotations is open-ended typed metadata attached to the flow.
+	// Annotations is open-ended, exclusively sidecar-authored metadata.
 	Annotations map[string]any `json:"annotations,omitempty" msgpack:"an,omitempty"`
+
+	// InvokedBy names the sidecar that originated a cross-adapter message.
+	InvokedBy string `json:"invoked_by,omitempty" msgpack:"ib,omitempty"`
+	// SidecarVersion and SidecarInstanceID attribute a sidecar-emitted flow.
+	SidecarVersion    string `json:"sidecar_version,omitempty" msgpack:"sv,omitempty"`
+	SidecarInstanceID string `json:"sidecar_instance_id,omitempty" msgpack:"si,omitempty"`
 }
 
 // ExtractMeta builds HistoryMeta from a Flow using its accessor methods.
@@ -66,6 +72,11 @@ func (f *Flow) ExtractMeta() HistoryMeta {
 		RespLen:      f.responseBodyLen(),
 		Timestamp:    f.StartedAt,
 		Duration:     f.CompletedAt.Sub(f.StartedAt),
+		Annotations:  f.Annotations,
+
+		InvokedBy:         f.InvokedBy,
+		SidecarVersion:    f.SidecarVersion,
+		SidecarInstanceID: f.SidecarInstanceID,
 	}
 }
 

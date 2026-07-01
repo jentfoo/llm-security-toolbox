@@ -42,7 +42,7 @@ func (s *session) handleDialUpstream(ctx context.Context, p *wire.DialUpstreamPa
 	id := rec.bridge.streams.add(conn)
 	go rec.bridge.streams.serveUpstream(ctx, rec, id, conn)
 
-	s.recordDial(rec, p.ParentFlowID, host, port, scheme, p.TLS != nil && p.TLS.Enabled)
+	s.recordDial(rec, p.ParentFlowID, host, port, scheme)
 	return wire.DialUpstreamResult{StreamID: id}, nil
 }
 
@@ -140,7 +140,7 @@ func (s *session) dial(ctx context.Context, rec *Record, host string, port int, 
 // recordDial stores an audit flow for the dial, linked to parent_flow_id, so
 // every sidecar egress is surfaced in history. Stored unconditionally (no capture
 // filter) so audit is never dropped.
-func (s *session) recordDial(rec *Record, parentFlowID, host string, port int, scheme string, tlsEnabled bool) {
+func (s *session) recordDial(rec *Record, parentFlowID, host string, port int, scheme string) {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	s.m.flows.Store(&types.Flow{
 		Adapter:      rec.Name,
@@ -155,9 +155,8 @@ func (s *session) recordDial(rec *Record, parentFlowID, host string, port int, s
 			Version: "HTTP/1.1",
 			Headers: types.Headers{{Name: "Host", Value: addr}},
 		},
-		StartedAt: s.m.now(),
-		Annotations: sidecarAnnotations(rec, map[string]any{
-			"dial_upstream": map[string]any{"host": host, "port": port, "tls": tlsEnabled},
-		}),
+		StartedAt:         s.m.now(),
+		SidecarVersion:    rec.Version,
+		SidecarInstanceID: rec.InstanceID,
 	})
 }

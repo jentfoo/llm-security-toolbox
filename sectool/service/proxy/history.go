@@ -190,6 +190,24 @@ func (h *HistoryStore) Complete(flowID string, resp *types.Message, completedAt 
 	return true
 }
 
+// SetInvokedBy records the originating sidecar on an already-stored flow.
+// Returns false when flowID is unknown.
+func (h *HistoryStore) SetInvokedBy(flowID, invokedBy string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	flow, ok := h.Get(flowID)
+	if !ok {
+		return false
+	}
+	flow.InvokedBy = invokedBy
+	h.writePayloadLocked(flow)
+	if flow.ParentFlowID == "" {
+		h.writeMetaLocked(flow)
+	}
+	return true
+}
+
 // mintUniqueFlowIDLocked generates a flow_id, retrying on collision. Caller must hold mu.
 // Probes the payload key so child flows (which have no meta key) are also covered.
 func (h *HistoryStore) mintUniqueFlowIDLocked() string {

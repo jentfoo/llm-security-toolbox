@@ -56,6 +56,17 @@ func (f *fakeFlows) Complete(id string, resp *types.Message, _ time.Time, ann ma
 	return true
 }
 
+func (f *fakeFlows) SetInvokedBy(id, invokedBy string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fl, ok := f.flows[id]
+	if !ok {
+		return false
+	}
+	fl.InvokedBy = invokedBy
+	return true
+}
+
 func (f *fakeFlows) Get(id string) (*types.Flow, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -64,17 +75,6 @@ func (f *fakeFlows) Get(id string) (*types.Flow, bool) {
 }
 
 func (f *fakeFlows) ShouldCapture(*types.Flow) bool { return true }
-
-func (f *fakeFlows) annotation(id, key string) (any, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	fl, ok := f.flows[id]
-	if !ok || fl.Annotations == nil {
-		return nil, false
-	}
-	v, ok := fl.Annotations[key]
-	return v, ok
-}
 
 func managerWithFlows(flows FlowSink) *Manager {
 	return NewManager(Config{
@@ -178,9 +178,9 @@ func TestHandleInvokeAdapter(t *testing.T) {
 		var res wire.InvokeAdapterResult
 		require.Nil(t, pc.Call(ctx, wire.MethodInvokeAdapter, wire.InvokeAdapterParams{Adapter: "dest"}, &res))
 		assert.Equal(t, []string{destFlowID}, res.NewFlowIDs)
-		v, ok := flows.annotation(destFlowID, "invoked_by")
+		fl, ok := flows.Get(destFlowID)
 		require.True(t, ok)
-		assert.Equal(t, "caller", v)
+		assert.Equal(t, "caller", fl.InvokedBy)
 	})
 
 	t.Run("unknown_destination", func(t *testing.T) {

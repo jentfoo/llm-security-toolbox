@@ -359,15 +359,19 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 			}
 
 			flows = append(flows, protocol.FlowEntry{
-				FlowID:         entry.flowID,
-				Method:         entry.method,
-				Scheme:         scheme,
-				Host:           entry.host,
-				Port:           port,
-				Path:           util.TruncateString(entry.path, maxPathLength),
-				Status:         entry.status,
-				ResponseLength: entry.respLen,
-				Source:         entry.source,
+				FlowID:            entry.flowID,
+				Method:            entry.method,
+				Scheme:            scheme,
+				Host:              entry.host,
+				Port:              port,
+				Path:              util.TruncateString(entry.path, maxPathLength),
+				Status:            entry.status,
+				ResponseLength:    entry.respLen,
+				Source:            entry.source,
+				Annotations:       entry.annotations,
+				InvokedBy:         entry.invokedBy,
+				SidecarVersion:    entry.sidecarVersion,
+				SidecarInstanceID: entry.sidecarInstanceID,
 			})
 		}
 		m.attachFlowNotes(flows)
@@ -498,6 +502,18 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 	}
 	if len(resolved.InterimResponses) > 0 {
 		result["interim_responses"] = resolved.InterimResponses
+	}
+	if len(resolved.Annotations) > 0 {
+		result["annotations"] = resolved.Annotations
+	}
+	if resolved.InvokedBy != "" {
+		result["invoked_by"] = resolved.InvokedBy
+	}
+	if resolved.SidecarVersion != "" {
+		result["sidecar_version"] = resolved.SidecarVersion
+	}
+	if resolved.SidecarInstanceID != "" {
+		result["sidecar_instance_id"] = resolved.SidecarInstanceID
 	}
 
 	if patternRe != nil {
@@ -675,20 +691,24 @@ func (m *mcpServer) handleProxyRuleDelete(ctx context.Context, req mcp.CallToolR
 
 // flowEntry holds parsed metadata for a proxy or replay history entry.
 type flowEntry struct {
-	flowID      string
-	timestamp   time.Time // primary sort key; flow_id breaks ties
-	method      string
-	host        string
-	path        string
-	scheme      string // "http" or "https" (empty = infer from host)
-	port        int    // original port (0 = infer from scheme)
-	status      int
-	respLen     int
-	request     string
-	response    string
-	source      string // "proxy" or "replay"
-	adapter     string // emitting adapter name
-	protocolTag string // protocol tag (e.g. "http/1.1", "http/2")
+	flowID            string
+	timestamp         time.Time // primary sort key; flow_id breaks ties
+	method            string
+	host              string
+	path              string
+	scheme            string // "http" or "https" (empty = infer from host)
+	port              int    // original port (0 = infer from scheme)
+	status            int
+	respLen           int
+	request           string
+	response          string
+	source            string         // "proxy" or "replay"
+	adapter           string         // emitting adapter name
+	protocolTag       string         // protocol tag (e.g. "http/1.1", "http/2")
+	annotations       map[string]any // sidecar-authored flow metadata
+	invokedBy         string
+	sidecarVersion    string
+	sidecarInstanceID string
 }
 
 // drainProxyHistory pages all proxy history entries from the backend in fetchBatchSize chunks.
@@ -713,20 +733,24 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 				status := readResponseStatusCode([]byte(entry.Response))
 				_, respBody := splitHeadersBody([]byte(entry.Response))
 				page = append(page, flowEntry{
-					flowID:      entry.FlowID,
-					timestamp:   entry.Timestamp,
-					method:      method,
-					host:        host,
-					path:        path,
-					scheme:      entry.Scheme,
-					port:        entry.Port,
-					status:      status,
-					respLen:     len(respBody),
-					request:     entry.Request,
-					response:    entry.Response,
-					source:      SourceProxy,
-					adapter:     entry.Adapter,
-					protocolTag: entry.Protocol,
+					flowID:            entry.FlowID,
+					timestamp:         entry.Timestamp,
+					method:            method,
+					host:              host,
+					path:              path,
+					scheme:            entry.Scheme,
+					port:              entry.Port,
+					status:            status,
+					respLen:           len(respBody),
+					request:           entry.Request,
+					response:          entry.Response,
+					source:            SourceProxy,
+					adapter:           entry.Adapter,
+					protocolTag:       entry.Protocol,
+					annotations:       entry.Annotations,
+					invokedBy:         entry.InvokedBy,
+					sidecarVersion:    entry.SidecarVersion,
+					sidecarInstanceID: entry.SidecarInstanceID,
 				})
 			}
 		} else {
@@ -740,18 +764,22 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 					continue
 				}
 				page = append(page, flowEntry{
-					flowID:      m.FlowID,
-					timestamp:   m.Timestamp,
-					method:      m.Method,
-					host:        m.Host,
-					path:        m.Path,
-					scheme:      m.Scheme,
-					port:        m.Port,
-					status:      m.Status,
-					respLen:     m.RespLen,
-					source:      SourceProxy,
-					adapter:     m.Adapter,
-					protocolTag: m.Protocol,
+					flowID:            m.FlowID,
+					timestamp:         m.Timestamp,
+					method:            m.Method,
+					host:              m.Host,
+					path:              m.Path,
+					scheme:            m.Scheme,
+					port:              m.Port,
+					status:            m.Status,
+					respLen:           m.RespLen,
+					source:            SourceProxy,
+					adapter:           m.Adapter,
+					protocolTag:       m.Protocol,
+					annotations:       m.Annotations,
+					invokedBy:         m.InvokedBy,
+					sidecarVersion:    m.SidecarVersion,
+					sidecarInstanceID: m.SidecarInstanceID,
 				})
 			}
 		}
@@ -780,18 +808,20 @@ func collectReplayHistory(replayStore *store.ReplayHistoryStore, full bool) []fl
 		out := make([]flowEntry, len(entries))
 		for i, re := range entries {
 			out[i] = flowEntry{
-				flowID:    re.FlowID,
-				timestamp: re.CreatedAt,
-				method:    re.Method,
-				host:      re.Host,
-				path:      re.Path,
-				scheme:    re.Scheme,
-				port:      re.Port,
-				status:    re.RespStatus,
-				respLen:   len(re.RespBody),
-				request:   string(re.RawRequest),
-				response:  string(re.RespHeaders) + string(re.RespBody),
-				source:    SourceReplay,
+				flowID:      re.FlowID,
+				timestamp:   re.CreatedAt,
+				method:      re.Method,
+				host:        re.Host,
+				path:        re.Path,
+				scheme:      re.Scheme,
+				port:        re.Port,
+				status:      re.RespStatus,
+				respLen:     len(re.RespBody),
+				request:     string(re.RawRequest),
+				response:    string(re.RespHeaders) + string(re.RespBody),
+				source:      SourceReplay,
+				annotations: re.Annotations,
+				invokedBy:   re.InvokedBy,
 			}
 		}
 		return out
@@ -800,16 +830,18 @@ func collectReplayHistory(replayStore *store.ReplayHistoryStore, full bool) []fl
 	out := make([]flowEntry, len(metas))
 	for i, rm := range metas {
 		out[i] = flowEntry{
-			flowID:    rm.FlowID,
-			timestamp: rm.CreatedAt,
-			method:    rm.Method,
-			host:      rm.Host,
-			path:      rm.Path,
-			scheme:    rm.Scheme,
-			port:      rm.Port,
-			status:    rm.RespStatus,
-			respLen:   rm.RespLen,
-			source:    SourceReplay,
+			flowID:      rm.FlowID,
+			timestamp:   rm.CreatedAt,
+			method:      rm.Method,
+			host:        rm.Host,
+			path:        rm.Path,
+			scheme:      rm.Scheme,
+			port:        rm.Port,
+			status:      rm.RespStatus,
+			respLen:     rm.RespLen,
+			source:      SourceReplay,
+			annotations: rm.Annotations,
+			invokedBy:   rm.InvokedBy,
 		}
 	}
 	return out
@@ -845,20 +877,24 @@ func (s *Server) fetchProxyChildren(ctx context.Context, parentFlowID string) ([
 		status := readResponseStatusCode([]byte(entry.Response))
 		_, respBody := splitHeadersBody([]byte(entry.Response))
 		out = append(out, flowEntry{
-			flowID:      entry.FlowID,
-			timestamp:   entry.Timestamp,
-			method:      method,
-			host:        host,
-			path:        path,
-			scheme:      entry.Scheme,
-			port:        entry.Port,
-			status:      status,
-			respLen:     len(respBody),
-			request:     entry.Request,
-			response:    entry.Response,
-			source:      SourceProxy,
-			adapter:     entry.Adapter,
-			protocolTag: entry.Protocol,
+			flowID:            entry.FlowID,
+			timestamp:         entry.Timestamp,
+			method:            method,
+			host:              host,
+			path:              path,
+			scheme:            entry.Scheme,
+			port:              entry.Port,
+			status:            status,
+			respLen:           len(respBody),
+			request:           entry.Request,
+			response:          entry.Response,
+			source:            SourceProxy,
+			adapter:           entry.Adapter,
+			protocolTag:       entry.Protocol,
+			annotations:       entry.Annotations,
+			invokedBy:         entry.InvokedBy,
+			sidecarVersion:    entry.SidecarVersion,
+			sidecarInstanceID: entry.SidecarInstanceID,
 		})
 	}
 	return out, nil

@@ -118,15 +118,16 @@ func (b *bridge) captureUpgrade(c *protocol.UpgradeClaimCtx, resp *types.RawHTTP
 	}
 	now := time.Now()
 	flow := &types.Flow{
-		Adapter:     b.rec.Name,
-		ProtocolTag: types.ProtocolHTTP11,
-		Scheme:      scheme,
-		Port:        port,
-		Request:     types.RequestToMessage(c.Req),
-		Response:    types.ResponseToMessage(resp),
-		StartedAt:   now,
-		CompletedAt: now,
-		Annotations: sidecarAnnotations(b.rec, nil),
+		Adapter:           b.rec.Name,
+		ProtocolTag:       types.ProtocolHTTP11,
+		Scheme:            scheme,
+		Port:              port,
+		Request:           types.RequestToMessage(c.Req),
+		Response:          types.ResponseToMessage(resp),
+		StartedAt:         now,
+		CompletedAt:       now,
+		SidecarVersion:    b.rec.Version,
+		SidecarInstanceID: b.rec.InstanceID,
 	}
 	if !b.flows.ShouldCapture(flow) {
 		return ""

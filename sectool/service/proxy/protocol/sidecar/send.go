@@ -2,8 +2,8 @@ package sidecar
 
 import (
 	"context"
-	"time"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
@@ -39,12 +39,31 @@ func (m *Manager) HasAdapter(name string) bool {
 }
 
 // handleInvokeAdapter routes an outbound message through another adapter's
-// injection_target, attributes the origination to the caller via
-// annotations.invoked_by, and returns the produced flows.
+// injection_target (or the native proxy for the reserved "sectool" adapter),
+// attributes the origination to the caller via the flow's InvokedBy field, and
+// returns the produced flows.
 func (s *session) handleInvokeAdapter(ctx context.Context, p *wire.InvokeAdapterParams) (any, *wire.Error) {
 	caller := s.record()
 	if caller == nil {
 		return nil, wire.NewError(wire.CodeNotRegistered, "invoke_adapter: register first")
+	}
+	// The in-process HTTP proxy is addressed as the reserved "sectool" name and
+	// originates through the native send path rather than a registered record
+	if p.Adapter == types.AdapterScopeCore {
+		if s.m.cfg.NativeHTTPSend == nil {
+			return nil, wire.NewError(wire.CodeUnknownDestAdapter, "invoke_adapter: native origination unavailable").
+				WithData(&wire.ErrorData{Adapter: caller.Name})
+		}
+		res, rpcErr := s.m.cfg.NativeHTTPSend(ctx, wire.SidecarSendParams{
+			Target:          p.Target,
+			Payload:         p.Payload,
+			Mutations:       p.Mutations,
+			WaitForResponse: p.WaitForResponse,
+		}, caller.Name)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		return wire.InvokeAdapterResult{NewFlowIDs: res.NewFlowIDs, Response: res.Response}, nil
 	}
 	dest, ok := s.m.Get(p.Adapter)
 	if !ok {
@@ -67,7 +86,7 @@ func (s *session) handleInvokeAdapter(ctx context.Context, p *wire.InvokeAdapter
 	}
 
 	for _, id := range res.NewFlowIDs {
-		s.m.flows.Complete(id, nil, time.Time{}, map[string]any{"invoked_by": caller.Name})
+		s.m.flows.SetInvokedBy(id, caller.Name)
 	}
 	return wire.InvokeAdapterResult{NewFlowIDs: res.NewFlowIDs, Response: res.Response}, nil
 }

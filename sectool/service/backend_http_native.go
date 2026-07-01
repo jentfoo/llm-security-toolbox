@@ -271,19 +271,23 @@ func (b *NativeProxyBackend) GetProxyHistoryMeta(ctx context.Context, count int,
 	result := make([]ProxyEntryMeta, len(metas))
 	for i, m := range metas {
 		result[i] = ProxyEntryMeta{
-			FlowID:       m.FlowID,
-			Timestamp:    m.Timestamp,
-			Method:       m.Method,
-			Host:         m.Host,
-			Path:         m.Path,
-			Status:       m.Status,
-			RespLen:      m.RespLen,
-			Protocol:     m.Protocol,
-			Adapter:      m.Adapter,
-			ParentFlowID: m.ParentFlowID,
-			Scheme:       m.Scheme,
-			Port:         m.Port,
-			ContentType:  m.ContentType,
+			FlowID:            m.FlowID,
+			Timestamp:         m.Timestamp,
+			Method:            m.Method,
+			Host:              m.Host,
+			Path:              m.Path,
+			Status:            m.Status,
+			RespLen:           m.RespLen,
+			Protocol:          m.Protocol,
+			Adapter:           m.Adapter,
+			ParentFlowID:      m.ParentFlowID,
+			Scheme:            m.Scheme,
+			Port:              m.Port,
+			ContentType:       m.ContentType,
+			Annotations:       m.Annotations,
+			InvokedBy:         m.InvokedBy,
+			SidecarVersion:    m.SidecarVersion,
+			SidecarInstanceID: m.SidecarInstanceID,
 		}
 	}
 	return result, nil
@@ -298,16 +302,20 @@ func (b *NativeProxyBackend) GetProxyEntry(ctx context.Context, flowID string) (
 	reqStr := string(entry.FormatRequest(&buf))
 	respStr := string(entry.FormatResponse(&buf))
 	return &ProxyEntry{
-		FlowID:           entry.FlowID,
-		Timestamp:        entry.StartedAt,
-		Request:          reqStr,
-		Response:         respStr,
-		InterimResponses: entry.FormatInterimResponses(&buf),
-		Protocol:         entry.ProtocolTag,
-		Adapter:          entry.Adapter,
-		ParentFlowID:     entry.ParentFlowID,
-		Scheme:           entry.Scheme,
-		Port:             entry.Port,
+		FlowID:            entry.FlowID,
+		Timestamp:         entry.StartedAt,
+		Request:           reqStr,
+		Response:          respStr,
+		InterimResponses:  entry.FormatInterimResponses(&buf),
+		Protocol:          entry.ProtocolTag,
+		Adapter:           entry.Adapter,
+		ParentFlowID:      entry.ParentFlowID,
+		Scheme:            entry.Scheme,
+		Port:              entry.Port,
+		Annotations:       entry.Annotations,
+		InvokedBy:         entry.InvokedBy,
+		SidecarVersion:    entry.SidecarVersion,
+		SidecarInstanceID: entry.SidecarInstanceID,
 	}, nil
 }
 

@@ -431,6 +431,13 @@ type HistoryMeta struct {
 	RespLen     int           `msgpack:"rl"`
 	Timestamp   time.Time     `msgpack:"ts"`
 	Duration    time.Duration `msgpack:"d"`
+
+	// Annotations carries the flow's sidecar-authored metadata.
+	Annotations map[string]any `msgpack:"an,omitempty"`
+
+	InvokedBy         string `msgpack:"ib,omitempty"`
+	SidecarVersion    string `msgpack:"sv,omitempty"`
+	SidecarInstanceID string `msgpack:"si,omitempty"`
 }
 
 // Target specifies where to send a request.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"maps"
 	"time"
 
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
@@ -16,6 +15,7 @@ import (
 type FlowSink interface {
 	Store(*types.Flow) string
 	Complete(flowID string, resp *types.Message, completedAt time.Time, annotations map[string]any) bool
+	SetInvokedBy(flowID, invokedBy string) bool
 	Get(flowID string) (*types.Flow, bool)
 	ShouldCapture(*types.Flow) bool
 }
@@ -107,42 +107,28 @@ func (s *session) adapterName() string {
 }
 
 // wireFlowToFlow converts a pushed wire flow into a store Flow, forcing the
-// emitting adapter's name and stamping its identity into annotations.
+// emitting adapter's name and stamping its identity as flow fields. The
+// sidecar's annotations are carried through unchanged.
 func wireFlowToFlow(rec *Record, p *wire.Flow, now time.Time) *types.Flow {
 	f := &types.Flow{
-		Adapter:      rec.Name,
-		ProtocolTag:  p.ProtocolTag,
-		Direction:    p.Direction,
-		ParentFlowID: p.ParentFlowID,
-		Scheme:       p.Scheme,
-		Port:         p.Port,
-		Request:      flowMessageToMessage(p.Request),
-		Response:     flowMessageToMessage(p.Response),
-		StartedAt:    p.StartedAt,
-		CompletedAt:  p.CompletedAt,
-		Annotations:  sidecarAnnotations(rec, p.Annotations),
+		Adapter:           rec.Name,
+		ProtocolTag:       p.ProtocolTag,
+		Direction:         p.Direction,
+		ParentFlowID:      p.ParentFlowID,
+		Scheme:            p.Scheme,
+		Port:              p.Port,
+		Request:           flowMessageToMessage(p.Request),
+		Response:          flowMessageToMessage(p.Response),
+		StartedAt:         p.StartedAt,
+		CompletedAt:       p.CompletedAt,
+		Annotations:       p.Annotations,
+		SidecarVersion:    rec.Version,
+		SidecarInstanceID: rec.InstanceID,
 	}
 	if f.StartedAt.IsZero() {
 		f.StartedAt = now
 	}
 	return f
-}
-
-// sidecarAnnotations merges the sidecar's version and instance_id into the
-// flow's annotations for per-flow attribution.
-func sidecarAnnotations(rec *Record, extra map[string]any) map[string]any {
-	if len(extra) == 0 && rec.Version == "" && rec.InstanceID == "" {
-		return nil
-	}
-	ann := make(map[string]any, len(extra)+2)
-	maps.Copy(ann, extra)
-	if rec.Version != "" {
-		ann["sidecar_version"] = rec.Version
-	}
-	if rec.InstanceID != "" {
-		ann["sidecar_instance_id"] = rec.InstanceID
-	}
-	return ann
 }
 
 // flowToWireFlow converts a stored flow into its wire form, passed inline to the

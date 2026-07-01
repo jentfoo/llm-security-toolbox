@@ -18,6 +18,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
 	"github.com/go-appsec/toolbox/sectool/service/store"
+	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
 const (
@@ -235,6 +236,17 @@ func (s *Server) CoreQuery(ctx context.Context, tool string, params json.RawMess
 	return m.CoreQuery(ctx, tool, params)
 }
 
+// OriginateNative backs a sidecar's invoke_adapter targeting the reserved
+// "sectool" adapter: it originates an outbound HTTP request through the native
+// send path. Returns an error until the MCP server is ready.
+func (s *Server) OriginateNative(ctx context.Context, p wire.SidecarSendParams, invokedBy string) (wire.SidecarSendResult, *wire.Error) {
+	m := s.mcpReady.Load()
+	if m == nil {
+		return wire.SidecarSendResult{}, wire.NewError(wire.CodeInjectSendFailed, "invoke_adapter: native origination not ready")
+	}
+	return m.originateNative(ctx, p, invokedBy)
+}
+
 // CoreToolNames returns the static core MCP tool names captured at construction,
 // or nil before the MCP server is built. It lets the sidecar registry reject a
 // tool-name collision against core tools; connected sidecars' tool names are
@@ -416,6 +428,7 @@ func (s *Server) startBuiltinProxy() error {
 			NativeProxyPort:   s.proxyPort,
 			ScopeCheck:        s.cfg.IsDomainAllowed,
 			DialTimeout:       timeouts.DialTimeout,
+			NativeHTTPSend:    s.OriginateNative,
 		}, s); err != nil {
 			_ = backend.Close()
 			return fmt.Errorf("enable sidecars: %w", err)

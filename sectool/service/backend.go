@@ -126,6 +126,11 @@ type ProxyEntryMeta struct {
 	Scheme       string // "http" or "https" (empty = infer from host)
 	Port         int    // original port (0 = infer from scheme)
 	ContentType  string
+	// Annotations carries sidecar-authored flow metadata.
+	Annotations       map[string]any
+	InvokedBy         string
+	SidecarVersion    string
+	SidecarInstanceID string
 	// Placeholder marks an unparseable Burp entry that preserves offset contiguity; skipped for display.
 	Placeholder bool
 }
@@ -144,6 +149,11 @@ type ProxyEntry struct {
 	ParentFlowID     string   `json:"parent_flow_id,omitempty"` // parent flow when nested
 	Scheme           string   `json:"scheme,omitempty"`         // "http" or "https" (empty = infer from host)
 	Port             int      `json:"port,omitempty"`           // original port (0 = infer from scheme)
+	// Annotations carries sidecar-authored flow metadata.
+	Annotations       map[string]any `json:"annotations,omitempty"`
+	InvokedBy         string         `json:"invoked_by,omitempty"`
+	SidecarVersion    string         `json:"sidecar_version,omitempty"`
+	SidecarInstanceID string         `json:"sidecar_instance_id,omitempty"`
 	// Placeholder marks an unparseable Burp entry that preserves offset contiguity; skipped for display.
 	Placeholder bool `json:"-"`
 }

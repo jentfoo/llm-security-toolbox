@@ -31,6 +31,11 @@ type FlowEntry struct {
 	ResponseLength int            `json:"response_length"`
 	Source         string         `json:"source,omitempty"` // "proxy" or "replay"
 	Notes          []FlowNoteInfo `json:"notes,omitempty"`
+	// Annotations is sidecar-authored flow metadata; empty for HTTP flows.
+	Annotations       map[string]any `json:"annotations,omitempty"`
+	InvokedBy         string         `json:"invoked_by,omitempty"`
+	SidecarVersion    string         `json:"sidecar_version,omitempty"`
+	SidecarInstanceID string         `json:"sidecar_instance_id,omitempty"`
 }
 
 // RequestLine contains path and version from the HTTP request line.
@@ -95,6 +100,11 @@ type FlowGetResponse struct {
 	Depth             int                 `json:"depth,omitempty"`
 	Truncated         bool                `json:"truncated,omitempty"`
 	Note              string              `json:"note,omitempty"`
+	// Annotations is sidecar-authored flow metadata; empty for HTTP flows.
+	Annotations       map[string]any `json:"annotations,omitempty"`
+	InvokedBy         string         `json:"invoked_by,omitempty"`
+	SidecarVersion    string         `json:"sidecar_version,omitempty"`
+	SidecarInstanceID string         `json:"sidecar_instance_id,omitempty"`
 }
 
 // =============================================================================

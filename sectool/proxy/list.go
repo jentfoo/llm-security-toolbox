@@ -3,7 +3,9 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 
@@ -147,6 +149,22 @@ func get(mcpURL string, flowID, scope, pattern string) error {
 	if resp.RespBody != "" {
 		fmt.Println(cliutil.Bold("Response Body"))
 		fmt.Println(resp.RespBody)
+	}
+	if resp.InvokedBy != "" || resp.SidecarVersion != "" || resp.SidecarInstanceID != "" || len(resp.Annotations) > 0 {
+		fmt.Println()
+		fmt.Println(cliutil.Bold("Annotations"))
+		if resp.InvokedBy != "" {
+			fmt.Printf("invoked_by: %s\n", resp.InvokedBy)
+		}
+		if resp.SidecarVersion != "" {
+			fmt.Printf("sidecar_version: %s\n", resp.SidecarVersion)
+		}
+		if resp.SidecarInstanceID != "" {
+			fmt.Printf("sidecar_instance_id: %s\n", resp.SidecarInstanceID)
+		}
+		for _, k := range slices.Sorted(maps.Keys(resp.Annotations)) {
+			fmt.Printf("%s: %v\n", k, resp.Annotations[k])
+		}
 	}
 	if resp.Note != "" {
 		fmt.Println()

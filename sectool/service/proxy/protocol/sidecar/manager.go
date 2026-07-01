@@ -29,6 +29,9 @@ type Config struct {
 	ScopeCheck func(host string) (allowed bool, reason string)
 	// DialTimeout bounds each dial_upstream connection attempt.
 	DialTimeout time.Duration
+	// NativeHTTPSend originates an outbound HTTP request through the in-process
+	// proxy on a sidecar's behalf; nil disables native origination.
+	NativeHTTPSend func(ctx context.Context, p wire.SidecarSendParams, invokedBy string) (wire.SidecarSendResult, *wire.Error)
 }
 
 // Manager owns the registry of connected sidecars: registration, conflict

@@ -152,13 +152,48 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// 7. Mutated flow carrying sidecar-authored audit annotations (captured/mutated pairing).
+	mutatedID, err := conn.PushFlow(ctx, wire.Flow{
+		ProtocolTag: "custom/1.mutated",
+		Request:     &wire.FlowMessage{Method: "POST", Path: "/mutated", Headers: host},
+		Response:    &wire.FlowMessage{StatusCode: 200},
+		Annotations: map[string]any{"phase": "mutated", "fired_rules": []any{"r1"}, "parent_flow_id": plainID},
+	})
+	require.NoError(t, err)
+
 	t.Run("top_level_flows_filtered_by_adapter", func(t *testing.T) {
 		resp, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: adapterName, Limit: 100})
 		require.NoError(t, perr)
 		got := flowIDs(resp.Flows)
-		assert.ElementsMatch(t, []string{plainID, twoPhaseID, streamID, tunnelID, rawID, reflectID}, got)
+		assert.ElementsMatch(t, []string{plainID, twoPhaseID, streamID, tunnelID, rawID, reflectID, mutatedID}, got)
 		// Children are not surfaced in the top-level listing.
 		assert.NotContains(t, got, childIDs[0])
+	})
+
+	t.Run("flow_get_surfaces_sidecar_annotations", func(t *testing.T) {
+		got, gerr := mcpClient.FlowGet(ctx, mutatedID, mcpclient.FlowGetOpts{})
+		require.NoError(t, gerr)
+		assert.Equal(t, "mutated", got.Annotations["phase"])
+		assert.Equal(t, plainID, got.Annotations["parent_flow_id"])
+		// sectool attribution is a typed field, never mixed into the sidecar map.
+		assert.NotContains(t, got.Annotations, "sidecar_version")
+		assert.Equal(t, sidecarVersion, got.SidecarVersion)
+		assert.Equal(t, instanceID, got.SidecarInstanceID)
+	})
+
+	t.Run("flow_get_omits_absent_annotations", func(t *testing.T) {
+		got, gerr := mcpClient.FlowGet(ctx, plainID, mcpclient.FlowGetOpts{})
+		require.NoError(t, gerr)
+		assert.Empty(t, got.Annotations)
+	})
+
+	t.Run("proxy_poll_lists_annotations_and_attribution", func(t *testing.T) {
+		resp, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", ProtocolTag: "custom/1.mutated", Limit: 100})
+		require.NoError(t, perr)
+		require.Len(t, resp.Flows, 1)
+		entry := resp.Flows[0]
+		assert.Equal(t, "mutated", entry.Annotations["phase"])
+		assert.Equal(t, sidecarVersion, entry.SidecarVersion)
 	})
 
 	t.Run("find_reflected_on_adapter_flow", func(t *testing.T) {
@@ -210,8 +245,8 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 		stored, ok := backend.server.History().Get(plainID)
 		require.True(t, ok)
 		assert.Equal(t, adapterName, stored.Adapter)
-		assert.Equal(t, sidecarVersion, stored.Annotations["sidecar_version"])
-		assert.Equal(t, instanceID, stored.Annotations["sidecar_instance_id"])
+		assert.Equal(t, sidecarVersion, stored.SidecarVersion)
+		assert.Equal(t, instanceID, stored.SidecarInstanceID)
 	})
 
 	t.Run("diff_flow_on_adapter_flows", func(t *testing.T) {
