@@ -538,6 +538,7 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 			ModifiedRequest: entry.ModifiedRequest,
 			RawResponse:     slices.Concat(entry.RespHeaders, entry.RespBody),
 			Source:          SourceReplay,
+			Adapter:         entry.Adapter,
 			Scheme:          entry.Scheme,
 			Port:            entry.Port,
 			Protocol:        entry.Protocol,

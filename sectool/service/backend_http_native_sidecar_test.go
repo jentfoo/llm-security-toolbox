@@ -25,7 +25,7 @@ func TestNativeProxyBackendSidecarLifecycle(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "sidecar.sock")
 	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{})
 	require.NoError(t, err)
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, nil))
+	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, nil, store.NewReplayHistoryStore(store.NewMemStorage())))
 
 	go func() { _ = backend.Serve() }()
 

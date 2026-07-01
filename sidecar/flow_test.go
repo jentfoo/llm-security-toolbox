@@ -97,3 +97,55 @@ func TestEmitMutatedPair(t *testing.T) {
 		assert.False(t, hasParent)
 	})
 }
+
+func TestPushFlow(t *testing.T) {
+	t.Parallel()
+
+	pushOne := func(t *testing.T, flow wire.Flow) wire.Flow {
+		t.Helper()
+		cap := &flowCapture{firstID: "f1"}
+		addr, _ := fakeServer(t, cap.handle)
+		conn, err := Dial(addr, Registration{Name: "alpha"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+
+		_, err = conn.PushFlow(t.Context(), flow)
+		require.NoError(t, err)
+
+		cap.mu.Lock()
+		defer cap.mu.Unlock()
+		require.Len(t, cap.pushed, 1)
+		return cap.pushed[0]
+	}
+
+	t.Run("replay_without_response_gets_placeholder", func(t *testing.T) {
+		got := pushOne(t, wire.Flow{
+			Request:     &wire.FlowMessage{Method: "PUBLISH", Path: "/topic"},
+			Annotations: map[string]any{wire.AnnotationReplay: true},
+		})
+		require.NotNil(t, got.Response)
+		assert.Equal(t, 204, got.Response.StatusCode)
+	})
+
+	t.Run("replay_with_response_unchanged", func(t *testing.T) {
+		got := pushOne(t, wire.Flow{
+			Request:     &wire.FlowMessage{Method: "GET"},
+			Response:    &wire.FlowMessage{StatusCode: 200},
+			Annotations: map[string]any{wire.AnnotationReplay: true},
+		})
+		assert.Equal(t, 200, got.Response.StatusCode)
+	})
+
+	t.Run("non_replay_without_response_unchanged", func(t *testing.T) {
+		got := pushOne(t, wire.Flow{Request: &wire.FlowMessage{Method: "GET"}})
+		assert.Nil(t, got.Response)
+	})
+
+	t.Run("two_phase_completion_not_synthesized", func(t *testing.T) {
+		got := pushOne(t, wire.Flow{
+			FlowID:      "existing",
+			Annotations: map[string]any{wire.AnnotationReplay: true},
+		})
+		assert.Nil(t, got.Response)
+	})
+}

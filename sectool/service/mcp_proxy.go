@@ -820,6 +820,7 @@ func collectReplayHistory(replayStore *store.ReplayHistoryStore, full bool) []fl
 				request:     string(re.RawRequest),
 				response:    string(re.RespHeaders) + string(re.RespBody),
 				source:      SourceReplay,
+				adapter:     re.Adapter,
 				annotations: re.Annotations,
 				invokedBy:   re.InvokedBy,
 			}
@@ -840,6 +841,7 @@ func collectReplayHistory(replayStore *store.ReplayHistoryStore, full bool) []fl
 			status:      rm.RespStatus,
 			respLen:     rm.RespLen,
 			source:      SourceReplay,
+			adapter:     rm.Adapter,
 			annotations: rm.Annotations,
 			invokedBy:   rm.InvokedBy,
 		}

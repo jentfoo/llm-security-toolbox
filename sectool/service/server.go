@@ -429,7 +429,7 @@ func (s *Server) startBuiltinProxy() error {
 			ScopeCheck:        s.cfg.IsDomainAllowed,
 			DialTimeout:       timeouts.DialTimeout,
 			NativeHTTPSend:    s.OriginateNative,
-		}, s); err != nil {
+		}, s, s.replayHistoryStore); err != nil {
 			_ = backend.Close()
 			return fmt.Errorf("enable sidecars: %w", err)
 		}

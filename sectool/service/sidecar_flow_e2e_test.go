@@ -51,7 +51,7 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 
 	// Enable sidecars with the server itself as the core_query dispatcher, then
 	// start the backend (proxy + sidecar listener) and the MCP server.
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv))
+	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
 	go func() { _ = backend.Serve() }()
 
 	serverErr := make(chan error, 1)

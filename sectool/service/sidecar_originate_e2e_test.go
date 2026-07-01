@@ -58,7 +58,7 @@ func startOriginateHarness(t *testing.T, allowedDomains []string) *originateHarn
 
 	require.NoError(t, backend.EnableSidecars(scsidecar.Config{
 		Socket: socket, NativeProxyPort: 0, NativeHTTPSend: srv.OriginateNative,
-	}, srv))
+	}, srv, srv.replayHistoryStore))
 	go func() { _ = backend.Serve() }()
 
 	serverErr := make(chan error, 1)

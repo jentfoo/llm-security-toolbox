@@ -117,7 +117,7 @@ func startForward(t *testing.T, name string, caps wire.Capabilities, scope func(
 		Socket:          socket,
 		NativeProxyPort: 0,
 		ScopeCheck:      scope,
-	}, srv))
+	}, srv, srv.replayHistoryStore))
 	go func() { _ = backend.Serve() }()
 
 	serverErr := make(chan error, 1)

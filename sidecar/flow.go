@@ -3,6 +3,7 @@ package sidecar
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"time"
 
 	"github.com/go-appsec/toolbox/sidecar/wire"
@@ -14,6 +15,14 @@ import (
 // no error) means the flow was excluded by the operator's capture filter and not
 // stored; do not attempt two-phase completion against it.
 func (c *Conn) PushFlow(ctx context.Context, flow wire.Flow) (string, error) {
+	// The replay sink completes only against proxy history, so a response-less
+	// replay stored two-phase could never complete; give it a placeholder response
+	// to record it single-phase.
+	if flow.FlowID == "" && flow.Response == nil {
+		if replay, _ := flow.Annotations[wire.AnnotationReplay].(bool); replay {
+			flow.Response = &wire.FlowMessage{StatusCode: http.StatusNoContent, StatusText: "No Content"}
+		}
+	}
 	var res wire.PushFlowResult
 	if rpcErr := c.peer.Call(ctx, wire.MethodPushFlow, flow, &res); rpcErr != nil {
 		return "", rpcErr

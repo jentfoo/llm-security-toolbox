@@ -69,7 +69,7 @@ func TestSidecarToolsE2E(t *testing.T) {
 	require.NoError(t, err)
 	srv.SetQuietLogging()
 
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv))
+	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
 	go func() { _ = backend.Serve() }()
 
 	serverErr := make(chan error, 1)
@@ -165,7 +165,7 @@ func TestSidecarToolsAbsentWithoutSidecar(t *testing.T) {
 	srv.SetQuietLogging()
 
 	// Sidecars enabled but none connected: the surface must be unchanged.
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: filepath.Join(t.TempDir(), "sidecar.sock"), NativeProxyPort: 0}, srv))
+	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: filepath.Join(t.TempDir(), "sidecar.sock"), NativeProxyPort: 0}, srv, srv.replayHistoryStore))
 	go func() { _ = backend.Serve() }()
 
 	serverErr := make(chan error, 1)

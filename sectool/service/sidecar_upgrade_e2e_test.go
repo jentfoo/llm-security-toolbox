@@ -68,7 +68,7 @@ func startUpgrade(t *testing.T, name string, caps wire.Capabilities) *upgradeHar
 	require.NoError(t, err)
 	srv.SetQuietLogging()
 
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv))
+	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
 	go func() { _ = backend.Serve() }()
 
 	serverErr := make(chan error, 1)

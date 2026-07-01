@@ -136,9 +136,12 @@ func NewNativeProxyBackend(port int, configDir string, maxBodyBytes int, storage
 // built-in adapter names are reserved automatically. coreQuery backs the sidecar
 // core_query method; it resolves the read-side tools lazily so it can be supplied
 // before the MCP server exists.
-func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sidecar.CoreService) error {
+func (b *NativeProxyBackend) EnableSidecars(cfg sidecar.Config, coreQuery sidecar.CoreService, replayStore *store.ReplayHistoryStore) error {
 	cfg.ReservedNames = []string{types.ProtocolHTTP11, types.ProtocolH2, types.ProtocolTagWS, types.AdapterScopeCore}
-	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry(), b.server.History(), coreQuery, b)
+	// Route sidecar-performed replays into the replay store so they report source
+	// "replay" like native replays; other flows go to proxy history.
+	sink := &replayRoutingSink{history: b.server.History(), replay: replayStore}
+	b.sidecarManager = sidecar.NewManager(cfg, b.server.Registry(), sink, coreQuery, b)
 	lst, err := sidecar.NewListener(cfg, b.sidecarManager)
 	if err != nil {
 		return err

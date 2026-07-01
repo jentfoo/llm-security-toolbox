@@ -32,6 +32,8 @@ type ReplayHistoryMeta struct {
 	Annotations map[string]any `msgpack:"an,omitempty"`
 	// InvokedBy names the sidecar that originated a native send via invoke_adapter.
 	InvokedBy string `msgpack:"ib,omitempty"`
+	// Adapter names the sidecar that performed a replay; empty for native sends.
+	Adapter string `msgpack:"ad,omitempty"`
 }
 
 // ReplayHistoryPayload holds the heavy request/response data for a replay entry.
@@ -70,7 +72,11 @@ type ReplayHistoryEntry struct {
 	Annotations map[string]any
 	// InvokedBy names the sidecar that originated a native send via invoke_adapter.
 	InvokedBy string
+	// Adapter names the sidecar that performed a replay; empty for native sends.
+	Adapter string
 }
+
+// TODO - Consider combining the HistoryStore and ReplayHistoryStore into a single unified storage
 
 // ReplayHistoryStore manages replay entries with thread-safe access.
 type ReplayHistoryStore struct {
@@ -110,6 +116,7 @@ func (s *ReplayHistoryStore) Store(entry *ReplayHistoryEntry) {
 		Duration:     entry.Duration,
 		Annotations:  entry.Annotations,
 		InvokedBy:    entry.InvokedBy,
+		Adapter:      entry.Adapter,
 	}
 	payload := ReplayHistoryPayload{
 		RawRequest:      entry.RawRequest,
@@ -189,6 +196,7 @@ func (s *ReplayHistoryStore) getLocked(flowID string) (*ReplayHistoryEntry, bool
 		SourceFlowID:    meta.SourceFlowID,
 		Annotations:     meta.Annotations,
 		InvokedBy:       meta.InvokedBy,
+		Adapter:         meta.Adapter,
 	}, true
 }
 
