@@ -13,11 +13,16 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-appsec/toolbox/sectool/service/dedupe"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 )
 
@@ -62,11 +67,14 @@ func newCertManager(configDir string) (*CertManager, error) {
 	return m, nil
 }
 
-// GetCertificate returns a certificate for the hostname.
+// GetCertificate returns a certificate for the hostname, whose SANs additionally
+// include any names in spec (nil spec yields a single-SAN leaf).
 // Generates and caches if not already cached.
-func (m *CertManager) GetCertificate(hostname string) (*tls.Certificate, error) {
+func (m *CertManager) GetCertificate(hostname string, spec *types.CertSpec) (*tls.Certificate, error) {
+	key := certCacheKey(hostname, spec)
+
 	// Fast path: check cache (SpillStore is thread-safe)
-	cert, err := m.getCachedCert(hostname)
+	cert, err := m.getCachedCert(key)
 	if err != nil {
 		return nil, err
 	} else if cert != nil {
@@ -78,20 +86,52 @@ func (m *CertManager) GetCertificate(hostname string) (*tls.Certificate, error) 
 	defer m.mu.Unlock()
 
 	// Double-check after acquiring lock
-	cert, err = m.getCachedCert(hostname)
+	cert, err = m.getCachedCert(key)
 	if err != nil {
 		return nil, err
 	} else if cert != nil {
 		return cert, nil
 	}
 
-	cert, err = m.generateCertificate(hostname)
+	cert, err = m.generateCertificate(hostname, spec)
 	if err != nil {
 		return nil, fmt.Errorf("generate certificate for %s: %w", hostname, err)
-	} else if err := m.storeCert(hostname, cert); err != nil {
+	} else if err := m.storeCert(key, cert); err != nil {
 		return nil, fmt.Errorf("cache certificate for %s: %w", hostname, err)
 	}
 	return cert, nil
+}
+
+// certCacheKey derives an order-independent cache key from the hostname and any
+// additive SANs, so a host served with and without mirrored SANs (or across an
+// upstream SAN rotation) does not collide on a stale leaf.
+func certCacheKey(hostname string, spec *types.CertSpec) string {
+	if spec.Empty() {
+		return hostname
+	}
+	var b strings.Builder
+	b.WriteString(hostname)
+	appendSorted := func(tag string, vals []string) {
+		if len(vals) == 0 {
+			return
+		}
+		vals = slices.Clone(vals)
+		slices.Sort(vals)
+		b.WriteByte(0)
+		b.WriteString(tag)
+		for _, v := range vals {
+			b.WriteByte(0)
+			b.WriteString(v)
+		}
+	}
+	appendSorted("d", spec.DNSNames)
+	appendSorted("i", ipStrings(spec.IPAddresses))
+	appendSorted("u", uriStrings(spec.URIs))
+	appendSorted("e", spec.Emails)
+	if spec.CommonName != "" {
+		appendSorted("c", []string{spec.CommonName})
+	}
+	return b.String()
 }
 
 // CACert returns the CA certificate for clients to trust.
@@ -104,9 +144,9 @@ func (m *CertManager) Close() error {
 	return m.cache.Close()
 }
 
-// getCachedCert retrieves a certificate from the SpillStore cache.
-func (m *CertManager) getCachedCert(hostname string) (*tls.Certificate, error) {
-	data, found, err := m.cache.Get(hostname)
+// getCachedCert retrieves a certificate from the SpillStore cache by cache key.
+func (m *CertManager) getCachedCert(key string) (*tls.Certificate, error) {
+	data, found, err := m.cache.Get(key)
 	if err != nil {
 		return nil, fmt.Errorf("cert cache get: %w", err)
 	} else if !found {
@@ -115,13 +155,13 @@ func (m *CertManager) getCachedCert(hostname string) (*tls.Certificate, error) {
 	return deserializeCert(data)
 }
 
-// storeCert serializes and stores a certificate in the SpillStore cache.
-func (m *CertManager) storeCert(hostname string, cert *tls.Certificate) error {
+// storeCert serializes and stores a certificate in the SpillStore cache by cache key.
+func (m *CertManager) storeCert(key string, cert *tls.Certificate) error {
 	data, err := serializeCert(cert)
 	if err != nil {
 		return err
 	}
-	return m.cache.Set(hostname, data)
+	return m.cache.Set(key, data)
 }
 
 func serializeCert(cert *tls.Certificate) ([]byte, error) {
@@ -277,8 +317,9 @@ func (m *CertManager) loadOrGenerateCA(configDir string) error {
 	return nil
 }
 
-// generateCertificate creates a certificate for the given hostname, signed by the CA.
-func (m *CertManager) generateCertificate(hostname string) (*tls.Certificate, error) {
+// generateCertificate creates a certificate for the given hostname, signed by the
+// CA. Its SANs are {hostname} plus any additive names in spec (nil for single-SAN).
+func (m *CertManager) generateCertificate(hostname string, spec *types.CertSpec) (*tls.Certificate, error) {
 	// Generate RSA key (2048-bit for speed)
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -302,12 +343,30 @@ func (m *CertManager) generateCertificate(hostname string) (*tls.Certificate, er
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 
-	// Set SAN - hostname or IP address
+	// Base SAN from the hostname (DNS or IP), then additive names from spec
+	var dnsNames []string
+	var ips []net.IP
 	if ip := net.ParseIP(hostname); ip != nil {
-		template.IPAddresses = []net.IP{ip}
+		ips = append(ips, ip)
 	} else {
-		template.DNSNames = []string{hostname}
+		dnsNames = append(dnsNames, hostname)
 	}
+	if spec != nil {
+		dnsNames = append(dnsNames, spec.DNSNames...)
+		ips = append(ips, spec.IPAddresses...)
+		template.URIs = dedupeURIs(spec.URIs)
+		template.EmailAddresses = dedupe.Slice(spec.Emails)
+		// Upstream/declared CN joins the SAN set (DNS, or IP if it parses as one)
+		if spec.CommonName != "" {
+			if ip := net.ParseIP(spec.CommonName); ip != nil {
+				ips = append(ips, ip)
+			} else {
+				dnsNames = append(dnsNames, spec.CommonName)
+			}
+		}
+	}
+	template.DNSNames = dedupe.Slice(dnsNames)
+	template.IPAddresses = dedupeIPs(ips)
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, m.caCert, &key.PublicKey, m.caKey)
 	if err != nil {
@@ -320,6 +379,60 @@ func (m *CertManager) generateCertificate(hostname string) (*tls.Certificate, er
 	}
 
 	return cert, nil
+}
+
+// ipStrings renders IPs to their canonical string form.
+func ipStrings(ips []net.IP) []string {
+	out := make([]string, len(ips))
+	for i, ip := range ips {
+		out[i] = ip.String()
+	}
+	return out
+}
+
+// uriStrings renders URIs to their string form.
+func uriStrings(uris []*url.URL) []string {
+	out := make([]string, len(uris))
+	for i, u := range uris {
+		out[i] = u.String()
+	}
+	return out
+}
+
+// dedupeIPs removes duplicate IPs (by canonical string), preserving first-seen order.
+func dedupeIPs(ips []net.IP) []net.IP {
+	if len(ips) < 2 {
+		return ips
+	}
+	seen := make(map[string]struct{}, len(ips))
+	out := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		k := ip.String()
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, ip)
+	}
+	return out
+}
+
+// dedupeURIs removes duplicate URIs (by string form), preserving first-seen order.
+func dedupeURIs(uris []*url.URL) []*url.URL {
+	if len(uris) < 2 {
+		return uris
+	}
+	seen := make(map[string]struct{}, len(uris))
+	out := make([]*url.URL, 0, len(uris))
+	for _, u := range uris {
+		k := u.String()
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, u)
+	}
+	return out
 }
 
 // parsePrivateKey tries to parse a private key in various formats.

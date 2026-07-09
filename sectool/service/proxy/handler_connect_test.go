@@ -3,9 +3,13 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -323,6 +327,62 @@ func TestHandle(t *testing.T) {
 		assert.Equal(t, "GET", entry.Request.Method)
 		assert.Equal(t, "https", entry.Scheme)
 	})
+}
+
+func TestUpstreamMirrorSpec(t *testing.T) {
+	t.Parallel()
+
+	t.Run("mirrors_upstream_sans", func(t *testing.T) {
+		ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+			Certificates: []tls.Certificate{multiSANServerCert(t)},
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_ = conn.(*tls.Conn).Handshake()
+		}()
+
+		conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+
+		spec := upstreamMirrorSpec(conn)
+		require.NotNil(t, spec)
+		assert.Contains(t, spec.DNSNames, "a.example.com")
+		assert.Contains(t, spec.DNSNames, "b.example.com")
+		assert.Equal(t, "cn.example.com", spec.CommonName)
+		require.Len(t, spec.URIs, 1)
+		assert.Equal(t, "spiffe://example.com/svc", spec.URIs[0].String())
+	})
+
+	t.Run("non_tls_conn_yields_nil", func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		t.Cleanup(func() { _ = c1.Close() })
+		t.Cleanup(func() { _ = c2.Close() })
+		assert.Nil(t, upstreamMirrorSpec(c1))
+	})
+}
+
+// multiSANServerCert builds a self-signed leaf carrying several SAN types and a CN.
+func multiSANServerCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "cn.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"a.example.com", "b.example.com"},
+		URIs:         []*url.URL{mustParseURL(t, "spiffe://example.com/svc")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
 func mustParseURL(t *testing.T, rawURL string) *url.URL {

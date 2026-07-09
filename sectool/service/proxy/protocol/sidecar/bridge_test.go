@@ -99,17 +99,42 @@ func TestBridgeClaimTLS(t *testing.T) {
 	}
 
 	t.Run("sni_and_port_match", func(t *testing.T) {
-		assert.True(t, newTestBridge(ec, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443))
+		spec, ok := newTestBridge(ec, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
+		assert.True(t, ok)
+		assert.Nil(t, spec)
 	})
 	t.Run("sni_mismatch", func(t *testing.T) {
-		assert.False(t, newTestBridge(ec, true).ClaimTLS("other.example.com", "other.example.com", 443))
+		_, ok := newTestBridge(ec, true).ClaimTLS("other.example.com", "other.example.com", 443)
+		assert.False(t, ok)
 	})
 	t.Run("port_mismatch", func(t *testing.T) {
-		assert.False(t, newTestBridge(ec, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 8443))
+		_, ok := newTestBridge(ec, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 8443)
+		assert.False(t, ok)
 	})
 	t.Run("non_terminating_claim_declines", func(t *testing.T) {
 		raw := &wire.EarlyClaim{PortRange: wire.PortRange{Low: 443, High: 443}}
-		assert.False(t, newTestBridge(raw, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443))
+		_, ok := newTestBridge(raw, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
+		assert.False(t, ok)
+	})
+	t.Run("cert_spec_translated", func(t *testing.T) {
+		withCert := &wire.EarlyClaim{
+			PortRange: wire.PortRange{Low: 443, High: 443},
+			TLS: &wire.TLSClaim{Terminate: true, Cert: &wire.TLSCertSpec{
+				DNSNames:    []string{"alt.example.com"},
+				IPAddresses: []string{"10.0.0.1", "not-an-ip"},
+				URIs:        []string{"spiffe://example.com/svc"},
+				CommonName:  "legacy.example.com",
+			}},
+		}
+		spec, ok := newTestBridge(withCert, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
+		require.True(t, ok)
+		require.NotNil(t, spec)
+		assert.Equal(t, []string{"alt.example.com"}, spec.DNSNames)
+		require.Len(t, spec.IPAddresses, 1) // invalid IP dropped
+		assert.Equal(t, "10.0.0.1", spec.IPAddresses[0].String())
+		require.Len(t, spec.URIs, 1)
+		assert.Equal(t, "spiffe://example.com/svc", spec.URIs[0].String())
+		assert.Equal(t, "legacy.example.com", spec.CommonName)
 	})
 }
 

@@ -181,9 +181,9 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 			}
 
 			// A sidecar tls.terminate claim takes precedence: skip the upstream dial
-			if b, ok := h.reg.MatchTLS(sni, target.Hostname, target.Port); ok {
+			if b, spec, ok := h.reg.MatchTLS(sni, target.Hostname, target.Port); ok {
 				tlsBridge = b
-				cert, certErr := h.certManager.GetCertificate(sni)
+				cert, certErr := h.certManager.GetCertificate(sni, spec)
 				if certErr != nil {
 					return nil, certErr
 				}
@@ -196,8 +196,8 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 				return nil, probeErr
 			}
 
-			// Get certificate for SNI
-			cert, certErr := h.certManager.GetCertificate(sni)
+			// Mint for SNI, mirroring the upstream leaf's SANs
+			cert, certErr := h.certManager.GetCertificate(sni, upstreamMirrorSpec(upstreamConn))
 			if certErr != nil {
 				if upstreamConn != nil {
 					_ = upstreamConn.Close()
@@ -352,6 +352,32 @@ func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstrea
 		UpstreamConn:   upstreamConn,
 		UpstreamReader: bufio.NewReader(upstreamConn),
 	})
+}
+
+// upstreamMirrorSpec builds an additive cert spec from the upstream leaf's SANs
+// (and CommonName). Returns nil when conn is not TLS or presents no peer cert.
+func upstreamMirrorSpec(conn net.Conn) *types.CertSpec {
+	tc, ok := conn.(*tls.Conn)
+	if !ok {
+		return nil
+	}
+	peers := tc.ConnectionState().PeerCertificates
+	if len(peers) == 0 {
+		return nil
+	}
+
+	leaf := peers[0]
+	spec := &types.CertSpec{
+		DNSNames:    leaf.DNSNames,
+		IPAddresses: leaf.IPAddresses,
+		URIs:        leaf.URIs,
+		Emails:      leaf.EmailAddresses,
+		CommonName:  leaf.Subject.CommonName,
+	}
+	if spec.Empty() {
+		return nil
+	}
+	return spec
 }
 
 // sendConnectError writes an HTTP error response for CONNECT failures.

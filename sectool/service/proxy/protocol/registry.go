@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/go-analyze/bulk"
+
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 // Registry holds the ordered claim seams for the native proxy backend; first
@@ -67,14 +69,17 @@ func (r *Registry) DispatchEarly(ctx context.Context, c *EarlyClaimCtx) {
 }
 
 // MatchTLS returns the first TLS early adapter that claims a connection by its
-// ClientHello SNI and CONNECT target, before TLS termination.
-func (r *Registry) MatchTLS(sni, host string, port int) (TLSEarlyAdapter, bool) {
+// ClientHello SNI and CONNECT target, before TLS termination, along with any
+// additive cert spec the claim declares for the minted leaf.
+func (r *Registry) MatchTLS(sni, host string, port int) (TLSEarlyAdapter, *types.CertSpec, bool) {
 	for _, a := range r.snapshotEarly() {
-		if t, ok := a.(TLSEarlyAdapter); ok && t.ClaimTLS(sni, host, port) {
-			return t, true
+		if t, ok := a.(TLSEarlyAdapter); ok {
+			if spec, claimed := t.ClaimTLS(sni, host, port); claimed {
+				return t, spec, true
+			}
 		}
 	}
-	return nil, false
+	return nil, nil, false
 }
 
 // ClaimUpgrade returns the first upgrade adapter that claims the parsed request.

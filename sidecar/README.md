@@ -59,7 +59,7 @@ A **Flow** is one logical exchange. It MAY carry a `request` side and a `respons
 
 A sidecar declares which connection-handling seams it claims at registration. Each kind is a list (`early_claims`, `upgrade_claims`, `injection_targets`), so one registration can claim several protocol entry points:
 
-- **`early_claim`** — claim TCP connections from accept on a port range, optionally gated by `magic_bytes_prefix`, `host_match`, `sni_match`, or a dynamic `probe`. With `tls.terminate`, `sectool` MitMs TLS and the sidecar receives the decrypted contents. A connection matching no claim falls through to the HTTP adapter.
+- **`early_claim`** — claim TCP connections from accept on a port range, optionally gated by `magic_bytes_prefix`, `host_match`, `sni_match`, or a dynamic `probe`. With `tls.terminate`, `sectool` MitMs TLS and the sidecar receives the decrypted contents. `tls.cert` optionally declares additive SANs (`dns_names`, `ip_addresses`, `uris`, `emails`) and a legacy `common_name` to mint onto the terminated leaf, for clients that verify a name (or URI/SPIFFE identity) other than the SNI they dial. The declaration is purely additive; the leaf always retains the dialed name. A connection matching no claim falls through to the HTTP adapter.
 - **`upgrade_claim`** — claim a byte stream after an HTTP upgrade (`http_101` or `connect`). Sectool captures the triggering request as a normal flow, synthesizes the upgrade response, and routes subsequent bytes to the sidecar; the captured request's `flow_id` and headers are surfaced on stream open.
 - **`injection_target`** — declare the adapter can originate new outbound messages, enabling `replay_send` routing and cross-adapter `invoke_adapter`.
 
@@ -663,7 +663,13 @@ All fields `omitempty`. `annotations` is a free-form object the sidecar owns (we
 {
   "early_claims": [{
     "port_range": { "low": 9443, "high": 9443 },
-    "tls": { "terminate": true, "sni_match": "mqtt.example.com" },
+    "tls": {
+      "terminate": true, "sni_match": "mqtt.example.com",
+      "cert": {
+        "dns_names": ["alt.example.com"], "ip_addresses": ["10.0.0.1"],
+        "uris": ["spiffe://example.com/svc"], "emails": [], "common_name": ""
+      }
+    },
     "magic_bytes_prefix": "<base64>", "host_match": "",
     "probe": false, "probe_max_bytes": 0
   }],

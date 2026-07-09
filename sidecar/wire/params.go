@@ -29,6 +29,19 @@ type PortRange struct {
 type TLSClaim struct {
 	Terminate bool   `json:"terminate"`
 	SNIMatch  string `json:"sni_match,omitempty"`
+	// Cert declares additive SANs for the leaf sectool mints when terminating.
+	Cert *TLSCertSpec `json:"cert,omitempty"`
+}
+
+// TLSCertSpec declares additive Subject Alternative Names (and a legacy CommonName)
+// to include on the minted terminated leaf, beyond the SNI-derived SAN. All fields
+// are additive; the leaf always retains the dialed name.
+type TLSCertSpec struct {
+	DNSNames    []string `json:"dns_names,omitempty"`
+	IPAddresses []string `json:"ip_addresses,omitempty"`
+	URIs        []string `json:"uris,omitempty"`
+	Emails      []string `json:"emails,omitempty"`
+	CommonName  string   `json:"common_name,omitempty"`
 }
 
 // EarlyClaim claims TCP connections at accept on a port range.

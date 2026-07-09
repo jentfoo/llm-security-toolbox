@@ -5,12 +5,30 @@
 package types
 
 import (
+	"net"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/go-analyze/bulk"
 )
+
+// CertSpec is additive leaf properties for a minted MITM leaf, beyond the
+// hostname-derived single SAN. A nil *CertSpec yields the single-SAN leaf.
+type CertSpec struct {
+	DNSNames    []string
+	IPAddresses []net.IP
+	URIs        []*url.URL
+	Emails      []string
+	CommonName  string // upstream/declared CN; added as a SAN, not the leaf Subject.CN
+}
+
+// Empty reports whether the spec contributes no additive names.
+func (s *CertSpec) Empty() bool {
+	return s == nil || (len(s.DNSNames) == 0 && len(s.IPAddresses) == 0 &&
+		len(s.URIs) == 0 && len(s.Emails) == 0 && s.CommonName == "")
+}
 
 // Protocol tags identify the protocol within a stored Flow.
 const (

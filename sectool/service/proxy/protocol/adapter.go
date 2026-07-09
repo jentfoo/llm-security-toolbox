@@ -59,10 +59,11 @@ type EarlyAdapter interface {
 // TLSEarlyAdapter gates a TLS connection before termination, by the ClientHello
 // SNI and the CONNECT target. Implemented by sidecar bridges whose early claim
 // sets tls.terminate; the connect handler MITMs a matched connection with the
-// fake CA and re-offers the decrypted stream through ServeEarly.
+// fake CA and re-offers the decrypted stream through ServeEarly. A claim may
+// return a *types.CertSpec of additive SANs to mint onto the terminated leaf.
 type TLSEarlyAdapter interface {
 	EarlyAdapter
-	ClaimTLS(sni, host string, port int) bool
+	ClaimTLS(sni, host string, port int) (*types.CertSpec, bool)
 }
 
 // UpgradeAdapter claims and serves a connection after an HTTP/1.x upgrade signal.

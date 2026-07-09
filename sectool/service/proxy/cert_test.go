@@ -2,10 +2,13 @@ package proxy
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 func TestNewCertManager(t *testing.T) {
@@ -150,7 +155,7 @@ func TestNewCertManager(t *testing.T) {
 		require.NoError(t, err)
 
 		// Generate a leaf certificate (not CA)
-		leafCert, err := cm.GetCertificate("example.com")
+		leafCert, err := cm.GetCertificate("example.com", nil)
 		require.NoError(t, err)
 		require.NoError(t, cm.Close())
 
@@ -240,7 +245,7 @@ func TestGetCertificate(t *testing.T) {
 	t.Cleanup(func() { _ = cm.Close() })
 
 	t.Run("hostname_cert", func(t *testing.T) {
-		cert, err := cm.GetCertificate("example.com")
+		cert, err := cm.GetCertificate("example.com", nil)
 		require.NoError(t, err)
 		require.NotNil(t, cert)
 
@@ -254,10 +259,10 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("cached_cert", func(t *testing.T) {
-		cert1, err := cm.GetCertificate("cached.example.com")
+		cert1, err := cm.GetCertificate("cached.example.com", nil)
 		require.NoError(t, err)
 
-		cert2, err := cm.GetCertificate("cached.example.com")
+		cert2, err := cm.GetCertificate("cached.example.com", nil)
 		require.NoError(t, err)
 
 		// Compare DER bytes (deserialized copies won't be pointer-equal)
@@ -265,7 +270,7 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("ip_address_cert", func(t *testing.T) {
-		cert, err := cm.GetCertificate("192.168.1.1")
+		cert, err := cm.GetCertificate("192.168.1.1", nil)
 		require.NoError(t, err)
 		require.NotNil(t, cert)
 
@@ -278,7 +283,7 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("certificate_chain", func(t *testing.T) {
-		cert, err := cm.GetCertificate("chain.example.com")
+		cert, err := cm.GetCertificate("chain.example.com", nil)
 		require.NoError(t, err)
 
 		assert.Len(t, cert.Certificate, 2)
@@ -296,7 +301,7 @@ func TestGetCertificate(t *testing.T) {
 		ipv6Addresses := []string{"::1", "2001:db8::1"}
 
 		for _, addr := range ipv6Addresses {
-			cert, err := cm.GetCertificate(addr)
+			cert, err := cm.GetCertificate(addr, nil)
 			require.NoError(t, err)
 			require.NotNil(t, cert)
 
@@ -310,7 +315,7 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("wildcard_hostname", func(t *testing.T) {
-		cert, err := cm.GetCertificate("*.example.com")
+		cert, err := cm.GetCertificate("*.example.com", nil)
 		require.NoError(t, err)
 		require.NotNil(t, cert)
 
@@ -321,7 +326,7 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("hostname_with_trailing_dot", func(t *testing.T) {
-		cert, err := cm.GetCertificate("example.com.")
+		cert, err := cm.GetCertificate("example.com.", nil)
 		require.NoError(t, err)
 		require.NotNil(t, cert)
 
@@ -340,7 +345,7 @@ func TestGetCertificate(t *testing.T) {
 			}
 		}
 		longHostname = "abcdefghij." + "x.y.z.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w" + ".example.com"
-		cert, err := cm.GetCertificate(longHostname)
+		cert, err := cm.GetCertificate(longHostname, nil)
 		require.NoError(t, err)
 		require.NotNil(t, cert)
 
@@ -352,7 +357,7 @@ func TestGetCertificate(t *testing.T) {
 
 	t.Run("punycode_hostname", func(t *testing.T) {
 		// IDN in punycode form
-		cert, err := cm.GetCertificate("xn--nxasmq5b.com")
+		cert, err := cm.GetCertificate("xn--nxasmq5b.com", nil)
 		require.NoError(t, err)
 		require.NotNil(t, cert)
 
@@ -363,7 +368,7 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("empty_hostname_cert", func(t *testing.T) {
-		cert, err := cm.GetCertificate("")
+		cert, err := cm.GetCertificate("", nil)
 		require.NoError(t, err)
 		require.NotNil(t, cert)
 
@@ -387,7 +392,7 @@ func TestGetCertificate(t *testing.T) {
 
 		for i := 0; i < goroutines; i++ {
 			go func() {
-				cert, err := cm.GetCertificate(hostname)
+				cert, err := cm.GetCertificate(hostname, nil)
 				if err != nil {
 					results <- result{err: err}
 					return
@@ -424,7 +429,7 @@ func TestGetCertificate(t *testing.T) {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				cert, err := cm.GetCertificate(hostnames[idx])
+				cert, err := cm.GetCertificate(hostnames[idx], nil)
 				if err != nil {
 					errors[idx] = err
 					return
@@ -447,7 +452,7 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("certificate_validity_window", func(t *testing.T) {
-		cert, err := cm.GetCertificate("validity.example.com")
+		cert, err := cm.GetCertificate("validity.example.com", nil)
 		require.NoError(t, err)
 
 		x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
@@ -463,7 +468,7 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("certificate_key_usage", func(t *testing.T) {
-		cert, err := cm.GetCertificate("keyusage.example.com")
+		cert, err := cm.GetCertificate("keyusage.example.com", nil)
 		require.NoError(t, err)
 
 		x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
@@ -477,9 +482,9 @@ func TestGetCertificate(t *testing.T) {
 	})
 
 	t.Run("certificate_serial_uniqueness", func(t *testing.T) {
-		cert1, err := cm.GetCertificate("serial1.example.com")
+		cert1, err := cm.GetCertificate("serial1.example.com", nil)
 		require.NoError(t, err)
-		cert2, err := cm.GetCertificate("serial2.example.com")
+		cert2, err := cm.GetCertificate("serial2.example.com", nil)
 		require.NoError(t, err)
 
 		x509Cert1, err := x509.ParseCertificate(cert1.Certificate[0])
@@ -489,6 +494,86 @@ func TestGetCertificate(t *testing.T) {
 
 		assert.NotEqual(t, x509Cert1.SerialNumber, x509Cert2.SerialNumber)
 	})
+}
+
+func TestGetCertificateSpec(t *testing.T) {
+	t.Parallel()
+
+	cm, err := newCertManager(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cm.Close() })
+
+	parseLeaf := func(t *testing.T, cert *tls.Certificate) *x509.Certificate {
+		t.Helper()
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		require.NoError(t, err)
+		return leaf
+	}
+
+	t.Run("additive_dns_san", func(t *testing.T) {
+		cert, err := cm.GetCertificate("dial.example.com", &types.CertSpec{DNSNames: []string{"verify.example.com"}})
+		require.NoError(t, err)
+		leaf := parseLeaf(t, cert)
+		assert.Contains(t, leaf.DNSNames, "dial.example.com")
+		assert.Contains(t, leaf.DNSNames, "verify.example.com")
+		assert.Equal(t, "dial.example.com", leaf.Subject.CommonName)
+	})
+
+	t.Run("uri_ip_email_cn_sans", func(t *testing.T) {
+		spec := &types.CertSpec{
+			URIs:        []*url.URL{mustParseURL(t, "spiffe://example.com/ns/default/sa/svc")},
+			IPAddresses: []net.IP{net.ParseIP("10.1.2.3")},
+			Emails:      []string{"svc@example.com"},
+			CommonName:  "legacy.example.com",
+		}
+		cert, err := cm.GetCertificate("mesh.example.com", spec)
+		require.NoError(t, err)
+		leaf := parseLeaf(t, cert)
+		require.Len(t, leaf.URIs, 1)
+		assert.Equal(t, "spiffe://example.com/ns/default/sa/svc", leaf.URIs[0].String())
+		assert.Contains(t, ipStrings(leaf.IPAddresses), "10.1.2.3")
+		assert.Contains(t, leaf.EmailAddresses, "svc@example.com")
+		assert.Contains(t, leaf.DNSNames, "legacy.example.com") // CN folded into SANs
+		assert.Contains(t, leaf.DNSNames, "mesh.example.com")
+	})
+
+	t.Run("cache_key_distinguishes_spec", func(t *testing.T) {
+		plain, err := cm.GetCertificate("host.example.com", nil)
+		require.NoError(t, err)
+		withC, err := cm.GetCertificate("host.example.com", &types.CertSpec{DNSNames: []string{"c.example.com"}})
+		require.NoError(t, err)
+		assert.NotEqual(t, plain.Certificate, withC.Certificate)
+
+		// same spec is cache-served (DER-equal)
+		again, err := cm.GetCertificate("host.example.com", &types.CertSpec{DNSNames: []string{"c.example.com"}})
+		require.NoError(t, err)
+		assert.Equal(t, withC.Certificate, again.Certificate)
+	})
+
+	t.Run("verify_name_other_than_sni", func(t *testing.T) {
+		const dial, verify = "dial.internal", "verify.internal"
+		mirrored, err := cm.GetCertificate(dial, &types.CertSpec{DNSNames: []string{verify}})
+		require.NoError(t, err)
+		control, err := cm.GetCertificate(dial, nil)
+		require.NoError(t, err)
+
+		pool := x509.NewCertPool()
+		pool.AddCert(cm.CACert())
+
+		// mirrored leaf carries verify -> verification against verify succeeds
+		require.NoError(t, verifyLeafHostname(t, mirrored, pool, verify))
+		// control leaf carries only dial -> verification against verify fails
+		require.Error(t, verifyLeafHostname(t, control, pool, verify))
+	})
+}
+
+// verifyLeafHostname parses the leaf and checks it verifies for name against pool.
+func verifyLeafHostname(t *testing.T, cert *tls.Certificate, pool *x509.CertPool, name string) error {
+	t.Helper()
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	require.NoError(t, err)
+	_, err = leaf.Verify(x509.VerifyOptions{DNSName: name, Roots: pool})
+	return err
 }
 
 func TestCACert(t *testing.T) {

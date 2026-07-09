@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -65,10 +66,11 @@ func (b *bridge) ServeEarly(ctx context.Context, c *protocol.EarlyClaimCtx) {
 }
 
 // ClaimTLS reports whether any TLS-terminating early_claim gates this connection
-// before termination on SNI and CONNECT target.
-func (b *bridge) ClaimTLS(sni, host string, port int) bool {
+// before termination on SNI and CONNECT target, returning the matched claim's
+// additive cert spec (nil when the claim declares none).
+func (b *bridge) ClaimTLS(sni, host string, port int) (*types.CertSpec, bool) {
 	if !b.rec.Healthy() {
-		return false
+		return nil, false
 	}
 	for i := range b.rec.Capabilities.EarlyClaims {
 		ec := &b.rec.Capabilities.EarlyClaims[i]
@@ -81,9 +83,31 @@ func (b *bridge) ClaimTLS(sni, host string, port int) bool {
 		} else if ec.HostMatch != "" && ec.HostMatch != host {
 			continue
 		}
-		return true
+
+		if ec.TLS.Cert == nil {
+			return nil, true
+		}
+		spec := &types.CertSpec{
+			DNSNames:   ec.TLS.Cert.DNSNames,
+			Emails:     ec.TLS.Cert.Emails,
+			CommonName: ec.TLS.Cert.CommonName,
+		}
+		for _, s := range ec.TLS.Cert.IPAddresses {
+			if ip := net.ParseIP(s); ip != nil {
+				spec.IPAddresses = append(spec.IPAddresses, ip)
+			}
+		}
+		for _, s := range ec.TLS.Cert.URIs {
+			if u, err := url.Parse(s); err == nil {
+				spec.URIs = append(spec.URIs, u)
+			}
+		}
+		if spec.Empty() {
+			return nil, true
+		}
+		return spec, true
 	}
-	return false
+	return nil, false
 }
 
 // ClaimUpgrade matches any of the sidecar's upgrade_claims against a parsed HTTP
