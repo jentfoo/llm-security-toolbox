@@ -31,7 +31,8 @@ func TestNativeProxyBackendSidecarLifecycle(t *testing.T) {
 
 	var conn net.Conn
 	require.Eventually(t, func() bool {
-		c, derr := net.Dial("unix", socket)
+		var d net.Dialer
+		c, derr := d.DialContext(t.Context(), "unix", socket)
 		if derr != nil {
 			return false
 		}

@@ -32,7 +32,8 @@ func TestListenerUnix(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), sockInfo.Mode().Perm())
 
-	conn, err := net.Dial("unix", socket)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "unix", socket)
 	require.NoError(t, err)
 	p := wire.NewPeer(conn, nil)
 	go func() { _ = p.Run(t.Context()) }()

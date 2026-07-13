@@ -9,11 +9,9 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
-// PushFlow emits a captured flow and returns the flow_id sectool assigned. Leave
-// flow.FlowID empty on first emission; set it to re-target an existing flow for
-// two-phase completion or session/stream teardown. A returned empty flow_id (with
-// no error) means the flow was excluded by the operator's capture filter and not
-// stored; do not attempt two-phase completion against it.
+// PushFlow emits a captured flow and returns the flow_id sectool assigned. Leave flow.FlowID empty to
+// store a new flow, or set it to re-target an existing flow. A returned empty flow_id with no error
+// means the operator's capture filter excluded the flow; it was not stored and cannot be re-targeted.
 func (c *Conn) PushFlow(ctx context.Context, flow wire.Flow) (string, error) {
 	// replay sink needs a response to record single-phase
 	if flow.FlowID == "" && flow.Response == nil {
@@ -37,10 +35,9 @@ const (
 	phaseMutated           = "mutated"
 )
 
-// EmitMutatedPair emits the captured (pre-mutation) and mutated (post-mutation) audit
-// pair for a message a rule changed on the hot path, returning the assigned flow ids.
-// The captured flow is tagged phase=captured, the mutated flow phase=mutated with a
-// parent_flow_id link back; any structural ParentFlowID on the inputs is preserved.
+// EmitMutatedPair emits the pre- and post-mutation audit pair for a message a rule changed, linking the
+// mutated flow back to the captured one, and returns their assigned flow ids. Use it when firedRules
+// altered a message and both versions should be recorded.
 func (c *Conn) EmitMutatedPair(ctx context.Context, captured, mutated wire.Flow, firedRules []string) (capturedID, mutatedID string, err error) {
 	if captured.Annotations == nil {
 		captured.Annotations = map[string]any{}

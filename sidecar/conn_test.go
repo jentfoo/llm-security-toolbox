@@ -16,7 +16,8 @@ import (
 // with the supplied request handler. It returns the dial address.
 func fakeServer(t *testing.T, req func(method string, params json.RawMessage) (any, *wire.Error)) (string, chan *wire.Peer) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
@@ -62,7 +63,7 @@ func TestDial(t *testing.T) {
 			return registerOK(method, params)
 		})
 
-		conn, err := Dial(addr, Registration{Name: "demo", Protocols: []string{"custom.foo"}})
+		conn, err := Dial(t.Context(), addr, Registration{Name: "demo", Protocols: []string{"custom.foo"}})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -78,7 +79,7 @@ func TestDial(t *testing.T) {
 			return nil, wire.NewError(-32601, "no")
 		})
 
-		_, err := Dial(addr, Registration{Name: "demo"})
+		_, err := Dial(t.Context(), addr, Registration{Name: "demo"})
 		require.ErrorIs(t, err, ErrVersionUnsupported)
 	})
 
@@ -91,7 +92,7 @@ func TestDial(t *testing.T) {
 			return nil, wire.NewError(-32601, "no")
 		})
 
-		_, err := Dial(addr, Registration{Name: "demo"})
+		_, err := Dial(t.Context(), addr, Registration{Name: "demo"})
 		require.ErrorIs(t, err, ErrVersionUnsupported)
 	})
 }
@@ -127,7 +128,7 @@ func TestConnInvokeTool(t *testing.T) {
 
 	t.Run("delegates_to_handler", func(t *testing.T) {
 		addr, peerCh := fakeServer(t, registerOK)
-		conn, err := Dial(addr, Registration{Name: "demo"})
+		conn, err := Dial(t.Context(), addr, Registration{Name: "demo"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		srv := <-peerCh
@@ -149,7 +150,7 @@ func TestConnInvokeTool(t *testing.T) {
 
 	t.Run("no_tool_handler", func(t *testing.T) {
 		addr, peerCh := fakeServer(t, registerOK)
-		conn, err := Dial(addr, Registration{Name: "demo"})
+		conn, err := Dial(t.Context(), addr, Registration{Name: "demo"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		srv := <-peerCh
@@ -170,7 +171,7 @@ func TestConnHeartbeatAndShutdown(t *testing.T) {
 	t.Parallel()
 
 	addr, peerCh := fakeServer(t, registerOK)
-	conn, err := Dial(addr, Registration{Name: "demo"})
+	conn, err := Dial(t.Context(), addr, Registration{Name: "demo"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 

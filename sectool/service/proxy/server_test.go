@@ -124,7 +124,8 @@ func TestServe(t *testing.T) {
 		go func() { _ = proxy.Serve() }()
 		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
 
-		conn, err := net.Dial("tcp", proxy.Addr())
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -149,7 +150,8 @@ func TestServe(t *testing.T) {
 		go func() { _ = proxy.Serve() }()
 		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
 
-		conn, err := net.Dial("tcp", proxy.Addr())
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -210,7 +212,8 @@ func TestShutdown(t *testing.T) {
 		err = proxy.Shutdown(ctx)
 		require.NoError(t, err)
 
-		_, err = net.Dial("tcp", proxy.Addr())
+		var d net.Dialer
+		_, err = d.DialContext(t.Context(), "tcp", proxy.Addr())
 		assert.Error(t, err)
 	})
 
@@ -531,7 +534,8 @@ func TestShutdownForceClose(t *testing.T) {
 	require.NoError(t, proxy.WaitReady(t.Context()))
 
 	// Create a slow connection that will be in-progress during shutdown
-	conn, err := net.Dial("tcp", proxy.Addr())
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 	require.NoError(t, err)
 
 	// Send partial request (will block waiting for more data)
@@ -588,7 +592,8 @@ func TestHTTP11KeepAlive(t *testing.T) {
 		require.NoError(t, proxy.WaitReady(t.Context()))
 
 		// Use raw TCP connection to verify keep-alive behavior
-		conn, err := net.Dial("tcp", proxy.Addr())
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -646,7 +651,8 @@ func TestHTTP11KeepAlive(t *testing.T) {
 		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
 		require.NoError(t, proxy.WaitReady(t.Context()))
 
-		conn, err := net.Dial("tcp", proxy.Addr())
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -714,7 +720,8 @@ func TestHTTP11KeepAlive(t *testing.T) {
 		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
 		require.NoError(t, proxy.WaitReady(t.Context()))
 
-		conn, err := net.Dial("tcp", proxy.Addr())
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 

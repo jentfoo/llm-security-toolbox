@@ -133,7 +133,7 @@ func startForward(t *testing.T, name string, caps wire.Capabilities, scope func(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mcpClient.Close() })
 
-	sc, err := sidecar.Dial(socket, sidecar.Registration{
+	sc, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
 		Name:            name,
 		Protocols:       []string{"forward/1"},
 		Capabilities:    caps,
@@ -157,7 +157,8 @@ func startEchoServer(t *testing.T, cert *tls.Certificate) (string, int) {
 	if cert != nil {
 		ln, err = tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{*cert}})
 	} else {
-		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		var lc net.ListenConfig
+		ln, err = lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	}
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
@@ -215,7 +216,8 @@ func TestSidecarDialUpstreamForwardE2E(t *testing.T) {
 			return wire.DialUpstreamParams{Host: ehost, Port: eport}, nil
 		})
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -238,7 +240,8 @@ func TestSidecarDialUpstreamOutOfScope(t *testing.T) {
 			return wire.DialUpstreamParams{Host: ehost, Port: eport}, nil
 		})
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -274,7 +277,8 @@ func TestSidecarDialUpstreamTLS(t *testing.T) {
 				TLS: &wire.DialUpstreamTLS{Enabled: true, SNI: "echo.upstream", SkipVerify: true}}, nil
 		})
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -303,7 +307,8 @@ func TestSidecarDialUpstreamDefaultDest(t *testing.T) {
 			return wire.DialUpstreamParams{ParentFlowID: fid}, nil
 		})
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 

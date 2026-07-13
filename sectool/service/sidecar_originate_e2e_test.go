@@ -73,7 +73,7 @@ func startOriginateHarness(t *testing.T, allowedDomains []string) *originateHarn
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mcpClient.Close() })
 
-	conn, err := sidecar.Dial(socket, sidecar.Registration{
+	conn, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
 		Name:            adapter,
 		Protocols:       []string{"custom/1"},
 		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},

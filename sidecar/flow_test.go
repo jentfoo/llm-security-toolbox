@@ -47,7 +47,7 @@ func TestEmitMutatedPair(t *testing.T) {
 	t.Run("links_captured_and_mutated", func(t *testing.T) {
 		cap := &flowCapture{firstID: "f1"}
 		addr, _ := fakeServer(t, cap.handle)
-		conn, err := Dial(addr, Registration{Name: "alpha"})
+		conn, err := Dial(t.Context(), addr, Registration{Name: "alpha"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -78,7 +78,7 @@ func TestEmitMutatedPair(t *testing.T) {
 	t.Run("skips_link_when_captured_filtered", func(t *testing.T) {
 		cap := &flowCapture{firstID: ""} // captured flow excluded by capture filter
 		addr, _ := fakeServer(t, cap.handle)
-		conn, err := Dial(addr, Registration{Name: "alpha"})
+		conn, err := Dial(t.Context(), addr, Registration{Name: "alpha"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -105,7 +105,7 @@ func TestPushFlow(t *testing.T) {
 		t.Helper()
 		cap := &flowCapture{firstID: "f1"}
 		addr, _ := fakeServer(t, cap.handle)
-		conn, err := Dial(addr, Registration{Name: "alpha"})
+		conn, err := Dial(t.Context(), addr, Registration{Name: "alpha"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 

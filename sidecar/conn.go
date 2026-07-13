@@ -29,11 +29,12 @@ type Conn struct {
 	handler Handler
 }
 
-// Dial connects to sectool at addr, performs the register handshake, and returns
-// the established connection.
-func Dial(addr string, reg Registration) (*Conn, error) {
+// Dial connects to sectool at addr, performs the register handshake, and returns the established connection.
+// The connect and handshake are bounded by ctx, capped at registerTimeout.
+func Dial(ctx context.Context, addr string, reg Registration) (*Conn, error) {
 	network := networkFor(addr)
-	raw, err := net.Dial(network, addr)
+	var d net.Dialer
+	raw, err := d.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: dial %s %s: %w", network, addr, err)
 	}
@@ -42,7 +43,7 @@ func Dial(addr string, reg Registration) (*Conn, error) {
 	c.peer = wire.NewPeer(raw, connHandler{c})
 	go func() { _ = c.peer.Run(context.Background()) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), registerTimeout)
+	ctx, cancel := context.WithTimeout(ctx, registerTimeout)
 	defer cancel()
 	var result wire.RegisterResult
 	if rpcErr := c.peer.Call(ctx, wire.MethodRegister, reg.toParams(), &result); rpcErr != nil {
@@ -57,9 +58,8 @@ func Dial(addr string, reg Registration) (*Conn, error) {
 	return c, nil
 }
 
-// Serve installs the inbound handler and blocks until ctx is cancelled or the
-// connection closes (e.g. after sectool's shutdown). Returns ctx.Err() on
-// cancellation, nil on a clean remote close.
+// Serve installs the inbound handler and blocks until ctx is cancelled or the connection closes
+// (e.g. after sectool shutdown). Returns ctx.Err() on cancellation, nil on a clean remote close.
 func (c *Conn) Serve(ctx context.Context, h Handler) error {
 	if h == nil {
 		h = BaseHandler{}

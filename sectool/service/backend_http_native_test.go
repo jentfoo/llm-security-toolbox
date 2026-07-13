@@ -77,7 +77,9 @@ func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 	}
 
 	// Make request through proxy
-	resp, err := client.Get(testServer.URL + "/test")
+	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/test", nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
@@ -129,7 +131,9 @@ func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
 	}
 
 	// Make request through proxy
-	resp, err := client.Get(testServer.URL + "/test?q=1")
+	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/test?q=1", nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
@@ -593,7 +597,9 @@ func TestNativeProxyBackend_HTTPS_Proxy(t *testing.T) {
 	client := &http.Client{Transport: transport}
 
 	// Make HTTPS request through proxy
-	resp, err := client.Get(testServer.URL + "/secure")
+	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/secure", nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 
 	body, err := io.ReadAll(resp.Body)

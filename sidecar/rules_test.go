@@ -135,7 +135,7 @@ func TestConnSyncRules(t *testing.T) {
 	t.Parallel()
 
 	addr, peerCh := fakeServer(t, registerOK)
-	conn, err := Dial(addr, Registration{Name: "alpha"})
+	conn, err := Dial(t.Context(), addr, Registration{Name: "alpha"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	srv := <-peerCh

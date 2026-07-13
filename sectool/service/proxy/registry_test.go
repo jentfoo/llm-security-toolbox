@@ -133,7 +133,8 @@ func TestServeRejectsH2C(t *testing.T) {
 	go func() { _ = proxy.Serve() }()
 	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
 
-	conn, err := net.Dial("tcp", proxy.Addr())
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 

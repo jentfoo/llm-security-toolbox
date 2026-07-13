@@ -71,12 +71,13 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	listener, err := net.Listen("tcp", addr)
+	ctx, cancel := context.WithCancel(context.Background())
+	var lc net.ListenConfig
+	listener, err := lc.Listen(ctx, "tcp", addr)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("listen on %s: %w", addr, err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
 	history := newHistoryStore(historyStorage)
 
 	wsHandler := newWebSocketHandler(history, certManager, timeouts)

@@ -84,7 +84,7 @@ func startUpgrade(t *testing.T, name string, caps wire.Capabilities) *upgradeHar
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mcpClient.Close() })
 
-	sc, err := sidecar.Dial(socket, sidecar.Registration{
+	sc, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
 		Name:            name,
 		Protocols:       []string{"custom/1"},
 		Capabilities:    caps,
@@ -127,7 +127,8 @@ func TestSidecarUpgradeClaimHTTP101E2E(t *testing.T) {
 	h := startUpgrade(t, "upgrade-sidecar", wire.Capabilities{UpgradeClaims: []wire.UpgradeClaim{*uc}})
 	ctx := t.Context()
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -170,7 +171,8 @@ func TestSidecarUpgradeClaimConnectE2E(t *testing.T) {
 	h := startUpgrade(t, "connect-upgrade", wire.Capabilities{UpgradeClaims: []wire.UpgradeClaim{*uc}})
 	ctx := t.Context()
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 

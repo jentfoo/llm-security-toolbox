@@ -3,6 +3,7 @@
 package sidecar
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -19,7 +20,8 @@ func listen(socket string) (net.Listener, error) {
 	if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("sidecar: remove stale socket: %w", err)
 	}
-	ln, err := net.Listen("unix", socket)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "unix", socket)
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: listen unix %s: %w", socket, err)
 	}

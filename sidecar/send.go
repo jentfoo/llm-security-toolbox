@@ -13,9 +13,8 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
-// InvokeAdapter routes an outbound message through another registered adapter's
-// injection_target and returns the flows it produced. Scope policy and the
-// destination adapter's own validation apply.
+// InvokeAdapter routes an outbound message through another registered adapter's injection_target and
+// returns the flows it produced. Scope policy and the destination adapter's own validation apply.
 func (c *Conn) InvokeAdapter(ctx context.Context, p wire.InvokeAdapterParams) (wire.InvokeAdapterResult, error) {
 	var res wire.InvokeAdapterResult
 	if rpcErr := c.peer.Call(ctx, wire.MethodInvokeAdapter, p, &res); rpcErr != nil {
@@ -24,9 +23,8 @@ func (c *Conn) InvokeAdapter(ctx context.Context, p wire.InvokeAdapterParams) (w
 	return res, nil
 }
 
-// ApplyMutations applies the ordered mutation ops to msg in place. Ops run in
-// slice order so later edits observe earlier ones. An unknown op or a body edit
-// against an incompatible body errors.
+// ApplyMutations applies the ordered mutation ops to msg in place. Ops run in slice order so
+// later edits observe earlier ones. An unknown op or a body edit against an incompatible body errors.
 func ApplyMutations(msg *wire.FlowMessage, muts []wire.Mutation) error {
 	for _, m := range muts {
 		switch m.Op {

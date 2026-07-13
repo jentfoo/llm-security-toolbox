@@ -176,7 +176,8 @@ func TestHandle(t *testing.T) {
 		go func() { _ = proxy.Serve() }()
 		t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
 
-		conn, err := net.Dial("tcp", proxy.Addr())
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -298,7 +299,8 @@ func TestHandle(t *testing.T) {
 
 		target := mustParseURL(t, testServer.URL).Host
 
-		raw, err := net.Dial("tcp", proxy.Addr())
+		var d net.Dialer
+		raw, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = raw.Close() })
 		// Deadline guards against a regression hanging the handshake
@@ -343,10 +345,11 @@ func TestUpstreamMirrorSpec(t *testing.T) {
 			if aerr != nil {
 				return
 			}
-			_ = conn.(*tls.Conn).Handshake()
+			_ = conn.(*tls.Conn).HandshakeContext(t.Context())
 		}()
 
-		conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+		d := tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}}
+		conn, err := d.DialContext(t.Context(), "tcp", ln.Addr().String())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 

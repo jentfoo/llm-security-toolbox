@@ -15,8 +15,7 @@ type compiledRule struct {
 	compiled *regexp.Regexp // nil for literal rules
 }
 
-// RuleCache holds the rules sectool pushes and applies the ones scoped to this adapter
-// on the hot path. Safe for concurrent use.
+// RuleCache holds the rules sectool pushes and applies the ones scoped to this adapter on the hot path. Safe for concurrent use.
 type RuleCache struct {
 	adapter string
 
@@ -50,6 +49,7 @@ func (c *RuleCache) replace(version uint64, rules []wire.Rule) error {
 func (c *RuleCache) Version() uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
 	return c.version
 }
 
@@ -78,8 +78,7 @@ func (c *RuleCache) ApplyHeaders(headers []wire.Header, ruleType string) ([]wire
 	return parseHeaders(block), fired
 }
 
-// apply runs every scoped, matching rule in order and records the ids that changed
-// the bytes.
+// apply runs every scoped, matching rule in order and records the ids that changed the bytes.
 func (c *RuleCache) apply(input []byte, caseInsensitive bool, matches func(wire.Rule) bool) ([]byte, []string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

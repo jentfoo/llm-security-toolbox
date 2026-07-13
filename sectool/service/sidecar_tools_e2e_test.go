@@ -83,7 +83,7 @@ func TestSidecarToolsE2E(t *testing.T) {
 
 	// The sidecar registers before the MCP client connects, so its tool is composed
 	// into that client's session at connect.
-	conn, err := sidecar.Dial(socket, sidecar.Registration{
+	conn, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
 		Name:            adapterName,
 		Protocols:       []string{"custom/1"},
 		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},

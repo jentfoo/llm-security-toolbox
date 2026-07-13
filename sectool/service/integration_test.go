@@ -101,7 +101,8 @@ func TestNativeProxyIntegrationTest(t *testing.T) {
 	t.Parallel()
 
 	t.Run("request_fidelity", func(t *testing.T) {
-		upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
+		var lc net.ListenConfig
+		upstreamListener, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = upstreamListener.Close() })
 		upstreamAddr := upstreamListener.Addr().String()
@@ -291,7 +292,8 @@ func TestNativeProxyIntegrationTest(t *testing.T) {
 					receivedCh <- accumulated
 				}()
 
-				clientConn, err := net.Dial("tcp", proxyAddr)
+				var d net.Dialer
+				clientConn, err := d.DialContext(t.Context(), "tcp", proxyAddr)
 				require.NoError(t, err)
 				defer func() { _ = clientConn.Close() }()
 

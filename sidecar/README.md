@@ -116,20 +116,20 @@ func main() {
         },
     }
 
-    conn, err := sidecar.Dial("~/.sectool/sidecar.sock", reg)
+    ctx := context.Background()
+    conn, err := sidecar.Dial(ctx, "~/.sectool/sidecar.sock", reg)
     if err != nil {
         log.Fatal(err)
     }
     defer conn.Close()
 
-    ctx := context.Background()
     log.Fatal(conn.Serve(ctx, &myHandler{}))
 }
 ```
 
 ## Registration
 
-`sidecar.Dial(addr, reg)` connects and registers. The `Registration` struct declares your adapter's identity and capabilities:
+`sidecar.Dial(ctx, addr, reg)` connects and registers, with the connect and handshake bounded by `ctx`. The `Registration` struct declares your adapter's identity and capabilities:
 
 ```go
 reg := sidecar.Registration{
@@ -140,7 +140,7 @@ reg := sidecar.Registration{
     MCPTools:        []wire.MCPTool{...},           // optional custom MCP tools
 }
 
-conn, err := sidecar.Dial(addr, reg)
+conn, err := sidecar.Dial(ctx, addr, reg)
 if errors.Is(err, sidecar.ErrVersionUnsupported) {
     // built against an incompatible toolbox (wrong major, or newer minor); rebuild against the running `sectool`
 }

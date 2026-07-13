@@ -65,7 +65,7 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mcpClient.Close() })
 
-	conn, err := sidecar.Dial(socket, sidecar.Registration{
+	conn, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
 		Name:            adapterName,
 		Protocols:       []string{"custom/1"},
 		InstanceID:      instanceID,

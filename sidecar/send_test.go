@@ -77,7 +77,7 @@ func TestSidecarSendDispatch(t *testing.T) {
 
 	t.Run("routes_to_handler", func(t *testing.T) {
 		addr, peerCh := fakeServer(t, registerOK)
-		conn, err := Dial(addr, Registration{Name: "demo"})
+		conn, err := Dial(t.Context(), addr, Registration{Name: "demo"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		srv := <-peerCh
@@ -92,7 +92,7 @@ func TestSidecarSendDispatch(t *testing.T) {
 
 	t.Run("no_send_handler", func(t *testing.T) {
 		addr, peerCh := fakeServer(t, registerOK)
-		conn, err := Dial(addr, Registration{Name: "demo"})
+		conn, err := Dial(t.Context(), addr, Registration{Name: "demo"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		srv := <-peerCh

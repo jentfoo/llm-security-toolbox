@@ -118,13 +118,18 @@ func setupIntegrationEnv(t *testing.T, backendType httpBackendType) *mcpclient.C
 
 		// Seed with GET requests
 		for i := 0; i < 3; i++ {
-			resp, err := client.Get(ts.URL + fmt.Sprintf("/path%d?param=value%d", i, i))
+			req, err := http.NewRequestWithContext(t.Context(), "GET", ts.URL+fmt.Sprintf("/path%d?param=value%d", i, i), nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 		}
 
 		// Seed with POST request
-		resp, err := client.Post(ts.URL+"/post", "application/json", strings.NewReader(`{"test":"data"}`))
+		req, err := http.NewRequestWithContext(t.Context(), "POST", ts.URL+"/post", strings.NewReader(`{"test":"data"}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -212,7 +217,8 @@ func runForAllBackendsWithHandler(t *testing.T, handler http.HandlerFunc, testFn
 func findAvailablePort(t *testing.T) int {
 	t.Helper()
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
@@ -606,7 +612,9 @@ func TestIntegration_Replay(t *testing.T) {
 
 		// Seed proxy history with a request to our test server
 		client := makeProxyClient(env.proxyAddr)
-		resp, err := client.Get(env.targetURL + "/replay-test")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/replay-test", nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 		testutil.WaitForCount(t, func() int {
@@ -762,7 +770,9 @@ func TestIntegration_ReplayQueryModsVerified(t *testing.T) {
 	proxyClient := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 	}
-	resp, err := proxyClient.Get(targetServer.URL + "/test?keep=value&remove_me=secret")
+	req, err := http.NewRequestWithContext(t.Context(), "GET", targetServer.URL+"/test?keep=value&remove_me=secret", nil)
+	require.NoError(t, err)
+	resp, err := proxyClient.Do(req)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
@@ -1042,7 +1052,9 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 	}
 
 	t.Run("https_get_through_proxy", func(t *testing.T) {
-		resp, err := client.Get(testServer.URL + "/secure-endpoint")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/secure-endpoint", nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = resp.Body.Close() })
 
@@ -1054,7 +1066,10 @@ func TestIntegration_HTTPSProxy(t *testing.T) {
 	})
 
 	t.Run("https_post_through_proxy", func(t *testing.T) {
-		resp, err := client.Post(testServer.URL+"/secure-post", "application/json", strings.NewReader(`{"data":"test"}`))
+		req, err := http.NewRequestWithContext(t.Context(), "POST", testServer.URL+"/secure-post", strings.NewReader(`{"data":"test"}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = resp.Body.Close() })
 
@@ -1149,7 +1164,9 @@ func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
 			}
 
 			client := makeProxyClient(env.proxyAddr)
-			resp, err := client.Get(env.targetURL + "/test-rule")
+			req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/test-rule", nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 
@@ -1178,7 +1195,9 @@ func TestIntegration_RuleRequestHeaderVerification(t *testing.T) {
 			}
 
 			client := makeProxyClient(env.proxyAddr)
-			resp, err := client.Get(env.targetURL + "/test-ua")
+			req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/test-ua", nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 
@@ -1228,8 +1247,11 @@ func TestIntegration_RuleRequestBodyVerification(t *testing.T) {
 			}
 
 			client := makeProxyClient(env.proxyAddr)
-			resp, err := client.Post(env.targetURL+"/body-test", "text/plain",
+			req, err := http.NewRequestWithContext(t.Context(), "POST", env.targetURL+"/body-test",
 				strings.NewReader("data=ORIGINAL_VALUE&other=test"))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "text/plain")
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 
@@ -1273,7 +1295,9 @@ func TestIntegration_RuleResponseHeaderVerification(t *testing.T) {
 			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
 			client := makeProxyClient(env.proxyAddr)
-			resp, err := client.Get(env.targetURL + "/resp-header-test")
+			req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/resp-header-test", nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 
@@ -1291,7 +1315,9 @@ func TestIntegration_RuleResponseHeaderVerification(t *testing.T) {
 			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
 			client := makeProxyClient(env.proxyAddr)
-			resp, err := client.Get(env.targetURL + "/resp-add-test")
+			req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/resp-add-test", nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 
@@ -1326,7 +1352,9 @@ func TestIntegration_RuleResponseBodyVerification(t *testing.T) {
 			t.Cleanup(func() { _ = env.mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
 			client := makeProxyClient(env.proxyAddr)
-			resp, err := client.Get(env.targetURL + "/resp-body-test")
+			req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/resp-body-test", nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			body, _ := io.ReadAll(resp.Body)
 			require.NoError(t, resp.Body.Close())
@@ -1356,8 +1384,11 @@ func TestIntegration_ReplayBodyReplacement(t *testing.T) {
 		t.Helper()
 		// Seed with a POST request
 		client := makeProxyClient(env.proxyAddr)
-		resp, err := client.Post(env.targetURL+"/body-test", "application/json",
+		req, err := http.NewRequestWithContext(t.Context(), "POST", env.targetURL+"/body-test",
 			strings.NewReader(`{"original": "body"}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -1427,8 +1458,11 @@ func TestIntegration_ReplayJSONModifications(t *testing.T) {
 		t.Helper()
 		// Seed with JSON POST request
 		client := makeProxyClient(env.proxyAddr)
-		resp, err := client.Post(env.targetURL+"/json-test", "application/json",
+		req, err := http.NewRequestWithContext(t.Context(), "POST", env.targetURL+"/json-test",
 			strings.NewReader(`{"user": "alice", "role": "viewer", "nested": {"key": "original"}}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -1531,7 +1565,9 @@ func TestIntegration_ReplayMethodOverride(t *testing.T) {
 	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
 		t.Helper()
 		client := makeProxyClient(env.proxyAddr)
-		resp, err := client.Get(env.targetURL + "/method-test")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/method-test", nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -1631,7 +1667,9 @@ func TestIntegration_ReplayFollowRedirects(t *testing.T) {
 			},
 		}
 
-		resp, err := proxyClient.Get(env.targetURL + "/redirect-start")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/redirect-start", nil)
+		require.NoError(t, err)
+		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -1735,7 +1773,9 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 	proxyClient := &http.Client{Transport: transport}
 
 	t.Run("h2_request_through_proxy", func(t *testing.T) {
-		resp, err := proxyClient.Get(testServer.URL + "/h2-test")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/h2-test", nil)
+		require.NoError(t, err)
+		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = resp.Body.Close() })
 
@@ -1754,8 +1794,11 @@ func TestIntegration_HTTP2Proxy(t *testing.T) {
 		}
 
 		postBody := `{"h2":"post","data":"test-value-123"}`
-		resp, err := proxyClient.Post(testServer.URL+"/h2-post", "application/json",
+		req, err := http.NewRequestWithContext(t.Context(), "POST", testServer.URL+"/h2-post",
 			strings.NewReader(postBody))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
 
 		// Read echoed body from response
@@ -1891,7 +1934,9 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 			<-receivedHeaders
 		}
 
-		resp, err := proxyClient.Get(testServer.URL + "/h2-rule-test")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/h2-rule-test", nil)
+		require.NoError(t, err)
+		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -1919,8 +1964,11 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 			<-receivedBody
 		}
 
-		resp, err := proxyClient.Post(testServer.URL+"/h2-body-rule", "text/plain",
+		req, err := http.NewRequestWithContext(t.Context(), "POST", testServer.URL+"/h2-body-rule",
 			strings.NewReader("data=ORIGINAL_VALUE&other=test"))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "text/plain")
+		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -1945,7 +1993,9 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
-		resp, err := proxyClient.Get(testServer.URL + "/h2-resp-header-test")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/h2-resp-header-test", nil)
+		require.NoError(t, err)
+		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -1963,7 +2013,9 @@ func TestIntegration_HTTP2Rules(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = mcpClient.ProxyRuleDelete(context.Background(), rule.RuleID) })
 
-		resp, err := proxyClient.Get(testServer.URL + "/h2-resp-body-test")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/h2-resp-body-test", nil)
+		require.NoError(t, err)
+		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
 
 		body, err := io.ReadAll(resp.Body)
@@ -2041,7 +2093,8 @@ func TestIntegration_WebSocketProxy(t *testing.T) {
 	t.Run("websocket_upgrade_through_proxy", func(t *testing.T) {
 		// Connect through proxy
 		proxyAddr := backend.Addr()
-		conn, err := net.Dial("tcp", proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -2119,7 +2172,9 @@ func TestIntegration_ChunkedEncoding(t *testing.T) {
 		client := makeProxyClient(env.proxyAddr)
 
 		t.Run("chunked_response_through_proxy", func(t *testing.T) {
-			resp, err := client.Get(env.targetURL + "/chunked-test")
+			req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/chunked-test", nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = resp.Body.Close() })
 
@@ -2181,7 +2236,9 @@ func TestIntegration_ForceFlag(t *testing.T) {
 	proxyClient := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 	}
-	resp, err := proxyClient.Get(testServer.URL + "/force-test")
+	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/force-test", nil)
+	require.NoError(t, err)
+	resp, err := proxyClient.Do(req)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
@@ -2233,7 +2290,8 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 	// Use raw TCP server to receive malformed requests without HTTP parsing
 	receivedData := make(chan []byte, 10)
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	listener, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 
@@ -2289,7 +2347,9 @@ func TestIntegration_MalformedRequests(t *testing.T) {
 	proxyClient := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 	}
-	resp, err := proxyClient.Get(normalServer.URL + "/malformed-test")
+	req, err := http.NewRequestWithContext(t.Context(), "GET", normalServer.URL+"/malformed-test", nil)
+	require.NoError(t, err)
+	resp, err := proxyClient.Do(req)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
@@ -2462,7 +2522,8 @@ func TestIntegration_ContentLengthMismatch(t *testing.T) {
 	// Raw TCP server to capture exact bytes received
 	receivedData := make(chan []byte, 10)
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	listener, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 
@@ -2514,8 +2575,11 @@ func TestIntegration_ContentLengthMismatch(t *testing.T) {
 	proxyClient := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 	}
-	resp, err := proxyClient.Post(normalServer.URL+"/cl-test", "text/plain",
+	req, err := http.NewRequestWithContext(t.Context(), "POST", normalServer.URL+"/cl-test",
 		strings.NewReader("original body"))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := proxyClient.Do(req)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
@@ -2633,8 +2697,11 @@ func TestIntegration_LargeBodies(t *testing.T) {
 		client := makeProxyClient(env.proxyAddr)
 
 		t.Run("large_request_body", func(t *testing.T) {
-			resp, err := client.Post(env.targetURL+"/large-req", "application/octet-stream",
+			req, err := http.NewRequestWithContext(t.Context(), "POST", env.targetURL+"/large-req",
 				strings.NewReader(largeBody))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/octet-stream")
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			defer func() { _ = resp.Body.Close() }()
 
@@ -2643,7 +2710,9 @@ func TestIntegration_LargeBodies(t *testing.T) {
 		})
 
 		t.Run("large_response_body", func(t *testing.T) {
-			resp, err := client.Get(env.targetURL + "/large-resp")
+			req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/large-resp", nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			body, _ := io.ReadAll(resp.Body)
 			require.NoError(t, resp.Body.Close())
@@ -2686,8 +2755,11 @@ func TestIntegration_BinaryContent(t *testing.T) {
 				<-receivedData
 			}
 
-			resp, err := client.Post(env.targetURL+"/binary", "application/octet-stream",
+			req, err := http.NewRequestWithContext(t.Context(), "POST", env.targetURL+"/binary",
 				strings.NewReader(string(binaryData)))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/octet-stream")
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 
@@ -2700,7 +2772,9 @@ func TestIntegration_BinaryContent(t *testing.T) {
 		})
 
 		t.Run("binary_response_body", func(t *testing.T) {
-			resp, err := client.Get(env.targetURL + "/binary-resp")
+			req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/binary-resp", nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			body, _ := io.ReadAll(resp.Body)
 			require.NoError(t, resp.Body.Close())
@@ -2730,7 +2804,9 @@ func TestIntegration_ConnectionErrors(t *testing.T) {
 	t.Run("connection_refused", func(t *testing.T) {
 		// Connect to a port that's not listening
 		// Proxy returns 502 Bad Gateway for connection errors
-		resp, err := proxyClient.Get("http://127.0.0.1:1/should-fail")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", "http://127.0.0.1:1/should-fail", nil)
+		require.NoError(t, err)
+		resp, err := proxyClient.Do(req)
 		if err != nil {
 			// Client error is acceptable
 			return
@@ -2741,7 +2817,9 @@ func TestIntegration_ConnectionErrors(t *testing.T) {
 	})
 
 	t.Run("dns_failure", func(t *testing.T) {
-		resp, err := proxyClient.Get("http://this-domain-should-not-exist-xyz123.invalid/test")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", "http://this-domain-should-not-exist-xyz123.invalid/test", nil)
+		require.NoError(t, err)
+		resp, err := proxyClient.Do(req)
 		if err != nil {
 			// Client error is acceptable
 			return
@@ -2777,7 +2855,9 @@ func TestIntegration_TimeoutHandling(t *testing.T) {
 	}
 
 	t.Run("client_timeout", func(t *testing.T) {
-		_, err := proxyClient.Get(testServer.URL + "/slow")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/slow", nil)
+		require.NoError(t, err)
+		_, err = proxyClient.Do(req)
 		require.Error(t, err)
 		// Should be a timeout error
 		assert.True(t, strings.Contains(err.Error(), "timeout") ||
@@ -2910,7 +2990,9 @@ func TestIntegration_ReplayPathModification(t *testing.T) {
 	runForAllBackendsWithHandler(t, handler, func(t *testing.T, env *testEnv) {
 		t.Helper()
 		client := makeProxyClient(env.proxyAddr)
-		resp, err := client.Get(env.targetURL + "/original-path")
+		req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/original-path", nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -3055,7 +3137,8 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 
 		// Connect through proxy
 		proxyAddr := backend.Addr()
-		conn, err := net.Dial("tcp", proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -3112,7 +3195,8 @@ func TestIntegration_WebSocketRules(t *testing.T) {
 
 		// Connect through proxy
 		proxyAddr := backend.Addr()
-		conn, err := net.Dial("tcp", proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -3195,13 +3279,19 @@ func TestIntegration_Redirect307BodyPreservation(t *testing.T) {
 			},
 		}
 
-		resp, err := proxyClient.Post(env.targetURL+"/redirect-307", "application/json",
+		req, err := http.NewRequestWithContext(t.Context(), "POST", env.targetURL+"/redirect-307",
 			strings.NewReader(`{"important":"data"}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
-		resp, err = proxyClient.Post(env.targetURL+"/redirect-308", "application/json",
+		req, err = http.NewRequestWithContext(t.Context(), "POST", env.targetURL+"/redirect-308",
 			strings.NewReader(`{"critical":"payload"}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = proxyClient.Do(req)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 
@@ -3330,7 +3420,8 @@ func TestIntegration_CrossOriginRedirectAuthPreserved(t *testing.T) {
 			},
 		}
 
-		req, _ := http.NewRequest("GET", env.targetURL+"/start", nil)
+		req, err := http.NewRequestWithContext(t.Context(), "GET", env.targetURL+"/start", nil)
+		require.NoError(t, err)
 		req.Header.Set("Authorization", "Bearer secret-token-12345")
 		resp, err := proxyClient.Do(req)
 		require.NoError(t, err)
@@ -3442,7 +3533,8 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 	t.Run("wss_upgrade_through_proxy", func(t *testing.T) {
 		// For wss://, we need to CONNECT first, then do TLS, then WebSocket
 		proxyAddr := backend.Addr()
-		conn, err := net.Dial("tcp", proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -3467,7 +3559,7 @@ func TestIntegration_SecureWebSocket(t *testing.T) {
 			InsecureSkipVerify: true,
 			ServerName:         serverURL.Hostname(),
 		})
-		err = tlsConn.Handshake()
+		err = tlsConn.HandshakeContext(t.Context())
 		require.NoError(t, err)
 
 		// Now do WebSocket upgrade over TLS
@@ -3564,7 +3656,9 @@ func TestIntegration_HTTP2Replay(t *testing.T) {
 	}
 	proxyClient := &http.Client{Transport: transport}
 
-	resp, err := proxyClient.Get(testServer.URL + "/h2-replay-test")
+	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/h2-replay-test", nil)
+	require.NoError(t, err)
+	resp, err := proxyClient.Do(req)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
@@ -3711,7 +3805,8 @@ func TestIntegration_WebSocketBinaryFrames(t *testing.T) {
 
 	t.Run("binary_frame_through_proxy", func(t *testing.T) {
 		proxyAddr := backend.Addr()
-		conn, err := net.Dial("tcp", proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -3831,7 +3926,8 @@ func TestIntegration_WebSocketPingPong(t *testing.T) {
 
 	t.Run("ping_pong_through_proxy", func(t *testing.T) {
 		proxyAddr := backend.Addr()
-		conn, err := net.Dial("tcp", proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -3885,7 +3981,8 @@ func TestIntegration_WebSocketPingPong(t *testing.T) {
 
 	t.Run("server_initiated_ping", func(t *testing.T) {
 		proxyAddr := backend.Addr()
-		conn, err := net.Dial("tcp", proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 
@@ -4001,7 +4098,8 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 				Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 			}
 
-			req, _ := http.NewRequest("POST", testServer.URL+"/test", bytes.NewReader(compressedBody))
+			req, err := http.NewRequestWithContext(t.Context(), "POST", testServer.URL+"/test", bytes.NewReader(compressedBody))
+			require.NoError(t, err)
 			req.Header.Set("Host", serverURL.Host)
 			req.Header.Set("Content-Encoding", "gzip")
 			req.Header.Set("Content-Type", "application/json")
@@ -4056,7 +4154,8 @@ func TestIntegration_CompressedRequestBodyRule(t *testing.T) {
 				Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 			}
 
-			req, _ := http.NewRequest("POST", testServer.URL+"/test", bytes.NewReader(fakeBody))
+			req, err := http.NewRequestWithContext(t.Context(), "POST", testServer.URL+"/test", bytes.NewReader(fakeBody))
+			require.NoError(t, err)
 			req.Header.Set("Content-Encoding", "compress") // unsupported encoding
 			req.Header.Set("Content-Type", "application/octet-stream")
 

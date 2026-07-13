@@ -101,7 +101,7 @@ func startIntercept(t *testing.T, name string, caps wire.Capabilities, probeMark
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mcpClient.Close() })
 
-	sc, err := sidecar.Dial(socket, sidecar.Registration{
+	sc, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
 		Name:            name,
 		Protocols:       []string{"echo/1"},
 		Capabilities:    caps,
@@ -135,7 +135,8 @@ func TestSidecarRawEarlyClaimE2E(t *testing.T) {
 		wire.Capabilities{EarlyClaims: []wire.EarlyClaim{{MagicBytesPrefix: magic("ECHO")}}}, nil)
 	ctx := t.Context()
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -160,7 +161,8 @@ func TestSidecarRawEarlyClaimFallthrough(t *testing.T) {
 	h := startIntercept(t, "echo-raw-ft",
 		wire.Capabilities{EarlyClaims: []wire.EarlyClaim{{MagicBytesPrefix: magic("ECHO")}}}, nil)
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -178,7 +180,8 @@ func TestSidecarTLSTerminateEarlyClaimE2E(t *testing.T) {
 		TLS:       &wire.TLSClaim{Terminate: true, SNIMatch: "echo.test"},
 	}}}, nil)
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -208,7 +211,8 @@ func TestSidecarProbeEarlyClaimE2E(t *testing.T) {
 		wire.Capabilities{EarlyClaims: []wire.EarlyClaim{{Probe: true, ProbeMaxBytes: 64}}}, []byte("XPROBE"))
 
 	t.Run("probe_claims", func(t *testing.T) {
-		conn, err := net.Dial("tcp", h.proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		got := roundTrip(t, conn, []byte("XPROBE data here"))
@@ -216,7 +220,8 @@ func TestSidecarProbeEarlyClaimE2E(t *testing.T) {
 	})
 
 	t.Run("probe_declines_falls_through", func(t *testing.T) {
-		conn, err := net.Dial("tcp", h.proxyAddr)
+		var d net.Dialer
+		conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		_, err = conn.Write([]byte("GET http://127.0.0.1:9/ HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"))
@@ -234,7 +239,8 @@ func TestSidecarProactiveStreamOutput(t *testing.T) {
 	h := startIntercept(t, "echo-proactive",
 		wire.Capabilities{EarlyClaims: []wire.EarlyClaim{{MagicBytesPrefix: magic("ECHO")}}}, nil)
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -263,7 +269,8 @@ func TestSidecarDeathTearsDownStream(t *testing.T) {
 	h := startIntercept(t, "echo-teardown",
 		wire.Capabilities{EarlyClaims: []wire.EarlyClaim{{MagicBytesPrefix: magic("ECHO")}}}, nil)
 
-	conn, err := net.Dial("tcp", h.proxyAddr)
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 

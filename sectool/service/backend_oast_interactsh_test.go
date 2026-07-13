@@ -816,7 +816,9 @@ func TestInteractshBackend_LivePoll(t *testing.T) {
 	httpURL := "http://" + sess.Domain
 	t.Logf("triggering HTTP request to: %s", httpURL)
 	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, httpErr := httpClient.Get(httpURL)
+	req, err := http.NewRequestWithContext(t.Context(), "GET", httpURL, nil)
+	require.NoError(t, err)
+	resp, httpErr := httpClient.Do(req)
 	if httpErr != nil {
 		t.Logf("HTTP request error (expected): %v", httpErr)
 	} else {
