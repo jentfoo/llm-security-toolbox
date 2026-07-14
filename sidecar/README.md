@@ -9,15 +9,15 @@ Two ways to implement an adapter:
 
 ---
 
-# Concepts
+## Concepts
 
-## Architecture
+### Architecture
 
 Sectool owns all sockets, client-facing and upstream. Bytes flow over the IPC connection as base64 encoded fields inside JSON-RPC 2.0 messages, keeping the contract portable across Linux, macOS, and Windows.
 
-The captured representation maps to an HTTP-shaped envelope (`method`, `path`, `headers`, `body`) with an adapter-defined `protocol_tag` in the slot HTTP uses for its version. Every existing `sectool` tool (`flow_get`, `diff_flow`, `find_reflected`, `replay_send`, `notes_save`, …) then works on adapter flows without per-adapter schema reasoning.
+The captured representation maps to an HTTP-shaped envelope (`method`, `path`, `headers`, `body`) with an adapter-defined `protocol_tag` in the slot HTTP uses for its version. Every existing sectool tool (`flow_get`, `diff_flow`, `find_reflected`, `replay_send`, `notes_save`, …) then works on adapter flows without per-adapter schema reasoning.
 
-### Connection lifecycle
+#### Connection lifecycle
 
 1. **Connect & register.** Sidecar dials the socket and sends a `register` request (see [register](#register-sidecar--sectool)). Sectool replies with effective version, rules snapshot, or rejects with `-33001` on version mismatch.
 2. **Rule sync.** Rules arrive via the registration snapshot, then through `sync_rules` on every change (see [sync_rules](#sync_rules-sectool--sidecar)).
@@ -26,9 +26,9 @@ The captured representation maps to an HTTP-shaped envelope (`method`, `path`, `
 5. **Heartbeat.** `ping` / `pong` keep the connection alive in both directions.
 6. **Shutdown.** Sectool sends `shutdown`; the sidecar drains, emits final metrics, and closes.
 
-## Transport
+### Transport
 
-Sidecars connect to `sectool` over a local socket resolved from config:
+Sidecars connect to sectool over a local socket resolved from config:
 
 | OS | Transport | Default address |
 |----|-----------|-----------------|
@@ -37,29 +37,29 @@ Sidecars connect to `sectool` over a local socket resolved from config:
 
 Override via the `--sidecar-socket <value>` CLI flag or the `sidecar_socket` field in `~/.sectool/config.json`. The network is inferred from shape: a `host:port` uses TCP, anything else uses a Unix domain socket. Sectool binds the address and an attached sidecar dials it, both resolving the same config value, so no custom configuration is needed.
 
-## Versioning
+### Versioning
 
 The `protocol_version` (`{major, minor}`) gates the session during `register`. The Go SDK defaults to the toolbox release the sidecar was built against.
 
 - **Major mismatch** → hard reject with `-33001` (`ErrVersionUnsupported`).
 - **Minor ≤ sectool's minor** → accepted; session runs at the sidecar's minor.
-- **Sidecar minor > sectool's minor** → rejected with `-33001`; update `sectool`.
+- **Sidecar minor > sectool's minor** → rejected with `-33001`; update sectool.
 
-## Flow model
+### Flow model
 
 A **Flow** is one logical exchange. It MAY carry a `request` side and a `response` side, each an envelope of `{method, path, query, status_code, status_text, headers, body}`. The envelope fields live inside the sub-objects; flow-level fields (`protocol_tag`, `direction`, `parent_flow_id`, timestamps, `annotations`) sit alongside.
 
 - **Request/response** protocols populate both sides under one `flow_id`.
 - **One-way messages** (tunnel envelopes, stream chunks, pub/sub frames) populate a single side and rely on `direction` (`client_to_server` | `server_to_client` | `bidirectional`).
 - **Two-phase completion** — emit the request side first (sectool returns a `flow_id`), attach the response later by re-emitting with the same `flow_id`.
-- **Streams and sessions** — a parent flow plus child flows that set `parent_flow_id`. Children are stored and replayed in emission order; `sectool` never reorders, so there is no per-chunk sequence number. A `direction=bidirectional`, `method=TUNNEL` parent is a session/tunnel envelope; its `flow_id` is the grouping key.
-- **Non-decodable bodies** — when the wire form is not natively decodable by `sectool` (protobuf, custom framing), supply the logical `body` plus `body_raw` (verbatim wire bytes) and `body_codec` (the transform chain and content-type). Unmutated replay resends `body_raw`; a mutated body is re-encoded through `body_codec`.
+- **Streams and sessions** — a parent flow plus child flows that set `parent_flow_id`. Children are stored and replayed in emission order; sectool never reorders, so there is no per-chunk sequence number. A `direction=bidirectional`, `method=TUNNEL` parent is a session/tunnel envelope; its `flow_id` is the grouping key.
+- **Non-decodable bodies** — when the wire form is not natively decodable by sectool (protobuf, custom framing), supply the logical `body` plus `body_raw` (verbatim wire bytes) and `body_codec` (the transform chain and content-type). Unmutated replay resends `body_raw`; a mutated body is re-encoded through `body_codec`.
 
-## Capabilities
+### Capabilities
 
 A sidecar declares which connection-handling seams it claims at registration. Each kind is a list (`early_claims`, `upgrade_claims`, `injection_targets`), so one registration can claim several protocol entry points:
 
-- **`early_claim`** — claim TCP connections from accept on a port range, optionally gated by `magic_bytes_prefix`, `host_match`, `sni_match`, or a dynamic `probe`. With `tls.terminate`, `sectool` MitMs TLS and the sidecar receives the decrypted contents. `tls.cert` optionally declares additive SANs (`dns_names`, `ip_addresses`, `uris`, `emails`) and a legacy `common_name` to mint onto the terminated leaf, for clients that verify a name (or URI/SPIFFE identity) other than the SNI they dial. The declaration is purely additive; the leaf always retains the dialed name. A connection matching no claim falls through to the HTTP adapter.
+- **`early_claim`** — claim TCP connections from accept on a port range, optionally gated by `magic_bytes_prefix`, `host_match`, `sni_match`, or a dynamic `probe`. With `tls.terminate`, sectool MitMs TLS and the sidecar receives the decrypted contents. `tls.cert` optionally declares additive SANs (`dns_names`, `ip_addresses`, `uris`, `emails`) and a legacy `common_name` to mint onto the terminated leaf, for clients that verify a name (or URI/SPIFFE identity) other than the SNI they dial. The declaration is purely additive; the leaf always retains the dialed name. A connection matching no claim falls through to the HTTP adapter.
 - **`upgrade_claim`** — claim a byte stream after an HTTP upgrade (`http_101` or `connect`). Sectool captures the triggering request as a normal flow, synthesizes the upgrade response, and routes subsequent bytes to the sidecar; the captured request's `flow_id` and headers are surfaced on stream open.
 - **`injection_target`** — declare the adapter can originate new outbound messages, enabling `replay_send` routing and cross-adapter `invoke_adapter`.
 
@@ -67,24 +67,24 @@ A sidecar with multiple claims routes an inbound stream on the protocol input `s
 
 Any sidecar may emit flows and apply pushed rules without declaring a capability. Conflicts (overlapping port ranges, ambiguous matchers, duplicate names) are rejected at registration time, naming both parties.
 
-## Mutation ownership
+### Mutation ownership
 
-A flow's content is mutated by exactly one party: `sectool` itself for native HTTP/WS flows, or the sidecar that captured it for adapter-owned flows. Sectool never mutates a sidecar-owned flow's plaintext (it relays opaque/ciphertext bytes), so nothing outside the owner ever rewrites that flow.
+A flow's content is mutated by exactly one party: sectool itself for native HTTP/WS flows, or the sidecar that captured it for adapter-owned flows. Sectool never mutates a sidecar-owned flow's plaintext (it relays opaque/ciphertext bytes), so nothing outside the owner ever rewrites that flow.
 
 As owner, a sidecar mutates through two mechanisms:
 
 - **Hot path** — pushed rules applied inline as traffic flows (see [Rules](#rules)).
 - **Replay / origination** — the ordered mutation ops carried on `sidecar_send` / `invoke_adapter`, applied when an agent re-sends or originates a message (see [Mutation operations](#mutation-operations)).
 
-## Rules
+### Rules
 
-Proxy rules are protocol-coupled, so a sidecar applies the rules relevant to its own flows; HTTP/WS traffic not delegated to a sidecar is handled by `sectool`. Sectool pushes the authoritative ordered rule list via `sync_rules`; the sidecar replaces its local cache atomically and applies find/replace on its hot path, exactly as the native proxy does. Sectool filters the list per sidecar, sending only rules with an empty `adapter` scope or matching the sidecar's name.
+Proxy rules are protocol-coupled, so a sidecar applies the rules relevant to its own flows; HTTP/WS traffic not delegated to a sidecar is handled by sectool. Sectool pushes the authoritative ordered rule list via `sync_rules`; the sidecar replaces its local cache atomically and applies find/replace on its hot path, exactly as the native proxy does. Sectool filters the list per sidecar, sending only rules with an empty `adapter` scope or matching the sidecar's name.
 
 ---
 
-# Go SDK
+## Go SDK
 
-## Quick start
+### Quick start
 
 ```go
 package main
@@ -127,7 +127,7 @@ func main() {
 }
 ```
 
-## Registration
+### Registration
 
 `sidecar.Dial(ctx, addr, reg)` connects and registers, with the connect and handshake bounded by `ctx`. The `Registration` struct declares your adapter's identity and capabilities:
 
@@ -153,7 +153,7 @@ if errors.Is(err, sidecar.ErrVersionUnsupported) {
 - **MCPTools** — optional custom MCP tools the sidecar exposes to agents
 - **InstanceID** — optional UUID for reconnect state recovery; **Resume** requests reattachment of in-flight flow metadata
 
-## Serving
+### Serving
 
 ```go
 err := conn.Serve(ctx, &myHandler{})
@@ -161,7 +161,7 @@ err := conn.Serve(ctx, &myHandler{})
 
 `Serve` blocks until context cancellation or remote close. Returns `ctx.Err()` on cancellation, `nil` on clean shutdown.
 
-## Handler interface
+### Handler interface
 
 Implement `sidecar.Handler` to receive inbound events. Embed `BaseHandler` for no-op defaults and override only what you need:
 
@@ -175,7 +175,7 @@ Implement `sidecar.Handler` to receive inbound events. Embed `BaseHandler` for n
 | `OnSidecarSend(params)` | Agent replays or originates a message through this adapter | `(wire.SidecarSendResult, error)` |
 | `OnInvokeTool(params)` | An MCP client calls one of the sidecar's registered tools | `(wire.InvokeToolResult, error)` |
 
-### Stream events
+#### Stream events
 
 `OnStreamDeliver` receives raw transport bytes, not aligned to protocol frame boundaries. One frame may span several deliveries; several may arrive in one chunk. Use `sidecar.Reassembler` to buffer and extract complete frames:
 
@@ -195,7 +195,7 @@ func (h *myHandler) splitFrame(buf []byte) (n int, ok bool) {
 }
 ```
 
-The returned writes tell `sectool` what bytes to write back. A write may target a **different** `stream_id` than the event arrived on; that is how client data is forwarded upstream. `sidecar.Forward(streamID, bytes)` builds a single-target writes slice:
+The returned writes tell sectool what bytes to write back. A write may target a **different** `stream_id` than the event arrived on; that is how client data is forwarded upstream. `sidecar.Forward(streamID, bytes)` builds a single-target writes slice:
 
 ```go
 func (h *myHandler) OnStreamDeliver(p wire.StreamWriteParams) ([]wire.StreamWrite, error) {
@@ -203,11 +203,11 @@ func (h *myHandler) OnStreamDeliver(p wire.StreamWriteParams) ([]wire.StreamWrit
 }
 ```
 
-## Emitting flows
+### Emitting flows
 
-### PushFlow
+#### PushFlow
 
-Emit a captured exchange. Leave `flow_id` empty on first emission; `sectool` assigns it:
+Emit a captured exchange. Leave `flow_id` empty on first emission; sectool assigns it:
 
 ```go
 flowID, err := conn.PushFlow(ctx, wire.Flow{
@@ -222,7 +222,7 @@ flowID, err := conn.PushFlow(ctx, wire.Flow{
 })
 ```
 
-### Two-phase completion
+#### Two-phase completion
 
 Emit the request side first, then attach the response with the returned `flow_id` (see [Flow model](#flow-model)):
 
@@ -232,7 +232,7 @@ flowID, _ := conn.PushFlow(ctx, wire.Flow{Request: req})
 conn.CompleteFlow(ctx, flowID, resp, time.Now())
 ```
 
-### Captured/mutated audit pairs
+#### Captured/mutated audit pairs
 
 When a rule mutates a message on the hot path, emit both forms for agent review:
 
@@ -242,7 +242,7 @@ capturedID, mutatedID, err := conn.EmitMutatedPair(ctx, capturedFlow, mutatedFlo
 
 The captured flow is tagged `phase=captured`; the mutated flow `phase=mutated` with a link back. Both appear in unified history and diff via `diff_flow`.
 
-### Streams and sessions
+#### Streams and sessions
 
 Use parent-child flows for long-lived exchanges (see [Flow model](#flow-model)):
 
@@ -266,9 +266,9 @@ conn.CompleteFlow(ctx, streamID, nil, time.Now())
 
 Session/tunnel envelopes follow the same pattern with `Direction: "bidirectional"` and `Method: "TUNNEL"`.
 
-### Non-decodable bodies
+#### Non-decodable bodies
 
-When `sectool` can't natively decode the wire body, supply both the logical and raw forms; unmutated replay resends `body_raw`, a mutated body re-encodes through `body_codec` (see [Flow model](#flow-model)):
+When sectool can't natively decode the wire body, supply both the logical and raw forms; unmutated replay resends `body_raw`, a mutated body re-encodes through `body_codec` (see [Flow model](#flow-model)):
 
 ```go
 Request: &wire.FlowMessage{
@@ -281,7 +281,7 @@ Request: &wire.FlowMessage{
 }
 ```
 
-## Rules
+### Rules
 
 The SDK maintains a hot-path `RuleCache`, refreshed atomically on each `sync_rules` push. Access via `conn.Rules()`; scoped rules for other adapters are filtered out automatically (see [Rules](#rules)).
 
@@ -291,9 +291,9 @@ mutatedHeaders, firedRules := conn.Rules().ApplyHeaders(headers, wire.RuleTypeRe
 mutatedPayload, firedRules := conn.Rules().ApplyWS(payload, wire.RuleTypeWSToServer)
 ```
 
-## Upstream connections
+### Upstream connections
 
-Request that `sectool` open a TCP connection on your behalf:
+Request that sectool open a TCP connection on your behalf:
 
 ```go
 upstreamID, err := conn.DialUpstream(ctx, wire.DialUpstreamParams{
@@ -305,7 +305,7 @@ upstreamID, err := conn.DialUpstream(ctx, wire.DialUpstreamParams{
 
 Sectool applies scope policy and records the dial. Bytes flow through the same event model: inbound via `OnStreamDeliver`, outbound via returned writes. Omit `Host`/`Port` and set `ParentFlowID` to dial that flow's original destination.
 
-## Cross-adapter invocation
+### Cross-adapter invocation
 
 Route an outbound message through another adapter's injection target:
 
@@ -319,9 +319,9 @@ result, err := conn.InvokeAdapter(ctx, wire.InvokeAdapterParams{
 
 The reserved destination `sectool` originates through the in-process HTTP proxy's native send path.
 
-## Invoking `sectool` core tools
+### Invoking sectool core tools
 
-Query or drive core `sectool` tools by name from within a handler or tool implementation:
+Query or drive core sectool tools by name from within a handler or tool implementation:
 
 ```go
 result, err := conn.CoreInvoke(ctx, "proxy_poll", map[string]any{"mode": "flows", "limit": 10})
@@ -329,9 +329,9 @@ result, err := conn.CoreInvoke(ctx, "proxy_poll", map[string]any{"mode": "flows"
 
 `result.Content` is the tool's markdown output. `core_invoke` reaches the same core tools agents call — both reads and writes. Internal tools are not invocable.
 
-## Replay and origination (OnSidecarSend)
+### Replay and origination (OnSidecarSend)
 
-When an agent calls `replay_send` on a flow captured by your adapter, `sectool` routes it to `OnSidecarSend`. The params carry the source flow inline, so you have `body`, `body_raw`, and `body_codec` without a round-trip:
+When an agent calls `replay_send` on a flow captured by your adapter, sectool routes it to `OnSidecarSend`. The params carry the source flow inline, so you have `body`, `body_raw`, and `body_codec` without a round-trip:
 
 ```go
 func (h *myHandler) OnSidecarSend(p wire.SidecarSendParams) (wire.SidecarSendResult, error) {
@@ -349,7 +349,7 @@ func (h *myHandler) OnSidecarSend(p wire.SidecarSendParams) (wire.SidecarSendRes
 }
 ```
 
-### Mutation operations
+#### Mutation operations
 
 `sidecar.ApplyMutations(&msg, mutations)` applies an ordered list of `{op, name, value}` operations in array order:
 
@@ -364,7 +364,7 @@ func (h *myHandler) OnSidecarSend(p wire.SidecarSendParams) (wire.SidecarSendRes
 
 As the flow's sole owner (see [Mutation ownership](#mutation-ownership)), the sidecar applies the ops once, then re-encodes and re-establishes any protocol binding (signatures, framing, compression). The `github.com/go-appsec/toolbox/pkg/mutate` helpers back `ApplyMutations`, and are available directly when you need to mutate outside it.
 
-## Custom MCP tools
+### Custom MCP tools
 
 Register protocol-specific tools that agents discover through the normal MCP `tools/list`:
 
@@ -378,9 +378,9 @@ MCPTools: []wire.MCPTool{
 }
 ```
 
-Invocation reaches `OnInvokeTool` with `sectool`-validated arguments. The handler may read state via `CoreInvoke` and emit flows via `PushFlow`.
+Invocation reaches `OnInvokeTool` with sectool-validated arguments. The handler may read state via `CoreInvoke` and emit flows via `PushFlow`.
 
-## Proactive stream operations
+### Proactive stream operations
 
 Two actions outside of event responses:
 
@@ -391,24 +391,24 @@ conn.StreamWrite(streamID, keepaliveBytes)     // write without a triggering eve
 
 `StreamWrite` is for keepalives and timer-driven output only. Ordinary data belongs in the writes returned from stream events, which preserve per-stream ordering.
 
-## Logging and metrics
+### Logging and metrics
 
 ```go
 conn.Log("info", "connected to broker", map[string]any{"broker": "mqtt.example.com"})
 conn.ReportMetrics(map[string]int64{"frames_parsed": 150}, map[string]float64{"buffer_bytes": 4096})
 ```
 
-## Error handling
+### Error handling
 
 The SDK surfaces JSON-RPC 2.0 errors as `*wire.Error` (`{Code, Message, Data}`). Sectool-specific codes occupy `-33000..-33999`; `Dial` maps `-33001` to `ErrVersionUnsupported`. See [Error object](#error-object) for the full code table.
 
 ---
 
-# JSON-RPC 2.0 wire protocol
+## JSON-RPC 2.0 wire protocol
 
 For implementing a sidecar without the Go SDK. Every field name below is a JSON tag from the shared `sidecar/wire` package, which both peers import, so the two ends encode byte-identical structures. Read [Concepts](#concepts) first for the semantics.
 
-## Framing
+### Framing
 
 A single connection carries a sequence of length-prefixed messages:
 
@@ -417,7 +417,7 @@ A single connection carries a sequence of length-prefixed messages:
 
 No delimiter, no trailing newline. The only ceiling is the `uint32` prefix (`0xFFFFFFFF`); a write exceeding it errors with `-33201`. `max_body_bytes` governs only what history retains, never what is forwarded.
 
-## Message envelope
+### Message envelope
 
 ```json
 { "jsonrpc": "2.0", "id": 1, "method": "push_flow", "params": { ... } }
@@ -442,7 +442,7 @@ Both peers are symmetric: either may issue requests and notifications. `id` is a
 
 Binary fields (`body`, `body_raw`, stream/probe `data`, `magic_bytes_prefix`) use standard-alphabet padded base64. Fields typed as raw JSON (schemas, `annotations`, structured tool output, and the adapter-validated `target`/`payload`/`params`) are embedded verbatim, not re-encoded; each method's params note which applies.
 
-## Error object
+### Error object
 
 ```json
 { "code": -33001, "message": "contract major mismatch: `sectool` 1, sidecar 2",
@@ -478,34 +478,34 @@ Standard JSON-RPC codes `-32601` (method not found) and `-32603` (internal) appl
 
 A `claim_probe` returning `{"claim": false}` is normal control flow, not an error.
 
-## Method catalog
+### Method catalog
 
 | Method | Direction | Kind |
 |--------|-----------|------|
-| `register` | sidecar → `sectool` | request |
-| `push_flow` | sidecar → `sectool` | request |
-| `core_invoke` | sidecar → `sectool` | request |
-| `dial_upstream` | sidecar → `sectool` | request |
-| `invoke_adapter` | sidecar → `sectool` | request |
-| `log` | sidecar → `sectool` | notification |
-| `report_metrics` | sidecar → `sectool` | notification |
-| `close_stream` | sidecar → `sectool` | notification |
-| `stream_write` | sidecar → `sectool` | notification |
-| `sync_rules` | `sectool` → sidecar | request |
-| `sidecar_send` | `sectool` → sidecar | request |
-| `invoke_tool` | `sectool` → sidecar | request |
-| `stream_open` | `sectool` → sidecar | request |
-| `stream_deliver` | `sectool` → sidecar | request |
-| `claim_probe` | `sectool` → sidecar | request |
-| `shutdown` | `sectool` → sidecar | request |
-| `stream_ended` | `sectool` → sidecar | notification |
+| `register` | sidecar → sectool | request |
+| `push_flow` | sidecar → sectool | request |
+| `core_invoke` | sidecar → sectool | request |
+| `dial_upstream` | sidecar → sectool | request |
+| `invoke_adapter` | sidecar → sectool | request |
+| `log` | sidecar → sectool | notification |
+| `report_metrics` | sidecar → sectool | notification |
+| `close_stream` | sidecar → sectool | notification |
+| `stream_write` | sidecar → sectool | notification |
+| `sync_rules` | sectool → sidecar | request |
+| `sidecar_send` | sectool → sidecar | request |
+| `invoke_tool` | sectool → sidecar | request |
+| `stream_open` | sectool → sidecar | request |
+| `stream_deliver` | sectool → sidecar | request |
+| `claim_probe` | sectool → sidecar | request |
+| `shutdown` | sectool → sidecar | request |
+| `stream_ended` | sectool → sidecar | notification |
 | `ping` / `pong` | either direction | notification (or request) |
 
-## Methods
+### Methods
 
 Params and results below list JSON field names. Reused shapes (`Flow`, `FlowMessage`, `Rule`, `Capabilities`, …) are defined under [Shared structs](#shared-structs).
 
-### register (sidecar → `sectool`)
+#### register (sidecar → sectool)
 
 Issued exactly once, first message on the connection.
 
@@ -513,58 +513,58 @@ Issued exactly once, first message on the connection.
 
 **result:** `protocol_version` (the effective `{major, minor}`), `rules_snapshot` (`[Rule]`, currently active rules for this adapter), `server_time` (RFC3339Nano string).
 
-Rejected with `-33001` when the major differs (any direction) or the sidecar's minor is newer than sectool's. Otherwise the session runs at the sidecar's (≤ `sectool`) minor, echoed in the result's `protocol_version`.
+Rejected with `-33001` when the major differs (any direction) or the sidecar's minor is newer than sectool's. Otherwise the session runs at the sidecar's (≤ sectool) minor, echoed in the result's `protocol_version`.
 
-### push_flow (sidecar → `sectool`)
+#### push_flow (sidecar → sectool)
 
 **params:** a bare `Flow` object (not wrapped). Empty `flow_id` is first emission; set `flow_id` to target an existing flow for two-phase completion or teardown. See [Flow model](#flow-model).
 
 **result:** `{ "flow_id": string }`.
 
-### core_invoke (sidecar → `sectool`)
+#### core_invoke (sidecar → sectool)
 
-Invokes a core `sectool` MCP tool by name, reusing the same handlers agents call.
+Invokes a core sectool MCP tool by name, reusing the same handlers agents call.
 Internal tools are not invocable.
 
 **params:** `tool` (string, a core MCP tool name, e.g. `proxy_poll`, `proxy_respond_add`), `params` (raw JSON, that tool's parameters).
 
 **result:** `content` (string, the tool's markdown), `is_error` (bool, optional).
 
-### dial_upstream (sidecar → `sectool`)
+#### dial_upstream (sidecar → sectool)
 
 **params:** `host` (string, optional), `port` (int, optional), `tls` (`{enabled, sni?, alpn?, skip_verify?}`, optional), `parent_flow_id` (string, optional, supplies the default destination and links the dial). Omitting `host`/`port` dials `parent_flow_id`'s original destination.
 
 **result:** `{ "stream_id": string }`, or a `-3330x` error on scope/dial/TLS failure. Bytes then flow via `stream_deliver` events and Response `writes`.
 
-### invoke_adapter (sidecar → `sectool`)
+#### invoke_adapter (sidecar → sectool)
 
 **params:** `adapter` (string, required, destination with an `injection_target`), `target` (raw JSON, validated by the destination adapter), `payload` (raw JSON, likewise), `mutations` (`[Mutation]`, optional), `wait_for_response` (bool, optional, default true).
 
 **result:** `new_flow_ids` (`[string]`), `response` (`FlowMessage`, when waited). Destination `sectool` originates via the native HTTP send path; `target`/`payload` then mirror `request_send` (`{url, method, headers, body, follow_redirects, force}`).
 
-### log (sidecar → `sectool`, notification)
+#### log (sidecar → sectool, notification)
 
 **params:** `level` (string, optional), `message` (string), `fields` (object, optional).
 
-### report_metrics (sidecar → `sectool`, notification)
+#### report_metrics (sidecar → sectool, notification)
 
 **params:** `counters` (`{name: int64}`), `gauges` (`{name: number}`).
 
-### close_stream (sidecar → `sectool`, notification)
+#### close_stream (sidecar → sectool, notification)
 
 **params:** `stream_id` (string), `reason` (string, optional). Proactively closes a client-facing or dialed upstream stream.
 
-### stream_write (sidecar → `sectool`, notification)
+#### stream_write (sidecar → sectool, notification)
 
 **params:** `stream_id` (string), `data` (standard-alphabet padded base64). Proactive write for keepalives and timer-driven output only; unknown `stream_id` is a `-33202` transport error. Ordinary data belongs in event-Response `writes`.
 
-### sync_rules (sectool → sidecar)
+#### sync_rules (sectool → sidecar)
 
 **params:** `snapshot_version` (uint64, monotonic), `rules` (`[Rule]`, the full ordered list to apply). The sidecar replaces its cache wholesale.
 
 **result:** `ack` (bool), `applied_version` (uint64, equals `snapshot_version` on success). On an unsupported rule shape, return `-33102` naming the `rule_id`; the sidecar keeps its previous version.
 
-### sidecar_send (sectool → sidecar)
+#### sidecar_send (sectool → sidecar)
 
 The method behind agent `replay_send` and the destination side of `invoke_adapter`. Never called by agents directly.
 
@@ -572,45 +572,45 @@ The method behind agent `replay_send` and the destination side of `invoke_adapte
 
 **result:** `new_flow_ids` (`[string]`), `writes` (`[StreamWrite]`, optional first outbound bytes), `response` (`FlowMessage`, when waited).
 
-### invoke_tool (sectool → sidecar)
+#### invoke_tool (sectool → sidecar)
 
-**params:** `name` (string, a registered tool), `arguments` (raw JSON, `sectool`-validated against `input_schema`).
+**params:** `name` (string, a registered tool), `arguments` (raw JSON, sectool-validated against `input_schema`).
 
 **result:** `content` (string, optional markdown), `structured_content` (raw JSON, optional), `is_error` (bool, optional).
 
-### stream_open (sectool → sidecar)
+#### stream_open (sectool → sidecar)
 
 **params:** `stream_id` (string), `host`, `path`, `peer_addr` (strings, optional), plus `request_flow_id` (string) and `request_headers` (`[Header]`), present only for an `upgrade_claim`, absent for `early_claim`.
 
 **result:** `{ "writes": [StreamWrite] }` (usually empty; the client speaks first).
 
-### stream_deliver (sectool → sidecar)
+#### stream_deliver (sectool → sidecar)
 
 **params:** `stream_id` (string), `data` (standard-alphabet padded base64, a raw transport chunk **not** frame-aligned; see [Stream events](#stream-events) for reassembly).
 
-**result:** `{ "writes": [StreamWrite] }`, bytes for `sectool` to write, possibly to a different `stream_id`. Sectool awaits this response before the next chunk (per-stream ordering). The sidecar may nest `dial_upstream`, `core_invoke`, or `push_flow`.
+**result:** `{ "writes": [StreamWrite] }`, bytes for sectool to write, possibly to a different `stream_id`. Sectool awaits this response before the next chunk (per-stream ordering). The sidecar may nest `dial_upstream`, `core_invoke`, or `push_flow`.
 
-### claim_probe (sectool → sidecar)
+#### claim_probe (sectool → sidecar)
 
 **params:** `host`, `port`, `peer_addr`, `sni` (optional), `data` (standard-alphabet padded base64, buffered opening bytes).
 
 **result:** `{ "claim": bool }`. True takes the connection; false declines to next probe or HTTP fallthrough. See [Capabilities](#capabilities).
 
-### shutdown (sectool → sidecar)
+#### shutdown (sectool → sidecar)
 
 **params:** `drain_seconds` (int). **result:** `{ "ack": true }`. The sidecar finishes in-flight work, emits a final `report_metrics`, and closes.
 
-### stream_ended (sectool → sidecar, notification)
+#### stream_ended (sectool → sidecar, notification)
 
 **params:** `stream_id` (string), `reason` (string, optional). The sidecar reacts by closing any paired stream.
 
-### ping / pong (either direction)
+#### ping / pong (either direction)
 
 A `ping` request (has `id`) is answered with an empty `{}` result. A `ping` notification (no `id`) is answered with a `pong` notification. Sectool records a received `pong` as liveness. Default interval 10 s, unhealthy after ~30 s without a reply.
 
-## Shared structs
+### Shared structs
 
-### Flow
+#### Flow
 
 ```json
 {
@@ -624,9 +624,9 @@ A `ping` request (has `id`) is answered with an empty `{}` result. A `ping` noti
 }
 ```
 
-All fields `omitempty`. `annotations` is a free-form object the sidecar owns (well-known key `replay`); `sectool` stores it verbatim. Timestamps are RFC 3339 strings. An empty `flow_id` is first emission (sectool assigns); set `flow_id` to re-target an existing flow for two-phase completion or teardown.
+All fields `omitempty`. `annotations` is a free-form object the sidecar owns (well-known key `replay`); sectool stores it verbatim. Timestamps are RFC 3339 strings. An empty `flow_id` is first emission (sectool assigns); set `flow_id` to re-target an existing flow for two-phase completion or teardown.
 
-### FlowMessage
+#### FlowMessage
 
 ```json
 {
@@ -640,15 +640,15 @@ All fields `omitempty`. `annotations` is a free-form object the sidecar owns (we
 
 `body` is the logical payload every tool operates on; encoded as standard-alphabet padded base64 on the wire. `body_raw` (also base64) and `body_codec` carry the verbatim wire form when `body` is not natively decodable — see [Flow model](#flow-model). `status_code` / `status_text` are the response side's outcome.
 
-### Header
+#### Header
 
 `{ "name": string, "value": string }`, an ordered array, not a map; duplicates and order are preserved.
 
-### StreamWrite
+#### StreamWrite
 
-`{ "stream_id": string, "data": "<base64>" }`, bytes for `sectool` to write. `stream_id` may differ from the stream the event arrived on; that is how client bytes are forwarded upstream.
+`{ "stream_id": string, "data": "<base64>" }`, bytes for sectool to write. `stream_id` may differ from the stream the event arrived on; that is how client bytes are forwarded upstream.
 
-### Rule
+#### Rule
 
 ```json
 { "rule_id": "r1", "type": "request_body", "label": "", "is_regex": false,
@@ -657,7 +657,7 @@ All fields `omitempty`. `annotations` is a free-form object the sidecar owns (we
 
 `type` ∈ `request_header`, `request_body`, `response_header`, `response_body`, `ws:to-server`, `ws:to-client`, `ws:both`. An empty `adapter` applies to every adapter; otherwise it names the owning sidecar.
 
-### Capabilities
+#### Capabilities
 
 ```json
 {
@@ -683,11 +683,10 @@ All fields `omitempty`. `annotations` is a free-form object the sidecar owns (we
 
 `upgrade_signal` ∈ `http_101`, `connect`. Each seam is a list; omit or leave empty the ones you don't claim, and declare more than one entry to claim multiple entry points. `magic_bytes_prefix` is standard-alphabet padded base64.
 
-### Mutation
+#### Mutation
 
 `{ "op": string, "name": string, "value": string }`, applied in array order. See the [op table](#mutation-operations).
 
-### MCPTool
+#### MCPTool
 
 `{ "name": string, "description": string, "input_schema": <JSON Schema>, "annotations": <JSON> }`.
-
