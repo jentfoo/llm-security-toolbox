@@ -110,30 +110,30 @@ func mutationsToOpts(muts []wire.Mutation) (PathQueryOpts, sendModifications) {
 	mods := sendModifications{SetJSON: map[string]interface{}{}, SetForm: map[string]string{}}
 	for _, mut := range muts {
 		switch mut.Op {
-		case opSetHeader:
+		case wire.OpSetHeader:
 			mods.SetHeaders = append(mods.SetHeaders, mut.Name+": "+mut.Value)
-		case opRemoveHeader:
+		case wire.OpRemoveHeader:
 			mods.RemoveHeaders = append(mods.RemoveHeaders, mut.Name)
-		case opSetJSON:
+		case wire.OpSetJSON:
 			mods.SetJSON[mut.Name] = mut.Value
-		case opRemoveJSON:
+		case wire.OpRemoveJSON:
 			mods.RemoveJSON = append(mods.RemoveJSON, mut.Name)
-		case opSetForm:
+		case wire.OpSetForm:
 			mods.SetForm[mut.Name] = mut.Value
-		case opRemoveForm:
+		case wire.OpRemoveForm:
 			mods.RemoveForm = append(mods.RemoveForm, mut.Name)
-		case opSetQuery:
+		case wire.OpSetQuery:
 			opts.SetQuery = append(opts.SetQuery, mut.Name+"="+mut.Value)
-		case opRemoveQuery:
+		case wire.OpRemoveQuery:
 			opts.RemoveQuery = append(opts.RemoveQuery, mut.Name)
-		case opMethod:
+		case wire.OpMethod:
 			opts.Method = mut.Value
 			mods.Method = mut.Value
-		case opPath:
+		case wire.OpPath:
 			opts.Path = mut.Value
-		case opQuery:
+		case wire.OpQuery:
 			opts.Query = mut.Value
-		case opBody:
+		case wire.OpBody:
 			mods.Body = mut.Value
 		}
 	}

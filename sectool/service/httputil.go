@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-analyze/bulk"
 
+	"github.com/go-appsec/toolbox/pkg/mutate"
 	"github.com/go-appsec/toolbox/sectool/config"
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
@@ -615,7 +616,7 @@ func modifyRequestLine(raw []byte, opts *PathQueryOpts) []byte {
 		// Complete replacement
 		query = opts.Query
 	} else if len(opts.SetQuery) > 0 || len(opts.RemoveQuery) > 0 {
-		query = proxy.ApplyRawQueryModifications(query, opts.RemoveQuery, opts.SetQuery)
+		query = mutate.Query(query, opts.RemoveQuery, opts.SetQuery)
 	}
 
 	// Build new request line

@@ -3,7 +3,6 @@ package sidecar
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"slices"
 	"strings"
 
@@ -28,7 +27,7 @@ func (c *Conn) InvokeAdapter(ctx context.Context, p wire.InvokeAdapterParams) (w
 func ApplyMutations(msg *wire.FlowMessage, muts []wire.Mutation) error {
 	for _, m := range muts {
 		switch m.Op {
-		case "set_header":
+		case wire.OpSetHeader:
 			if i := slices.IndexFunc(msg.Headers, func(h wire.Header) bool {
 				return strings.EqualFold(h.Name, m.Name)
 			}); i >= 0 {
@@ -36,48 +35,44 @@ func ApplyMutations(msg *wire.FlowMessage, muts []wire.Mutation) error {
 			} else {
 				msg.Headers = append(msg.Headers, wire.Header{Name: m.Name, Value: m.Value})
 			}
-		case "remove_header":
+		case wire.OpRemoveHeader:
 			name := m.Name
 			msg.Headers = bulk.SliceFilterInPlace(func(h wire.Header) bool { return !strings.EqualFold(h.Name, name) }, msg.Headers)
-		case "set_json":
+		case wire.OpSetJSON:
 			b, err := mutate.JSON(msg.Body, map[string]interface{}{m.Name: m.Value}, nil)
 			if err != nil {
 				return fmt.Errorf("set_json %q: %w", m.Name, err)
 			}
 			msg.Body = b
-		case "remove_json":
+		case wire.OpRemoveJSON:
 			b, err := mutate.JSON(msg.Body, nil, []string{m.Name})
 			if err != nil {
 				return fmt.Errorf("remove_json %q: %w", m.Name, err)
 			}
 			msg.Body = b
-		case "set_form":
+		case wire.OpSetForm:
 			b, err := mutate.Form(msg.Body, map[string]string{m.Name: m.Value}, nil)
 			if err != nil {
 				return fmt.Errorf("set_form %q: %w", m.Name, err)
 			}
 			msg.Body = b
-		case "remove_form":
+		case wire.OpRemoveForm:
 			b, err := mutate.Form(msg.Body, nil, []string{m.Name})
 			if err != nil {
 				return fmt.Errorf("remove_form %q: %w", m.Name, err)
 			}
 			msg.Body = b
-		case "set_query":
-			vals, _ := url.ParseQuery(msg.Query)
-			vals.Set(m.Name, m.Value)
-			msg.Query = vals.Encode()
-		case "remove_query":
-			vals, _ := url.ParseQuery(msg.Query)
-			vals.Del(m.Name)
-			msg.Query = vals.Encode()
-		case "query":
+		case wire.OpSetQuery:
+			msg.Query = mutate.Query(msg.Query, nil, []string{m.Name + "=" + m.Value})
+		case wire.OpRemoveQuery:
+			msg.Query = mutate.Query(msg.Query, []string{m.Name}, nil)
+		case wire.OpQuery:
 			msg.Query = m.Value
-		case "method":
+		case wire.OpMethod:
 			msg.Method = m.Value
-		case "path":
+		case wire.OpPath:
 			msg.Path = m.Value
-		case "body":
+		case wire.OpBody:
 			msg.Body = []byte(m.Value)
 		default:
 			return fmt.Errorf("unknown mutation op %q", m.Op)

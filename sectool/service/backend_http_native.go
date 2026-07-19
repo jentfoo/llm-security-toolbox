@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/go-analyze/bulk"
+	"github.com/go-appsec/toolbox/pkg/mutate"
 	"github.com/go-appsec/toolbox/sectool/protocol"
 	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
@@ -819,16 +820,7 @@ func (b *NativeProxyBackend) coreRulesOfTypeLocked(ruleType string) []nativeStor
 
 // applyRequestHeaderRules applies header rules to request.
 func (b *NativeProxyBackend) applyRequestHeaderRules(req *types.RawHTTP1Request, rules []nativeStoredRule) *types.RawHTTP1Request {
-	// Serialize headers to text format
-	var headerBuf bytes.Buffer
-	for _, h := range req.Headers {
-		headerBuf.WriteString(h.Name)
-		headerBuf.WriteString(": ")
-		headerBuf.WriteString(h.Value)
-		headerBuf.WriteString("\r\n")
-	}
-
-	original := headerBuf.Bytes()
+	original := renderHeaderText(req.Headers)
 	modified := original
 
 	// Apply each rule in order (case-insensitive for headers to handle HTTP/2 lowercase)
@@ -868,16 +860,7 @@ func (b *NativeProxyBackend) applyRequestBodyRules(req *types.RawHTTP1Request, r
 
 // applyResponseHeaderRules applies header rules to response.
 func (b *NativeProxyBackend) applyResponseHeaderRules(resp *types.RawHTTP1Response, rules []nativeStoredRule) *types.RawHTTP1Response {
-	// Serialize headers to text format
-	var headerBuf bytes.Buffer
-	for _, h := range resp.Headers {
-		headerBuf.WriteString(h.Name)
-		headerBuf.WriteString(": ")
-		headerBuf.WriteString(h.Value)
-		headerBuf.WriteString("\r\n")
-	}
-
-	original := headerBuf.Bytes()
+	original := renderHeaderText(resp.Headers)
 	modified := original
 
 	// Apply each rule in order (case-insensitive for headers to handle HTTP/2 lowercase)
@@ -989,7 +972,7 @@ func applyMatchReplaceRule(input []byte, rule nativeStoredRule, caseInsensitive 
 
 	if !rule.IsRegex {
 		if caseInsensitive {
-			return replaceCaseInsensitive(input, rule.Find, rule.Replace)
+			return mutate.ReplaceCaseInsensitive(input, rule.Find, rule.Replace)
 		}
 		return bytes.ReplaceAll(input, []byte(rule.Find), []byte(rule.Replace))
 	}
@@ -1005,64 +988,17 @@ func applyMatchReplaceRule(input []byte, rule nativeStoredRule, caseInsensitive 
 	return re.ReplaceAll(input, []byte(rule.Replace))
 }
 
-// toLowerASCII maps ASCII A-Z to a-z; all other bytes (including multibyte UTF-8) pass through.
-func toLowerASCII(b byte) byte {
-	if b >= 'A' && b <= 'Z' {
-		return b + ('a' - 'A')
-	}
-	return b
+// renderHeaderText serializes headers as "Name: Value\r\n" lines for rule application.
+func renderHeaderText(headers types.Headers) []byte {
+	return mutate.RenderHeaders([]types.Header(headers),
+		func(h types.Header) string { return h.Name },
+		func(h types.Header) string { return h.Value })
 }
 
-// equalFoldASCIIAt reports whether input[pos:pos+len(match)] equals match under ASCII case folding.
-// Caller guarantees pos+len(match) <= len(input).
-func equalFoldASCIIAt(input []byte, pos int, match string) bool {
-	for i := 0; i < len(match); i++ {
-		if toLowerASCII(input[pos+i]) != toLowerASCII(match[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// replaceCaseInsensitive replaces all occurrences of match in input using ASCII-only case folding.
-// Non-ASCII bytes fold case-sensitively, which is correct for HTTP headers.
-func replaceCaseInsensitive(input []byte, match, replace string) []byte {
-	if match == "" {
-		return input
-	}
-
-	replaceBytes := []byte(replace)
-	var result []byte
-	start := 0
-	for i := 0; i+len(match) <= len(input); {
-		if toLowerASCII(input[i]) == toLowerASCII(match[0]) && equalFoldASCIIAt(input, i, match) {
-			result = append(result, input[start:i]...)
-			result = append(result, replaceBytes...)
-			i += len(match)
-			start = i
-		} else {
-			i++
-		}
-	}
-	return append(result, input[start:]...)
-}
-
-// parseHeadersFromText parses "Name: Value\r\n" lines into Header slice.
+// parseHeadersFromText parses "Name: Value\r\n" lines into a Header slice,
+// keeping colon-less lines and preserving each line's raw bytes for wire fidelity.
 func parseHeadersFromText(text []byte) []types.Header {
-	lines := bytes.Split(text, []byte("\r\n"))
-	headers := make([]types.Header, 0, len(lines))
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
-		}
-		idx := bytes.IndexByte(line, ':')
-		if idx < 0 {
-			// No colon - skip malformed line
-			continue
-		}
-		name := string(line[:idx])
-		value := string(bytes.TrimSpace(line[idx+1:]))
-		headers = append(headers, types.Header{Name: name, Value: value})
-	}
-	return headers
+	return mutate.ParseHeaders(text, func(name, value string, raw []byte) types.Header {
+		return types.Header{Name: name, Value: value, RawLine: raw, LineEnding: types.EndingCRLF}
+	})
 }

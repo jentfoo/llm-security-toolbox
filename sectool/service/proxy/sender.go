@@ -460,7 +460,7 @@ func applyQueryModifications(req *types.RawHTTP1Request, mods *Modifications) {
 	for _, key := range keys {
 		set = append(set, url.QueryEscape(key)+"="+url.QueryEscape(mods.SetParams[key]))
 	}
-	req.Query = ApplyRawQueryModifications(req.Query, mods.RemoveParams, set)
+	req.Query = mutate.Query(req.Query, mods.RemoveParams, set)
 }
 
 // buildRedirectRequest builds a new request for following a redirect.

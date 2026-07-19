@@ -248,6 +248,34 @@ func TestHandleReplaySend(t *testing.T) {
 		assert.NotContains(t, body, "temp")
 	})
 
+	t.Run("body_then_json_order", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+
+		mockHTTP.AddProxyEntry(
+			"POST /api HTTP/1.1\r\nHost: mock.test\r\nContent-Type: application/json\r\n\r\n{\"old\":1}",
+			"HTTP/1.1 200 OK\r\n\r\nok",
+			"",
+		)
+		mockHTTP.SetSendResult("HTTP/1.1 200 OK\r\n", "ok")
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"method":      "POST",
+		})
+		require.NotEmpty(t, listResp.Flows)
+
+		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id":  listResp.Flows[0].FlowID,
+			"body":     `{"a":0}`,
+			"set_json": map[string]interface{}{"a": "1"},
+		})
+		assert.NotEmpty(t, resp.FlowID)
+
+		parts := strings.SplitN(mockHTTP.LastSentRequest(), "\r\n\r\n", 2)
+		require.Len(t, parts, 2)
+		assert.JSONEq(t, `{"a":1}`, parts[1])
+	})
+
 	t.Run("form_encoded_rejects_set_json", func(t *testing.T) {
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
 
@@ -527,10 +555,11 @@ func TestBuildMutations(t *testing.T) {
 		}
 		assert.Equal(t, []string{
 			"remove_header", "set_header",
-			"set_json", "remove_json",
-			"set_form", "remove_form",
+			"body",
+			"remove_json", "set_json",
+			"remove_form", "set_form",
 			"remove_query", "set_query",
-			"method", "path", "query", "body",
+			"method", "path", "query",
 		}, ops)
 	})
 

@@ -1,6 +1,6 @@
-// Package mutate hosts the shared JSON and form request-mutation helpers used by
-// replay and origination for both in-process and sidecar-owned flows. It depends
-// only on the standard library and go-analyze/bulk.
+// Package mutate hosts the shared request-mutation and match/replace helpers
+// used by replay, origination, and rule application across in-process and
+// sidecar-owned flows. It depends only on the standard library and go-analyze/bulk.
 package mutate
 
 import (
@@ -9,8 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/go-analyze/bulk"
 )
 
 // marshalRaw serializes to JSON without HTML-escaping <, >, and &.
@@ -89,7 +92,11 @@ func JSON(body []byte, setJSON map[string]interface{}, removeJSON []string) ([]b
 		}
 	}
 
-	for keyPath, value := range setJSON {
+	// sorted so overlapping paths apply deterministically
+	setPaths := bulk.MapKeysSlice(setJSON)
+	slices.Sort(setPaths)
+	for _, keyPath := range setPaths {
+		value := setJSON[keyPath]
 		segments, err := parseJSONPath(keyPath)
 		if err != nil {
 			return nil, fmt.Errorf("set_json %q: %w", keyPath, err)

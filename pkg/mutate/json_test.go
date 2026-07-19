@@ -364,6 +364,14 @@ func TestJSON(t *testing.T) {
 			input:    `{"unchanged": true}`,
 			expected: `{"unchanged": true}`,
 		},
+		{
+			// parent set must apply before child set regardless of map order
+			name:       "overlapping_set_paths_sorted",
+			input:      `{}`,
+			setJSON:    map[string]any{"user": `{"name":"x"}`, "user.id": "5"},
+			expected:   `{"user":{"id":5,"name":"x"}}`,
+			rawCompare: true,
+		},
 		// Error cases
 		{
 			name:    "invalid_json_body",

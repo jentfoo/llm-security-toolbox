@@ -187,22 +187,6 @@ func (m *mcpServer) replaySidecar(ctx context.Context, req mcp.CallToolRequest, 
 	return jsonResult(out)
 }
 
-// Mutation op names, the shared vocabulary of buildMutations and mutationsToOpts.
-const (
-	opSetHeader    = "set_header"
-	opRemoveHeader = "remove_header"
-	opSetJSON      = "set_json"
-	opRemoveJSON   = "remove_json"
-	opSetForm      = "set_form"
-	opRemoveForm   = "remove_form"
-	opSetQuery     = "set_query"
-	opRemoveQuery  = "remove_query"
-	opMethod       = "method"
-	opPath         = "path"
-	opQuery        = "query"
-	opBody         = "body"
-)
-
 // buildMutations translates the replay_send MCP params into the ordered wire
 // mutation list applied by a sidecar adapter (mutate via sidecar.ApplyMutations).
 // It is the structured-path counterpart to executeSend's raw-byte application:
@@ -212,14 +196,24 @@ const (
 func buildMutations(req mcp.CallToolRequest) []wire.Mutation {
 	var muts []wire.Mutation
 	for _, h := range req.GetStringSlice("remove_headers", nil) {
-		muts = append(muts, wire.Mutation{Op: opRemoveHeader, Name: h})
+		muts = append(muts, wire.Mutation{Op: wire.OpRemoveHeader, Name: h})
 	}
 	for _, h := range getHeaderArg(req, "set_headers") {
-		if name, value, ok := splitPair(h, ":"); ok {
-			muts = append(muts, wire.Mutation{Op: opSetHeader, Name: name, Value: value})
+		// name trimmed, value verbatim past the conventional one space after ':'
+		if name, value, found := strings.Cut(h, ":"); found {
+			if name = strings.TrimSpace(name); name != "" {
+				muts = append(muts, wire.Mutation{Op: wire.OpSetHeader, Name: name, Value: strings.TrimPrefix(value, " ")})
+			}
 		}
 	}
-	// Sorted for a deterministic mutation array across calls
+	// body replaced first so structured edits land on the new body, matching native
+	if v := req.GetString("body", ""); v != "" {
+		muts = append(muts, wire.Mutation{Op: wire.OpBody, Value: v})
+	}
+	for _, path := range req.GetStringSlice("remove_json", nil) {
+		muts = append(muts, wire.Mutation{Op: wire.OpRemoveJSON, Name: path})
+	}
+	// sorted for a deterministic mutation array across calls
 	setJSON := getJSONArg(req)
 	jsonPaths := bulk.MapKeysSlice(setJSON)
 	slices.Sort(jsonPaths)
@@ -234,39 +228,34 @@ func buildMutations(req mcp.CallToolRequest) []wire.Mutation {
 				sv = fmt.Sprint(val)
 			}
 		}
-		muts = append(muts, wire.Mutation{Op: opSetJSON, Name: path, Value: sv})
+		muts = append(muts, wire.Mutation{Op: wire.OpSetJSON, Name: path, Value: sv})
 	}
-	for _, path := range req.GetStringSlice("remove_json", nil) {
-		muts = append(muts, wire.Mutation{Op: opRemoveJSON, Name: path})
+	for _, name := range req.GetStringSlice("remove_form", nil) {
+		muts = append(muts, wire.Mutation{Op: wire.OpRemoveForm, Name: name})
 	}
 	setForm := getFormArg(req)
 	formNames := bulk.MapKeysSlice(setForm)
 	slices.Sort(formNames)
 	for _, name := range formNames {
-		muts = append(muts, wire.Mutation{Op: opSetForm, Name: name, Value: setForm[name]})
-	}
-	for _, name := range req.GetStringSlice("remove_form", nil) {
-		muts = append(muts, wire.Mutation{Op: opRemoveForm, Name: name})
+		muts = append(muts, wire.Mutation{Op: wire.OpSetForm, Name: name, Value: setForm[name]})
 	}
 	for _, name := range req.GetStringSlice("remove_query", nil) {
-		muts = append(muts, wire.Mutation{Op: opRemoveQuery, Name: name})
+		muts = append(muts, wire.Mutation{Op: wire.OpRemoveQuery, Name: name})
 	}
 	for _, q := range req.GetStringSlice("set_query", nil) {
-		if name, value, ok := splitPair(q, "="); ok {
-			muts = append(muts, wire.Mutation{Op: opSetQuery, Name: name, Value: value})
+		// verbatim: preserve param value encoding and whitespace
+		if name, value, found := strings.Cut(q, "="); found && name != "" {
+			muts = append(muts, wire.Mutation{Op: wire.OpSetQuery, Name: name, Value: value})
 		}
 	}
 	if v := req.GetString("method", ""); v != "" {
-		muts = append(muts, wire.Mutation{Op: opMethod, Value: v})
+		muts = append(muts, wire.Mutation{Op: wire.OpMethod, Value: v})
 	}
 	if v := req.GetString("path", ""); v != "" {
-		muts = append(muts, wire.Mutation{Op: opPath, Value: v})
+		muts = append(muts, wire.Mutation{Op: wire.OpPath, Value: v})
 	}
 	if v := req.GetString("query", ""); v != "" {
-		muts = append(muts, wire.Mutation{Op: opQuery, Value: v})
-	}
-	if v := req.GetString("body", ""); v != "" {
-		muts = append(muts, wire.Mutation{Op: opBody, Value: v})
+		muts = append(muts, wire.Mutation{Op: wire.OpQuery, Value: v})
 	}
 	return muts
 }

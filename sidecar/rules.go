@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
-	"strings"
 	"sync"
 
+	"github.com/go-appsec/toolbox/pkg/mutate"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
@@ -71,11 +71,14 @@ func (c *RuleCache) ApplyWS(payload []byte, direction string) ([]byte, []string)
 // response_header) to the header list, returning the result and the fired rule ids.
 // Matching is case-insensitive, mirroring the in-process proxy.
 func (c *RuleCache) ApplyHeaders(headers []wire.Header, ruleType string) ([]wire.Header, []string) {
-	block, fired := c.apply(renderHeaders(headers), true, func(r wire.Rule) bool { return r.Type == ruleType })
+	rendered := mutate.RenderHeaders(headers, func(h wire.Header) string { return h.Name }, func(h wire.Header) string { return h.Value })
+	block, fired := c.apply(rendered, true, func(r wire.Rule) bool { return r.Type == ruleType })
 	if len(fired) == 0 {
 		return headers, nil
 	}
-	return parseHeaders(block), fired
+	return mutate.ParseHeaders(block, func(name, value string, _ []byte) wire.Header {
+		return wire.Header{Name: name, Value: value}
+	}), fired
 }
 
 // apply runs every scoped, matching rule in order and records the ids that changed the bytes.
@@ -116,50 +119,7 @@ func applyRule(input []byte, cr compiledRule, caseInsensitive bool) []byte {
 		return cr.compiled.ReplaceAll(input, []byte(r.Replace))
 	}
 	if caseInsensitive {
-		return replaceCaseInsensitive(input, r.Find, r.Replace)
+		return mutate.ReplaceCaseInsensitive(input, r.Find, r.Replace)
 	}
 	return bytes.ReplaceAll(input, []byte(r.Find), []byte(r.Replace))
-}
-
-// replaceCaseInsensitive replaces all case-insensitive occurrences of find.
-func replaceCaseInsensitive(input []byte, find, replace string) []byte {
-	src := string(input)
-	lowerInput := strings.ToLower(src)
-	lowerFind := strings.ToLower(find)
-	var out strings.Builder
-	for {
-		idx := strings.Index(lowerInput, lowerFind)
-		if idx < 0 {
-			out.WriteString(src)
-			return []byte(out.String())
-		}
-		out.WriteString(src[:idx])
-		out.WriteString(replace)
-		src = src[idx+len(lowerFind):]
-		lowerInput = lowerInput[idx+len(lowerFind):]
-	}
-}
-
-func renderHeaders(headers []wire.Header) []byte {
-	var b bytes.Buffer
-	for _, h := range headers {
-		b.WriteString(h.Name)
-		b.WriteString(": ")
-		b.WriteString(h.Value)
-		b.WriteString("\r\n")
-	}
-	return b.Bytes()
-}
-
-func parseHeaders(block []byte) []wire.Header {
-	trimmed := strings.TrimRight(string(block), "\r\n")
-	if trimmed == "" {
-		return nil
-	}
-	var out []wire.Header
-	for _, line := range strings.Split(trimmed, "\r\n") {
-		name, value, _ := strings.Cut(line, ":")
-		out = append(out, wire.Header{Name: name, Value: strings.TrimPrefix(value, " ")})
-	}
-	return out
 }

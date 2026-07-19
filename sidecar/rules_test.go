@@ -117,6 +117,20 @@ func TestRuleCacheApplyHeaders(t *testing.T) {
 	}, out)
 }
 
+func TestRuleCacheApplyHeadersNonASCII(t *testing.T) {
+	t.Parallel()
+
+	c := &RuleCache{adapter: "alpha"}
+	require.NoError(t, c.replace(1, []wire.Rule{
+		{RuleID: "fold", Type: wire.RuleTypeRequestHeader, Find: "SECRET", Replace: "REDACTED"},
+	}))
+
+	out, fired := c.ApplyHeaders([]wire.Header{{Name: "X-Data", Value: "İ secret Ⱥ"}}, wire.RuleTypeRequestHeader)
+
+	assert.Equal(t, []string{"fold"}, fired)
+	assert.Equal(t, []wire.Header{{Name: "X-Data", Value: "İ REDACTED Ⱥ"}}, out)
+}
+
 func TestRuleCacheReplaceRejectsBadRegex(t *testing.T) {
 	t.Parallel()
 

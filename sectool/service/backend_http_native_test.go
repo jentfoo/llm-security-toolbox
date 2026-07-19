@@ -1354,32 +1354,6 @@ func TestApplyMatchReplaceRule(t *testing.T) {
 	}
 }
 
-func TestReplaceCaseInsensitive(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		input   string
-		match   string
-		replace string
-		want    string
-	}{
-		{name: "empty_match", input: "abc", match: "", replace: "x", want: "abc"},
-		{name: "ascii_fold", input: "Foo FOO foo", match: "foo", replace: "bar", want: "bar bar bar"},
-		{name: "multi_occurrence_grow", input: "AaAa", match: "a", replace: "bb", want: "bbbbbbbb"},
-		{name: "kelvin_before_match", input: "K foo", match: "foo", replace: "x", want: "K x"},
-		{name: "latin_a_stroke_before_match", input: "Ⱥ foo", match: "foo", replace: "x", want: "Ⱥ x"},
-		{name: "nonascii_case_sensitive", input: "ⱥ", match: "Ⱥ", replace: "x", want: "ⱥ"},
-		{name: "no_match", input: "hello", match: "xyz", replace: "q", want: "hello"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, string(replaceCaseInsensitive([]byte(tt.input), tt.match, tt.replace)))
-		})
-	}
-}
-
 func TestParseHeadersFromText(t *testing.T) {
 	t.Parallel()
 
@@ -1392,49 +1366,46 @@ func TestParseHeadersFromText(t *testing.T) {
 			name:  "single_header",
 			input: "Content-Type: text/plain\r\n",
 			want: []types.Header{
-				{Name: "Content-Type", Value: "text/plain"},
+				{Name: "Content-Type", Value: "text/plain", RawLine: []byte("Content-Type: text/plain")},
 			},
 		},
 		{
 			name:  "multiple_headers",
-			input: "Host: example.com\r\nContent-Type: application/json\r\nX-Custom: value\r\n",
+			input: "Host: example.com\r\nX-Custom: value\r\n",
 			want: []types.Header{
-				{Name: "Host", Value: "example.com"},
-				{Name: "Content-Type", Value: "application/json"},
-				{Name: "X-Custom", Value: "value"},
+				{Name: "Host", Value: "example.com", RawLine: []byte("Host: example.com")},
+				{Name: "X-Custom", Value: "value", RawLine: []byte("X-Custom: value")},
 			},
 		},
 		{
-			name:  "header_with_spaces",
+			name:  "value_whitespace_verbatim",
 			input: "X-Test:   value with spaces   \r\n",
 			want: []types.Header{
-				{Name: "X-Test", Value: "value with spaces"},
+				{Name: "X-Test", Value: "  value with spaces   ", RawLine: []byte("X-Test:   value with spaces   ")},
 			},
 		},
 		{
-			name:  "empty_value",
-			input: "X-Empty:\r\n",
-			want: []types.Header{
-				{Name: "X-Empty", Value: ""},
-			},
-		},
-		{
-			name:  "malformed_no_colon",
+			name:  "colon_less_line_kept",
 			input: "MalformedHeader\r\nValid: value\r\n",
 			want: []types.Header{
-				{Name: "Valid", Value: "value"},
+				{Name: "MalformedHeader", Value: "", RawLine: []byte("MalformedHeader")},
+				{Name: "Valid", Value: "value", RawLine: []byte("Valid: value")},
 			},
 		},
 		{
 			name:  "empty_input",
 			input: "",
-			want:  []types.Header{},
+			want:  nil,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, parseHeadersFromText([]byte(tt.input)))
+			got := parseHeadersFromText([]byte(tt.input))
+			assert.Equal(t, tt.want, got)
+			for _, h := range got {
+				assert.Equal(t, types.EndingCRLF, h.LineEnding)
+			}
 		})
 	}
 }

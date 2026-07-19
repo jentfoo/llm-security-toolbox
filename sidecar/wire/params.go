@@ -331,6 +331,22 @@ type DialUpstreamResult struct {
 	StreamID string `json:"stream_id"`
 }
 
+// Mutation op names, the shared vocabulary of the replay/origination and sidecar send paths.
+const (
+	OpSetHeader    = "set_header"
+	OpRemoveHeader = "remove_header"
+	OpSetJSON      = "set_json"
+	OpRemoveJSON   = "remove_json"
+	OpSetForm      = "set_form"
+	OpRemoveForm   = "remove_form"
+	OpSetQuery     = "set_query"
+	OpRemoveQuery  = "remove_query"
+	OpMethod       = "method"
+	OpPath         = "path"
+	OpQuery        = "query"
+	OpBody         = "body"
+)
+
 // Mutation is one replay/origination edit applied in array order.
 type Mutation struct {
 	// Op names a shared mutation: set_header/remove_header, set_json/remove_json,

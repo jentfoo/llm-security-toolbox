@@ -362,7 +362,9 @@ func (h *myHandler) OnSidecarSend(p wire.SidecarSendParams) (wire.SidecarSendRes
 | `method` / `path` / `query` | (unused) | full replacement string |
 | `body` | (unused) | full body replacement |
 
-As the flow's sole owner (see [Mutation ownership](#mutation-ownership)), the sidecar applies the ops once, then re-encodes and re-establishes any protocol binding (signatures, framing, compression). The `github.com/go-appsec/toolbox/pkg/mutate` helpers back `ApplyMutations`, and are available directly when you need to mutate outside it.
+The op names are exported as constants in `sidecar/wire` (`wire.OpSetHeader`, `wire.OpSetQuery`, …). `set_query`/`remove_query` edit the raw query in place, preserving parameter order and percent-encoding.
+
+As the flow's sole owner (see [Mutation ownership](#mutation-ownership)), the sidecar applies the ops once, then re-encodes and re-establishes any protocol binding (signatures, framing, compression). The `github.com/go-appsec/toolbox/pkg/mutate` helpers (`JSON`, `Form`, `Query`, `ReplaceCaseInsensitive`, header render/parse) back `ApplyMutations` and the `RuleCache`, and are available directly when you need to mutate outside them.
 
 ### Custom MCP tools
 
