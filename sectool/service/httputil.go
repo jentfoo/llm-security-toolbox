@@ -1088,8 +1088,8 @@ func buildRedirectRequest(originalReq []byte, location string, currentTarget typ
 	var dropTE bool
 	if preserveBody {
 		// De-chunk a chunked original so the rebuilt request carries a correct
-		// Content-Length and no Transfer-Encoding (avoids ambiguous TE+CL framing)
-		if parsed, err := proxy.ParseRequest(bytes.NewReader(originalReq)); err == nil && parsed.Wire != nil && parsed.Wire.WasChunked {
+		// Content-Length and no Transfer-Encoding; unframed bodies use splitHeadersBody
+		if parsed, err := proxy.ParseRequest(bytes.NewReader(originalReq), false); err == nil && parsed.Wire != nil && parsed.Wire.WasChunked {
 			body = parsed.Body
 			dropTE = true
 		} else {

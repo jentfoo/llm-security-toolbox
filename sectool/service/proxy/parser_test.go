@@ -279,7 +279,7 @@ func TestParseRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseRequest(strings.NewReader(tt.input))
+			got, err := ParseRequest(strings.NewReader(tt.input), false)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -302,7 +302,7 @@ func TestParseRequest(t *testing.T) {
 	}
 
 	t.Run("non_eof_error_empty", func(t *testing.T) {
-		_, err := ParseRequest(iotest.ErrReader(errors.New("network error")))
+		_, err := ParseRequest(iotest.ErrReader(errors.New("network error")), false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "network error")
 	})
@@ -311,7 +311,7 @@ func TestParseRequest(t *testing.T) {
 		// Reader returns partial data then a non-EOF error;
 		// parseRequest should return the error, not attempt to parse
 		r := io.MultiReader(strings.NewReader("GET /"), iotest.ErrReader(errors.New("connection reset")))
-		_, err := ParseRequest(r)
+		_, err := ParseRequest(r, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "connection reset")
 	})
@@ -328,7 +328,7 @@ func TestParseRequest(t *testing.T) {
 			"0\r\n" +
 			"\r\n"
 
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		assert.Equal(t, "POST", req.Method)
@@ -348,7 +348,7 @@ func TestParseRequest(t *testing.T) {
 			"Checksum: abc123\r\n" +
 			"\r\n"
 
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		assert.Equal(t, []byte("Hello"), req.Body)
@@ -359,7 +359,7 @@ func TestParseRequest(t *testing.T) {
 		largeValue := strings.Repeat("x", 10000)
 		input := "GET / HTTP/1.1\r\nHost: example.com\r\nX-Large: " + largeValue + "\r\n\r\n"
 
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		assert.Equal(t, largeValue, req.GetHeader("X-Large"))
@@ -368,7 +368,7 @@ func TestParseRequest(t *testing.T) {
 	t.Run("invalid_header_name", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nInvalid<Header>: value\r\n\r\n"
 
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		assert.Equal(t, "Invalid<Header>", req.Headers[0].Name)
@@ -378,7 +378,7 @@ func TestParseRequest(t *testing.T) {
 	t.Run("control_characters", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nX-Test: value\twith\ttabs\r\n\r\n"
 
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		assert.Equal(t, "value\twith\ttabs", req.GetHeader("X-Test"))
@@ -406,7 +406,7 @@ func TestParseRequest(t *testing.T) {
 		var buf bytes.Buffer
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				req, err := ParseRequest(strings.NewReader(tc.input))
+				req, err := ParseRequest(strings.NewReader(tc.input), false)
 				require.NoError(t, err)
 
 				assert.Equal(t, tc.input, string(req.SerializeRaw(&buf)))
@@ -417,7 +417,7 @@ func TestParseRequest(t *testing.T) {
 	t.Run("header_without_colon", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nHeaderNoColon\r\nHost: example.com\r\n\r\n"
 
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		// Header without colon gets name = full line, value = empty
@@ -428,7 +428,7 @@ func TestParseRequest(t *testing.T) {
 	t.Run("negative_content_length", func(t *testing.T) {
 		input := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: -5\r\n\r\n"
 
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		// Negative content-length should result in no body read
@@ -438,7 +438,7 @@ func TestParseRequest(t *testing.T) {
 	t.Run("non_numeric_content_length", func(t *testing.T) {
 		input := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: abc\r\n\r\n"
 
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		// Non-numeric content-length should be skipped
@@ -448,7 +448,7 @@ func TestParseRequest(t *testing.T) {
 	// edge cases
 	t.Run("asterisk_form_url", func(t *testing.T) {
 		input := "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, "OPTIONS", req.Method)
 		assert.Equal(t, "*", req.Path)
@@ -456,7 +456,7 @@ func TestParseRequest(t *testing.T) {
 
 	t.Run("connect_authority_form", func(t *testing.T) {
 		input := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, "CONNECT", req.Method)
 		assert.Equal(t, "example.com:443", req.Path)
@@ -464,7 +464,7 @@ func TestParseRequest(t *testing.T) {
 
 	t.Run("multiple_question_marks", func(t *testing.T) {
 		input := "GET /search?q=what?really? HTTP/1.1\r\nHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, "/search", req.Path)
 		assert.Equal(t, "q=what?really?", req.Query)
@@ -472,14 +472,14 @@ func TestParseRequest(t *testing.T) {
 
 	t.Run("header_with_multiple_colons", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nAuthorization: Bearer: token: value\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, "Bearer: token: value", req.GetHeader("Authorization"))
 	})
 
 	t.Run("header_only_colon", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\n:\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Len(t, req.Headers, 1)
 		assert.Empty(t, req.Headers[0].Name)
@@ -487,14 +487,14 @@ func TestParseRequest(t *testing.T) {
 
 	t.Run("header_value_leading_tab", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nHeader:\tvalue\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, "value", req.GetHeader("Header"))
 	})
 
 	t.Run("https_proxy_form", func(t *testing.T) {
 		input := "GET https://example.com/path?q=1 HTTP/1.1\r\nHost: proxy.local\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, "https://example.com/path", req.Path)
 		assert.Equal(t, "q=1", req.Query)
@@ -502,7 +502,7 @@ func TestParseRequest(t *testing.T) {
 
 	t.Run("content_length_zero_explicit", func(t *testing.T) {
 		input := "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Empty(t, req.Body)
 	})
@@ -513,14 +513,14 @@ func TestParseRequest(t *testing.T) {
 			headers.WriteString("X-Header-" + string(rune('A'+i%26)) + ": value\r\n")
 		}
 		input := "GET / HTTP/1.1\r\n" + headers.String() + "\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Len(t, req.Headers, 100)
 	})
 
 	t.Run("bare_cr_request_line", func(t *testing.T) {
 		input := "GET / HTTP/1.1\rHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, "GET", req.Method)
 		assert.Equal(t, "/", req.Path)
@@ -530,7 +530,7 @@ func TestParseRequest(t *testing.T) {
 
 	t.Run("bare_cr_header", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nHost: example.com\rAccept: */*\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		require.Len(t, req.Headers, 2)
 		assert.Equal(t, types.EndingCRLF, req.RequestLineEnding)
@@ -540,7 +540,7 @@ func TestParseRequest(t *testing.T) {
 
 	t.Run("mixed_crlf_and_bare_cr", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nA: 1\r\nB: 2\rC: 3\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		require.Len(t, req.Headers, 3)
 		assert.Equal(t, types.EndingCRLF, req.Headers[0].LineEnding)
@@ -551,7 +551,7 @@ func TestParseRequest(t *testing.T) {
 	t.Run("obs_fold_bare_cr", func(t *testing.T) {
 		// Obs-folded header: one continuation terminated by bare CR
 		input := "GET / HTTP/1.1\r\nX-Fold: first\r part2\r end\r\nHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		require.Len(t, req.Headers, 2)
 		assert.Equal(t, "first part2 end", req.Headers[0].Value)
@@ -562,7 +562,7 @@ func TestParseRequest(t *testing.T) {
 	t.Run("truncated_request_line", func(t *testing.T) {
 		// No terminator on request line; message truncated at EOF
 		input := "GET / HTTP/1.1"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, types.EndingNone, req.RequestLineEnding)
 		assert.Equal(t, types.EndingNone, req.HeaderBlockEnding)
@@ -575,7 +575,7 @@ func TestParseRequest(t *testing.T) {
 	t.Run("truncated_mid_header", func(t *testing.T) {
 		// Last header lacks a terminator and no blank line ends the header block
 		input := "GET / HTTP/1.1\r\nHost: example.com\r\nX-Trunc: value"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		require.Len(t, req.Headers, 2)
 		assert.Equal(t, types.EndingCRLF, req.Headers[0].LineEnding)
@@ -584,6 +584,44 @@ func TestParseRequest(t *testing.T) {
 		var buf bytes.Buffer
 		got := req.SerializeRaw(&buf)
 		assert.Equal(t, input, string(got))
+	})
+
+	t.Run("unframed_body_dropped", func(t *testing.T) {
+		input := "POST /api HTTP/1.1\r\nHost: example.com\r\n\r\n{\"a\":1}"
+		req, err := ParseRequest(strings.NewReader(input), false)
+		require.NoError(t, err)
+		assert.Nil(t, req.Body)
+	})
+
+	t.Run("unframed_body_read", func(t *testing.T) {
+		input := "POST /api HTTP/1.1\r\nHost: example.com\r\n\r\n{\"a\":1}"
+		req, err := ParseRequest(strings.NewReader(input), true)
+		require.NoError(t, err)
+		assert.Equal(t, []byte(`{"a":1}`), req.Body)
+		assert.Empty(t, req.GetHeader("Content-Length"))
+	})
+
+	t.Run("unframed_no_body", func(t *testing.T) {
+		input := "GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input), true)
+		require.NoError(t, err)
+		assert.Nil(t, req.Body)
+	})
+
+	t.Run("unframed_content_length_wins", func(t *testing.T) {
+		input := "POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 2\r\n\r\nhithere"
+		req, err := ParseRequest(strings.NewReader(input), true)
+		require.NoError(t, err)
+		assert.Equal(t, []byte("hi"), req.Body)
+	})
+
+	t.Run("unframed_chunked_wins", func(t *testing.T) {
+		input := "POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n0\r\n\r\n"
+		req, err := ParseRequest(strings.NewReader(input), true)
+		require.NoError(t, err)
+		assert.Equal(t, []byte("Hello"), req.Body)
+		require.NotNil(t, req.Wire)
+		assert.True(t, req.Wire.WasChunked)
 	})
 }
 
@@ -1065,7 +1103,7 @@ func TestParseResponseBoundedBody(t *testing.T) {
 
 	t.Run("request_oversized_content_length", func(t *testing.T) {
 		input := "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 9999999999\r\n\r\nhi"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Equal(t, []byte("hi"), req.Body)
 	})
@@ -1835,7 +1873,7 @@ func TestHeaderRawLinePreservation(t *testing.T) {
 
 	t.Run("simple_header", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		assert.Equal(t, "Host: example.com", string(req.Headers[0].RawLine))
@@ -1843,7 +1881,7 @@ func TestHeaderRawLinePreservation(t *testing.T) {
 
 	t.Run("obs_fold_preserved", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nLong-Header: first\r\n second\r\n\tthird\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		// RawLine should include all continuation lines
@@ -1854,7 +1892,7 @@ func TestHeaderRawLinePreservation(t *testing.T) {
 
 	t.Run("whitespace_in_name_preserved", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nHeader : value\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		assert.Equal(t, "Header : value", string(req.Headers[0].RawLine))
@@ -1863,7 +1901,7 @@ func TestHeaderRawLinePreservation(t *testing.T) {
 
 	t.Run("multiple_headers", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		assert.Equal(t, "Host: example.com", string(req.Headers[0].RawLine))
@@ -1876,14 +1914,14 @@ func TestWireFormatTracking(t *testing.T) {
 
 	t.Run("crlf_no_chunked", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		assert.Nil(t, req.Wire)
 	})
 
 	t.Run("bare_lf_request", func(t *testing.T) {
 		input := "GET / HTTP/1.1\nHost: example.com\n\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		require.NotNil(t, req.Wire)
 		assert.True(t, req.Wire.UsedBareLF)
@@ -1892,7 +1930,7 @@ func TestWireFormatTracking(t *testing.T) {
 
 	t.Run("chunked_request", func(t *testing.T) {
 		input := "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n0\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		require.NotNil(t, req.Wire)
 		assert.True(t, req.Wire.WasChunked)
@@ -1917,7 +1955,7 @@ func TestWireFormatTracking(t *testing.T) {
 
 	t.Run("bare_cr_request", func(t *testing.T) {
 		input := "GET / HTTP/1.1\rHost: example.com\r\r"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		require.NotNil(t, req.Wire)
 		assert.True(t, req.Wire.UsedBareCR)
@@ -1938,7 +1976,7 @@ func TestWireFormatTracking(t *testing.T) {
 	t.Run("mixed_endings", func(t *testing.T) {
 		// Request line bare LF; one header bare CR; others CRLF
 		input := "GET / HTTP/1.1\nHost: example.com\r\nX-Smuggle: yes\rAccept: */*\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 		require.NotNil(t, req.Wire)
 		assert.True(t, req.Wire.UsedBareLF)
@@ -2103,7 +2141,7 @@ func TestSerializeRawChunked(t *testing.T) {
 			"\r\n" +
 			"5\r\nhello\r\n0\r\n\r\n"
 
-		req, err := ParseRequest(strings.NewReader(wire))
+		req, err := ParseRequest(strings.NewReader(wire), false)
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
@@ -2119,7 +2157,7 @@ func TestSerializeRawChunked(t *testing.T) {
 			"\r\n" +
 			"0x5\r\nhello\r\n0\r\n\r\n"
 
-		req, err := ParseRequest(strings.NewReader(wire))
+		req, err := ParseRequest(strings.NewReader(wire), false)
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
@@ -2237,7 +2275,7 @@ func TestSerializeRawRoundTrip(t *testing.T) {
 
 	t.Run("bare_lf_round_trip", func(t *testing.T) {
 		input := "GET / HTTP/1.1\nHost: example.com\nAccept: */*\n\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
@@ -2248,7 +2286,7 @@ func TestSerializeRawRoundTrip(t *testing.T) {
 
 	t.Run("obs_fold_round_trip", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nLong: first\r\n second\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
@@ -2259,7 +2297,7 @@ func TestSerializeRawRoundTrip(t *testing.T) {
 
 	t.Run("bare_cr_round_trip", func(t *testing.T) {
 		input := "GET / HTTP/1.1\rHost: example.com\rAccept: */*\r\r"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
@@ -2268,7 +2306,7 @@ func TestSerializeRawRoundTrip(t *testing.T) {
 
 	t.Run("mixed_endings_round_trip", func(t *testing.T) {
 		input := "GET / HTTP/1.1\nA: 1\r\nB: 2\rC: 3\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
@@ -2278,7 +2316,7 @@ func TestSerializeRawRoundTrip(t *testing.T) {
 	t.Run("obs_fold_with_bare_cr_continuation", func(t *testing.T) {
 		// Physical lines: "X-Fold: first" (CRLF), " more" (bare CR), "Host: ..." (CRLF)
 		input := "GET / HTTP/1.1\r\nX-Fold: first\r\n more\rHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		var buf bytes.Buffer
@@ -2313,7 +2351,7 @@ func TestHeadersSetClearsRawLine(t *testing.T) {
 
 	t.Run("set_clears_rawline", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nContent-Length: 100\r\nHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		// Verify RawLine is present after parsing
@@ -2340,7 +2378,7 @@ func TestHeadersSetClearsRawLine(t *testing.T) {
 
 	t.Run("set_new_header_no_rawline", func(t *testing.T) {
 		input := "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
-		req, err := ParseRequest(strings.NewReader(input))
+		req, err := ParseRequest(strings.NewReader(input), false)
 		require.NoError(t, err)
 
 		// Add new header

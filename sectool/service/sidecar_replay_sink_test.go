@@ -128,4 +128,26 @@ func TestReplayRoutingSink(t *testing.T) {
 		assert.Equal(t, "/x", got.Request.Path)
 		assert.Equal(t, "other.test", got.Request.GetHeader("Host"))
 	})
+
+	t.Run("get_keeps_h2_unframed_body", func(t *testing.T) {
+		history := newFakeFlowSink()
+		replay := store.NewReplayHistoryStore(store.NewMemStorage())
+		sink := &replayRoutingSink{history: history, replay: replay}
+
+		f := replayFlow()
+		f.ProtocolTag = types.ProtocolH2
+		f.Request = &types.Message{
+			Headers: types.Headers{
+				{Name: ":method", Value: "POST"},
+				{Name: ":authority", Value: "other.test"},
+				{Name: ":path", Value: "/x"},
+			},
+			Body: []byte(`{"a":1}`),
+		}
+		id := sink.Store(f)
+
+		got, ok := sink.Get(id)
+		require.True(t, ok)
+		assert.Equal(t, []byte(`{"a":1}`), got.Request.Body)
+	})
 }

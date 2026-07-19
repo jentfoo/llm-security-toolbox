@@ -114,7 +114,8 @@ func flowToReplayEntry(id string, flow *types.Flow) *store.ReplayHistoryEntry {
 // replayEntryToFlow reconstructs a store Flow from a replay entry so the FlowSink Get
 // can serve a chained replay's source lookup; returns nil if the request won't parse.
 func replayEntryToFlow(entry *store.ReplayHistoryEntry) *types.Flow {
-	parsed, err := proxy.ParseRequest(bytes.NewReader(entry.RawRequest))
+	// the entry holds exactly the one request we sent, so trailing bytes are its body
+	parsed, err := proxy.ParseRequest(bytes.NewReader(entry.RawRequest), true)
 	if err != nil {
 		return nil
 	}

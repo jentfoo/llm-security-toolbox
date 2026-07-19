@@ -934,7 +934,7 @@ func TestApplyRequestRulesToRaw(t *testing.T) {
 			Replace: "X-New",
 		}}
 
-		result := applyRequestRulesToRaw(raw, rules)
+		result := applyRequestRulesToRaw(raw, rules, false)
 		assert.Contains(t, string(result), "X-New: value")
 		assert.NotContains(t, string(result), "X-Old")
 	})
@@ -946,7 +946,7 @@ func TestApplyRequestRulesToRaw(t *testing.T) {
 			Replace: "X-Added: injected\r\n",
 		}}
 
-		result := applyRequestRulesToRaw(raw, rules)
+		result := applyRequestRulesToRaw(raw, rules, false)
 		assert.Contains(t, string(result), "X-Added: injected")
 	})
 
@@ -960,7 +960,7 @@ func TestApplyRequestRulesToRaw(t *testing.T) {
 			Replace: `"token":"REDACTED"`,
 		}}
 
-		result := applyRequestRulesToRaw(raw, rules)
+		result := applyRequestRulesToRaw(raw, rules, false)
 		assert.Contains(t, string(result), `"token":"REDACTED"`)
 		assert.NotContains(t, string(result), "abc123")
 	})
@@ -973,14 +973,14 @@ func TestApplyRequestRulesToRaw(t *testing.T) {
 			Replace: "Hidden",
 		}}
 
-		result := applyRequestRulesToRaw(raw, rules)
+		result := applyRequestRulesToRaw(raw, rules, false)
 		assert.Equal(t, raw, result)
 	})
 
 	t.Run("empty_rules", func(t *testing.T) {
 		raw := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
 
-		result := applyRequestRulesToRaw(raw, nil)
+		result := applyRequestRulesToRaw(raw, nil, false)
 		assert.Equal(t, raw, result)
 	})
 }

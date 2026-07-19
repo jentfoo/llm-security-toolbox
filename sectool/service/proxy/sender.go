@@ -17,10 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-analyze/bulk"
 	"golang.org/x/net/http2"
 
-	"github.com/go-appsec/toolbox/pkg/mutate"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
@@ -39,27 +37,14 @@ type Sender struct {
 
 // SendOptions configures request sending.
 type SendOptions struct {
-	RawRequest    []byte         // Raw HTTP request bytes
-	Target        types.Target   // Where to send
-	Modifications *Modifications // Optional changes
-	Force         bool           // Bypass validation
+	RawRequest []byte       // Raw HTTP request bytes
+	Target     types.Target // Where to send
+	Force      bool         // Bypass validation
 
 	// Protocol specifies the original request's protocol.
 	// Values: "http/1.1", "http/2", or "" (defaults to http/1.1)
 	// When "http/2", the sender will negotiate HTTP/2 with the server.
 	Protocol string
-}
-
-// Modifications specifies changes to apply to a request.
-type Modifications struct {
-	Method        string            // Override HTTP method
-	SetHeaders    []string          // "Name: Value" format; duplicates supported
-	RemoveHeaders []string          // Remove headers by name
-	Body          []byte            // Replace entire body (mutually exclusive with JSON mods)
-	SetJSON       map[string]any    // Modify JSON fields
-	RemoveJSON    []string          // Remove JSON fields
-	SetParams     map[string]string // Set query parameters
-	RemoveParams  []string          // Remove query parameters
 }
 
 type SendResult struct {
@@ -71,15 +56,13 @@ type SendResult struct {
 	ModifiedRequest []byte
 }
 
-// prepareRequest parses raw request bytes, applies modifications, and optionally validates.
-func (s *Sender) prepareRequest(rawRequest []byte, mods *Modifications, force bool) (*types.RawHTTP1Request, error) {
-	req, err := ParseRequest(bytes.NewReader(rawRequest))
+// prepareRequest parses raw request bytes and optionally validates.
+func (s *Sender) prepareRequest(rawRequest []byte, protocol string, force bool) (*types.RawHTTP1Request, error) {
+	// H2 frames the body with DATA, and force keeps whatever bytes the caller supplied
+	unframedBody := protocol == types.ProtocolH2 || force
+	req, err := ParseRequest(bytes.NewReader(rawRequest), unframedBody)
 	if err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
-	}
-
-	if err := s.applyModifications(req, mods, force); err != nil {
-		return nil, fmt.Errorf("apply modifications: %w", err)
 	}
 
 	if !force {
@@ -103,13 +86,12 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 		return nil, fmt.Errorf("invalid protocol %q: must be %q, %q, or empty", opts.Protocol, types.ProtocolHTTP11, types.ProtocolH2)
 	}
 
-	// No modifications + HTTP/1.1: send raw bytes for wire fidelity.
+	// HTTP/1.1: send raw bytes for wire fidelity.
 	// H2 always requires framing, so it falls through to prepareRequest.
-	isHTTP11 := opts.Protocol == "" || opts.Protocol == types.ProtocolHTTP11
-	if isHTTP11 && isEmptyModifications(opts.Modifications) {
+	if opts.Protocol == "" || opts.Protocol == types.ProtocolHTTP11 {
 		// Validate when force=false (parse-only, does not re-serialize)
 		if !opts.Force {
-			req, err := ParseRequest(bytes.NewReader(opts.RawRequest))
+			req, err := ParseRequest(bytes.NewReader(opts.RawRequest), false)
 			if err != nil {
 				return nil, fmt.Errorf("parse request: %w", err)
 			} else if err := validateRequest(req); err != nil {
@@ -126,7 +108,7 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 		}, nil
 	}
 
-	req, err := s.prepareRequest(opts.RawRequest, opts.Modifications, opts.Force)
+	req, err := s.prepareRequest(opts.RawRequest, opts.Protocol, opts.Force)
 	if err != nil {
 		return nil, err
 	}
@@ -147,9 +129,9 @@ func (s *Sender) Send(ctx context.Context, opts SendOptions) (*SendResult, error
 func (s *Sender) SendWithRedirects(ctx context.Context, opts SendOptions) (*SendResult, error) {
 	start := time.Now()
 
-	// currentBase is the pristine request (modifications applied, but NOT find/replace rules).
+	// currentBase is the pristine request (no find/replace rules applied).
 	// Each hop is built from it so append rules can't accumulate across redirects.
-	currentBase, err := s.prepareRequest(opts.RawRequest, opts.Modifications, opts.Force)
+	currentBase, err := s.prepareRequest(opts.RawRequest, opts.Protocol, opts.Force)
 	if err != nil {
 		return nil, err
 	}
@@ -326,84 +308,8 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *types.RawHTTP
 	return resp, nil
 }
 
-// applyModifications applies all modifications to a request.
-// Content-Length is auto-updated on body changes unless the user explicitly
-// set it via SetHeaders. Force only disables validation, not CL behavior.
-func (s *Sender) applyModifications(req *types.RawHTTP1Request, mods *Modifications, force bool) error {
-	if mods == nil {
-		return nil
-	}
-
-	// Check if user explicitly set Content-Length via SetHeaders before we apply them.
-	// If so, we won't auto-update Content-Length on body changes.
-	userSetContentLength := ContainsHeader(mods.SetHeaders, "Content-Length")
-
-	if mods.Method != "" {
-		req.Method = mods.Method
-	}
-
-	if len(mods.SetParams) > 0 || len(mods.RemoveParams) > 0 {
-		applyQueryModifications(req, mods)
-	}
-
-	// Header modifications: remove first, then set (matches MCP layer order)
-	for _, name := range mods.RemoveHeaders {
-		req.RemoveHeader(name)
-	}
-
-	for _, g := range GroupHeaderEntries(mods.SetHeaders) {
-		req.RemoveHeader(g.Key)
-		for _, entry := range g.Entries {
-			idx := strings.Index(entry, ":")
-			name := strings.TrimSpace(entry[:idx])
-			value := strings.TrimSpace(entry[idx+1:])
-			req.Headers = append(req.Headers, types.Header{Name: name, Value: value})
-		}
-	}
-
-	// Body modifications (mutually exclusive)
-	// Auto-update Content-Length unless user explicitly set it via SetHeaders
-	// or Transfer-Encoding is present (TE and CL are mutually exclusive per
-	// RFC 7230; auto-adding CL alongside TE changes request semantics).
-	hasTE := req.GetHeader("Transfer-Encoding") != ""
-	shouldAutoUpdateCL := !userSetContentLength && !hasTE
-
-	if mods.Body != nil {
-		req.SetBody(mods.Body)
-		if shouldAutoUpdateCL {
-			req.SetHeader("Content-Length", strconv.Itoa(len(mods.Body)))
-		}
-	} else if len(mods.SetJSON) > 0 || len(mods.RemoveJSON) > 0 {
-		if len(req.Body) == 0 && len(mods.SetJSON) > 0 {
-			req.SetBody([]byte("{}"))
-		}
-		modified, err := mutate.JSON(req.Body, mods.SetJSON, mods.RemoveJSON)
-		if err != nil {
-			return fmt.Errorf("JSON modification failed: %w", err)
-		}
-		req.SetBody(modified)
-		if shouldAutoUpdateCL {
-			req.SetHeader("Content-Length", strconv.Itoa(len(modified)))
-		}
-	}
-
-	return nil
-}
-
-// isEmptyModifications returns true if modifications struct has no actual changes.
-func isEmptyModifications(mods *Modifications) bool {
-	if mods == nil {
-		return true
-	}
-	return mods.Method == "" &&
-		len(mods.SetHeaders) == 0 && len(mods.RemoveHeaders) == 0 &&
-		mods.Body == nil &&
-		len(mods.SetJSON) == 0 && len(mods.RemoveJSON) == 0 &&
-		len(mods.SetParams) == 0 && len(mods.RemoveParams) == 0
-}
-
 // sendRawRequest sends raw request bytes without parsing/serializing.
-// Used for wire fidelity when no modifications are needed (HTTP/1.1 only).
+// Used for wire fidelity on the HTTP/1.1 path.
 func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*types.RawHTTP1Response, error) {
 	method := ExtractMethod(opts.RawRequest)
 
@@ -448,19 +354,6 @@ func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*types.R
 	}
 
 	return resp, nil
-}
-
-// applyQueryModifications modifies query parameters in the request path
-// using raw string manipulation to preserve original parameter order and encoding.
-func applyQueryModifications(req *types.RawHTTP1Request, mods *Modifications) {
-	// Convert map entries to "key=value" strings with URL encoding
-	keys := bulk.MapKeysSlice(mods.SetParams)
-	slices.Sort(keys)
-	set := make([]string, 0, len(keys))
-	for _, key := range keys {
-		set = append(set, url.QueryEscape(key)+"="+url.QueryEscape(mods.SetParams[key]))
-	}
-	req.Query = mutate.Query(req.Query, mods.RemoveParams, set)
 }
 
 // buildRedirectRequest builds a new request for following a redirect.

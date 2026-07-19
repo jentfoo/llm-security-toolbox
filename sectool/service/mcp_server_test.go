@@ -439,6 +439,23 @@ func (b *mockHttpBackend) AddProxyEntry(request, response, notes string) string 
 	return flowID
 }
 
+// AddProxyEntryProtocol adds an https entry with an explicit protocol. Returns the minted flow_id.
+func (b *mockHttpBackend) AddProxyEntryProtocol(request, response, protocol string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	flowID := ids.Generate(ids.DefaultLength)
+	b.entries = append(b.entries, ProxyEntry{
+		FlowID:    flowID,
+		Timestamp: time.Now().UTC(),
+		Request:   request,
+		Response:  response,
+		Protocol:  protocol,
+		Scheme:    schemeHTTPS,
+		Port:      443,
+	})
+	return flowID
+}
+
 // AddProxyEntryScheme adds an entry with an explicit scheme/port. Returns the minted flow_id.
 func (b *mockHttpBackend) AddProxyEntryScheme(request, response, scheme string, port int) string {
 	b.mu.Lock()

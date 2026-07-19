@@ -28,8 +28,10 @@ const initialBodyAlloc = 8192
 const streamReadChunk = 32 << 10
 
 // ParseRequest parses an HTTP/1.1 request from the reader.
-// Returns error only for truly unparseable input.
-func ParseRequest(r io.Reader) (*types.RawHTTP1Request, error) {
+// Returns error only for truly unparseable input. unframedBody takes the bytes
+// after the header block as the body when Content-Length/Transfer-Encoding are
+// absent; use it only for a reader holding exactly one message.
+func ParseRequest(r io.Reader, unframedBody bool) (*types.RawHTTP1Request, error) {
 	br := bufio.NewReader(r)
 
 	line, requestLineEnding, err := readLineWithEnding(br)
@@ -64,7 +66,7 @@ func ParseRequest(r io.Reader) (*types.RawHTTP1Request, error) {
 
 	// Determine body handling
 	var wasChunked, trailersBareLF, trailersBareCR bool
-	if req.Body, req.Trailers, wasChunked, req.Chunks, trailersBareLF, trailersBareCR, err = readRequestBodyWithWire(br, req); err != nil && !errors.Is(err, io.EOF) {
+	if req.Body, req.Trailers, wasChunked, req.Chunks, trailersBareLF, trailersBareCR, err = readRequestBodyWithWire(br, req, unframedBody); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 
@@ -394,8 +396,9 @@ func parseHeaderLine(line []byte) types.Header {
 }
 
 // readRequestBodyWithWire reads the request body and returns wasChunked, per-chunk
-// framing, and bare-LF/CR flags observed inside trailer lines.
-func readRequestBodyWithWire(br *bufio.Reader, req *types.RawHTTP1Request) (body, trailers []byte, wasChunked bool, chunks []types.ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
+// framing, and bare-LF/CR flags observed inside trailer lines. unframedBody reads
+// the remaining bytes as the body when no framing header is present.
+func readRequestBodyWithWire(br *bufio.Reader, req *types.RawHTTP1Request, unframedBody bool) (body, trailers []byte, wasChunked bool, chunks []types.ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
 	// Check for chunked encoding first (takes precedence over Content-Length)
 	te := req.GetHeader("Transfer-Encoding")
 	if strings.Contains(strings.ToLower(te), "chunked") {
@@ -415,6 +418,13 @@ func readRequestBodyWithWire(br *bufio.Reader, req *types.RawHTTP1Request) (body
 	}
 
 	// No body indicator for requests
+	if unframedBody {
+		body, err = io.ReadAll(br)
+		if len(body) == 0 {
+			body = nil
+		}
+		return body, nil, false, nil, false, false, err
+	}
 	return nil, nil, false, nil, false, false, nil
 }
 

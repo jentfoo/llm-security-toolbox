@@ -421,7 +421,7 @@ func (m *mcpServer) executeSendFlow(ctx context.Context, rawRequest []byte, http
 	teValue := extractHeader(string(headers), "Transfer-Encoding")
 	if bodyModified && strings.Contains(strings.ToLower(teValue), "chunked") {
 		var trailers []byte
-		if parsed, err := proxy.ParseRequest(bytes.NewReader(rawRequest)); err == nil && parsed.Wire != nil && parsed.Wire.WasChunked {
+		if parsed, err := proxy.ParseRequest(bytes.NewReader(rawRequest), false); err == nil && parsed.Wire != nil && parsed.Wire.WasChunked {
 			trailers = parsed.Trailers
 		}
 		var framed bytes.Buffer
@@ -432,7 +432,10 @@ func (m *mcpServer) executeSendFlow(ctx context.Context, rawRequest []byte, http
 	// Auto-update CL only when body was modified, user didn't explicitly set CL, and not chunked
 	// TE and CL are mutually exclusive (RFC 7230); auto-adding CL alongside TE would change request semantics
 	if bodyModified && teValue == "" && !proxy.ContainsHeader(mods.SetHeaders, "Content-Length") {
-		headers = updateContentLength(headers, len(reqBody))
+		// H2 frames the body with DATA; refresh a captured CL but never introduce one
+		if httpProtocol != types.ProtocolH2 || extractHeader(string(headers), "Content-Length") != "" {
+			headers = updateContentLength(headers, len(reqBody))
+		}
 	}
 
 	rawRequest = append(headers, reqBody...)

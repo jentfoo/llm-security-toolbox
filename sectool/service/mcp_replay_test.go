@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/config"
 	"github.com/go-appsec/toolbox/sectool/protocol"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 )
 
 func TestHandleReplaySend(t *testing.T) {
@@ -930,6 +931,43 @@ func TestExecuteSend_WireFidelity(t *testing.T) {
 		})
 		sent := mockHTTP.LastSentRequest()
 		assert.Contains(t, sent, "Content-Length: 16")
+	})
+
+	t.Run("h2_unframed_body_replayed", func(t *testing.T) {
+		h2FlowID := mockHTTP.AddProxyEntryProtocol(
+			"POST /api HTTP/1.1\r\nhost: h2.test\r\ncontent-type: application/json\r\n\r\n{\"a\":1}",
+			"HTTP/2 200 OK\r\n\r\nok",
+			types.ProtocolH2,
+		)
+		mockHTTP.SetSendResult(
+			"HTTP/2 200 OK\r\n",
+			"ok",
+		)
+		CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id": h2FlowID,
+		})
+		sent := mockHTTP.LastSentRequest()
+		assert.Contains(t, sent, `{"a":1}`)
+		assert.NotContains(t, strings.ToLower(sent), "content-length")
+	})
+
+	t.Run("h2_body_mod_adds_no_cl", func(t *testing.T) {
+		h2FlowID := mockHTTP.AddProxyEntryProtocol(
+			"POST /api HTTP/1.1\r\nhost: h2.test\r\ncontent-type: application/json\r\n\r\n{\"a\":1}",
+			"HTTP/2 200 OK\r\n\r\nok",
+			types.ProtocolH2,
+		)
+		mockHTTP.SetSendResult(
+			"HTTP/2 200 OK\r\n",
+			"ok",
+		)
+		CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id":  h2FlowID,
+			"set_json": map[string]interface{}{"a": 2},
+		})
+		sent := mockHTTP.LastSentRequest()
+		assert.Contains(t, sent, `{"a":2}`)
+		assert.NotContains(t, strings.ToLower(sent), "content-length")
 	})
 
 	t.Run("explicit_cl_preserved_with_body_mod", func(t *testing.T) {

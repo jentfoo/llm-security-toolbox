@@ -360,7 +360,8 @@ func (b *NativeProxyBackend) SendRequest(ctx context.Context, name string, req S
 	// Non-redirect path pre-applies rules here (Send ignores RequestRuleApplier). Redirect path
 	// leaves rawRequest pristine; the sender applies rules per hop. Malformed requests skip rules.
 	if b.hasRequestRules() && !req.FollowRedirects {
-		if parsed, parseErr := proxy.ParseRequest(bytes.NewReader(rawRequest)); parseErr == nil {
+		unframedBody := protocol == types.ProtocolH2 || req.Force
+		if parsed, parseErr := proxy.ParseRequest(bytes.NewReader(rawRequest), unframedBody); parseErr == nil {
 			var buf bytes.Buffer
 			modified := b.ApplyRequestRules(parsed).SerializeRaw(&buf)
 			if !bytes.Equal(rawRequest, modified) {
@@ -852,7 +853,8 @@ func (b *NativeProxyBackend) applyRequestBodyRules(req *types.RawHTTP1Request, r
 	}
 
 	req.SetBody(result.body)
-	if req.Wire == nil || !req.Wire.WasChunked {
+	// refresh a declared CL only; an unframed body (H2, force) must stay unframed
+	if (req.Wire == nil || !req.Wire.WasChunked) && req.GetHeader("Content-Length") != "" {
 		req.SetHeader("Content-Length", strconv.Itoa(len(result.body)))
 	}
 	return req

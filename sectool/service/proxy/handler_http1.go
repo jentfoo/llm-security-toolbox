@@ -76,7 +76,7 @@ func (h *http1Handler) handleExchange(ctx context.Context, clientConn net.Conn, 
 	startTime := time.Now()
 	var buf bytes.Buffer
 
-	req, err := ParseRequest(clientReader)
+	req, err := ParseRequest(clientReader, false)
 	if err != nil {
 		if errors.Is(err, ErrInvalidRequest) {
 			if x.logParseErrors {

@@ -524,7 +524,7 @@ func (b *BurpBackend) doSendRequest(ctx context.Context, name string, req SendRe
 	// Rules are applied per-hop so redirect requests also get rule modifications.
 	sender := func(ctx context.Context, r SendRequestInput, start time.Time) (*SendRequestResult, error) {
 		if rules, err := b.ListRules(ctx, false); err == nil && len(rules) > 0 {
-			r.RawRequest = applyRequestRulesToRaw(r.RawRequest, rules)
+			r.RawRequest = applyRequestRulesToRaw(r.RawRequest, rules, r.Protocol == types.ProtocolH2 || r.Force)
 		}
 		if hopCount == 0 {
 			*firstHopRequest = r.RawRequest
@@ -923,7 +923,7 @@ func parseSectoolComment(comment string) (id, label string, ok bool) {
 // applyRequestRulesToRaw applies protocol-level request rules to raw HTTP bytes.
 // Used by backends that read rules dynamically (e.g., Burp via MCP).
 // Returns the original bytes unchanged if parsing fails (intentionally malformed requests).
-func applyRequestRulesToRaw(rawRequest []byte, rules []protocol.RuleEntry) []byte {
+func applyRequestRulesToRaw(rawRequest []byte, rules []protocol.RuleEntry, unframedBody bool) []byte {
 	var headerRules, bodyRules []nativeStoredRule
 	for _, r := range rules {
 		stored := nativeStoredRule{
@@ -949,7 +949,7 @@ func applyRequestRulesToRaw(rawRequest []byte, rules []protocol.RuleEntry) []byt
 		return rawRequest
 	}
 
-	parsed, err := proxy.ParseRequest(bytes.NewReader(rawRequest))
+	parsed, err := proxy.ParseRequest(bytes.NewReader(rawRequest), unframedBody)
 	if err != nil {
 		return rawRequest
 	}
