@@ -438,7 +438,8 @@ func (m *mcpServer) executeSendFlow(ctx context.Context, rawRequest []byte, http
 		}
 	}
 
-	rawRequest = append(headers, reqBody...)
+	// concat rather than append: headers may alias a stored flow's bytes
+	rawRequest = slices.Concat(headers, reqBody)
 
 	// Validate when force is not set
 	if !mods.Force {

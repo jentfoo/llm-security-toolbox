@@ -1177,6 +1177,48 @@ func TestExecuteSend_WireFidelity(t *testing.T) {
 		assert.Contains(t, sent, "\r\n8\r\n")
 		assert.Contains(t, sent, "new body")
 	})
+
+	t.Run("crawl_flow_bytes_preserved", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, mockCrawler := setupMockMCPServer(t, nil)
+
+		createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://crawl.test",
+		})
+
+		chunkedReq := "POST /submit HTTP/1.1\r\n" +
+			"Host: crawl.test\r\n" +
+			"User-Agent: colly\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"\r\n" +
+			"5\r\nhello\r\n0\r\n\r\n"
+		// spare capacity mirrors the crawler's bytes.Buffer dumps
+		request := append(make([]byte, 0, len(chunkedReq)+256), chunkedReq...)
+
+		crawlFlowID := "crawl-flow-chunked"
+		require.NoError(t, mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
+			ID:         crawlFlowID,
+			SessionID:  createResp.SessionID,
+			URL:        "https://crawl.test/submit",
+			Host:       "crawl.test",
+			Path:       "/submit",
+			Method:     "POST",
+			StatusCode: 200,
+			Request:    request,
+			Response:   []byte("HTTP/1.1 200 OK\r\n\r\ncrawled"),
+		}))
+		mockHTTP.SetSendResult("HTTP/1.1 200 OK\r\n", "ok")
+
+		CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id": crawlFlowID,
+			"body":    "a much longer replacement body",
+			"force":   true,
+		})
+		assert.Contains(t, mockHTTP.LastSentRequest(), "a much longer replacement body")
+
+		flow, err := mockCrawler.GetFlow(t.Context(), crawlFlowID)
+		require.NoError(t, err)
+		assert.Equal(t, chunkedReq, string(flow.Request))
+	})
 }
 
 func TestExecuteSend_DomainScoping(t *testing.T) {

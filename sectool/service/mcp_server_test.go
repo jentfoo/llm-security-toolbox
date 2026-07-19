@@ -795,7 +795,8 @@ func (b *mockCrawlerBackend) GetFlow(ctx context.Context, flowID string) (*Crawl
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return flow, nil
+	flowCopy := *flow // shallow copy, matching CollyBackend
+	return &flowCopy, nil
 }
 
 func (b *mockCrawlerBackend) StopSession(ctx context.Context, sessionID string) error {

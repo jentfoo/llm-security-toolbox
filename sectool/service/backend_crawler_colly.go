@@ -843,6 +843,8 @@ func (b *CollyBackend) ListErrors(ctx context.Context, sessionID string, limit i
 	return slices.Clone(errs), nil
 }
 
+// GetFlow returns the flow for flowID. The returned Request and Response bytes
+// alias the stored flow and must not be mutated.
 func (b *CollyBackend) GetFlow(ctx context.Context, flowID string) (*CrawlFlow, error) {
 	b.mu.RLock()
 	sessions := bulk.MapValuesSlice(b.sessions)
