@@ -117,19 +117,19 @@ func NewSpillStore(cfg SpillStoreConfig) (Storage, error) {
 	// Generate ephemeral encryption key
 	encKey := make([]byte, 32)
 	if _, err := rand.Read(encKey); err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = removeStoreFiles(tempDir, cfg.FilePrefix, ownsDataDir)
 		return nil, err
 	}
 
 	block, err := aes.NewCipher(encKey)
 	if err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = removeStoreFiles(tempDir, cfg.FilePrefix, ownsDataDir)
 		return nil, err
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = removeStoreFiles(tempDir, cfg.FilePrefix, ownsDataDir)
 		return nil, err
 	}
 
@@ -137,7 +137,7 @@ func NewSpillStore(cfg SpillStoreConfig) (Storage, error) {
 	dataPath := filepath.Join(tempDir, prefixedName(cfg.FilePrefix, spillDataFile))
 	dataFile, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = removeStoreFiles(tempDir, cfg.FilePrefix, ownsDataDir)
 		return nil, err
 	}
 
@@ -147,7 +147,7 @@ func NewSpillStore(cfg SpillStoreConfig) (Storage, error) {
 	binary.LittleEndian.PutUint32(header[8:12], spillVersion)
 	if _, err := dataFile.Write(header); err != nil {
 		_ = dataFile.Close()
-		_ = os.RemoveAll(tempDir)
+		_ = removeStoreFiles(tempDir, cfg.FilePrefix, ownsDataDir)
 		return nil, err
 	}
 
@@ -155,14 +155,14 @@ func NewSpillStore(cfg SpillStoreConfig) (Storage, error) {
 	zstdEncoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(cfg.ZSTDLevel)))
 	if err != nil {
 		_ = dataFile.Close()
-		_ = os.RemoveAll(tempDir)
+		_ = removeStoreFiles(tempDir, cfg.FilePrefix, ownsDataDir)
 		return nil, err
 	}
 	zstdDecoder, err := zstd.NewReader(nil)
 	if err != nil {
 		_ = zstdEncoder.Close()
 		_ = dataFile.Close()
-		_ = os.RemoveAll(tempDir)
+		_ = removeStoreFiles(tempDir, cfg.FilePrefix, ownsDataDir)
 		return nil, err
 	}
 
@@ -383,10 +383,21 @@ func (s *spillStore) Close() error {
 	s.zstdDecoder.Close()
 
 	_ = s.dataFile.Close()
-	if s.ownsDataDir {
-		return os.RemoveAll(s.dataDir)
+	return removeStoreFiles(s.dataDir, s.filePrefix, s.ownsDataDir)
+}
+
+// removeStoreFiles deletes the prefixed store files in dir, or all of dir when owned.
+func removeStoreFiles(dir, prefix string, owned bool) error {
+	if owned {
+		return os.RemoveAll(dir)
 	}
-	return os.Remove(filepath.Join(s.dataDir, prefixedName(s.filePrefix, spillDataFile)))
+	err := os.Remove(filepath.Join(dir, prefixedName(prefix, spillDataFile)))
+	// leftover from an interrupted compaction
+	rmErr := os.Remove(filepath.Join(dir, prefixedName(prefix, spillCompactTmp)))
+	if err == nil && rmErr != nil && !os.IsNotExist(rmErr) {
+		err = rmErr
+	}
+	return err
 }
 
 // maybeStartEviction spawns eviction goroutine if needed and not already running.

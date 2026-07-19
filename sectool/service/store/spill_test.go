@@ -1351,3 +1351,46 @@ func TestSpillStore_GetCloseRace(t *testing.T) {
 	require.NoError(t, s.Close())
 	wg.Wait()
 }
+
+func TestNewSpillStore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("shared_dir_error_keeps_peer", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := DefaultSpillStoreConfig()
+		cfg.Dir = dir
+
+		cfg.FilePrefix = "replay"
+		replay, err := NewSpillStore(cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = replay.Close() })
+		require.NoError(t, replay.Set("key1", []byte("value1")))
+
+		// block the second store's data file so the open fails
+		require.NoError(t, os.Mkdir(filepath.Join(dir, prefixedName("notes", spillDataFile)), 0700))
+		cfg.FilePrefix = "notes"
+		_, err = NewSpillStore(cfg)
+		require.Error(t, err)
+
+		assert.FileExists(t, filepath.Join(dir, prefixedName("replay", spillDataFile)))
+		data, found, err := replay.Get("key1")
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, []byte("value1"), data)
+	})
+
+	t.Run("provided_dir_kept_on_error", func(t *testing.T) {
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "owned")
+		require.NoError(t, os.Mkdir(dir, 0700))
+		require.NoError(t, os.Mkdir(filepath.Join(dir, spillDataFile), 0700))
+
+		cfg := DefaultSpillStoreConfig()
+		cfg.Dir = dir
+		_, err := NewSpillStore(cfg)
+		require.Error(t, err)
+
+		// caller-provided dir is never removed, only the store's own file
+		assert.DirExists(t, dir)
+	})
+}
