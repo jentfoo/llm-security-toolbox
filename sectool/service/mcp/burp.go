@@ -44,6 +44,9 @@ const (
 // ErrNotConnected is returned when an operation is attempted without a connection.
 var ErrNotConnected = errors.New("not connected to Burp MCP")
 
+// errTransport marks a Burp MCP transport failure eligible for reconnect+retry
+var errTransport = errors.New("burp mcp transport error")
+
 // ErrClientClosed is returned when an operation is attempted on a closed client.
 var ErrClientClosed = errors.New("client closed")
 
@@ -317,18 +320,24 @@ func (c *BurpClient) withConn(ctx context.Context, fn func(context.Context) erro
 	return fn(ctx)
 }
 
-// isConnectionError checks if an error indicates a connection problem that warrants retry.
+// isConnectionError reports whether err is a transport failure warranting reconnect+retry.
 func isConnectionError(err error) bool {
-	if err == nil {
-		return false
+	return errors.Is(err, ErrNotConnected) || errors.Is(err, errTransport)
+}
+
+// callTool invokes the named MCP tool with args, returning the result or an error.
+// A transport failure wraps errTransport (retryable); a tool-level error result is plain (non-retryable).
+func (c *BurpClient) callTool(ctx context.Context, name string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+	result, err := c.mcpClient.CallTool(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: name, Arguments: args},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w: %w", name, errTransport, err)
 	}
-	if errors.Is(err, ErrNotConnected) {
-		return true
+	if result.IsError {
+		return nil, fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
 	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "connection") ||
-		strings.Contains(errStr, "transport") ||
-		strings.Contains(errStr, "EOF")
+	return result, nil
 }
 
 // GetProxyHistory retrieves proxy HTTP history entries.
@@ -345,19 +354,12 @@ func (c *BurpClient) GetProxyHistory(ctx context.Context, count, offset int) ([]
 func (c *BurpClient) GetProxyHistoryRaw(ctx context.Context, count, offset int) (string, error) {
 	var raw string
 	err := c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name: "get_proxy_http_history",
-				Arguments: map[string]interface{}{
-					"count":  count,
-					"offset": offset,
-				},
-			},
+		result, err := c.callTool(opCtx, "get_proxy_http_history", map[string]interface{}{
+			"count":  count,
+			"offset": offset,
 		})
 		if err != nil {
-			return fmt.Errorf("get_proxy_http_history failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
+			return err
 		}
 		raw = extractTextContent(result.Content)
 		return nil
@@ -370,20 +372,13 @@ func (c *BurpClient) GetProxyHistoryRaw(ctx context.Context, count, offset int) 
 func (c *BurpClient) GetProxyHistoryRegex(ctx context.Context, regex string, count, offset int) ([]ProxyHistoryEntry, error) {
 	var entries []ProxyHistoryEntry
 	err := c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name: "get_proxy_http_history_regex",
-				Arguments: map[string]interface{}{
-					"regex":  regex,
-					"count":  count,
-					"offset": offset,
-				},
-			},
+		result, err := c.callTool(opCtx, "get_proxy_http_history_regex", map[string]interface{}{
+			"regex":  regex,
+			"count":  count,
+			"offset": offset,
 		})
 		if err != nil {
-			return fmt.Errorf("get_proxy_http_history_regex failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
+			return err
 		}
 		var parseErr error
 		entries, parseErr = parseHistoryNDJSON(extractTextContent(result.Content))
@@ -625,21 +620,14 @@ func decodeBurpFieldValue(raw []byte) string {
 func (c *BurpClient) SendHTTP1Request(ctx context.Context, params SendRequestParams) (string, error) {
 	var response string
 	err := c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name: "send_http1_request",
-				Arguments: map[string]interface{}{
-					"content":        params.Content,
-					"targetHostname": params.TargetHostname,
-					"targetPort":     params.TargetPort,
-					"usesHttps":      params.UsesHTTPS,
-				},
-			},
+		result, err := c.callTool(opCtx, "send_http1_request", map[string]interface{}{
+			"content":        params.Content,
+			"targetHostname": params.TargetHostname,
+			"targetPort":     params.TargetPort,
+			"usesHttps":      params.UsesHTTPS,
 		})
 		if err != nil {
-			return fmt.Errorf("send_http1_request failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
+			return err
 		}
 		response = extractTextContent(result.Content)
 		return nil
@@ -660,38 +648,18 @@ func (c *BurpClient) CreateRepeaterTab(ctx context.Context, params RepeaterTabPa
 			args["tabName"] = params.TabName
 		}
 
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name:      "create_repeater_tab",
-				Arguments: args,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("create_repeater_tab failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
-		}
-		return nil
+		_, err := c.callTool(opCtx, "create_repeater_tab", args)
+		return err
 	})
 }
 
 // SetInterceptState enables or disables proxy intercept mode.
 func (c *BurpClient) SetInterceptState(ctx context.Context, intercepting bool) error {
 	return c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name: "set_proxy_intercept_state",
-				Arguments: map[string]interface{}{
-					"intercepting": intercepting,
-				},
-			},
+		_, err := c.callTool(opCtx, "set_proxy_intercept_state", map[string]interface{}{
+			"intercepting": intercepting,
 		})
-		if err != nil {
-			return fmt.Errorf("set_proxy_intercept_state failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
-		}
-		return nil
+		return err
 	})
 }
 
@@ -713,16 +681,9 @@ func (c *BurpClient) SendHTTP2Request(ctx context.Context, params SendHTTP2Reque
 			args["headers"] = params.Headers
 		}
 
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name:      "send_http2_request",
-				Arguments: args,
-			},
-		})
+		result, err := c.callTool(opCtx, "send_http2_request", args)
 		if err != nil {
-			return fmt.Errorf("send_http2_request failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
+			return err
 		}
 		response = extractTextContent(result.Content)
 		return nil
@@ -743,18 +704,8 @@ func (c *BurpClient) SendToIntruder(ctx context.Context, params IntruderParams) 
 			args["tabName"] = params.TabName
 		}
 
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name:      "send_to_intruder",
-				Arguments: args,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("send_to_intruder failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
-		}
-		return nil
+		_, err := c.callTool(opCtx, "send_to_intruder", args)
+		return err
 	})
 }
 
@@ -771,19 +722,12 @@ func (c *BurpClient) GetProxyWebsocketHistory(ctx context.Context, count, offset
 func (c *BurpClient) GetProxyWebsocketHistoryRaw(ctx context.Context, count, offset int) (string, error) {
 	var raw string
 	err := c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name: "get_proxy_websocket_history",
-				Arguments: map[string]interface{}{
-					"count":  count,
-					"offset": offset,
-				},
-			},
+		result, err := c.callTool(opCtx, "get_proxy_websocket_history", map[string]interface{}{
+			"count":  count,
+			"offset": offset,
 		})
 		if err != nil {
-			return fmt.Errorf("get_proxy_websocket_history failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
+			return err
 		}
 		raw = extractTextContent(result.Content)
 		return nil
@@ -795,20 +739,13 @@ func (c *BurpClient) GetProxyWebsocketHistoryRaw(ctx context.Context, count, off
 func (c *BurpClient) GetProxyWebsocketHistoryRegex(ctx context.Context, regex string, count, offset int) ([]WebSocketHistoryEntry, error) {
 	var entries []WebSocketHistoryEntry
 	err := c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name: "get_proxy_websocket_history_regex",
-				Arguments: map[string]interface{}{
-					"regex":  regex,
-					"count":  count,
-					"offset": offset,
-				},
-			},
+		result, err := c.callTool(opCtx, "get_proxy_websocket_history_regex", map[string]interface{}{
+			"regex":  regex,
+			"count":  count,
+			"offset": offset,
 		})
 		if err != nil {
-			return fmt.Errorf("get_proxy_websocket_history_regex failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
+			return err
 		}
 		var parseErr error
 		entries, parseErr = parseWebsocketHistoryNDJSON(extractTextContent(result.Content))
@@ -856,20 +793,10 @@ func parseWebsocketHistoryNDJSON(text string) ([]WebSocketHistoryEntry, error) {
 // When running=true, tasks will execute; when running=false, tasks are paused.
 func (c *BurpClient) SetTaskExecutionEngineState(ctx context.Context, running bool) error {
 	return c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name: "set_task_execution_engine_state",
-				Arguments: map[string]interface{}{
-					"running": running,
-				},
-			},
+		_, err := c.callTool(opCtx, "set_task_execution_engine_state", map[string]interface{}{
+			"running": running,
 		})
-		if err != nil {
-			return fmt.Errorf("set_task_execution_engine_state failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
-		}
-		return nil
+		return err
 	})
 }
 
@@ -877,16 +804,9 @@ func (c *BurpClient) SetTaskExecutionEngineState(ctx context.Context, running bo
 func (c *BurpClient) GetActiveEditorContents(ctx context.Context) (string, error) {
 	var contents string
 	err := c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name:      "get_active_editor_contents",
-				Arguments: map[string]interface{}{},
-			},
-		})
+		result, err := c.callTool(opCtx, "get_active_editor_contents", map[string]interface{}{})
 		if err != nil {
-			return fmt.Errorf("get_active_editor_contents failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
+			return err
 		}
 		contents = extractTextContent(result.Content)
 		return nil
@@ -897,20 +817,10 @@ func (c *BurpClient) GetActiveEditorContents(ctx context.Context) (string, error
 // SetActiveEditorContents sets the contents of the user's active message editor.
 func (c *BurpClient) SetActiveEditorContents(ctx context.Context, text string) error {
 	return c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name: "set_active_editor_contents",
-				Arguments: map[string]interface{}{
-					"text": text,
-				},
-			},
+		_, err := c.callTool(opCtx, "set_active_editor_contents", map[string]interface{}{
+			"text": text,
 		})
-		if err != nil {
-			return fmt.Errorf("set_active_editor_contents failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
-		}
-		return nil
+		return err
 	})
 }
 
@@ -940,16 +850,9 @@ func (c *BurpClient) SetWSMatchReplaceRules(ctx context.Context, rules []MatchRe
 func (c *BurpClient) getMatchReplaceRulesFromKey(ctx context.Context, key string) ([]MatchReplaceRule, error) {
 	var rules []MatchReplaceRule
 	err := c.withConn(ctx, func(opCtx context.Context) error {
-		result, err := c.mcpClient.CallTool(opCtx, mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name:      "output_project_options",
-				Arguments: map[string]interface{}{},
-			},
-		})
+		result, err := c.callTool(opCtx, "output_project_options", map[string]interface{}{})
 		if err != nil {
-			return fmt.Errorf("output_project_options failed: %w", err)
-		} else if result.IsError {
-			return fmt.Errorf("MCP error: %s", extractTextContent(result.Content))
+			return err
 		}
 
 		var config struct {
@@ -991,7 +894,7 @@ func (c *BurpClient) setMatchReplaceRulesToKey(ctx context.Context, key string, 
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("set_project_options failed: %w", err)
+			return fmt.Errorf("set_project_options: %w: %w", errTransport, err)
 		}
 		msg := extractTextContent(result.Content)
 		if strings.Contains(msg, "disabled configuration editing") {

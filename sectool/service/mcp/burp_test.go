@@ -3,6 +3,8 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +13,29 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/config"
 )
+
+func TestIsConnectionError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"not_connected", ErrNotConnected, true},
+		{"transport_wrapped", fmt.Errorf("send_http1_request: %w: %w", errTransport, errors.New("unexpected EOF")), true},
+		{"tool_level_connection_refused", fmt.Errorf("MCP error: %s", "dial tcp: connection refused"), false},
+		{"tool_level_eof", fmt.Errorf("MCP error: %s", "unexpected EOF in response body"), false},
+		{"plain_eof", errors.New("EOF"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isConnectionError(tt.err))
+		})
+	}
+}
 
 func TestBurpClientClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

@@ -145,7 +145,8 @@ func (i *burpFlowIndex) recover() {
 }
 
 // RegisterOrLookup resolves the flow_id and observation timestamp for a Burp entry at offset and request bytes.
-// New content mints a fresh flow_id; matching content elsewhere relocates the existing flow_id.
+// Identical content at a higher cached offset relocates the existing flow_id (delete shift-down); a lower or
+// equal offset is a distinct live duplicate and mints fresh, as does new content.
 func (i *burpFlowIndex) RegisterOrLookup(offset int, request string) (flowID string, observedAt time.Time) {
 	fp := fnv1aHash(request)
 
@@ -161,31 +162,31 @@ func (i *burpFlowIndex) RegisterOrLookup(offset int, request string) (flowID str
 		i.evictOffsetLocked(offset)
 	}
 
-	// Same content may have shifted from another offset (mid-history delete)
+	// identical content at a higher cached offset is a mid-history delete shift-down; relocate the flow_id
 	if existingFlowID, ok := i.byFingerprint[fp]; ok {
-		oldOff, hasOld := i.byFlowID[existingFlowID]
-		var oldObservedAt time.Time
-		if hasOld {
+		if oldOff, hasOld := i.byFlowID[existingFlowID]; hasOld && oldOff > offset {
+			var oldObservedAt time.Time
 			if e, ok := i.byOffset[oldOff]; ok {
 				oldObservedAt = e.observedAt
 			}
-			// remove the old offset's mapping without marking its flow_id stale; the flow_id is being moved to a new offset
+			// move the flow_id to the new offset without marking it stale
 			delete(i.byOffset, oldOff)
 			if err := i.storage.Delete(burpFlowIndexKey(oldOff)); err != nil {
 				log.Printf("burp index: delete relocated record %d: %v", oldOff, err)
 			}
+			if oldObservedAt.IsZero() {
+				oldObservedAt = time.Now().UTC()
+			}
+			i.byOffset[offset] = burpFlowEntry{flowID: existingFlowID, observedAt: oldObservedAt, fingerprint: fp}
+			i.byFlowID[existingFlowID] = offset
+			i.persistRecordLocked(offset, existingFlowID, oldObservedAt, fp)
+			i.advanceMaxLocked(offset)
+			return existingFlowID, oldObservedAt
 		}
-		if oldObservedAt.IsZero() {
-			oldObservedAt = time.Now().UTC()
-		}
-		i.byOffset[offset] = burpFlowEntry{flowID: existingFlowID, observedAt: oldObservedAt, fingerprint: fp}
-		i.byFlowID[existingFlowID] = offset
-		i.persistRecordLocked(offset, existingFlowID, oldObservedAt, fp)
-		i.advanceMaxLocked(offset)
-		return existingFlowID, oldObservedAt
+		// lower/equal cached offset with identical content: distinct live duplicate, fall through to mint
 	}
 
-	// new entry
+	// new entry or live duplicate; mint a fresh flow_id
 	for {
 		candidate := ids.Generate(ids.DefaultLength)
 		if _, exists := i.byFlowID[candidate]; !exists {

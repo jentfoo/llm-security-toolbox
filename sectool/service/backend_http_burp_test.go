@@ -510,6 +510,51 @@ func TestBurpFlowIndexRegisterOrLookup(t *testing.T) {
 		reF2, _ := idx.RegisterOrLookup(1, "GET /c HTTP/1.1\r\n\r\n")
 		assert.Equal(t, f2, reF2)
 	})
+
+	t.Run("two_identical_live_get_distinct_ids", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		// Two byte-identical requests at two live offsets must not collapse to one id
+		f0, _ := idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		f1, _ := idx.RegisterOrLookup(1, "GET /a HTTP/1.1\r\n\r\n")
+		require.NotEqual(t, f0, f1)
+		off0, ok := idx.OffsetFor(f0)
+		require.True(t, ok)
+		assert.Equal(t, 0, off0)
+
+		// Re-poll both: ids stable across passes
+		reF0, _ := idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		reF1, _ := idx.RegisterOrLookup(1, "GET /a HTTP/1.1\r\n\r\n")
+		assert.Equal(t, f0, reF0)
+		assert.Equal(t, f1, reF1)
+	})
+
+	t.Run("duplicates_plus_delete_stay_distinct", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		t.Cleanup(func() { _ = storage.Close() })
+		idx := newBurpFlowIndex(storage)
+
+		// /a duplicated at offsets 0 and 2, /b between them
+		f0, _ := idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		_, _ = idx.RegisterOrLookup(1, "GET /b HTTP/1.1\r\n\r\n")
+		f2, _ := idx.RegisterOrLookup(2, "GET /a HTTP/1.1\r\n\r\n")
+		require.NotEqual(t, f0, f2)
+
+		// Delete /b: /a shifts down from offset 2 to offset 1
+		got0, _ := idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		got1, _ := idx.RegisterOrLookup(1, "GET /a HTTP/1.1\r\n\r\n")
+		idx.SweepTail(2)
+		assert.Equal(t, f0, got0)
+		assert.Equal(t, f2, got1)
+
+		// Both survivors stable on re-poll
+		reF0, _ := idx.RegisterOrLookup(0, "GET /a HTTP/1.1\r\n\r\n")
+		reF1, _ := idx.RegisterOrLookup(1, "GET /a HTTP/1.1\r\n\r\n")
+		assert.Equal(t, f0, reF0)
+		assert.Equal(t, f2, reF1)
+	})
 }
 
 func TestBurpFlowIndexSweepTail(t *testing.T) {
