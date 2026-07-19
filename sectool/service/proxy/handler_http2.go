@@ -240,8 +240,9 @@ type h2Proxy struct {
 	upstreamPushActive    bool   // true if accumulating PUSH_PROMISE headers
 }
 
-// Handle proxies HTTP/2 traffic between client and upstream connections.
-func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls.Conn) {
+// Handle proxies HTTP/2 traffic between client and upstream connections, reading
+// the client side through clientReader.
+func (h *http2Handler) Handle(ctx context.Context, clientConn *tls.Conn, clientReader io.Reader, upstreamConn *tls.Conn) {
 	proxyCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -256,7 +257,7 @@ func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls
 
 	proxy := &h2Proxy{
 		handler:  h,
-		client:   newH2Conn(clientConn),
+		client:   newH2ConnReader(clientConn, clientReader),
 		upstream: newH2Conn(upstreamConn),
 		streams:  newStreamTracker(),
 		ctx:      proxyCtx,
@@ -265,7 +266,7 @@ func (h *http2Handler) Handle(ctx context.Context, clientConn, upstreamConn *tls
 
 	// Read and validate client preface
 	preface := make([]byte, len(h2Preface))
-	if n, err := io.ReadFull(clientConn, preface); err != nil {
+	if n, err := io.ReadFull(clientReader, preface); err != nil {
 		if !isConnClosedErr(err) {
 			log.Printf("h2: failed to read client preface (%s): read %d/%d bytes %q: %v",
 				h2ConnDesc(clientConn), n, len(preface), preface[:n], err)

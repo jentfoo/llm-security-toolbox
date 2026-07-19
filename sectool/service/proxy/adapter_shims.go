@@ -36,7 +36,8 @@ func (a http2Adapter) ServeEarly(ctx context.Context, c *protocol.EarlyClaimCtx)
 	clientTLS, ok1 := c.ClientConn.(*tls.Conn)
 	upstreamTLS, ok2 := c.UpstreamConn.(*tls.Conn)
 	if ok1 && ok2 {
-		a.h.Handle(ctx, clientTLS, upstreamTLS)
+		// read through ClientReader: a declined claim may have buffered opening frames
+		a.h.Handle(ctx, clientTLS, c.ClientReader, upstreamTLS)
 	} else {
 		log.Printf("proxy: HTTP/2 handler not available or invalid connection types")
 	}

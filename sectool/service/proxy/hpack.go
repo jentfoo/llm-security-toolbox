@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"slices"
 	"strings"
@@ -99,9 +100,15 @@ type h2Conn struct {
 	abortMu        sync.Mutex
 }
 
-// newH2Conn creates a new HTTP/2 connection wrapper.
+// newH2Conn creates a new HTTP/2 connection wrapper reading frames from conn.
 func newH2Conn(conn net.Conn) *h2Conn {
-	framer := http2.NewFramer(nil, conn)
+	return newH2ConnReader(conn, conn)
+}
+
+// newH2ConnReader creates a wrapper that writes to conn but reads frames from r;
+// use when opening bytes are already buffered ahead of the connection.
+func newH2ConnReader(conn net.Conn, r io.Reader) *h2Conn {
+	framer := http2.NewFramer(nil, r)
 	framer.ReadMetaHeaders = nil // We decode HPACK ourselves
 
 	h := &h2Conn{

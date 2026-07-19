@@ -241,6 +241,10 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 		return
 	}
 
+	// single reader for the decrypted stream: a declining claim's peeked bytes stay
+	// buffered for whichever adapter serves the fall-through
+	clientTLSReader := bufio.NewReader(clientTLS)
+
 	// Sidecar claimed the connection: hand it the decrypted stream; decrypted matchers
 	// may still decline, then we dial upstream and fall through to the HTTP path
 	if tlsBridge != nil {
@@ -248,7 +252,7 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 			TLSTerminated: true,
 			Target:        target,
 			ClientConn:    clientTLS,
-			ClientReader:  bufio.NewReader(clientTLS),
+			ClientReader:  clientTLSReader,
 		}
 		if tlsBridge.ClaimEarly(c) {
 			tlsBridge.ServeEarly(ctx, c)
@@ -263,7 +267,7 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 			_ = clientTLS.Close()
 			return
 		}
-		h.routeByClientProto(ctx, clientTLS, upstreamConn, negotiatedProto, targetAddr, sni, target)
+		h.routeByClientProto(ctx, clientTLS, clientTLSReader, upstreamConn, negotiatedProto, targetAddr, sni, target)
 		return
 	}
 
@@ -274,12 +278,13 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 	}
 
 	// Route based on negotiated protocol
-	h.routeByClientProto(ctx, clientTLS, upstreamConn, negotiatedProto, targetAddr, sni, target)
+	h.routeByClientProto(ctx, clientTLS, clientTLSReader, upstreamConn, negotiatedProto, targetAddr, sni, target)
 }
 
 // routeByClientProto re-dials upstream to match the client's negotiated ALPN when it
-// diverges from the upstream negotiation, then routes the decrypted stream.
-func (h *connectHandler) routeByClientProto(ctx context.Context, clientTLS *tls.Conn, upstreamConn net.Conn, negotiatedProto, targetAddr, sni string, target *types.Target) {
+// diverges from the upstream negotiation, then routes the decrypted stream read
+// through clientReader.
+func (h *connectHandler) routeByClientProto(ctx context.Context, clientTLS *tls.Conn, clientReader *bufio.Reader, upstreamConn net.Conn, negotiatedProto, targetAddr, sni string, target *types.Target) {
 	clientProto := clientTLS.ConnectionState().NegotiatedProtocol
 	if negotiatedProto == alpnH2 && clientProto != alpnH2 {
 		// upstream/cache said h2 but the client offered no h2 (e.g. no ALPN); re-dial
@@ -295,7 +300,7 @@ func (h *connectHandler) routeByClientProto(ctx context.Context, clientTLS *tls.
 		upstreamConn = newUp
 		negotiatedProto = clientProto // "" routes to the http1 fallthrough adapter
 	}
-	h.routeByProtocol(ctx, clientTLS, upstreamConn, negotiatedProto, target)
+	h.routeByProtocol(ctx, clientTLS, clientReader, upstreamConn, negotiatedProto, target)
 }
 
 // cachedProto returns the cached upstream protocol for targetAddr, false when absent or expired.
@@ -400,9 +405,10 @@ func (h *connectHandler) dialUpstream(ctx context.Context, targetAddr, sni strin
 	return tlsDialer.DialContext(ctx, "tcp", targetAddr)
 }
 
-// routeByProtocol feeds the decrypted post-CONNECT stream through the early-claim
-// seam, keyed on the negotiated ALPN (h2 -> HTTP/2 adapter, else HTTP/1.1 fallthrough).
-func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstreamConn net.Conn, alpn string, target *types.Target) {
+// routeByProtocol feeds the decrypted post-CONNECT stream, read through clientReader,
+// into the early-claim seam, keyed on the negotiated ALPN (h2 -> HTTP/2 adapter, else
+// HTTP/1.1 fallthrough).
+func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS net.Conn, clientReader *bufio.Reader, upstreamConn net.Conn, alpn string, target *types.Target) {
 	defer func() {
 		_ = clientTLS.Close()
 		_ = upstreamConn.Close()
@@ -413,7 +419,7 @@ func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS, upstrea
 		ALPN:           alpn,
 		Target:         target,
 		ClientConn:     clientTLS,
-		ClientReader:   bufio.NewReader(clientTLS),
+		ClientReader:   clientReader,
 		UpstreamConn:   upstreamConn,
 		UpstreamReader: bufio.NewReader(upstreamConn),
 	})

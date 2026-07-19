@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
+	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sectool/service/testutil"
 )
@@ -406,6 +408,48 @@ func TestHandleClientProtoReconciliation(t *testing.T) {
 
 	assert.Equal(t, 200, noAlpnResp.StatusCode)
 	assert.Contains(t, string(noAlpnBody), "proto=HTTP/1.1")
+}
+
+func TestRouteByProtocol(t *testing.T) {
+	t.Parallel()
+
+	client, clientPeer := net.Pipe()
+	upstream, upstreamPeer := net.Pipe()
+	t.Cleanup(func() { _ = clientPeer.Close() })
+	t.Cleanup(func() { _ = upstreamPeer.Close() })
+
+	req := []byte("GET /x HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	go func() {
+		_, _ = clientPeer.Write(req)
+		_ = clientPeer.Close()
+	}()
+
+	served := make(chan []byte, 1)
+	h := &connectHandler{reg: &protocol.Registry{Early: []protocol.EarlyAdapter{
+		&captureEarly{served: served},
+	}}}
+
+	// a declined claim leaves peeked bytes buffered; they must survive the fall-through
+	br := bufio.NewReader(client)
+	_, err := br.Peek(4)
+	require.NoError(t, err)
+
+	h.routeByProtocol(t.Context(), client, br, upstream, alpnHTTP1, &types.Target{Hostname: "example.com", Port: 443})
+
+	assert.Equal(t, string(req), string(<-served))
+}
+
+// captureEarly claims any stream and reports the bytes read from the offered reader.
+type captureEarly struct {
+	served chan []byte
+}
+
+func (*captureEarly) Name() string                            { return "capture" }
+func (*captureEarly) ClaimEarly(*protocol.EarlyClaimCtx) bool { return true }
+
+func (a *captureEarly) ServeEarly(_ context.Context, c *protocol.EarlyClaimCtx) {
+	b, _ := io.ReadAll(c.ClientReader)
+	a.served <- b
 }
 
 func TestProbeOrConnect(t *testing.T) {
