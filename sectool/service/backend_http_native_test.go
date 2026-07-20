@@ -808,6 +808,63 @@ func TestApplyRequestRules(t *testing.T) {
 		assert.Equal(t, "gzip, deflate, br, zstd", modified.GetHeader("Accept-Encoding"))
 	})
 
+	t.Run("identity_not_upgraded", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "resp-body",
+			Type:    wire.RuleTypeResponseBody,
+			Find:    "false",
+			Replace: "true",
+		})
+		require.NoError(t, err)
+
+		req := &types.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []types.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Accept-Encoding", Value: "identity"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		// client refused compression, never advertise it upstream
+		assert.Equal(t, "identity", modified.GetHeader("Accept-Encoding"))
+	})
+
+	t.Run("unsupported_falls_back_to_identity", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "resp-body",
+			Type:    wire.RuleTypeResponseBody,
+			Find:    "false",
+			Replace: "true",
+		})
+		require.NoError(t, err)
+
+		req := &types.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []types.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Accept-Encoding", Value: "compress"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+
+		assert.Equal(t, "identity", modified.GetHeader("Accept-Encoding"))
+	})
+
 	t.Run("preserves_accept_encoding", func(t *testing.T) {
 		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
 		require.NoError(t, err)
@@ -1408,6 +1465,55 @@ func TestParseHeadersFromText(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyRequestHeaderOnlyRules(t *testing.T) {
+	t.Parallel()
+
+	configDir := t.TempDir() // shared so CA cert is generated once
+
+	h2Headers := func() types.Headers {
+		return types.Headers{
+			{Name: ":method", Value: "GET"},
+			{Name: "accept-encoding", Value: "compress"},
+		}
+	}
+
+	t.Run("negotiates_for_response_body_rule", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "resp-body",
+			Type:    wire.RuleTypeResponseBody,
+			Find:    "false",
+			Replace: "true",
+		})
+		require.NoError(t, err)
+
+		modified := backend.ApplyRequestHeaderOnlyRules(h2Headers())
+
+		assert.Equal(t, "identity", modified.Get("accept-encoding"))
+	})
+
+	t.Run("preserved_without_body_rule", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "req-header",
+			Type:    wire.RuleTypeRequestHeader,
+			Replace: "x-test: value",
+		})
+		require.NoError(t, err)
+
+		modified := backend.ApplyRequestHeaderOnlyRules(h2Headers())
+
+		assert.Equal(t, "compress", modified.Get("accept-encoding"))
+		assert.Equal(t, "value", modified.Get("x-test"))
+	})
 }
 
 func TestApplyRequestBodyOnlyRules(t *testing.T) {

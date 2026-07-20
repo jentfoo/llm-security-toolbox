@@ -476,13 +476,15 @@ func TestFilterSupportedEncodings(t *testing.T) {
 	}{
 		{"all_supported", "gzip, deflate, br, zstd", "gzip, deflate, br, zstd"},
 		{"strips_unknown", "gzip, snappy, br", "gzip, br"},
-		{"only_unsupported", "snappy, lz4", "gzip, deflate, br, zstd"},
+		{"only_unsupported", "snappy, lz4", "identity"},
 		{"with_quality", "br;q=1.0, gzip;q=0.8, snappy;q=0.5", "br;q=1.0, gzip;q=0.8"},
 		{"single_supported", "gzip", "gzip"},
-		{"single_unsupported", "snappy", "gzip, deflate, br, zstd"},
+		{"single_unsupported", "snappy", "identity"},
 		{"identity_stripped", "gzip, identity", "gzip"},
+		{"identity_unchanged", "identity", "identity"},
+		{"wildcard_to_identity", "*", "identity"},
 		{"preserves_x_gzip", "x-gzip, br", "x-gzip, br"},
-		{"empty_after_filter", "compress", "gzip, deflate, br, zstd"},
+		{"empty_after_filter", "compress", "identity"},
 	}
 
 	for _, tt := range tests {

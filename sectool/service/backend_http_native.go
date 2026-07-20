@@ -645,13 +645,8 @@ func (b *NativeProxyBackend) ApplyRequestRules(req *types.RawHTTP1Request) *type
 		req = b.applyRequestBodyRules(req, bodyRules)
 	}
 
-	// Ensure server responds with an encoding we can decompress for body rules
 	if hasRespBodyRules {
-		if ae := req.GetHeader("Accept-Encoding"); ae != "" {
-			if filtered := proxy.FilterSupportedEncodings(ae); filtered != ae {
-				req.SetHeader("Accept-Encoding", filtered)
-			}
-		}
+		negotiateDecodableEncoding(&req.Headers)
 	}
 
 	return req
@@ -716,16 +711,7 @@ func (b *NativeProxyBackend) HasBodyRules(isRequest bool) bool {
 	if isRequest {
 		targetType = wire.RuleTypeRequestBody
 	}
-
-	for _, rule := range b.httpRules {
-		if rule.Adapter != "" && rule.Adapter != types.AdapterScopeCore {
-			continue
-		}
-		if rule.Type == targetType {
-			return true
-		}
-	}
-	return false
+	return b.hasCoreRuleTypeLocked(targetType)
 }
 
 // ApplyRequestBodyOnlyRules applies only body rules to a request body.
@@ -787,12 +773,22 @@ func (b *NativeProxyBackend) ApplyRequestHeaderOnlyRules(headers types.Headers) 
 	b.rulesMu.RLock()
 	defer b.rulesMu.RUnlock()
 
-	headerRules := b.coreRulesOfTypeLocked(wire.RuleTypeRequestHeader)
-	if len(headerRules) == 0 {
-		return headers
+	if headerRules := b.coreRulesOfTypeLocked(wire.RuleTypeRequestHeader); len(headerRules) > 0 {
+		headers = b.applyRequestHeaderRules(&types.RawHTTP1Request{Headers: headers}, headerRules).Headers
 	}
-	req := b.applyRequestHeaderRules(&types.RawHTTP1Request{Headers: headers}, headerRules)
-	return req.Headers
+	if b.hasCoreRuleTypeLocked(wire.RuleTypeResponseBody) {
+		negotiateDecodableEncoding(&headers)
+	}
+	return headers
+}
+
+// negotiateDecodableEncoding rewrites a present Accept-Encoding to the encodings the rule engine can decode.
+func negotiateDecodableEncoding(headers *types.Headers) {
+	if ae := headers.Get("Accept-Encoding"); ae != "" {
+		if filtered := proxy.FilterSupportedEncodings(ae); filtered != ae {
+			headers.Set("Accept-Encoding", filtered)
+		}
+	}
 }
 
 // ApplyResponseHeaderOnlyRules applies only response header rules to headers.
@@ -814,6 +810,13 @@ func (b *NativeProxyBackend) coreRulesOfTypeLocked(ruleType string) []nativeStor
 	return bulk.SliceFilter(func(rule nativeStoredRule) bool {
 		return (rule.Adapter == "" || rule.Adapter == types.AdapterScopeCore) && rule.Type == ruleType
 	}, b.httpRules)
+}
+
+// hasCoreRuleTypeLocked reports whether any core-adapter httpRule of the given type exists. Caller must hold rulesMu.
+func (b *NativeProxyBackend) hasCoreRuleTypeLocked(ruleType string) bool {
+	return slices.ContainsFunc(b.httpRules, func(rule nativeStoredRule) bool {
+		return (rule.Adapter == "" || rule.Adapter == types.AdapterScopeCore) && rule.Type == ruleType
+	})
 }
 
 // applyRequestHeaderRules applies header rules to request.

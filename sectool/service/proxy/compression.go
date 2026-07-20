@@ -19,6 +19,8 @@ const (
 	encodingDeflate = "deflate"
 	encodingBrotli  = "br"
 	encodingZstd    = "zstd"
+	// encodingIdentity is never decompressed, only requested when nothing else is decodable
+	encodingIdentity = "identity"
 )
 
 // NormalizeEncoding normalizes a Content-Encoding header value.
@@ -199,7 +201,8 @@ func Compress(data []byte, encoding string) ([]byte, error) {
 
 // FilterSupportedEncodings filters an Accept-Encoding header value to only include encodings the
 // proxy can decompress/recompress. Preserves quality values and ordering.
-// Falls back to all supported encodings when the input contains no encoding supported by the proxy.
+// Falls back to "identity" when the input contains no encoding supported by the proxy, so the
+// client never receives an encoding it did not offer.
 func FilterSupportedEncodings(acceptEncoding string) string {
 	supported := bulk.SliceFilterInPlace(func(part string) bool {
 		trimmed := strings.TrimSpace(part)
@@ -212,7 +215,7 @@ func FilterSupportedEncodings(acceptEncoding string) string {
 		return supported
 	}, strings.Split(acceptEncoding, ","))
 	if len(supported) == 0 {
-		return strings.Join([]string{encodingGzip, encodingDeflate, encodingBrotli, encodingZstd}, ", ")
+		return encodingIdentity
 	}
 	return strings.Join(supported, ",")
 }
