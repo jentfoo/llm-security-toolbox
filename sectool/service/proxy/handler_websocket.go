@@ -23,18 +23,21 @@ const maxWebSocketFrameSize = 100 * 1024 * 1024 // 100 MB
 
 // webSocketHandler handles WebSocket proxying for both ws:// and wss://.
 type webSocketHandler struct {
-	history     *HistoryStore
-	ruleApplier types.RuleApplier
-	certManager *CertManager
-	timeouts    TimeoutConfig
+	history      *HistoryStore
+	ruleApplier  types.RuleApplier
+	certManager  *CertManager
+	maxBodyBytes int
+	timeouts     TimeoutConfig
 }
 
 // newWebSocketHandler creates a new WebSocket handler.
-func newWebSocketHandler(history *HistoryStore, certManager *CertManager, timeouts TimeoutConfig) *webSocketHandler {
+// maxBodyBytes limits frame payload sizes stored in history.
+func newWebSocketHandler(history *HistoryStore, certManager *CertManager, maxBodyBytes int, timeouts TimeoutConfig) *webSocketHandler {
 	return &webSocketHandler{
-		history:     history,
-		certManager: certManager,
-		timeouts:    timeouts,
+		history:      history,
+		certManager:  certManager,
+		maxBodyBytes: maxBodyBytes,
+		timeouts:     timeouts,
 	}
 }
 
@@ -158,13 +161,21 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 
 	var buf bytes.Buffer
 
+	now := time.Now()
+
 	// Forward upgrade request to upstream
+	if h.timeouts.WriteTimeout > 0 {
+		_ = upstreamConn.SetWriteDeadline(now.Add(h.timeouts.WriteTimeout))
+	}
 	if _, err := upstreamConn.Write(req.SerializeRaw(&buf)); err != nil {
 		log.Printf("proxy: websocket upgrade send failed: %v", err)
 		sendError(clientConn, 502, "Bad Gateway: failed to send upgrade")
 		return
 	}
 
+	if h.timeouts.ReadTimeout > 0 {
+		_ = upstreamConn.SetReadDeadline(now.Add(h.timeouts.ReadTimeout))
+	}
 	resp, err := parseResponse(upstreamReader, req.Method)
 	if err != nil {
 		log.Printf("proxy: websocket upgrade response parse failed: %v", err)
@@ -178,6 +189,9 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 			resp = h.ruleApplier.ApplyResponseRules(resp)
 		}
 		// Forward error response to client
+		if h.timeouts.WriteTimeout > 0 {
+			_ = clientConn.SetWriteDeadline(now.Add(h.timeouts.WriteTimeout))
+		}
 		if _, err := clientConn.Write(resp.SerializeRaw(&buf)); err != nil {
 			log.Printf("proxy: failed to send websocket error response: %v", err)
 		}
@@ -198,13 +212,21 @@ func (h *webSocketHandler) proxyWebSocketWithReader(
 	parentFlowID := h.storeHandshake(scheme, port, req, resp, startTime)
 
 	// Send 101 to client
+	if h.timeouts.WriteTimeout > 0 {
+		_ = clientConn.SetWriteDeadline(now.Add(h.timeouts.WriteTimeout))
+	}
 	if _, err := clientConn.Write(resp.SerializeRaw(&buf)); err != nil {
 		log.Printf("proxy: failed to send websocket upgrade response: %v", err)
 		return
 	}
 
+	// relay sessions are long-lived and legitimately idle, so no deadline may carry over
+	_ = clientConn.SetDeadline(time.Time{})
+	_ = upstreamConn.SetDeadline(time.Time{})
+
 	// Start bidirectional frame proxy
 	proxy := &wsProxy{
+		ctx:          ctx,
 		handler:      h,
 		parentFlowID: parentFlowID,
 		clientConn:   clientConn,
@@ -252,6 +274,7 @@ func (h *webSocketHandler) storeHandshake(scheme string, port int, req *types.Ra
 
 // wsProxy handles bidirectional WebSocket frame proxying.
 type wsProxy struct {
+	ctx          context.Context
 	handler      *webSocketHandler
 	parentFlowID string // handshake flow_id; "" when the handshake was filtered out
 	clientConn   net.Conn
@@ -265,6 +288,15 @@ type wsProxy struct {
 func (p *wsProxy) run() {
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	// readWSFrame is context-unaware; closing the conns is the only way to unblock it
+	go func() {
+		select {
+		case <-p.ctx.Done():
+			p.close()
+		case <-p.done:
+		}
+	}()
 
 	// Client -> Upstream: proxy acts as client, MUST mask per RFC 6455 section 5.1
 	go func() {
@@ -320,6 +352,9 @@ func (p *wsProxy) proxyFrames(src *bufio.Reader, dst net.Conn, direction string,
 		}
 
 		encoded := encodeWSFrame(frame)
+		if wt := p.handler.timeouts.WriteTimeout; wt > 0 {
+			_ = dst.SetWriteDeadline(time.Now().Add(wt))
+		}
 		if _, err := dst.Write(encoded); err != nil {
 			p.close()
 			return
@@ -340,10 +375,16 @@ func (p *wsProxy) storeFrame(frame *wsFrame, direction string) {
 	}
 
 	now := time.Now()
+	body := frame.payload
+	var truncated bool
+	if maxBytes := p.handler.maxBodyBytes; maxBytes > 0 && len(body) > maxBytes {
+		body = body[:maxBytes] // stored slice only; the forwarded frame stays whole
+		truncated = true
+	}
 	msg := &types.Message{
 		Method: types.MethodFrame,
 		Path:   "/ws/" + strconv.Itoa(int(frame.opcode)),
-		Body:   frame.payload,
+		Body:   body,
 	}
 	child := &types.Flow{
 		Adapter:      types.ProtocolTagWS,
@@ -351,6 +392,7 @@ func (p *wsProxy) storeFrame(frame *wsFrame, direction string) {
 		ParentFlowID: p.parentFlowID,
 		StartedAt:    now,
 		CompletedAt:  now,
+		Annotations:  truncationAnnotations("", truncated),
 	}
 	if direction == "ws:to-client" {
 		child.Direction = types.DirectionS2C

@@ -81,7 +81,7 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage
 	}
 	history := newHistoryStore(historyStorage)
 
-	wsHandler := newWebSocketHandler(history, certManager, timeouts)
+	wsHandler := newWebSocketHandler(history, certManager, maxBodyBytes, timeouts)
 
 	http1Handler := &http1Handler{
 		history:      history,

@@ -1,11 +1,17 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"io"
+	"net"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
+	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -817,4 +823,190 @@ func TestStripResponseExtensions(t *testing.T) {
 			assert.False(t, hasExtensions)
 		})
 	}
+}
+
+// newTestWSHandler returns a handler storing into a fresh in-memory history.
+func newTestWSHandler(t *testing.T, maxBodyBytes int, timeouts TimeoutConfig) *webSocketHandler {
+	t.Helper()
+
+	history := newHistoryStore(store.NewMemStorage())
+	t.Cleanup(history.Close)
+	return newWebSocketHandler(history, nil, maxBodyBytes, timeouts)
+}
+
+// wsUpgradeRequest builds a minimal WebSocket upgrade request for host.
+func wsUpgradeRequest(host string) *types.RawHTTP1Request {
+	return &types.RawHTTP1Request{
+		Method:  "GET",
+		Path:    "/ws",
+		Version: "HTTP/1.1",
+		Headers: types.Headers{
+			{Name: "Host", Value: host},
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+			{Name: "Sec-WebSocket-Key", Value: "dGhlIHNhbXBsZSBub25jZQ=="},
+			{Name: "Sec-WebSocket-Version", Value: "13"},
+		},
+	}
+}
+
+func TestWebSocketHandshakeDeadline(t *testing.T) {
+	t.Parallel()
+
+	// upstream accepts but never answers the upgrade
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+		}
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	h := newTestWSHandler(t, 0, TimeoutConfig{
+		DialTimeout:  time.Second,
+		ReadTimeout:  100 * time.Millisecond,
+		WriteTimeout: 100 * time.Millisecond,
+	})
+
+	clientConn, proxyConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 512)
+		n, _ := clientConn.Read(buf)
+		got <- buf[:n]
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Handle(t.Context(), proxyConn, bufio.NewReader(proxyConn),
+			wsUpgradeRequest(addr.String()), &types.Target{Hostname: addr.IP.String(), Port: addr.Port})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handshake was not bounded by the read deadline")
+	}
+
+	select {
+	case resp := <-got:
+		assert.Contains(t, string(resp), "502")
+	case <-time.After(time.Second):
+		t.Fatal("no error response sent to client")
+	}
+}
+
+func TestWSProxyStoreFrame(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		maxBodyBytes int
+		payloadLen   int
+		wantLen      int
+		wantCapped   bool
+	}{
+		{"under_cap_stored_whole", 16, 8, 8, false},
+		{"over_cap_truncated", 16, 64, 16, true},
+		{"cap_disabled", 0, 64, 64, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestWSHandler(t, tt.maxBodyBytes, TimeoutConfig{})
+			parentID := h.history.Store(&types.Flow{
+				Adapter:     types.ProtocolHTTP11,
+				ProtocolTag: types.ProtocolTagWS,
+			})
+			p := &wsProxy{handler: h, parentFlowID: parentID}
+
+			p.storeFrame(&wsFrame{fin: true, opcode: 2, payload: bytes.Repeat([]byte("a"), tt.payloadLen)}, "ws:to-client")
+
+			children := h.history.Children(parentID)
+			require.Len(t, children, 1)
+			child := children[0]
+			require.NotNil(t, child.Response)
+			assert.Len(t, child.Response.Body, tt.wantLen)
+			if tt.wantCapped {
+				assert.Equal(t, true, child.Annotations[annBodyTruncated])
+			} else {
+				assert.Nil(t, child.Annotations)
+			}
+		})
+	}
+}
+
+func TestWSProxyRunContextCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	clientConn, clientPeer := net.Pipe()
+	upstreamConn, upstreamPeer := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientPeer.Close()
+		_ = upstreamPeer.Close()
+	})
+
+	h := newTestWSHandler(t, 0, TimeoutConfig{})
+	p := &wsProxy{
+		ctx:          ctx,
+		handler:      h,
+		clientConn:   clientConn,
+		clientBuf:    bufio.NewReader(clientConn),
+		upstreamConn: upstreamConn,
+		upstreamBuf:  bufio.NewReader(upstreamConn),
+		done:         make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.run()
+	}()
+
+	// both pumps are blocked reading from idle peers
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return after context cancel")
+	}
+	_, err := clientPeer.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF)
+	_, err = upstreamPeer.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestWSProxyFramesForwardsUncapped(t *testing.T) {
+	t.Parallel()
+
+	// stored history is capped, but the relayed frame must stay byte-for-byte whole
+	const payloadLen = 4096
+	h := newTestWSHandler(t, 16, TimeoutConfig{})
+	parentID := h.history.Store(&types.Flow{Adapter: types.ProtocolHTTP11, ProtocolTag: types.ProtocolTagWS})
+
+	src := encodeWSFrame(&wsFrame{fin: true, opcode: 2, payload: bytes.Repeat([]byte("b"), payloadLen)})
+	dst, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+
+	p := &wsProxy{handler: h, parentFlowID: parentID, clientConn: dst, upstreamConn: dst, done: make(chan struct{})}
+	go p.proxyFrames(bufio.NewReader(bytes.NewReader(src)), dst, "ws:to-client", false)
+
+	got, err := readWSFrame(bufio.NewReader(peer))
+	require.NoError(t, err)
+	assert.Len(t, got.payload, payloadLen)
+
+	children := h.history.Children(parentID)
+	require.Len(t, children, 1)
+	assert.Len(t, children[0].Response.Body, 16)
 }
