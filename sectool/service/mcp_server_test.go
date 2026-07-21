@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -332,7 +333,12 @@ func (b *mockHttpBackend) GetProxyEntry(ctx context.Context, flowID string) (*Pr
 }
 
 func (b *mockHttpBackend) GetProxyChildren(ctx context.Context, parentFlowID string) ([]ProxyEntry, error) {
-	return nil, nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return bulk.SliceFilter(func(e ProxyEntry) bool {
+		return e.ParentFlowID == parentFlowID
+	}, b.entries), nil
 }
 
 func (b *mockHttpBackend) DeleteProxyEntries(ctx context.Context, flowIDs []string) (int, error) {
@@ -475,6 +481,7 @@ func (b *mockHttpBackend) DeleteResponder(ctx context.Context, idOrLabel string)
 func (b *mockHttpBackend) ListResponders(ctx context.Context) ([]protocol.ResponderEntry, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return slices.Clone(b.responders), nil
 }
 
@@ -484,6 +491,7 @@ func (b *mockHttpBackend) ListResponders(ctx context.Context) ([]protocol.Respon
 func (b *mockHttpBackend) AddProxyEntry(request, response, notes string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	flowID := ids.Generate(ids.DefaultLength)
 	b.entries = append(b.entries, ProxyEntry{
 		FlowID:    flowID,
@@ -495,10 +503,26 @@ func (b *mockHttpBackend) AddProxyEntry(request, response, notes string) string 
 	return flowID
 }
 
+// AddProxyChildEntry adds a child entry under parentFlowID. Returns the minted flow_id.
+func (b *mockHttpBackend) AddProxyChildEntry(parentFlowID, request string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	flowID := ids.Generate(ids.DefaultLength)
+	b.entries = append(b.entries, ProxyEntry{
+		FlowID:       flowID,
+		ParentFlowID: parentFlowID,
+		Timestamp:    time.Now().UTC(),
+		Request:      request,
+	})
+	return flowID
+}
+
 // AddProxyEntryProtocol adds an https entry with an explicit protocol. Returns the minted flow_id.
 func (b *mockHttpBackend) AddProxyEntryProtocol(request, response, protocol string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	flowID := ids.Generate(ids.DefaultLength)
 	b.entries = append(b.entries, ProxyEntry{
 		FlowID:    flowID,
@@ -516,6 +540,7 @@ func (b *mockHttpBackend) AddProxyEntryProtocol(request, response, protocol stri
 func (b *mockHttpBackend) AddProxyEntryScheme(request, response, scheme string, port int) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	flowID := ids.Generate(ids.DefaultLength)
 	b.entries = append(b.entries, ProxyEntry{
 		FlowID:    flowID,
@@ -532,6 +557,7 @@ func (b *mockHttpBackend) AddProxyEntryScheme(request, response, scheme string, 
 func (b *mockHttpBackend) AddProxyEntryAdapter(request, response, adapter string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	flowID := ids.Generate(ids.DefaultLength)
 	b.entries = append(b.entries, ProxyEntry{
 		FlowID:    flowID,
@@ -547,6 +573,7 @@ func (b *mockHttpBackend) AddProxyEntryAdapter(request, response, adapter string
 func (b *mockHttpBackend) AddProxyPlaceholder() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.entries = append(b.entries, ProxyEntry{Placeholder: true})
 }
 
@@ -556,6 +583,7 @@ func (b *mockHttpBackend) AddProxyPlaceholder() {
 func (b *mockHttpBackend) SetSendResult(headers, body string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if !strings.HasSuffix(headers, "\r\n\r\n") {
 		headers += "\r\n"
 	}
@@ -569,6 +597,7 @@ func (b *mockHttpBackend) SetSendResult(headers, body string) {
 func (b *mockHttpBackend) LastSentRequest() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return string(b.lastSentReq)
 }
 

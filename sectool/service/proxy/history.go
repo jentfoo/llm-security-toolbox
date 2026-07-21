@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-analyze/bulk"
+
 	"github.com/go-appsec/toolbox/sectool/service/ids"
 	"github.com/go-appsec/toolbox/sectool/service/proxy/types"
 	"github.com/go-appsec/toolbox/sectool/service/store"
@@ -365,51 +367,63 @@ func (h *HistoryStore) Count() int {
 	return len(h.flowOrder)
 }
 
-// Delete removes entries by flow_id. Idempotent; unknown ids are skipped.
-// Returns the number of entries actually removed.
+// Delete removes entries by flow_id, cascading to their child flows.
+// Idempotent; unknown ids are skipped. Returns the number of requested
+// entries removed, not counting cascaded children.
 func (h *HistoryStore) Delete(flowIDs ...string) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	var deleted int
-	for _, fid := range flowIDs {
+	queue := slices.Clone(flowIDs)
+	requested := bulk.SliceToSet(flowIDs)
+	seen := maps.Clone(requested)
+	for i := 0; i < len(queue); i++ {
+		fid := queue[i]
+		// children are reachable only through this parent, so they queue for
+		// deletion rather than being orphaned in storage
+		for _, child := range h.childOrder[fid] {
+			if _, dup := seen[child]; dup {
+				continue // guard against a cyclic parent link
+			}
+			seen[child] = struct{}{}
+			queue = append(queue, child)
+		}
+
 		if ts, ok := h.timestampByFlow[fid]; ok {
-			// Top-level flow: drop meta, payload, ordering, and its child index
+			// top-level flow: drop meta and listing order
 			if err := h.storage.Delete(historyMetaKey(fid)); err != nil {
 				log.Printf("proxy: delete history meta %s: %v", fid, err)
 				continue
 			}
-			if err := h.storage.Delete(historyPayloadKey(fid)); err != nil {
-				log.Printf("proxy: delete history payload %s: %v", fid, err)
-			}
 			delete(h.timestampByFlow, fid)
-			delete(h.childOrder, fid)
 			idx := sort.Search(len(h.flowOrder), func(i int) bool {
 				return !lessOrder(h.flowOrder[i].timestamp, h.flowOrder[i].flowID, ts, fid)
 			})
 			if idx < len(h.flowOrder) && h.flowOrder[idx].flowID == fid {
 				h.flowOrder = slices.Delete(h.flowOrder, idx, idx+1)
 			}
-			deleted++
-			continue
-		}
-
-		// Child flow (payload-only) or unknown id
-		flow, ok := h.Get(fid)
-		if !ok {
-			continue
-		}
-		if flow.ParentFlowID != "" {
-			siblings := h.childOrder[flow.ParentFlowID]
-			if i := slices.Index(siblings, fid); i >= 0 {
-				h.childOrder[flow.ParentFlowID] = slices.Delete(siblings, i, i+1)
+		} else {
+			// child flow (payload-only) or unknown id
+			flow, ok := h.Get(fid)
+			if !ok {
+				continue
+			}
+			if flow.ParentFlowID != "" {
+				siblings := h.childOrder[flow.ParentFlowID]
+				if j := slices.Index(siblings, fid); j >= 0 {
+					h.childOrder[flow.ParentFlowID] = slices.Delete(siblings, j, j+1)
+				}
 			}
 		}
-		delete(h.childOrder, fid) // drop fid's own child index if it nested further
+
+		delete(h.childOrder, fid)
 		if err := h.storage.Delete(historyPayloadKey(fid)); err != nil {
 			log.Printf("proxy: delete history payload %s: %v", fid, err)
 		}
-		deleted++
+		if _, ok := requested[fid]; ok {
+			deleted++ // cascaded children are not counted
+		}
 	}
 	return deleted
 }

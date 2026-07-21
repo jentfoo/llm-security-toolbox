@@ -437,17 +437,53 @@ func TestHistoryStore_Delete(t *testing.T) {
 		assert.Equal(t, c2, remaining[0].FlowID)
 	})
 
-	t.Run("delete_parent_drops_child_index", func(t *testing.T) {
+	t.Run("delete_parent_removes_children", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		h := newHistoryStore(storage)
+		t.Cleanup(h.Close)
+
+		parent := h.Store(newTestEntry("STREAM", "/s"))
+		c1 := h.Store(childFlow(parent, "a"))
+		c2 := h.Store(childFlow(parent, "b"))
+
+		// cascaded children are not counted
+		assert.Equal(t, 1, h.Delete(parent))
+		assert.Equal(t, 0, h.Count())
+		assert.Empty(t, h.Children(parent))
+		for _, c := range []string{c1, c2} {
+			_, ok := h.Get(c)
+			assert.False(t, ok)
+			assert.NotContains(t, storage.KeySet(), historyPayloadKey(c))
+		}
+	})
+
+	t.Run("delete_child_removes_grandchildren", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		h := newHistoryStore(storage)
+		t.Cleanup(h.Close)
+
+		parent := h.Store(newTestEntry("STREAM", "/s"))
+		child := h.Store(childFlow(parent, "a"))
+		grandchild := h.Store(childFlow(child, "b"))
+
+		assert.Equal(t, 1, h.Delete(child))
+		assert.NotContains(t, storage.KeySet(), historyPayloadKey(grandchild))
+		assert.Empty(t, h.Children(child))
+		// parent survives with the deleted child spliced out
+		assert.Equal(t, 1, h.Count())
+		assert.Empty(t, h.Children(parent))
+	})
+
+	t.Run("cyclic_parent_link_terminates", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
 
 		parent := h.Store(newTestEntry("STREAM", "/s"))
-		h.Store(childFlow(parent, "a"))
+		child := h.Store(childFlow(parent, "a"))
+		h.childOrder[child] = append(h.childOrder[child], parent)
 
 		assert.Equal(t, 1, h.Delete(parent))
 		assert.Equal(t, 0, h.Count())
-		// Child index for the gone parent is dropped (no dangling references).
-		assert.Empty(t, h.Children(parent))
 	})
 }
 
@@ -530,6 +566,12 @@ func TestHistoryStore_RecoverChildOrder(t *testing.T) {
 		got = append(got, c.FlowID)
 	}
 	assert.Equal(t, childIDs, got)
+
+	// a deleted parent leaves no child payloads for a rebuild to re-attach
+	require.Equal(t, 1, h2.Delete(parent))
+	h3 := newHistoryStore(storage)
+	t.Cleanup(h3.Close)
+	assert.Empty(t, h3.Children(parent))
 }
 
 func TestFormatRequest(t *testing.T) {

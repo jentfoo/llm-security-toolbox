@@ -190,7 +190,11 @@ func TestConnHeartbeatAndShutdown(t *testing.T) {
 	})
 
 	drained := make(chan int, 1)
-	go func() { _ = conn.Serve(t.Context(), shutdownHandler{fn: func(d int) { drained <- d }}) }()
+	// install up front: Serve's own install races the shutdown request below,
+	// which would silently ack against the BaseHandler no-op
+	h := shutdownHandler{fn: func(d int) { drained <- d }}
+	conn.SetHandler(h)
+	go func() { _ = conn.Serve(t.Context(), h) }()
 
 	require.NoError(t, srv.Notify(wire.MethodPing, nil))
 	select {

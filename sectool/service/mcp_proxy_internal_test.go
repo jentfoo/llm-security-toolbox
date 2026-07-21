@@ -64,6 +64,52 @@ func TestMCP_HistoryDelete(t *testing.T) {
 		assert.Equal(t, pid1, got[0].FlowID)
 	})
 
+	t.Run("note_on_child_retains_parent", func(t *testing.T) {
+		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		pid := mockHTTP.AddProxyEntry("GET /s HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 101 Switching Protocols\r\n\r\n", "")
+		cid := mockHTTP.AddProxyChildEntry(pid, "FRAME / HTTP/1.1\r\n\r\n")
+		require.NoError(t, srv.noteStore.Save(&store.NoteMeta{NoteID: "n1", Type: "note", FlowIDs: []string{cid}, Content: "x"}))
+
+		resp := CallMCPToolJSONOK[protocol.HistoryDeleteResponse](t, mcpClient, "_internal_history_delete", map[string]interface{}{
+			"flow_ids": []string{pid},
+		})
+		assert.Equal(t, 0, resp.DeletedProxy)
+		assert.Equal(t, []string{pid}, resp.Skipped)
+
+		// deleting the parent would cascade over the noted child, so it survives
+		_, err := mockHTTP.GetProxyEntry(t.Context(), pid)
+		assert.NoError(t, err)
+	})
+
+	t.Run("note_on_grandchild_retains_parent", func(t *testing.T) {
+		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		pid := mockHTTP.AddProxyEntry("GET /s HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 101 Switching Protocols\r\n\r\n", "")
+		cid := mockHTTP.AddProxyChildEntry(pid, "FRAME / HTTP/1.1\r\n\r\n")
+		gid := mockHTTP.AddProxyChildEntry(cid, "FRAME / HTTP/1.1\r\n\r\n")
+		require.NoError(t, srv.noteStore.Save(&store.NoteMeta{NoteID: "n1", Type: "note", FlowIDs: []string{gid}, Content: "x"}))
+
+		resp := CallMCPToolJSONOK[protocol.HistoryDeleteResponse](t, mcpClient, "_internal_history_delete", map[string]interface{}{
+			"flow_ids": []string{pid},
+		})
+		assert.Equal(t, 0, resp.DeletedProxy)
+		assert.Equal(t, []string{pid}, resp.Skipped)
+	})
+
+	t.Run("unnoted_children_delete_parent", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		pid := mockHTTP.AddProxyEntry("GET /s HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 101 Switching Protocols\r\n\r\n", "")
+		mockHTTP.AddProxyChildEntry(pid, "FRAME / HTTP/1.1\r\n\r\n")
+
+		resp := CallMCPToolJSONOK[protocol.HistoryDeleteResponse](t, mcpClient, "_internal_history_delete", map[string]interface{}{
+			"flow_ids": []string{pid},
+		})
+		assert.Equal(t, 1, resp.DeletedProxy)
+		assert.Empty(t, resp.Skipped)
+	})
+
 	t.Run("no_replay_cascade", func(t *testing.T) {
 		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 

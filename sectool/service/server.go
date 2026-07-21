@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/go-analyze/bulk"
 
 	"github.com/go-appsec/toolbox/sectool/config"
 	"github.com/go-appsec/toolbox/sectool/service/proxy"
@@ -297,14 +300,15 @@ func (s *Server) RequestShutdown() {
 	}
 }
 
-// DeleteProxyHistory removes the supplied flow_ids from the proxy backend and the replay store.
-// Flow_ids referenced by any saved note are retained and returned in skippedNoted.
+// DeleteProxyHistory removes the supplied flow_ids, and their child flows, from
+// the proxy backend and the replay store. A flow_id is retained and returned in
+// skippedNoted when it or any of its children is referenced by a saved note.
 // Each store silently ignores ids it doesn't own, so callers don't need to pre-route by source.
 func (s *Server) DeleteProxyHistory(ctx context.Context, flowIDs []string) (int, int, []string, error) {
 	if len(flowIDs) == 0 {
 		return 0, 0, nil, nil
 	}
-	skipped, candidates := s.noteStore.SplitReferencedFlows(flowIDs)
+	skipped, candidates := s.splitNotedFlows(ctx, flowIDs)
 	if len(candidates) == 0 {
 		return 0, 0, skipped, nil
 	}
@@ -317,6 +321,50 @@ func (s *Server) DeleteProxyHistory(ctx context.Context, flowIDs []string) (int,
 	}
 	deletedReplay := s.replayHistoryStore.Delete(candidates)
 	return deletedProxy, deletedReplay, skipped, nil
+}
+
+// splitNotedFlows splits flowIDs into those retained for a note reference
+// somewhere in their subtree (left / first) and those safe to delete (right).
+func (s *Server) splitNotedFlows(ctx context.Context, flowIDs []string) ([]string, []string) {
+	subtrees := make(map[string][]string, len(flowIDs))
+	all := make([]string, 0, len(flowIDs))
+	for _, fid := range flowIDs {
+		subtrees[fid] = s.flowSubtree(ctx, fid)
+		all = append(all, subtrees[fid]...)
+	}
+
+	referenced, _ := s.noteStore.SplitReferencedFlows(all)
+	if len(referenced) == 0 {
+		return nil, flowIDs
+	}
+	noted := bulk.SliceToSet(referenced)
+	return bulk.SliceSplit(func(fid string) bool {
+		return slices.ContainsFunc(subtrees[fid], func(id string) bool {
+			_, ok := noted[id]
+			return ok
+		})
+	}, flowIDs)
+}
+
+// flowSubtree returns flowID followed by its descendant flow_ids, breadth-first.
+func (s *Server) flowSubtree(ctx context.Context, flowID string) []string {
+	subtree := []string{flowID}
+	seen := map[string]struct{}{flowID: {}}
+	for i := 0; i < len(subtree); i++ {
+		children, err := s.httpBackend.GetProxyChildren(ctx, subtree[i])
+		if err != nil {
+			log.Printf("history/delete: children of %s: %v", subtree[i], err)
+			continue
+		}
+		for _, c := range children {
+			if _, dup := seen[c.FlowID]; dup {
+				continue // guard against a cyclic parent link
+			}
+			seen[c.FlowID] = struct{}{}
+			subtree = append(subtree, c.FlowID)
+		}
+	}
+	return subtree
 }
 
 // loadOrCreateConfig loads config and applies CLI flag overrides.
