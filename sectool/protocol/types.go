@@ -157,6 +157,7 @@ type OastPollResponse struct {
 	Events       []OastEvent        `json:"events,omitempty"`      // list mode
 	TotalCount   int                `json:"total_count,omitempty"` // total before limit truncation
 	DroppedCount int                `json:"dropped_count,omitempty"`
+	Note         string             `json:"note,omitempty"`
 }
 
 // MarshalJSON preserves non-nil empty slices (as []) while omitting nil ones.
@@ -173,6 +174,9 @@ func (r OastPollResponse) MarshalJSON() ([]byte, error) {
 	}
 	if r.DroppedCount > 0 {
 		m["dropped_count"] = r.DroppedCount
+	}
+	if r.Note != "" {
+		m["note"] = r.Note
 	}
 	return json.Marshal(m)
 }

@@ -88,10 +88,6 @@ type sendModifications struct {
 }
 
 func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	flowID := req.GetString("flow_id", "")
 	if flowID == "" {
 		return errorResult("flow_id is required"), nil
@@ -270,10 +266,6 @@ func splitPair(s, sep string) (name, value string, ok bool) {
 }
 
 func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	urlStr := req.GetString("url", "")
 	if urlStr == "" {
 		return errorResult("url is required"), nil
@@ -574,13 +566,20 @@ func jsonObjectArg(raw interface{}) map[string]interface{} {
 	return nil
 }
 
-// getFormArg extracts set_form as a string-valued map; non-string values are coerced via fmt.Sprint.
+// getFormArg extracts set_form as a string-valued map.
 func getFormArg(req mcp.CallToolRequest) map[string]string {
+	return getStringMapArg(req, "set_form")
+}
+
+// getStringMapArg extracts the named argument as a string-valued map, accepting an
+// object or a string-encoded object literal. Scalar values are coerced to strings,
+// nested objects and arrays are skipped.
+func getStringMapArg(req mcp.CallToolRequest, key string) map[string]string {
 	args := req.GetArguments()
 	if args == nil {
 		return nil
 	}
-	raw, ok := args["set_form"]
+	raw, ok := args[key]
 	if !ok || raw == nil {
 		return nil
 	}
@@ -590,10 +589,15 @@ func getFormArg(req mcp.CallToolRequest) map[string]string {
 	}
 	out := make(map[string]string, len(rawMap))
 	for k, v := range rawMap {
-		if s, ok := v.(string); ok {
-			out[k] = s
-		} else {
-			out[k] = fmt.Sprint(v)
+		switch val := v.(type) {
+		case nil:
+			out[k] = ""
+		case string:
+			out[k] = val
+		case bool, float64, int, int64, json.Number:
+			out[k] = fmt.Sprint(val)
+		default:
+			// skip maps/slices/objects, not valid header or form scalars
 		}
 	}
 	return out

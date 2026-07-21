@@ -257,56 +257,56 @@ func (m *mcpServer) registerTools() {
 }
 
 func (m *mcpServer) addProxyTools() {
-	m.server.AddTool(m.proxyPollTool(), m.handleProxyPoll)
-	m.server.AddTool(m.flowGetTool(), m.handleFlowGet)
-	m.server.AddTool(m.cookieJarTool(), m.handleCookieJar)
-	m.server.AddTool(m.proxyRuleListTool(), m.handleProxyRuleList)
-	m.server.AddTool(m.proxyRuleAddTool(), m.handleProxyRuleAdd)
-	m.server.AddTool(m.proxyRuleDeleteTool(), m.handleProxyRuleDelete)
-	m.server.AddTool(m.historyDeleteTool(), m.handleHistoryDelete)
+	m.server.AddTool(m.proxyPollTool(), m.requireWorkflow(m.handleProxyPoll))
+	m.server.AddTool(m.flowGetTool(), m.requireWorkflow(m.handleFlowGet))
+	m.server.AddTool(m.cookieJarTool(), m.requireWorkflow(m.handleCookieJar))
+	m.server.AddTool(m.proxyRuleListTool(), m.requireWorkflow(m.handleProxyRuleList))
+	m.server.AddTool(m.proxyRuleAddTool(), m.requireWorkflow(m.handleProxyRuleAdd))
+	m.server.AddTool(m.proxyRuleDeleteTool(), m.requireWorkflow(m.handleProxyRuleDelete))
+	m.server.AddTool(m.historyDeleteTool(), m.requireWorkflow(m.handleHistoryDelete))
 }
 
 func (m *mcpServer) addReplayTools() {
-	m.server.AddTool(m.replaySendTool(), m.handleReplaySend)
-	m.server.AddTool(m.requestSendTool(), m.handleRequestSend)
+	m.server.AddTool(m.replaySendTool(), m.requireWorkflow(m.handleReplaySend))
+	m.server.AddTool(m.requestSendTool(), m.requireWorkflow(m.handleRequestSend))
 }
 
 func (m *mcpServer) addOastTools() {
-	m.server.AddTool(m.oastCreateTool(), m.handleOastCreate)
-	m.server.AddTool(m.oastPollTool(), m.handleOastPoll)
-	m.server.AddTool(m.oastGetTool(), m.handleOastGet)
-	m.server.AddTool(m.oastListTool(), m.handleOastList)
-	m.server.AddTool(m.oastDeleteTool(), m.handleOastDelete)
+	m.server.AddTool(m.oastCreateTool(), m.requireWorkflow(m.handleOastCreate))
+	m.server.AddTool(m.oastPollTool(), m.requireWorkflow(m.handleOastPoll))
+	m.server.AddTool(m.oastGetTool(), m.requireWorkflow(m.handleOastGet))
+	m.server.AddTool(m.oastListTool(), m.requireWorkflow(m.handleOastList))
+	m.server.AddTool(m.oastDeleteTool(), m.requireWorkflow(m.handleOastDelete))
 }
 
 func (m *mcpServer) addEncodingTools() {
-	m.server.AddTool(m.encodeTool(), m.handleEncode)
-	m.server.AddTool(m.decodeTool(), m.handleDecode)
+	m.server.AddTool(m.encodeTool(), m.requireWorkflow(m.handleEncode))
+	m.server.AddTool(m.decodeTool(), m.requireWorkflow(m.handleDecode))
 }
 
 func (m *mcpServer) addUUIDTools() {
-	m.server.AddTool(m.uuidGenerateTool(), m.handleUUIDGenerate)
+	m.server.AddTool(m.uuidGenerateTool(), m.requireWorkflow(m.handleUUIDGenerate))
 }
 
 func (m *mcpServer) addHashTools() {
-	m.server.AddTool(m.hashTool(), m.handleHash)
+	m.server.AddTool(m.hashTool(), m.requireWorkflow(m.handleHash))
 }
 
 func (m *mcpServer) addJWTTools() {
-	m.server.AddTool(m.jwtDecodeTool(), m.handleJWTDecode)
+	m.server.AddTool(m.jwtDecodeTool(), m.requireWorkflow(m.handleJWTDecode))
 }
 
 func (m *mcpServer) addCrawlTools() {
-	m.server.AddTool(m.crawlCreateTool(), m.handleCrawlCreate)
-	m.server.AddTool(m.crawlSeedTool(), m.handleCrawlSeed)
-	m.server.AddTool(m.crawlStatusTool(), m.handleCrawlStatus)
-	m.server.AddTool(m.crawlPollTool(), m.handleCrawlPoll)
-	m.server.AddTool(m.crawlSessionsTool(), m.handleCrawlSessions)
-	m.server.AddTool(m.crawlStopTool(), m.handleCrawlStop)
+	m.server.AddTool(m.crawlCreateTool(), m.requireWorkflow(m.handleCrawlCreate))
+	m.server.AddTool(m.crawlSeedTool(), m.requireWorkflow(m.handleCrawlSeed))
+	m.server.AddTool(m.crawlStatusTool(), m.requireWorkflow(m.handleCrawlStatus))
+	m.server.AddTool(m.crawlPollTool(), m.requireWorkflow(m.handleCrawlPoll))
+	m.server.AddTool(m.crawlSessionsTool(), m.requireWorkflow(m.handleCrawlSessions))
+	m.server.AddTool(m.crawlStopTool(), m.requireWorkflow(m.handleCrawlStop))
 }
 
 func (m *mcpServer) addDiffTools() {
-	m.server.AddTool(m.diffFlowTool(), m.handleDiffFlow)
+	m.server.AddTool(m.diffFlowTool(), m.requireWorkflow(m.handleDiffFlow))
 }
 
 func (m *mcpServer) addJSTools() {
@@ -316,13 +316,15 @@ func (m *mcpServer) addJSTools() {
 
 const workflowNotInitializedError = "call workflow first with the relevant task, use 'explore' if there is no better fit"
 
-// requireWorkflow returns an error result if workflow is required but not initialized, nil otherwise.
+// requireWorkflow wraps a tool handler to require workflow initialization first.
 // Only enforced when workflowMode is empty (default behavior).
-func (m *mcpServer) requireWorkflow() *mcp.CallToolResult {
-	if m.workflowMode == "" && !m.workflowInitialized.Load() {
-		return errorResult(workflowNotInitializedError)
+func (m *mcpServer) requireWorkflow(h server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if m.workflowMode == "" && !m.workflowInitialized.Load() {
+			return errorResult(workflowNotInitializedError), nil
+		}
+		return h(ctx, req)
 	}
-	return nil
 }
 
 func (m *mcpServer) workflowTool() mcp.Tool {
@@ -457,6 +459,20 @@ func jsonResult(data interface{}) (*mcp.CallToolResult, error) {
 		return errorResult("failed to marshal response: " + err.Error()), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
+}
+
+// normalizeOutputMode resolves an output_mode argument against the modes a tool
+// supports, the first being the default. Returns the resolved mode, plus a note when
+// the requested mode was not recognized and the default was used instead.
+func normalizeOutputMode(raw string, valid ...string) (string, string) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		return valid[0], ""
+	} else if slices.Contains(valid, mode) {
+		return mode, ""
+	}
+	return valid[0], fmt.Sprintf("unknown output_mode %q, used %s; valid: %s",
+		raw, valid[0], strings.Join(valid, ", "))
 }
 
 // getOptionalBoolArg returns the named bool argument, or nil when absent.

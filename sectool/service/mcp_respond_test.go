@@ -13,7 +13,7 @@ import (
 func TestMCP_ProxyRespondAdd(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	resp := CallMCPToolJSONOK[protocol.ResponderEntry](t, mcpClient, "proxy_respond_add", map[string]interface{}{
 		"origin":      "https://example.com",
@@ -35,7 +35,7 @@ func TestMCP_ProxyRespondAdd(t *testing.T) {
 func TestMCP_ProxyRespondAdd_ScalarHeaders(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	resp := CallMCPToolJSONOK[protocol.ResponderEntry](t, mcpClient, "proxy_respond_add", map[string]interface{}{
 		"origin": "https://example.com",
@@ -73,6 +73,14 @@ func TestGetStringMapArg(t *testing.T) {
 		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{"headers": "oops"}), "headers"))
 	})
 
+	t.Run("string_encoded_object", func(t *testing.T) {
+		got := getStringMapArg(newReq(map[string]interface{}{
+			"headers": `{"X-Test": "v", "X-Num": 2}`,
+		}), "headers")
+
+		assert.Equal(t, map[string]string{"X-Test": "v", "X-Num": "2"}, got)
+	})
+
 	t.Run("coerce_scalars", func(t *testing.T) {
 		got := getStringMapArg(newReq(map[string]interface{}{"headers": map[string]interface{}{
 			"str":    "v",
@@ -95,7 +103,7 @@ func TestGetStringMapArg(t *testing.T) {
 func TestMCP_ProxyRespondAdd_Validation(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	t.Run("missing_origin", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "proxy_respond_add", map[string]interface{}{
@@ -117,7 +125,7 @@ func TestMCP_ProxyRespondAdd_Validation(t *testing.T) {
 func TestMCP_ProxyRespondAdd_DuplicateLabel(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	CallMCPToolTextOK(t, mcpClient, "proxy_respond_add", map[string]interface{}{
 		"origin": "https://example.com",
@@ -137,7 +145,7 @@ func TestMCP_ProxyRespondAdd_DuplicateLabel(t *testing.T) {
 func TestMCP_ProxyRespondDelete(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	resp := CallMCPToolJSONOK[protocol.ResponderEntry](t, mcpClient, "proxy_respond_add", map[string]interface{}{
 		"origin": "https://example.com",
@@ -160,7 +168,7 @@ func TestMCP_ProxyRespondDelete(t *testing.T) {
 func TestMCP_ProxyRespondDelete_ByLabel(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	CallMCPToolTextOK(t, mcpClient, "proxy_respond_add", map[string]interface{}{
 		"origin": "https://example.com",
@@ -176,7 +184,7 @@ func TestMCP_ProxyRespondDelete_ByLabel(t *testing.T) {
 func TestMCP_ProxyRespondList(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	// Empty list
 	listResp := CallMCPToolJSONOK[protocol.ResponderListResponse](t, mcpClient, "proxy_respond_list", nil)

@@ -40,10 +40,6 @@ The crawler automatically:
 }
 
 func (m *mcpServer) handleCrawlCreate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	// Parse seed URLs and flows
 	var seeds []CrawlSeed
 	if seedURLs := req.GetString("seed_urls", ""); seedURLs != "" {
@@ -115,10 +111,6 @@ Can only add seeds while session is running.`),
 }
 
 func (m *mcpServer) handleCrawlSeed(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	sessionID := req.GetString("session_id", "")
 	if sessionID == "" {
 		return errorResult("session_id is required"), nil
@@ -161,10 +153,6 @@ Returns progress metrics including URLs visited, queued, errors, and forms disco
 }
 
 func (m *mcpServer) handleCrawlStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	sessionID := req.GetString("session_id", "")
 	if sessionID == "" {
 		return errorResult("session_id is required"), nil
@@ -226,18 +214,15 @@ Filters apply to summary and flows modes only.
 }
 
 func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	sessionID := req.GetString("session_id", "")
 	if sessionID == "" {
 		return errorResult("session_id is required"), nil
 	}
 
-	outputMode := req.GetString("output_mode", "summary")
+	outputMode, modeNote := normalizeOutputMode(req.GetString("output_mode", ""),
+		OutputModeSummary, OutputModeFlows, OutputModeForms, OutputModeErrors)
 	limit := req.GetInt("limit", 0)
-	if limit == 0 && outputMode != "summary" {
+	if limit == 0 && outputMode != OutputModeSummary {
 		limit = 100
 	}
 
@@ -267,38 +252,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 		return jsonResult(protocol.CrawlPollResponse{SessionID: sessionID, Errors: errs})
 
 	case OutputModeFlows:
-		searchHeader := req.GetString("search_header", "")
-		searchBody := req.GetString("search_body", "")
-		offset := req.GetInt("offset", 0)
-
-		var notes []string
-		opts := CrawlListOptions{
-			Host:        req.GetString("host", ""),
-			PathPattern: req.GetString("path", ""),
-			StatusCodes: parseStatusFilter(req.GetString("status", "")),
-			Methods:     parseCommaSeparated(req.GetString("method", "")),
-			ExcludeHost: req.GetString("exclude_host", ""),
-			ExcludePath: req.GetString("exclude_path", ""),
-			Since:       req.GetString("since", ""),
-			Limit:       limit,
-			Offset:      offset,
-		}
-
-		// Pass compiled search regexes to backend for integrated filtering
-		if searchHeader != "" {
-			re, note := compileSearchPattern(searchHeader, true)
-			opts.SearchHeaderRe = re
-			if note != "" {
-				notes = append(notes, note)
-			}
-		}
-		if searchBody != "" {
-			re, note := compileSearchPattern(searchBody, false)
-			opts.SearchBodyRe = re
-			if note != "" {
-				notes = append(notes, note)
-			}
-		}
+		opts, notes := crawlListOptions(req, limit, req.GetInt("offset", 0))
 
 		flows, err := m.service.crawlerBackend.ListFlows(ctx, sessionID, opts)
 		if err != nil {
@@ -336,36 +290,10 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 			return errorResultFromErr("failed to get status: ", err), nil
 		}
 
-		searchHeader := req.GetString("search_header", "")
-		searchBody := req.GetString("search_body", "")
-
-		var notes []string
-		// Use ListFlows with filters (no limit) to get filtered flows, then aggregate
-		opts := CrawlListOptions{
-			Host:        req.GetString("host", ""),
-			PathPattern: req.GetString("path", ""),
-			StatusCodes: parseStatusFilter(req.GetString("status", "")),
-			Methods:     parseCommaSeparated(req.GetString("method", "")),
-			ExcludeHost: req.GetString("exclude_host", ""),
-			ExcludePath: req.GetString("exclude_path", ""),
-			Since:       req.GetString("since", ""),
-			Limit:       0, // no limit for summary
-		}
-
-		// Pass compiled search regexes to backend for integrated filtering
-		if searchHeader != "" {
-			re, note := compileSearchPattern(searchHeader, true)
-			opts.SearchHeaderRe = re
-			if note != "" {
-				notes = append(notes, note)
-			}
-		}
-		if searchBody != "" {
-			re, note := compileSearchPattern(searchBody, false)
-			opts.SearchBodyRe = re
-			if note != "" {
-				notes = append(notes, note)
-			}
+		// aggregation needs every match, so the limit is applied after filtering
+		opts, notes := crawlListOptions(req, 0, 0)
+		if modeNote != "" {
+			notes = append(notes, modeNote)
 		}
 
 		flows, err := m.service.crawlerBackend.ListFlows(ctx, sessionID, opts)
@@ -397,6 +325,40 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 	}
 }
 
+// crawlListOptions builds crawl flow filter options from the request, returning any
+// notes produced while compiling the search patterns.
+func crawlListOptions(req mcp.CallToolRequest, limit, offset int) (CrawlListOptions, []string) {
+	opts := CrawlListOptions{
+		Host:        req.GetString("host", ""),
+		PathPattern: req.GetString("path", ""),
+		StatusCodes: parseStatusFilter(req.GetString("status", "")),
+		Methods:     parseCommaSeparated(req.GetString("method", "")),
+		ExcludeHost: req.GetString("exclude_host", ""),
+		ExcludePath: req.GetString("exclude_path", ""),
+		Since:       req.GetString("since", ""),
+		Limit:       limit,
+		Offset:      offset,
+	}
+
+	// compiled here so the backend filters during listing
+	var notes []string
+	if v := req.GetString("search_header", ""); v != "" {
+		re, note := compileSearchPattern(v, true)
+		opts.SearchHeaderRe = re
+		if note != "" {
+			notes = append(notes, note)
+		}
+	}
+	if v := req.GetString("search_body", ""); v != "" {
+		re, note := compileSearchPattern(v, false)
+		opts.SearchBodyRe = re
+		if note != "" {
+			notes = append(notes, note)
+		}
+	}
+	return opts, notes
+}
+
 func (m *mcpServer) crawlSessionsTool() mcp.Tool {
 	return mcp.NewTool("crawl_sessions",
 		mcp.WithDescription(`List all crawl sessions.
@@ -407,10 +369,6 @@ Returns sessions ordered by creation time (most recent first).`),
 }
 
 func (m *mcpServer) handleCrawlSessions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	limit := req.GetInt("limit", 0)
 
 	sessions, err := m.service.crawlerBackend.ListSessions(ctx, limit)
@@ -442,10 +400,6 @@ In-flight requests are abandoned immediately.`),
 }
 
 func (m *mcpServer) handleCrawlStop(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	sessionID := req.GetString("session_id", "")
 	if sessionID == "" {
 		return errorResult("session_id is required"), nil

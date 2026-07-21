@@ -18,7 +18,7 @@ func TestHandleReplaySend(t *testing.T) {
 	t.Parallel()
 
 	t.Run("happy_path", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /replay-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
@@ -45,7 +45,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("missing_flow_id", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "replay_send", map[string]interface{}{})
 		assert.True(t, result.IsError)
@@ -53,7 +53,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("invalid_flow_id", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "replay_send", map[string]interface{}{
 			"flow_id": "nonexistent",
@@ -63,7 +63,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("from_crawler_flow", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, mockCrawler := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
 			"seed_urls": "https://crawl.test",
@@ -95,7 +95,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("set_headers_array", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /header-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
@@ -124,7 +124,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("set_headers_object", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /header-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
@@ -155,7 +155,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("with_path_override", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /api/users HTTP/1.1\r\nHost: original.test\r\nContent-Type: application/json\r\n\r\n{\"name\":\"test\"}",
@@ -184,7 +184,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("with_query_modifications", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /api/users HTTP/1.1\r\nHost: original.test\r\nContent-Type: application/json\r\n\r\n{\"name\":\"test\"}",
@@ -214,7 +214,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("with_json_modifications", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /api/users HTTP/1.1\r\nHost: original.test\r\nContent-Type: application/json\r\n\r\n{\"name\":\"test\",\"temp\":\"remove\"}",
@@ -250,7 +250,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("body_then_json_order", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /api HTTP/1.1\r\nHost: mock.test\r\nContent-Type: application/json\r\n\r\n{\"old\":1}",
@@ -278,7 +278,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("form_encoded_rejects_set_json", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /oauth2/token HTTP/1.1\r\nHost: idp.test\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\ngrant_type=refresh_token&refresh_token=x",
@@ -305,7 +305,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("set_form_modifies_form_encoded_body", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /oauth2/token HTTP/1.1\r\nHost: idp.test\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\ngrant_type=refresh_token&refresh_token=abc",
@@ -339,7 +339,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("form_encoded_rejects_set_json_with_charset", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /oauth2/token HTTP/1.1\r\nHost: idp.test\r\nContent-Type: application/x-www-form-urlencoded; charset=utf-8\r\n\r\ngrant_type=refresh_token",
@@ -363,7 +363,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("with_follow_redirects", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /api/users HTTP/1.1\r\nHost: original.test\r\nContent-Type: application/json\r\n\r\n{\"name\":\"test\"}",
@@ -390,7 +390,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("with_body_replacement", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /api/users HTTP/1.1\r\nHost: original.test\r\nContent-Type: application/json\r\n\r\n{\"name\":\"original\"}",
@@ -421,7 +421,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("compresses_modified_body", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"POST /api/data HTTP/1.1\r\nHost: test.com\r\nContent-Encoding: gzip\r\nContent-Type: application/json\r\n\r\noriginal body",
@@ -459,7 +459,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("no_compression_unmodified", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		const originalBody = "original body unchanged"
 		mockHTTP.AddProxyEntry(
@@ -491,7 +491,7 @@ func TestHandleReplaySend(t *testing.T) {
 	})
 
 	t.Run("set_json_triggers_compression", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		const originalJSON = `{"key":"value"}`
 		mockHTTP.AddProxyEntry(
@@ -573,7 +573,7 @@ func TestHandleReplaySendSidecarRouting(t *testing.T) {
 	t.Parallel()
 
 	t.Run("unregistered_adapter_stays_native", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 		// Adapter set but no sidecar registry (mock backend): native replay runs.
 		flowID := mockHTTP.AddProxyEntryAdapter(
 			"GET /x HTTP/1.1\r\nHost: mock.test\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "ghost")
@@ -592,7 +592,7 @@ func TestHandleRequestSend(t *testing.T) {
 	t.Parallel()
 
 	t.Run("defaults_to_get", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -606,7 +606,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("missing_url", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "request_send", map[string]interface{}{
 			"method": "GET",
@@ -616,7 +616,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("invalid_url", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "request_send", map[string]interface{}{
 			"url": "://invalid",
@@ -626,7 +626,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("headers_object", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -645,7 +645,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("headers_array", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -664,7 +664,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("headers_string_array", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -681,7 +681,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("headers_string_object", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -698,7 +698,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("compresses_with_encoding", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -729,7 +729,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("no_compression_without_header", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -754,7 +754,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("te_with_force", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -773,7 +773,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("explicit_cl_with_force", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -791,7 +791,7 @@ func TestHandleRequestSend(t *testing.T) {
 	})
 
 	t.Run("user_host_preserved", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",
@@ -810,7 +810,7 @@ func TestHandleRequestSend(t *testing.T) {
 func TestExecuteSend_WireFidelity(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	mockHTTP.AddProxyEntry(
 		"POST /test HTTP/1.1\r\nHost: wire.test\r\nContent-Length: 5\r\n\r\nhello",
@@ -1113,7 +1113,7 @@ func TestExecuteSend_WireFidelity(t *testing.T) {
 	})
 
 	t.Run("chunked_body_replacement", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		chunkedReq := "POST /case1 HTTP/1.1\r\n" +
 			"Host: example.com\r\n" +
@@ -1145,7 +1145,7 @@ func TestExecuteSend_WireFidelity(t *testing.T) {
 	})
 
 	t.Run("chunked_trailer_headers_with_new_body", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		chunkedReq := "POST /case2 HTTP/1.1\r\n" +
 			"Host: example.com\r\n" +
@@ -1179,7 +1179,7 @@ func TestExecuteSend_WireFidelity(t *testing.T) {
 	})
 
 	t.Run("crawl_flow_bytes_preserved", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, mockCrawler := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
 			"seed_urls": "https://crawl.test",
@@ -1229,7 +1229,7 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
-		})
+		}, protocol.WorkflowModeNone)
 
 		flowID := mockHTTP.AddProxyEntry(
 			"GET /page HTTP/1.1\r\nHost: blocked.test\r\n\r\n",
@@ -1249,7 +1249,7 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
-		})
+		}, protocol.WorkflowModeNone)
 
 		flowID := mockHTTP.AddProxyEntry(
 			"GET /page HTTP/1.1\r\nHost: blocked.test\r\n\r\n",
@@ -1270,7 +1270,7 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
-		})
+		}, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "request_send", map[string]interface{}{
 			"url": "https://blocked.test/api",
@@ -1284,7 +1284,7 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, &config.Config{
 			ExcludeDomains: []string{"internal.corp"},
-		})
+		}, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "request_send", map[string]interface{}{
 			"url": "https://db.internal.corp/admin",
@@ -1298,7 +1298,7 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
-		})
+		}, protocol.WorkflowModeNone)
 
 		mockHTTP.SetSendResult(
 			"HTTP/1.1 200 OK\r\n",

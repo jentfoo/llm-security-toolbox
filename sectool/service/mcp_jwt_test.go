@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/toolbox/sectool/jwt"
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 func testMakeJWT(header, payload map[string]interface{}) string {
@@ -22,7 +23,7 @@ func testMakeJWT(header, payload map[string]interface{}) string {
 func TestMCP_JWTDecode(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	t.Run("valid_jwt", func(t *testing.T) {
 		now := time.Now()

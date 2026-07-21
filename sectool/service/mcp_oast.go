@@ -91,10 +91,6 @@ func (m *mcpServer) oastDeleteTool() mcp.Tool {
 	)
 }
 func (m *mcpServer) handleOastCreate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	label := req.GetString("label", "")
 	redirectTarget := req.GetString("redirect_target", "")
 
@@ -112,16 +108,12 @@ func (m *mcpServer) handleOastCreate(ctx context.Context, req mcp.CallToolReques
 }
 
 func (m *mcpServer) handleOastPoll(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	oastID := req.GetString("oast_id", "")
 	if oastID == "" {
 		return errorResult("oast_id is required"), nil
 	}
 
-	outputMode := req.GetString("output_mode", "summary")
+	outputMode, modeNote := normalizeOutputMode(req.GetString("output_mode", ""), OutputModeSummary, OutputModeEvents)
 
 	wait := 30 * time.Second
 	if waitStr := req.GetString("wait", ""); waitStr != "" {
@@ -141,7 +133,7 @@ func (m *mcpServer) handleOastPoll(ctx context.Context, req mcp.CallToolRequest)
 
 	// In summary mode, fetch all events (limit applied after aggregation)
 	backendLimit := limit
-	if outputMode != "events" {
+	if outputMode != OutputModeEvents {
 		backendLimit = 0
 	}
 
@@ -154,7 +146,7 @@ func (m *mcpServer) handleOastPoll(ctx context.Context, req mcp.CallToolRequest)
 	}
 
 	switch outputMode {
-	case "events":
+	case OutputModeEvents:
 		events := make([]protocol.OastEvent, len(result.Events))
 		for i, e := range result.Events {
 			events[i] = protocol.OastEvent{
@@ -183,6 +175,7 @@ func (m *mcpServer) handleOastPoll(ctx context.Context, req mcp.CallToolRequest)
 		resp := protocol.OastPollResponse{
 			Aggregates:   agg,
 			DroppedCount: result.DroppedCount,
+			Note:         modeNote,
 		}
 		if limit > 0 && totalCount > limit {
 			resp.TotalCount = totalCount
@@ -224,10 +217,6 @@ func aggregateOastEvents(events []OastEventInfo) []protocol.OastSummaryEntry {
 }
 
 func (m *mcpServer) handleOastGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	eventID := req.GetString("event_id", "")
 	if eventID == "" {
 		return errorResult("event_id is required"), nil
@@ -368,10 +357,6 @@ func filterOastDetails(details map[string]interface{}, fields map[string]bool, e
 }
 
 func (m *mcpServer) handleOastList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	limit := req.GetInt("limit", 0)
 
 	sessions, err := m.service.oastBackend.ListSessions(ctx)
@@ -404,10 +389,6 @@ func (m *mcpServer) handleOastList(ctx context.Context, req mcp.CallToolRequest)
 }
 
 func (m *mcpServer) handleOastDelete(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	oastID := req.GetString("oast_id", "")
 	if oastID == "" {
 		return errorResult("oast_id is required"), nil

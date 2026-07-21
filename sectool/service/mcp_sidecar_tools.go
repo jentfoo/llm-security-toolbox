@@ -52,7 +52,7 @@ func (m *mcpServer) syncSidecarTools() {
 			}
 			add = append(add, server.ServerTool{
 				Tool:    sidecarToolDef(tool, schemaRaw),
-				Handler: m.delegateSidecarTool(tool.Name, schema),
+				Handler: m.requireWorkflow(m.delegateSidecarTool(tool.Name, schema)),
 			})
 		}
 	}
@@ -75,13 +75,13 @@ func (m *mcpServer) syncSidecarTools() {
 		ruleParam := mcp.WithString("adapter", mcp.Description(fmt.Sprintf(
 			"Adapter scope: empty applies to all adapters; %q targets the in-process proxy and Burp; or a sidecar name (%s)",
 			types.AdapterScopeCore, strings.Join(names, ", "))))
-		m.server.AddTool(m.proxyPollTool(pollParams...), m.handleProxyPoll)
-		m.server.AddTool(m.proxyRuleAddTool(ruleParam), m.handleProxyRuleAdd)
+		m.server.AddTool(m.proxyPollTool(pollParams...), m.requireWorkflow(m.handleProxyPoll))
+		m.server.AddTool(m.proxyRuleAddTool(ruleParam), m.requireWorkflow(m.handleProxyRuleAdd))
 		m.sidecarCoreParams = true
 	case m.sidecarCoreParams:
 		// last sidecar disconnected: restore the byte-identical core schema
-		m.server.AddTool(m.proxyPollTool(), m.handleProxyPoll)
-		m.server.AddTool(m.proxyRuleAddTool(), m.handleProxyRuleAdd)
+		m.server.AddTool(m.proxyPollTool(), m.requireWorkflow(m.handleProxyPoll))
+		m.server.AddTool(m.proxyRuleAddTool(), m.requireWorkflow(m.handleProxyRuleAdd))
 		m.sidecarCoreParams = false
 	}
 }
@@ -90,9 +90,6 @@ func (m *mcpServer) syncSidecarTools() {
 // against the tool's schema and delegates the call to the owning sidecar.
 func (m *mcpServer) delegateSidecarTool(name string, schema *jsonschema.Schema) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if r := m.requireWorkflow(); r != nil {
-			return r, nil
-		}
 		args, err := json.Marshal(req.GetArguments())
 		if err != nil {
 			return errorResultFromErr("invalid arguments", err), nil

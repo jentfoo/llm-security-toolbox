@@ -13,8 +13,8 @@ import (
 )
 
 func (m *mcpServer) addNotesTools() {
-	m.server.AddTool(m.notesSaveTool(), m.handleNotesSave)
-	m.server.AddTool(m.notesListTool(), m.handleNotesList)
+	m.server.AddTool(m.notesSaveTool(), m.requireWorkflow(m.handleNotesSave))
+	m.server.AddTool(m.notesListTool(), m.requireWorkflow(m.handleNotesList))
 }
 
 func (m *mcpServer) notesSaveTool() mcp.Tool {
@@ -45,10 +45,6 @@ Returns notes sorted by creation time. Use filters to narrow results.`),
 }
 
 func (m *mcpServer) handleNotesSave(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	noteID := req.GetString("note_id", "")
 	noteType := req.GetString("type", "")
 	flowIDsStr := req.GetString("flow_ids", "")
@@ -125,10 +121,6 @@ func (m *mcpServer) handleNotesSave(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (m *mcpServer) handleNotesList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	ns := m.service.noteStore
 
 	flowIDStr := req.GetString("flow_ids", "")

@@ -4,12 +4,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 func TestMCP_Encode(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	t.Run("url", func(t *testing.T) {
 		text := CallMCPToolTextOK(t, mcpClient, "encode", map[string]interface{}{
@@ -56,7 +58,7 @@ func TestMCP_Encode(t *testing.T) {
 func TestMCP_Decode(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	t.Run("url", func(t *testing.T) {
 		text := CallMCPToolTextOK(t, mcpClient, "decode", map[string]interface{}{

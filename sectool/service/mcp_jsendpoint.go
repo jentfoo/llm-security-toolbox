@@ -14,7 +14,7 @@ import (
 )
 
 func (m *mcpServer) addJSEndpointTools() {
-	m.server.AddTool(m.jsEndpointTool(), m.handleJSEndpoint)
+	m.server.AddTool(m.jsEndpointTool(), m.requireWorkflow(m.handleJSEndpoint))
 }
 
 func (m *mcpServer) jsEndpointTool() mcp.Tool {
@@ -34,10 +34,6 @@ Use this to construct a request for an endpoint when no example flow exists yet.
 }
 
 func (m *mcpServer) handleJSEndpoint(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	flowID, endpointID, ok := splitEndpointHandle(req.GetString("endpoint", ""))
 	if !ok {
 		return errorResult(`endpoint must be "<flow_id>.<endpoint_id>" (endpoint_id from js_surface)`), nil

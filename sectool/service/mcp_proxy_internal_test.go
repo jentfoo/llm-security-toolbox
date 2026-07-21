@@ -15,7 +15,7 @@ func TestMCP_HistoryDelete(t *testing.T) {
 	t.Parallel()
 
 	t.Run("no_args", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		res := CallMCPTool(t, mcpClient, "_internal_history_delete", map[string]interface{}{})
 		require.True(t, res.IsError)
@@ -23,7 +23,7 @@ func TestMCP_HistoryDelete(t *testing.T) {
 	})
 
 	t.Run("skips_note_referenced", func(t *testing.T) {
-		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		pid := mockHTTP.AddProxyEntry("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "")
 		require.NoError(t, srv.noteStore.Save(&store.NoteMeta{NoteID: "n1", Type: "note", FlowIDs: []string{pid}, Content: "x"}))
@@ -45,7 +45,7 @@ func TestMCP_HistoryDelete(t *testing.T) {
 	})
 
 	t.Run("partial_skip", func(t *testing.T) {
-		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		pid1 := mockHTTP.AddProxyEntry("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "")
 		pid2 := mockHTTP.AddProxyEntry("GET / HTTP/1.1\r\nHost: b\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "")
@@ -65,7 +65,7 @@ func TestMCP_HistoryDelete(t *testing.T) {
 	})
 
 	t.Run("no_replay_cascade", func(t *testing.T) {
-		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		pid := mockHTTP.AddProxyEntry("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "")
 		srv.replayHistoryStore.Store(&store.ReplayHistoryEntry{FlowID: "r1", SourceFlowID: pid, CreatedAt: time.Now()})
@@ -83,7 +83,7 @@ func TestMCP_HistoryDelete(t *testing.T) {
 	})
 
 	t.Run("unknown_ids_noop", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		resp := CallMCPToolJSONOK[protocol.HistoryDeleteResponse](t, mcpClient, "_internal_history_delete", map[string]interface{}{
 			"flow_ids": []string{"missing1", "missing2"},
@@ -93,7 +93,7 @@ func TestMCP_HistoryDelete(t *testing.T) {
 	})
 
 	t.Run("mixed_proxy_and_replay", func(t *testing.T) {
-		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		srv, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		pid1 := mockHTTP.AddProxyEntry("GET / HTTP/1.1\r\nHost: a\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "")
 		pid2 := mockHTTP.AddProxyEntry("GET / HTTP/1.1\r\nHost: b\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n", "")

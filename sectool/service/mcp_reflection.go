@@ -59,7 +59,7 @@ var skipReflectionHeader = map[string]bool{
 }
 
 func (m *mcpServer) addReflectionTools() {
-	m.server.AddTool(m.findReflectedTool(), m.handleFindReflected)
+	m.server.AddTool(m.findReflectedTool(), m.requireWorkflow(m.handleFindReflected))
 }
 
 func (m *mcpServer) findReflectedTool() mcp.Tool {
@@ -76,10 +76,6 @@ Locations indicate where: body:<context> (html_text, html_attribute, url, script
 }
 
 func (m *mcpServer) handleFindReflected(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	flowID := req.GetString("flow_id", "")
 	if flowID == "" {
 		return errorResult("flow_id is required"), nil

@@ -4,12 +4,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 func TestMCP_Hash(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	t.Run("sha256_default", func(t *testing.T) {
 		text := CallMCPToolTextOK(t, mcpClient, "hash", map[string]interface{}{

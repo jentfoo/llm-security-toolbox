@@ -16,7 +16,7 @@ func TestHandleDiffFlow(t *testing.T) {
 	t.Parallel()
 
 	t.Run("scopes", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /api/v1/users?page=1 HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nAuthorization: Bearer tok1\r\n\r\n",
@@ -172,7 +172,7 @@ func TestHandleDiffFlow(t *testing.T) {
 	})
 
 	t.Run("identical_flows", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /api/test HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -207,7 +207,7 @@ func TestHandleDiffFlow(t *testing.T) {
 	})
 
 	t.Run("text_body_diff", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /page HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -241,7 +241,7 @@ func TestHandleDiffFlow(t *testing.T) {
 	})
 
 	t.Run("json_body_diff", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -304,7 +304,7 @@ func TestHandleDiffFlow(t *testing.T) {
 	})
 
 	t.Run("json_auto_detect", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",

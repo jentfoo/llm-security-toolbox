@@ -6,12 +6,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
 func TestCoreInvoke(t *testing.T) {
 	t.Parallel()
 
-	srv, _, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+	srv, _, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 	flowID := mockHTTP.AddProxyEntry(
 		"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
 		"HTTP/1.1 200 OK\r\n\r\n",

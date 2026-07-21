@@ -130,10 +130,6 @@ Without filters: overview only (no values). With name or domain filter: includes
 }
 
 func (m *mcpServer) handleCookieJar(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	nameFilter := req.GetString("name", "")
 	domainFilter := req.GetString("domain", "")
 	// Detail mode: include values and JWT decode when any filter is applied
@@ -249,11 +245,7 @@ func (m *mcpServer) handleCookieJar(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
-	outputMode := req.GetString("output_mode", "summary")
+	outputMode, modeNote := normalizeOutputMode(req.GetString("output_mode", ""), OutputModeSummary, OutputModeFlows)
 
 	listReq := &ProxyListRequest{
 		Host:         req.GetString("host", ""),
@@ -281,6 +273,9 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 	// Compile search patterns once
 	var searchHeaderRe, searchBodyRe *regexp.Regexp
 	var notes []string
+	if modeNote != "" {
+		notes = append(notes, modeNote)
+	}
 	if listReq.SearchHeader != "" {
 		re, note := compileSearchPattern(listReq.SearchHeader, true)
 		searchHeaderRe = re
@@ -406,10 +401,6 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	flowID := req.GetString("flow_id", "")
 	if flowID == "" {
 		return errorResult("flow_id is required"), nil
@@ -578,10 +569,6 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 }
 
 func (m *mcpServer) handleProxyRuleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	typeFilter := req.GetString("type_filter", "all")
 	limit := req.GetInt("limit", 0)
 
@@ -622,10 +609,6 @@ func (m *mcpServer) handleProxyRuleList(ctx context.Context, req mcp.CallToolReq
 }
 
 func (m *mcpServer) handleProxyRuleAdd(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	ruleType := req.GetString("type", "")
 	if ruleType == "" {
 		return errorResult("type is required"), nil
@@ -682,10 +665,6 @@ func (m *mcpServer) handleProxyRuleAdd(ctx context.Context, req mcp.CallToolRequ
 }
 
 func (m *mcpServer) handleProxyRuleDelete(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	ruleID := req.GetString("rule_id", "")
 	if ruleID == "" {
 		return errorResult("rule_id is required"), nil

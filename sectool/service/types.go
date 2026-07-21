@@ -20,6 +20,7 @@ const (
 	OutputModeSummary = "summary"
 	OutputModeForms   = "forms"
 	OutputModeErrors  = "errors"
+	OutputModeEvents  = "events"
 )
 
 // IsTimeoutError returns true if the error is a timeout.

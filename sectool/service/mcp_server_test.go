@@ -27,7 +27,8 @@ import (
 // setupMockMCPServer creates an MCP server with mock backends and a
 // pre-written config file. Fields set on cfg are merged onto the defaults so
 // the server loads them before any handler runs (no post-start mutation).
-func setupMockMCPServer(t *testing.T, cfg *config.Config) (*Server, *mcpclient.Client, *mockHttpBackend, *mockOastBackend, *mockCrawlerBackend) {
+// An empty workflowMode requires the workflow tool before any other tool works.
+func setupMockMCPServer(t *testing.T, cfg *config.Config, workflowMode string) (*Server, *mcpclient.Client, *mockHttpBackend, *mockOastBackend, *mockCrawlerBackend) {
 	t.Helper()
 
 	mockHTTP := newMockHttpBackend()
@@ -53,7 +54,7 @@ func setupMockMCPServer(t *testing.T, cfg *config.Config) (*Server, *mcpclient.C
 
 	srv, err := NewServer(MCPServerFlags{
 		MCPPort:      0, // Let OS pick a port
-		WorkflowMode: protocol.WorkflowModeNone,
+		WorkflowMode: workflowMode,
 		ConfigPath:   configPath,
 	}, mockHTTP, mockOast, mockCrawler)
 	require.NoError(t, err)
@@ -97,7 +98,7 @@ func setupMockMCPServer(t *testing.T, cfg *config.Config) (*Server, *mcpclient.C
 func TestMCP_ListTools(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	t.Cleanup(cancel)
@@ -148,6 +149,61 @@ func TestMCP_ListTools(t *testing.T) {
 	}
 }
 
+func TestMCP_RequireWorkflow(t *testing.T) {
+	t.Parallel()
+
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, "")
+
+	t.Run("blocks_before_workflow", func(t *testing.T) {
+		for _, tool := range []string{"hash", "encode", "uuid_generate", "proxy_poll"} {
+			result := CallMCPTool(t, mcpClient, tool, map[string]interface{}{
+				"input": "abc", "type": "sha256",
+			})
+			assert.True(t, result.IsError, "%s should be gated", tool)
+			assert.Contains(t, ExtractMCPText(t, result), workflowNotInitializedError)
+		}
+	})
+
+	t.Run("allows_after_workflow", func(t *testing.T) {
+		CallMCPToolTextOK(t, mcpClient, "workflow", map[string]interface{}{"task": protocol.WorkflowModeExplore})
+
+		text := CallMCPToolTextOK(t, mcpClient, "hash", map[string]interface{}{
+			"input": "abc", "type": "sha256",
+		})
+		assert.Contains(t, text, "ba7816bf")
+	})
+}
+
+func TestNormalizeOutputMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      string
+		wantMode string
+		wantNote bool
+	}{
+		{name: "empty_default", raw: "", wantMode: OutputModeSummary},
+		{name: "exact_match", raw: "flows", wantMode: OutputModeFlows},
+		{name: "mixed_case", raw: " Flows ", wantMode: OutputModeFlows},
+		{name: "unknown_falls_back", raw: "form", wantMode: OutputModeSummary, wantNote: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mode, note := normalizeOutputMode(tt.raw, OutputModeSummary, OutputModeFlows)
+
+			assert.Equal(t, tt.wantMode, mode)
+			if tt.wantNote {
+				assert.Contains(t, note, "unknown output_mode")
+				assert.Contains(t, note, "valid: summary, flows")
+			} else {
+				assert.Empty(t, note)
+			}
+		})
+	}
+}
+
 func TestMCP_MultiWorkflowHidesLastCursor(t *testing.T) {
 	t.Parallel()
 
@@ -180,7 +236,7 @@ func TestResolveFlow(t *testing.T) {
 	t.Parallel()
 
 	t.Run("crawler_error_propagated", func(t *testing.T) {
-		_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 		mockCrawler.getFlowErr = errors.New("storage boom")
 
 		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
@@ -191,7 +247,7 @@ func TestResolveFlow(t *testing.T) {
 	})
 
 	t.Run("not_found", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
 			"flow_id": "nonexistent",

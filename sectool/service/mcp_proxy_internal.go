@@ -26,10 +26,6 @@ func (m *mcpServer) historyDeleteTool() mcp.Tool {
 }
 
 func (m *mcpServer) handleHistoryDelete(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	flowIDs := req.GetStringSlice("flow_ids", nil)
 	if len(flowIDs) == 0 {
 		return errorResult("flow_ids is required"), nil

@@ -2,9 +2,7 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -13,9 +11,9 @@ import (
 )
 
 func (m *mcpServer) addRespondTools(rb ResponderBackend) {
-	m.server.AddTool(m.proxyRespondAddTool(), m.handleProxyRespondAdd(rb))
-	m.server.AddTool(m.proxyRespondDeleteTool(), m.handleProxyRespondDelete(rb))
-	m.server.AddTool(m.proxyRespondListTool(), m.handleProxyRespondList(rb))
+	m.server.AddTool(m.proxyRespondAddTool(), m.requireWorkflow(m.handleProxyRespondAdd(rb)))
+	m.server.AddTool(m.proxyRespondDeleteTool(), m.requireWorkflow(m.handleProxyRespondDelete(rb)))
+	m.server.AddTool(m.proxyRespondListTool(), m.requireWorkflow(m.handleProxyRespondList(rb)))
 }
 
 func (m *mcpServer) proxyRespondAddTool() mcp.Tool {
@@ -51,10 +49,6 @@ func (m *mcpServer) proxyRespondListTool() mcp.Tool {
 
 func (m *mcpServer) handleProxyRespondAdd(rb ResponderBackend) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if err := m.requireWorkflow(); err != nil {
-			return err, nil
-		}
-
 		origin := req.GetString("origin", "")
 		if origin == "" {
 			return errorResult("origin is required"), nil
@@ -89,10 +83,6 @@ func (m *mcpServer) handleProxyRespondAdd(rb ResponderBackend) func(ctx context.
 
 func (m *mcpServer) handleProxyRespondDelete(rb ResponderBackend) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if err := m.requireWorkflow(); err != nil {
-			return err, nil
-		}
-
 		id := req.GetString("id", "")
 		if id == "" {
 			return errorResult("id is required"), nil
@@ -112,10 +102,6 @@ func (m *mcpServer) handleProxyRespondDelete(rb ResponderBackend) func(ctx conte
 
 func (m *mcpServer) handleProxyRespondList(rb ResponderBackend) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if err := m.requireWorkflow(); err != nil {
-			return err, nil
-		}
-
 		responders, err := rb.ListResponders(ctx)
 		if err != nil {
 			return errorResultFromErr("failed to list responders: ", err), nil
@@ -124,35 +110,4 @@ func (m *mcpServer) handleProxyRespondList(rb ResponderBackend) func(ctx context
 		log.Printf("proxy/respond_list: %d responders", len(responders))
 		return jsonResult(protocol.ResponderListResponse{Responders: responders})
 	}
-}
-
-// getStringMapArg extracts a map[string]string from an MCP request parameter.
-func getStringMapArg(req mcp.CallToolRequest, key string) map[string]string {
-	args := req.GetArguments()
-	if args == nil {
-		return nil
-	}
-	raw, ok := args[key]
-	if !ok || raw == nil {
-		return nil
-	}
-	m, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	result := make(map[string]string, len(m))
-	for k, v := range m {
-		switch val := v.(type) {
-		case nil:
-			result[k] = ""
-		case string:
-			result[k] = val
-		case bool, float64, int, int64, json.Number:
-			// coerce scalar JSON values to strings rather than dropping them
-			result[k] = fmt.Sprint(val)
-		default:
-			// skip maps/slices/objects, not valid header scalars
-		}
-	}
-	return result
 }

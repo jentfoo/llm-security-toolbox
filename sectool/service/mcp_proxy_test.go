@@ -17,7 +17,7 @@ import (
 func TestMCP_ProxyPoll(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	// Summary filter entries
 	mockHTTP.AddProxyEntry(
@@ -251,7 +251,7 @@ func TestMCP_ProxyPoll(t *testing.T) {
 		})
 
 		t.Run("since_replay_flow_id", func(t *testing.T) {
-			_, mc, mock, _, _ := setupMockMCPServer(t, nil)
+			_, mc, mock, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 			mock.AddProxyEntry(
 				"GET /api/1 HTTP/1.1\r\nHost: test.com\r\n\r\n",
@@ -299,7 +299,7 @@ func TestMCP_ProxyPoll(t *testing.T) {
 		})
 
 		t.Run("since_multiple_replays", func(t *testing.T) {
-			_, mc, mock, _, _ := setupMockMCPServer(t, nil)
+			_, mc, mock, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 			mock.AddProxyEntry(
 				"GET /api/test HTTP/1.1\r\nHost: test.com\r\n\r\n",
@@ -379,7 +379,7 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	t.Run("allowed_domains_filters", func(t *testing.T) {
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"example.com"},
-		})
+		}, protocol.WorkflowModeNone)
 		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
@@ -410,7 +410,7 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	t.Run("exclude_domains_filters", func(t *testing.T) {
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			ExcludeDomains: []string{"noise.com"},
-		})
+		}, protocol.WorkflowModeNone)
 		mockHTTP.AddProxyEntry(
 			"GET /target HTTP/1.1\r\nHost: target.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
@@ -428,7 +428,7 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	})
 
 	t.Run("no_scoping_passes_all", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 		mockHTTP.AddProxyEntry(
 			"GET /a HTTP/1.1\r\nHost: one.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\n\r\n", "",
@@ -445,7 +445,7 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	t.Run("replay_entries_filtered", func(t *testing.T) {
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.com"},
-		})
+		}, protocol.WorkflowModeNone)
 
 		// Add proxy entries for both domains so replay_send can reference one
 		mockHTTP.AddProxyEntry(
@@ -485,7 +485,7 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 func TestMCP_FlowGet(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	mockHTTP.AddProxyEntry(
 		"GET /scoped HTTP/1.1\r\nHost: scope.com\r\n\r\nreq body here",
@@ -671,7 +671,7 @@ func TestMCP_FlowGet(t *testing.T) {
 func TestMCP_ProxyRules(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	t.Run("crud", func(t *testing.T) {
 		var ruleID string
@@ -882,7 +882,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	t.Parallel()
 
 	t.Run("overview_no_values", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /login HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -906,7 +906,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("detail_with_name", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /login HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -931,7 +931,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("dedup_keeps_last", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /page1 HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -952,7 +952,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("domain_filter", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n",
@@ -981,7 +981,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("replay_included", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /api HTTP/1.1\r\nHost: test.com\r\n\r\n",
@@ -1014,7 +1014,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("no_cookies", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /plain HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -1027,7 +1027,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("domain_defaults_to_host", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		// Cookie without Domain attribute should default to request host
 		mockHTTP.AddProxyEntry(
@@ -1044,7 +1044,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	t.Run("config_domain_scoping", func(t *testing.T) {
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.com"},
-		})
+		}, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: allowed.com\r\n\r\n",
@@ -1063,7 +1063,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("multiple_cookies_one_response", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: multi.com\r\n\r\n",
@@ -1084,7 +1084,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("name_and_domain_filter", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: a.com\r\n\r\n",
@@ -1107,7 +1107,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("jwt_auto_decode", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		jwtValue := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 
@@ -1132,7 +1132,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("jwt_hidden_in_overview", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		jwtValue := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
 
@@ -1150,7 +1150,7 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 
 	t.Run("non_jwt_no_decoded", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -1171,7 +1171,7 @@ func TestMCP_CookieJar(t *testing.T) {
 func TestMCP_FlowGetDecompressesGzipBody(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	// Create crawl session
 	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
@@ -1219,7 +1219,7 @@ func TestHandleFlowGetForReplay(t *testing.T) {
 	t.Parallel()
 
 	t.Run("happy_path", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /replay-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
@@ -1253,7 +1253,7 @@ func TestHandleFlowGetForReplay(t *testing.T) {
 	})
 
 	t.Run("missing_flow_id", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{})
 		assert.True(t, result.IsError)
@@ -1261,7 +1261,7 @@ func TestHandleFlowGetForReplay(t *testing.T) {
 	})
 
 	t.Run("invalid_flow_id", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
 			"flow_id": "nonexistent",
@@ -1271,7 +1271,7 @@ func TestHandleFlowGetForReplay(t *testing.T) {
 	})
 
 	t.Run("full_body_base64", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		mockHTTP.AddProxyEntry(
 			"GET /api/replay HTTP/1.1\r\nHost: test.com\r\n\r\n",
@@ -1313,7 +1313,7 @@ func TestHandleFlowGetForReplay(t *testing.T) {
 func TestMCP_FlowGetWithCrawlScope(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
 		"seed_urls": "https://example.com",

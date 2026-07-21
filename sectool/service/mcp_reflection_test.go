@@ -13,7 +13,7 @@ import (
 func TestHandleFindReflected(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	// Entry 0: query reflected as HTML-encoded in body, redirect in Location header, cookie in Set-Cookie
 	mockHTTP.AddProxyEntry(

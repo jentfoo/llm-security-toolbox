@@ -277,7 +277,7 @@ func TestMCP_NotesToolsRegistered(t *testing.T) {
 func TestMCP_NotesToolsNotRegisteredWithoutFlag(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	t.Cleanup(cancel)

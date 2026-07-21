@@ -15,7 +15,7 @@ import (
 func TestMCP_CrawlLifecycleWithMock(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
 		"seed_urls": "https://example.com",
@@ -253,7 +253,7 @@ func TestMCP_CrawlLifecycleWithMock(t *testing.T) {
 func TestMCP_CrawlSeedWithMock(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
 		"seed_urls": "https://example.com",
@@ -283,7 +283,7 @@ func TestMCP_CrawlSeedWithMock(t *testing.T) {
 func TestMCP_CrawlCreateOptions(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	create := func(t *testing.T, args map[string]interface{}) CrawlOptions {
 		t.Helper()
@@ -323,7 +323,7 @@ func TestMCP_CrawlCreateOptions(t *testing.T) {
 func TestMCP_CrawlValidation(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	t.Run("create_missing_seeds", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{})
@@ -396,6 +396,28 @@ func TestMCP_CrawlValidation(t *testing.T) {
 		assert.NotEmpty(t, pollResp.State)
 		assert.Nil(t, pollResp.Forms)
 		assert.Nil(t, pollResp.Errors)
+	})
+
+	t.Run("unknown_output_mode_notes_fallback", func(t *testing.T) {
+		createResult := CallMCPTool(t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://example.com",
+		})
+		require.False(t, createResult.IsError,
+			"crawl_create failed: %s", ExtractMCPText(t, createResult))
+		var createResp protocol.CrawlCreateResponse
+		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, createResult)), &createResp))
+
+		result := CallMCPTool(t, mcpClient, "crawl_poll", map[string]interface{}{
+			"session_id":  createResp.SessionID,
+			"output_mode": "form",
+		})
+		require.False(t, result.IsError,
+			"crawl_poll failed: %s", ExtractMCPText(t, result))
+
+		var pollResp protocol.CrawlPollResponse
+		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, result)), &pollResp))
+		assert.NotEmpty(t, pollResp.State)
+		assert.Contains(t, pollResp.Note, `unknown output_mode "form", used summary`)
 	})
 
 	t.Run("summary_invalid_session_id", func(t *testing.T) {
@@ -477,7 +499,7 @@ func TestMCP_CrawlValidation(t *testing.T) {
 func TestMCP_CrawlPollSearch(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil)
+	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
 		"seed_urls": "https://example.com",

@@ -21,7 +21,7 @@ var bare = '/just/a/literal/path';
 
 	setup := func(t *testing.T) (*mcpclient.Client, string) {
 		t.Helper()
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 		flowID := mockHTTP.AddProxyEntry(
 			"GET /app.js HTTP/1.1\r\nHost: example.com\r\n\r\n",
 			"HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\n"+jsBody,

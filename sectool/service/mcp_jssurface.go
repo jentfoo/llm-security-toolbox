@@ -39,7 +39,7 @@ var jsPrefixes = [][]byte{
 }
 
 func (m *mcpServer) addJSAnalyzeTools() {
-	m.server.AddTool(m.jsAnalyzeTool(), m.handleJSAnalyze)
+	m.server.AddTool(m.jsAnalyzeTool(), m.requireWorkflow(m.handleJSAnalyze))
 }
 
 func (m *mcpServer) jsAnalyzeTool() mcp.Tool {
@@ -69,10 +69,6 @@ The "origin" parameter controls endpoint volume and focus:
 }
 
 func (m *mcpServer) handleJSAnalyze(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	flowID := req.GetString("flow_id", "")
 	if flowID == "" {
 		return errorResult("flow_id is required"), nil

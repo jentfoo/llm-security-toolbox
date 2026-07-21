@@ -47,10 +47,6 @@ Sections where everything is identical are omitted. Returns {"same": true} when 
 }
 
 func (m *mcpServer) handleDiffFlow(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := m.requireWorkflow(); err != nil {
-		return err, nil
-	}
-
 	flowAID := req.GetString("flow_a", "")
 	flowBID := req.GetString("flow_b", "")
 	scope := req.GetString("scope", "")

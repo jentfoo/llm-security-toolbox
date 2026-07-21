@@ -14,7 +14,7 @@ func TestHandleJSAnalyze(t *testing.T) {
 	t.Parallel()
 
 	t.Run("javascript_bundle_full", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		// A prior proxy flow that the JS bundle's URL should match against
 		priorFlowID := mockHTTP.AddProxyEntry(
@@ -65,7 +65,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("html_inline", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		html := `<html><head>
 <script src="/static/bundle.js"></script>
@@ -100,7 +100,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+				_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 				historyFlowID := mockHTTP.AddProxyEntry(
 					"GET "+tc.historyPath+" HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -128,7 +128,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("cross_host_not_annotated", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		// /api/things lives on a different host than the bundle
 		mockHTTP.AddProxyEntry(
@@ -153,7 +153,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("same_host_path_relative_matches", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		historyFlowID := mockHTTP.AddProxyEntry(
 			"GET /api/things HTTP/1.1\r\nHost: app.example.com\r\n\r\n",
@@ -177,7 +177,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("relative_literal_resolves_to_history", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		historyFlowID := mockHTTP.AddProxyEntry(
 			"GET /login/assets/User-x.js HTTP/1.1\r\nHost: app.example.com\r\n\r\n",
@@ -202,7 +202,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("relative_resolves_against_extensionless_doc", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		historyFlowID := mockHTTP.AddProxyEntry(
 			"GET /login/assets/User-x.js HTTP/1.1\r\nHost: app.example.com\r\n\r\n",
@@ -229,7 +229,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("trailing_slash_and_fragment_match", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		historyFlowID := mockHTTP.AddProxyEntry(
 			"GET /api/things/ HTTP/1.1\r\nHost: app.example.com\r\n\r\n",
@@ -253,7 +253,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("absolute_url_matches_own_host", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		apiFlowID := mockHTTP.AddProxyEntry(
 			"GET /v1/users HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
@@ -278,7 +278,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("assets_dropped_by_default", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		// A vite-style chunk manifest plus a real API endpoint
 		jsBody := `var __vite__mapDeps=["assets/index-BMaEmbqv.js","assets/Loading-Dz9iJOJs.css"];` +
@@ -306,7 +306,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("origin_modes", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		jsBody := `fetch('/api/local');` +
 			`fetch('https://cdn.lib.com/a');fetch('https://cdn.lib.com/b');` +
@@ -355,7 +355,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("rejects_non_js", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		flowID := mockHTTP.AddProxyEntry(
 			"GET /data.json HTTP/1.1\r\nHost: example.com\r\n\r\n",
@@ -369,7 +369,7 @@ var key = 'AKIAIOSFODNN7EXAMPLE';
 	})
 
 	t.Run("unknown_flow", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil)
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "js_surface",
 			map[string]interface{}{"flow_id": "no-such-flow"})
