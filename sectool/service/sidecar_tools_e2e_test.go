@@ -95,7 +95,10 @@ func TestSidecarToolsE2E(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
-	go func() { _ = conn.Serve(t.Context(), &toolSidecar{conn: conn}) }()
+	// install up front: Serve's own install races inbound invoke_tool requests
+	h := &toolSidecar{conn: conn}
+	conn.SetHandler(h)
+	go func() { _ = conn.Serve(t.Context(), h) }()
 
 	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
 	require.NoError(t, err)

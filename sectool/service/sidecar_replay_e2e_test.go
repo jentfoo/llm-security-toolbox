@@ -74,7 +74,9 @@ func TestSidecarReplaySendE2E(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	ctx := t.Context()
 
+	// install up front: Serve's own install races the sidecar_send request below
 	h := &replaySendHandler{got: make(chan wire.SidecarSendParams, 1)}
+	conn.SetHandler(h)
 	go func() { _ = conn.Serve(ctx, h) }()
 
 	// The adapter owns a flow in history.
