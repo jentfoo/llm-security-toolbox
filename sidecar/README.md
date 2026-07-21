@@ -67,6 +67,32 @@ A sidecar with multiple claims routes an inbound stream on the protocol input `s
 
 Any sidecar may emit flows and apply pushed rules without declaring a capability. Conflicts (overlapping port ranges, ambiguous matchers, duplicate names) are rejected at registration time, naming both parties.
 
+#### Early claim matching
+
+An early claim is offered connections at two seams, and every matcher it declares is applied at both. An omitted matcher matches anything: an unset `port_range` (`{"low": 0, "high": 0}`) spans every port, and an empty `host_match` or `sni_match` matches any host or SNI.
+
+| | raw accept | decrypted post-CONNECT stream |
+| --- | --- | --- |
+| `port_range` | the proxy's listen port | the CONNECT target port |
+| `host_match` | not applicable | the CONNECT target host |
+| `sni_match` | not applicable | the ClientHello SNI, for `tls.terminate` claims |
+| `magic_bytes_prefix`, `probe` | applied | applied |
+
+A `tls.terminate` claim gates termination itself: sectool MitMs a matching connection with its own CA and offers that claim the decrypted stream first. Every other claim sees the stream only if the terminating claim declines, and is still gated by its own matchers — a claim never receives traffic outside what it declared.
+
+Claims rejected at registration:
+
+- an early claim covering the native proxy port with no `magic_bytes_prefix`, `probe`, or `tls.terminate` — it would swallow all proxy traffic (`capability_conflict`)
+- an invalid `port_range` (inverted or outside 1–65535), a `magic_bytes_prefix` that is not non-empty standard base64, a negative `probe_max_bytes`, an unknown `upgrade_signal`, or a pattern that is not valid RE2 (`registration_rejected`)
+
+A raw claim and a `tls.terminate` claim occupy separate seams, so one registration may declare both for the plain and TLS forms of a protocol.
+
+#### Upgrade claim matching
+
+`host_pattern` and `path_pattern` are RE2 patterns matched against the whole value (compiled as `^(?:pattern)$`), so `app\.example\.com` matches only that host while `app.example.com` also matches `appXexample!com` — escape metacharacters for an exact match. An empty pattern matches anything, and `path_pattern` is matched against the path with any query string removed. An empty `upgrade_signal` means `http_101`, which additionally requires an `Upgrade` header on the request.
+
+When two claims can match the same request, the more specific one wins: a literal pattern outranks a regex, which outranks an empty pattern. Two overlapping claims where neither is strictly more specific are rejected at registration.
+
 ### Mutation ownership
 
 A flow's content is mutated by exactly one party: sectool itself for native HTTP/WS flows, or the sidecar that captured it for adapter-owned flows. Sectool never mutates a sidecar-owned flow's plaintext (it relays opaque/ciphertext bytes), so nothing outside the owner ever rewrites that flow.
@@ -678,14 +704,14 @@ All fields `omitempty`. `annotations` is a free-form object the sidecar owns (we
     "probe": false, "probe_max_bytes": 0
   }],
   "upgrade_claims": [{
-    "host_pattern": "example.com", "path_pattern": "/ws/custom",
+    "host_pattern": "example\\.com", "path_pattern": "/ws/custom",
     "upgrade_signal": "http_101", "method_set": ["GET"]
   }],
   "injection_targets": [{ "target_schema": { /* JSON Schema */ } }]
 }
 ```
 
-`upgrade_signal` ∈ `http_101`, `connect`. Each seam is a list; omit or leave empty the ones you don't claim, and declare more than one entry to claim multiple entry points. `magic_bytes_prefix` is standard-alphabet padded base64.
+`upgrade_signal` ∈ `http_101`, `connect`; empty means `http_101`. Each seam is a list; omit or leave empty the ones you don't claim, and declare more than one entry to claim multiple entry points. `magic_bytes_prefix` is standard-alphabet padded base64, and `port_range` `{ "low": 0, "high": 0 }` matches any port. `host_pattern` and `path_pattern` are whole-value RE2 patterns; see [Early claim matching](#early-claim-matching) and [Upgrade claim matching](#upgrade-claim-matching) for how each matcher applies per seam.
 
 #### Mutation
 

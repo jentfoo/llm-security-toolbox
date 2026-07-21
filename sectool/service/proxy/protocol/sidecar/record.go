@@ -17,6 +17,10 @@ type Record struct {
 	MCPTools     []wire.MCPTool // tool definitions the sidecar provides
 	InstanceID   string
 
+	// early and upgrade are the compiled claims backing this record's bridge.
+	early   []earlyClaim
+	upgrade []upgradeClaim
+
 	peer    *wire.Peer
 	bridge  *bridge
 	resume  bool

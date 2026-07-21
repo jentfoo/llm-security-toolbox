@@ -121,7 +121,9 @@ Generalized capture pipeline letting built-in and out-of-process protocol adapte
 - `sectool/service/proxy/protocol/sidecar/listener.go` - Sidecar IPC listener and accept loop
 - `sectool/service/proxy/protocol/sidecar/listener_unix.go` / `listener_windows.go` - Per-OS listen (Unix domain socket, or loopback TCP on Windows)
 - `sectool/service/proxy/protocol/sidecar/register.go` - `register` handshake: validation, version negotiation (major reject, minor cap), resume/reconnect, rules snapshot
-- `sectool/service/proxy/protocol/sidecar/conflict.go` - Registration conflict checks (port ranges, claim matchers, tool names)
+- `sectool/service/proxy/protocol/sidecar/claim_early.go` - Compiled early claim: per-seam matching plus its conflict/overlap rules
+- `sectool/service/proxy/protocol/sidecar/claim_upgrade.go` - Compiled upgrade claim and RE2 `pattern`: matching, specificity ranking, conflict rules
+- `sectool/service/proxy/protocol/sidecar/conflict.go` - Registration conflict checks over compiled claims (native port, self-overlap, cross-adapter, tool names)
 - `sectool/service/proxy/protocol/sidecar/record.go` - `Record` registry entry per adapter; `Liveness` heartbeat tracking
 - `sectool/service/proxy/protocol/sidecar/bridge.go` - Adapter shim exposing a sidecar's claims to the registry and driving claimed streams
 - `sectool/service/proxy/protocol/sidecar/streams.go` - Per-connection stream set; client/upgrade/upstream byte pumping and `writes` application

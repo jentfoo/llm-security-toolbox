@@ -59,10 +59,14 @@ type EarlyClaim struct {
 
 // UpgradeClaim claims a byte stream after an HTTP upgrade signal.
 type UpgradeClaim struct {
-	HostPattern   string   `json:"host_pattern,omitempty"`
-	PathPattern   string   `json:"path_pattern,omitempty"`
-	UpgradeSignal string   `json:"upgrade_signal,omitempty"` // http_101 | connect
-	MethodSet     []string `json:"method_set,omitempty"`
+	// HostPattern is an RE2 pattern matched against the whole host; empty matches any.
+	HostPattern string `json:"host_pattern,omitempty"`
+	// PathPattern is an RE2 pattern matched against the whole path; empty matches any.
+	PathPattern string `json:"path_pattern,omitempty"`
+	// UpgradeSignal is http_101 or connect; empty defaults to http_101.
+	UpgradeSignal string `json:"upgrade_signal,omitempty"`
+	// MethodSet limits the claim to these request methods; empty matches any.
+	MethodSet []string `json:"method_set,omitempty"`
 }
 
 // InjectionTarget declares the sidecar can originate outbound messages.

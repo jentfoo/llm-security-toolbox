@@ -17,6 +17,9 @@ type EarlyClaimCtx struct {
 	TLSTerminated bool
 	// ALPN is the negotiated protocol ("h2"/"http/1.1"/""); empty at raw accept.
 	ALPN string
+	// SNI is the ClientHello server name, falling back to the CONNECT target
+	// hostname when the client sent none; empty at raw accept.
+	SNI string
 	// Target is the fixed upstream for a post-CONNECT stream; nil at raw accept.
 	Target *types.Target
 

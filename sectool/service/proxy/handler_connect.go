@@ -250,6 +250,7 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 	if tlsBridge != nil {
 		c := &protocol.EarlyClaimCtx{
 			TLSTerminated: true,
+			SNI:           sni,
 			Target:        target,
 			ClientConn:    clientTLS,
 			ClientReader:  clientTLSReader,
@@ -300,7 +301,7 @@ func (h *connectHandler) routeByClientProto(ctx context.Context, clientTLS *tls.
 		upstreamConn = newUp
 		negotiatedProto = clientProto // "" routes to the http1 fallthrough adapter
 	}
-	h.routeByProtocol(ctx, clientTLS, clientReader, upstreamConn, negotiatedProto, target)
+	h.routeByProtocol(ctx, clientTLS, clientReader, upstreamConn, negotiatedProto, sni, target)
 }
 
 // cachedProto returns the cached upstream protocol for targetAddr, false when absent or expired.
@@ -408,7 +409,7 @@ func (h *connectHandler) dialUpstream(ctx context.Context, targetAddr, sni strin
 // routeByProtocol feeds the decrypted post-CONNECT stream, read through clientReader,
 // into the early-claim seam, keyed on the negotiated ALPN (h2 -> HTTP/2 adapter, else
 // HTTP/1.1 fallthrough).
-func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS net.Conn, clientReader *bufio.Reader, upstreamConn net.Conn, alpn string, target *types.Target) {
+func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS net.Conn, clientReader *bufio.Reader, upstreamConn net.Conn, alpn, sni string, target *types.Target) {
 	defer func() {
 		_ = clientTLS.Close()
 		_ = upstreamConn.Close()
@@ -417,6 +418,7 @@ func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS net.Conn
 	h.reg.DispatchEarly(ctx, &protocol.EarlyClaimCtx{
 		TLSTerminated:  true,
 		ALPN:           alpn,
+		SNI:            sni,
 		Target:         target,
 		ClientConn:     clientTLS,
 		ClientReader:   clientReader,

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"github.com/google/uuid"
 
 	"github.com/go-appsec/toolbox/sidecar/wire"
@@ -37,6 +38,16 @@ func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Reco
 			return nil, nil, wire.NewError(wire.CodeRegistrationRejected, "register: instance_id must be a valid UUID").
 				WithData(&wire.ErrorData{Adapter: p.Name})
 		}
+	}
+	early, err := compileEarlyClaims(p.Capabilities.EarlyClaims)
+	if err != nil {
+		return nil, nil, wire.NewError(wire.CodeRegistrationRejected, "register: "+err.Error()).
+			WithData(&wire.ErrorData{Adapter: p.Name})
+	}
+	upgrade, err := compileUpgradeClaims(p.Capabilities.UpgradeClaims)
+	if err != nil {
+		return nil, nil, wire.NewError(wire.CodeRegistrationRejected, "register: "+err.Error()).
+			WithData(&wire.ErrorData{Adapter: p.Name})
 	}
 
 	m.mu.Lock()
@@ -70,7 +81,7 @@ func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Reco
 		}
 	}
 
-	if rpcErr := m.checkConflicts(p); rpcErr != nil {
+	if rpcErr := m.checkConflicts(p, early, upgrade); rpcErr != nil {
 		return nil, nil, rpcErr
 	}
 
@@ -82,6 +93,8 @@ func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Reco
 		Capabilities: p.Capabilities,
 		MCPTools:     p.MCPTools,
 		InstanceID:   p.InstanceID,
+		early:        early,
+		upgrade:      upgrade,
 		peer:         peer,
 		resume:       p.Resume,
 		liveness:     Liveness{LastPongRecv: now},
@@ -120,10 +133,10 @@ func (m *Manager) activateClaims(rec *Record) {
 	if m.records[rec.Name] != rec {
 		return // replaced or disconnected while seeding
 	}
-	if len(rec.Capabilities.EarlyClaims) > 0 {
+	if len(rec.early) > 0 {
 		m.registry.InsertEarly(rec.bridge)
 	}
-	if len(rec.Capabilities.UpgradeClaims) > 0 {
+	if len(rec.upgrade) > 0 {
 		m.reorderUpgradeClaims()
 	}
 }
@@ -133,14 +146,9 @@ func (m *Manager) activateClaims(rec *Record) {
 // record with several upgrade claims is ranked by its most-specific one. Callers
 // hold mu.
 func (m *Manager) reorderUpgradeClaims() {
-	recs := make([]*Record, 0, len(m.records))
-	for _, r := range m.records {
-		if len(r.Capabilities.UpgradeClaims) > 0 {
-			recs = append(recs, r)
-		}
-	}
+	recs := bulk.SliceFilter(func(r *Record) bool { return len(r.upgrade) > 0 }, bulk.MapValuesSlice(m.records))
 	slices.SortStableFunc(recs, func(a, b *Record) int {
-		ac, bc := mostSpecificUpgrade(a.Capabilities.UpgradeClaims), mostSpecificUpgrade(b.Capabilities.UpgradeClaims)
+		ac, bc := mostSpecificUpgrade(a.upgrade), mostSpecificUpgrade(b.upgrade)
 		switch {
 		case dominates(ac, bc):
 			return -1

@@ -84,9 +84,7 @@ func (r *Registry) MatchTLS(sni, host string, port int) (TLSEarlyAdapter, *types
 
 // ClaimUpgrade returns the first upgrade adapter that claims the parsed request.
 func (r *Registry) ClaimUpgrade(c *UpgradeClaimCtx) (UpgradeAdapter, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, a := range r.Upgrade {
+	for _, a := range r.snapshotUpgrade() {
 		if a.ClaimUpgrade(c) {
 			return a, true
 		}
@@ -100,4 +98,12 @@ func (r *Registry) snapshotEarly() []EarlyAdapter {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return slices.Clone(r.Early)
+}
+
+// snapshotUpgrade copies the upgrade list so claiming never holds the lock across an
+// adapter call.
+func (r *Registry) snapshotUpgrade() []UpgradeAdapter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return slices.Clone(r.Upgrade)
 }

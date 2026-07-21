@@ -31,22 +31,33 @@ func earlyCtx(localPort int, opening []byte) *protocol.EarlyClaimCtx {
 	}
 }
 
-func newTestBridge(ec *wire.EarlyClaim, healthy bool) *bridge {
-	return newMultiEarlyBridge([]wire.EarlyClaim{*ec}, healthy)
+// terminatedCtx is a decrypted post-CONNECT stream re-offered to the early seam.
+func terminatedCtx(sni, host string, port int, opening []byte) *protocol.EarlyClaimCtx {
+	return &protocol.EarlyClaimCtx{
+		TLSTerminated: true,
+		SNI:           sni,
+		Target:        &types.Target{Hostname: host, Port: port, UsesHTTPS: true},
+		ClientConn:    localAddrConn{port: 8080},
+		ClientReader:  bufio.NewReader(bytes.NewReader(opening)),
+	}
 }
 
-func newMultiEarlyBridge(ecs []wire.EarlyClaim, healthy bool) *bridge {
-	rec := &Record{Name: "sc", Capabilities: wire.Capabilities{EarlyClaims: ecs}}
+func newEarlyBridge(t *testing.T, ecs []wire.EarlyClaim, healthy bool) *bridge {
+	t.Helper()
+
+	early, err := compileEarlyClaims(ecs)
+	require.NoError(t, err)
+	rec := &Record{Name: "sc", early: early}
 	rec.healthy.Store(healthy)
 	return newBridge(rec, nil)
 }
 
-func newUpgradeBridge(uc *wire.UpgradeClaim, healthy bool) *bridge {
-	return newMultiUpgradeBridge([]wire.UpgradeClaim{*uc}, healthy)
-}
+func newUpgradeBridge(t *testing.T, ucs []wire.UpgradeClaim, healthy bool) *bridge {
+	t.Helper()
 
-func newMultiUpgradeBridge(ucs []wire.UpgradeClaim, healthy bool) *bridge {
-	rec := &Record{Name: "sc", Capabilities: wire.Capabilities{UpgradeClaims: ucs}}
+	upgrade, err := compileUpgradeClaims(ucs)
+	require.NoError(t, err)
+	rec := &Record{Name: "sc", upgrade: upgrade}
 	rec.healthy.Store(healthy)
 	return newBridge(rec, nil)
 }
@@ -69,55 +80,90 @@ func TestBridgeClaimEarly(t *testing.T) {
 	}
 
 	t.Run("port_and_magic_match", func(t *testing.T) {
-		b := newTestBridge(&magic, true)
+		b := newEarlyBridge(t, []wire.EarlyClaim{magic}, true)
 		assert.True(t, b.ClaimEarly(earlyCtx(1883, mqtt)))
 	})
 	t.Run("port_out_of_range", func(t *testing.T) {
-		b := newTestBridge(&magic, true)
+		b := newEarlyBridge(t, []wire.EarlyClaim{magic}, true)
 		assert.False(t, b.ClaimEarly(earlyCtx(9999, mqtt)))
 	})
 	t.Run("magic_mismatch", func(t *testing.T) {
-		b := newTestBridge(&magic, true)
+		b := newEarlyBridge(t, []wire.EarlyClaim{magic}, true)
 		assert.False(t, b.ClaimEarly(earlyCtx(1883, []byte("GET /"))))
 	})
 	t.Run("unhealthy_declines", func(t *testing.T) {
-		b := newTestBridge(&magic, false)
+		b := newEarlyBridge(t, []wire.EarlyClaim{magic}, false)
 		assert.False(t, b.ClaimEarly(earlyCtx(1883, mqtt)))
 	})
 	t.Run("unset_range_matches_any_port", func(t *testing.T) {
-		b := newTestBridge(&wire.EarlyClaim{}, true)
+		b := newEarlyBridge(t, []wire.EarlyClaim{{}}, true)
 		assert.True(t, b.ClaimEarly(earlyCtx(40000, nil)))
+	})
+	t.Run("either_claim_matches", func(t *testing.T) {
+		b := newEarlyBridge(t, []wire.EarlyClaim{
+			{PortRange: wire.PortRange{Low: 1883, High: 1883}, MagicBytesPrefix: base64.StdEncoding.EncodeToString([]byte{0x10})},
+			{PortRange: wire.PortRange{Low: 5222, High: 5222}, MagicBytesPrefix: base64.StdEncoding.EncodeToString([]byte("<?xml"))},
+		}, true)
+		assert.True(t, b.ClaimEarly(earlyCtx(1883, []byte{0x10})))
+		assert.True(t, b.ClaimEarly(earlyCtx(5222, []byte("<?xml"))))
+		assert.False(t, b.ClaimEarly(earlyCtx(1883, []byte("<?xml"))))
+		assert.False(t, b.ClaimEarly(earlyCtx(9999, []byte{0x10})))
+	})
+
+	// TLS re-entry: a decrypted post-CONNECT stream is offered to every early claim,
+	// so the claim's declared scope must still gate it.
+	t.Run("terminated_target_port_out_of_range", func(t *testing.T) {
+		b := newEarlyBridge(t, []wire.EarlyClaim{{PortRange: wire.PortRange{Low: 1883, High: 1883}}}, true)
+		assert.False(t, b.ClaimEarly(terminatedCtx("app.example.com", "app.example.com", 443, nil)))
+	})
+	t.Run("terminated_target_port_in_range", func(t *testing.T) {
+		b := newEarlyBridge(t, []wire.EarlyClaim{{PortRange: wire.PortRange{Low: 1883, High: 1883}}}, true)
+		assert.True(t, b.ClaimEarly(terminatedCtx("mqtt.example.com", "mqtt.example.com", 1883, nil)))
+	})
+	t.Run("terminated_host_mismatch", func(t *testing.T) {
+		b := newEarlyBridge(t, []wire.EarlyClaim{{HostMatch: "mqtt.example.com"}}, true)
+		assert.False(t, b.ClaimEarly(terminatedCtx("app.example.com", "app.example.com", 443, nil)))
+	})
+	t.Run("terminated_sni_mismatch", func(t *testing.T) {
+		b := newEarlyBridge(t, []wire.EarlyClaim{{
+			TLS: &wire.TLSClaim{Terminate: true, SNIMatch: "mqtt.example.com"},
+		}}, true)
+		assert.False(t, b.ClaimEarly(terminatedCtx("app.example.com", "app.example.com", 443, nil)))
+	})
+	t.Run("terminated_magic_still_claims", func(t *testing.T) {
+		b := newEarlyBridge(t, []wire.EarlyClaim{{MagicBytesPrefix: base64.StdEncoding.EncodeToString(mqtt)}}, true)
+		assert.True(t, b.ClaimEarly(terminatedCtx("mqtt.example.com", "mqtt.example.com", 8883, mqtt)))
 	})
 }
 
 func TestBridgeClaimTLS(t *testing.T) {
 	t.Parallel()
 
-	ec := &wire.EarlyClaim{
+	ec := wire.EarlyClaim{
 		PortRange: wire.PortRange{Low: 443, High: 443},
 		TLS:       &wire.TLSClaim{Terminate: true, SNIMatch: "ctrl.example.com"},
 	}
 
 	t.Run("sni_and_port_match", func(t *testing.T) {
-		spec, ok := newTestBridge(ec, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
+		spec, ok := newEarlyBridge(t, []wire.EarlyClaim{ec}, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
 		assert.True(t, ok)
 		assert.Nil(t, spec)
 	})
 	t.Run("sni_mismatch", func(t *testing.T) {
-		_, ok := newTestBridge(ec, true).ClaimTLS("other.example.com", "other.example.com", 443)
+		_, ok := newEarlyBridge(t, []wire.EarlyClaim{ec}, true).ClaimTLS("other.example.com", "other.example.com", 443)
 		assert.False(t, ok)
 	})
 	t.Run("port_mismatch", func(t *testing.T) {
-		_, ok := newTestBridge(ec, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 8443)
+		_, ok := newEarlyBridge(t, []wire.EarlyClaim{ec}, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 8443)
 		assert.False(t, ok)
 	})
 	t.Run("non_terminating_claim_declines", func(t *testing.T) {
-		raw := &wire.EarlyClaim{PortRange: wire.PortRange{Low: 443, High: 443}}
-		_, ok := newTestBridge(raw, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
+		raw := wire.EarlyClaim{PortRange: wire.PortRange{Low: 443, High: 443}}
+		_, ok := newEarlyBridge(t, []wire.EarlyClaim{raw}, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
 		assert.False(t, ok)
 	})
 	t.Run("cert_spec_translated", func(t *testing.T) {
-		withCert := &wire.EarlyClaim{
+		withCert := wire.EarlyClaim{
 			PortRange: wire.PortRange{Low: 443, High: 443},
 			TLS: &wire.TLSClaim{Terminate: true, Cert: &wire.TLSCertSpec{
 				DNSNames:    []string{"alt.example.com"},
@@ -126,7 +172,7 @@ func TestBridgeClaimTLS(t *testing.T) {
 				CommonName:  "legacy.example.com",
 			}},
 		}
-		spec, ok := newTestBridge(withCert, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
+		spec, ok := newEarlyBridge(t, []wire.EarlyClaim{withCert}, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
 		require.True(t, ok)
 		require.NotNil(t, spec)
 		assert.Equal(t, []string{"alt.example.com"}, spec.DNSNames)
@@ -142,68 +188,52 @@ func TestBridgeClaimUpgrade(t *testing.T) {
 	t.Parallel()
 
 	t.Run("http_101_host_path_method_match", func(t *testing.T) {
-		uc := &wire.UpgradeClaim{HostPattern: "ctrl.example.com", PathPattern: "/control", UpgradeSignal: "http_101", MethodSet: []string{"POST"}}
-		b := newUpgradeBridge(uc, true)
+		uc := wire.UpgradeClaim{HostPattern: "ctrl.example.com", PathPattern: "/control", UpgradeSignal: "http_101", MethodSet: []string{"POST"}}
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
 		assert.True(t, b.ClaimUpgrade(upgradeCtx("http_101", "POST", "ctrl.example.com", "/control", "custom-control-protocol")))
 	})
 	t.Run("http_101_requires_upgrade_header", func(t *testing.T) {
-		uc := &wire.UpgradeClaim{PathPattern: "/control", UpgradeSignal: "http_101"}
-		b := newUpgradeBridge(uc, true)
+		uc := wire.UpgradeClaim{PathPattern: "/control", UpgradeSignal: "http_101"}
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
 		assert.False(t, b.ClaimUpgrade(upgradeCtx("http_101", "POST", "ctrl.example.com", "/control", "")))
 	})
 	t.Run("path_matched_ignoring_query", func(t *testing.T) {
-		uc := &wire.UpgradeClaim{PathPattern: "/ws/*", UpgradeSignal: "http_101"}
-		b := newUpgradeBridge(uc, true)
+		uc := wire.UpgradeClaim{PathPattern: "/ws/.*", UpgradeSignal: "http_101"}
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
 		assert.True(t, b.ClaimUpgrade(upgradeCtx("http_101", "GET", "h", "/ws/chat?token=1", "websocket")))
 	})
 	t.Run("method_not_in_set", func(t *testing.T) {
-		uc := &wire.UpgradeClaim{PathPattern: "/control", UpgradeSignal: "http_101", MethodSet: []string{"POST"}}
-		b := newUpgradeBridge(uc, true)
+		uc := wire.UpgradeClaim{PathPattern: "/control", UpgradeSignal: "http_101", MethodSet: []string{"POST"}}
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
 		assert.False(t, b.ClaimUpgrade(upgradeCtx("http_101", "GET", "h", "/control", "x")))
 	})
 	t.Run("host_mismatch", func(t *testing.T) {
-		uc := &wire.UpgradeClaim{HostPattern: "ctrl.example.com", UpgradeSignal: "http_101"}
-		b := newUpgradeBridge(uc, true)
+		uc := wire.UpgradeClaim{HostPattern: "ctrl.example.com", UpgradeSignal: "http_101"}
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
 		assert.False(t, b.ClaimUpgrade(upgradeCtx("http_101", "GET", "other.example.com", "/x", "websocket")))
 	})
 	t.Run("signal_mismatch", func(t *testing.T) {
-		uc := &wire.UpgradeClaim{UpgradeSignal: "connect"}
-		b := newUpgradeBridge(uc, true)
+		uc := wire.UpgradeClaim{UpgradeSignal: "connect"}
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
 		assert.False(t, b.ClaimUpgrade(upgradeCtx("http_101", "GET", "h", "/x", "websocket")))
 	})
 	t.Run("connect_signal_match", func(t *testing.T) {
-		uc := &wire.UpgradeClaim{HostPattern: "ctrl.example.com", UpgradeSignal: "connect"}
-		b := newUpgradeBridge(uc, true)
+		uc := wire.UpgradeClaim{HostPattern: "ctrl.example.com", UpgradeSignal: "connect"}
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
 		assert.True(t, b.ClaimUpgrade(upgradeCtx("connect", "CONNECT", "ctrl.example.com", "ctrl.example.com:443", "")))
 	})
 	t.Run("unhealthy_declines", func(t *testing.T) {
-		uc := &wire.UpgradeClaim{PathPattern: "/control", UpgradeSignal: "http_101"}
-		b := newUpgradeBridge(uc, false)
+		uc := wire.UpgradeClaim{PathPattern: "/control", UpgradeSignal: "http_101"}
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, false)
 		assert.False(t, b.ClaimUpgrade(upgradeCtx("http_101", "POST", "h", "/control", "x")))
 	})
-}
-
-func TestBridgeMultiClaim(t *testing.T) {
-	t.Parallel()
-
-	t.Run("upgrade_either_claim_matches", func(t *testing.T) {
-		b := newMultiUpgradeBridge([]wire.UpgradeClaim{
+	t.Run("either_claim_matches", func(t *testing.T) {
+		b := newUpgradeBridge(t, []wire.UpgradeClaim{
 			{HostPattern: "ctrl.example.com", PathPattern: "/ts2021", UpgradeSignal: "http_101"},
 			{HostPattern: "ctrl.example.com", PathPattern: "/derp", UpgradeSignal: "http_101"},
 		}, true)
 		assert.True(t, b.ClaimUpgrade(upgradeCtx("http_101", "GET", "ctrl.example.com", "/ts2021", "x")))
 		assert.True(t, b.ClaimUpgrade(upgradeCtx("http_101", "GET", "ctrl.example.com", "/derp", "x")))
 		assert.False(t, b.ClaimUpgrade(upgradeCtx("http_101", "GET", "ctrl.example.com", "/other", "x")))
-	})
-
-	t.Run("early_either_claim_matches", func(t *testing.T) {
-		b := newMultiEarlyBridge([]wire.EarlyClaim{
-			{PortRange: wire.PortRange{Low: 1883, High: 1883}, MagicBytesPrefix: base64.StdEncoding.EncodeToString([]byte{0x10})},
-			{PortRange: wire.PortRange{Low: 5222, High: 5222}, MagicBytesPrefix: base64.StdEncoding.EncodeToString([]byte("<?xml"))},
-		}, true)
-		assert.True(t, b.ClaimEarly(earlyCtx(1883, []byte{0x10})))
-		assert.True(t, b.ClaimEarly(earlyCtx(5222, []byte("<?xml"))))
-		assert.False(t, b.ClaimEarly(earlyCtx(1883, []byte("<?xml"))))
-		assert.False(t, b.ClaimEarly(earlyCtx(9999, []byte{0x10})))
 	})
 }

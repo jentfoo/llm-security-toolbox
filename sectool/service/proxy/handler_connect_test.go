@@ -434,7 +434,7 @@ func TestRouteByProtocol(t *testing.T) {
 	_, err := br.Peek(4)
 	require.NoError(t, err)
 
-	h.routeByProtocol(t.Context(), client, br, upstream, alpnHTTP1, &types.Target{Hostname: "example.com", Port: 443})
+	h.routeByProtocol(t.Context(), client, br, upstream, alpnHTTP1, "example.com", &types.Target{Hostname: "example.com", Port: 443})
 
 	assert.Equal(t, string(req), string(<-served))
 }
