@@ -42,6 +42,9 @@ func (m *Manager) checkToolNames(p *wire.RegisterParams) *wire.Error {
 		owner[n] = types.AdapterScopeCore
 	}
 	for _, r := range m.records {
+		if r.Name == p.Name {
+			continue // record being replaced
+		}
 		for _, t := range r.MCPTools {
 			owner[t.Name] = r.Name
 		}
@@ -85,6 +88,9 @@ func (m *Manager) checkEarlyClaims(name string, claims []earlyClaim) *wire.Error
 			}
 		}
 		for _, r := range m.records {
+			if r.Name == name {
+				continue // record being replaced
+			}
 			for k := range r.early {
 				if earlyClaimConflict(ec, &r.early[k]) {
 					return wire.NewError(wire.CodeCapabilityConflict,
@@ -113,6 +119,9 @@ func (m *Manager) checkUpgradeClaims(name string, claims []upgradeClaim) *wire.E
 			}
 		}
 		for _, r := range m.records {
+			if r.Name == name {
+				continue // record being replaced
+			}
 			for k := range r.upgrade {
 				if upgradeClaimConflict(uc, &r.upgrade[k]) {
 					return wire.NewError(wire.CodeCapabilityConflict,

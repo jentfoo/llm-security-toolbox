@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -150,6 +151,128 @@ func TestManagerRegister(t *testing.T) {
 		require.NotNil(t, err)
 		assert.Equal(t, wire.CodeRegistrationRejected, err.Code)
 	})
+
+	t.Run("reregister_same_conn", func(t *testing.T) {
+		m := testManager(Config{})
+		p := dialManager(t, m, true)
+		params := baseParams("demo")
+		params.InstanceID = "33333333-3333-3333-3333-333333333333"
+		_, err := register(t, p, params)
+		require.Nil(t, err)
+
+		// second register on the live connection is rejected, not self-closed
+		_, err = register(t, p, params)
+		require.NotNil(t, err)
+		assert.Equal(t, wire.CodeDuplicateRegistration, err.Code)
+
+		rec, ok := m.Get("demo")
+		require.True(t, ok)
+		assert.True(t, rec.Healthy())
+		assert.Equal(t, 1, m.Count())
+	})
+
+	t.Run("failed_reregister_keeps_existing", func(t *testing.T) {
+		m := testManager(Config{NativeProxyPort: 8080})
+		p1 := dialManager(t, m, true)
+		params := baseParams("demo")
+		params.InstanceID = "44444444-4444-4444-4444-444444444444"
+		_, err := register(t, p1, params)
+		require.Nil(t, err)
+		rec1, _ := m.Get("demo")
+
+		// reconnect whose claim blankets the native proxy port fails validation
+		p2 := dialManager(t, m, true)
+		bad := params
+		bad.Capabilities.EarlyClaims = []wire.EarlyClaim{{PortRange: wire.PortRange{Low: 8080, High: 8080}}}
+		_, err = register(t, p2, bad)
+		require.NotNil(t, err)
+		assert.Equal(t, wire.CodeCapabilityConflict, err.Code)
+
+		rec2, ok := m.Get("demo")
+		require.True(t, ok)
+		assert.Same(t, rec1, rec2)
+		assert.True(t, rec2.Healthy())
+	})
+
+	t.Run("failed_reregister_keeps_resume", func(t *testing.T) {
+		const instance = "55555555-5555-5555-5555-555555555555"
+		m := testManager(Config{NativeProxyPort: 8080})
+		p1 := dialManager(t, m, true)
+		params := baseParams("demo")
+		params.InstanceID = instance
+		params.Resume = true
+		_, err := register(t, p1, params)
+		require.Nil(t, err)
+
+		// drop the connection so resume state is stashed
+		_ = p1.Close()
+		require.Eventually(t, func() bool { return m.Count() == 0 && m.hasResumeState(instance) }, 2*time.Second, 10*time.Millisecond)
+
+		// a failing reconnect must not consume the stash
+		p2 := dialManager(t, m, true)
+		bad := params
+		bad.Capabilities.EarlyClaims = []wire.EarlyClaim{{PortRange: wire.PortRange{Low: 8080, High: 8080}}}
+		_, err = register(t, p2, bad)
+		require.NotNil(t, err)
+		assert.Equal(t, wire.CodeCapabilityConflict, err.Code)
+		assert.True(t, m.hasResumeState(instance))
+	})
+
+	t.Run("resume_reclaim_race", func(t *testing.T) {
+		const instance = "66666666-6666-6666-6666-666666666666"
+		m := testManager(Config{})
+		p1 := dialManager(t, m, true)
+		params := baseParams("demo")
+		params.InstanceID = instance
+		params.Resume = true
+		_, err := register(t, p1, params)
+		require.Nil(t, err)
+
+		// spam push_flow on conn1 so its handlers mutate ownedFlows during reclaim
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pushLoop(t, p1, stop)
+		}()
+
+		// reconnect same instance while conn1 is live: reclaims its bookkeeping
+		p2 := dialManager(t, m, true)
+		_, err = register(t, p2, params)
+		require.Nil(t, err)
+
+		// push on conn2 too: a shared (uncloned) map would race conn1's lingering handlers
+		for range 50 {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			var res wire.PushFlowResult
+			_ = p2.Call(ctx, wire.MethodPushFlow, wire.Flow{Request: &wire.FlowMessage{Method: "GET", Path: "/"}}, &res)
+			cancel()
+		}
+
+		close(stop)
+		wg.Wait()
+
+		rec, ok := m.Get("demo")
+		require.True(t, ok)
+		assert.Equal(t, instance, rec.InstanceID)
+	})
+}
+
+// pushLoop emits create push_flows until stop closes.
+func pushLoop(t *testing.T, p *wire.Peer, stop <-chan struct{}) {
+	t.Helper()
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		var res wire.PushFlowResult
+		_ = p.Call(ctx, wire.MethodPushFlow, wire.Flow{Request: &wire.FlowMessage{Method: "GET", Path: "/"}}, &res)
+		cancel()
+	}
 }
 
 func TestManagerHeartbeat(t *testing.T) {

@@ -1,6 +1,7 @@
 package sidecar
 
 import (
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,6 +84,13 @@ func (r *Record) owns(flowID string) bool {
 	defer r.mu.Unlock()
 	_, ok := r.ownedFlows[flowID]
 	return ok
+}
+
+// snapshotOwnership returns private clones of the ownership maps for stash and reclaim.
+func (r *Record) snapshotOwnership() (ownedFlows, inFlight map[string]struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return maps.Clone(r.ownedFlows), maps.Clone(r.inFlight)
 }
 
 // markComplete clears a flow's in-flight status after two-phase completion.

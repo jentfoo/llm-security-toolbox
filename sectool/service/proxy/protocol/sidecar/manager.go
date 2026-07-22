@@ -182,7 +182,8 @@ func (m *Manager) detachSession(s *session) {
 	}
 	m.releaseClaims(rec)
 	if rec.resume && rec.InstanceID != "" {
-		m.resumeState[rec.InstanceID] = &resumeEntry{ownedFlows: rec.ownedFlows, inFlight: rec.inFlight}
+		owned, inFlight := rec.snapshotOwnership()
+		m.resumeState[rec.InstanceID] = &resumeEntry{ownedFlows: owned, inFlight: inFlight}
 	}
 
 	log.Printf("sidecar[%s]: disconnected instance_id=%s", rec.Name, instanceTag)

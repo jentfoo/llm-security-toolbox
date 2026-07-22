@@ -53,27 +53,19 @@ func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Reco
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var carried *resumeEntry
-	if p.InstanceID != "" {
-		if st, ok := m.resumeState[p.InstanceID]; ok {
-			if p.Resume {
-				carried = st
-			}
-			delete(m.resumeState, p.InstanceID)
-		}
-	}
-
-	// reconnect or stale record replaces; live record with a different instance conflicts
-	if existing, ok := m.records[p.Name]; ok {
-		reconnect := p.InstanceID != "" && existing.InstanceID == p.InstanceID
+	// classify a name collision before mutating anything
+	existing, hasExisting := m.records[p.Name]
+	var reconnect bool
+	if hasExisting {
+		reconnect = p.InstanceID != "" && existing.InstanceID == p.InstanceID
 		switch {
-		case reconnect:
-			if p.Resume && carried == nil {
-				carried = &resumeEntry{ownedFlows: existing.ownedFlows, inFlight: existing.inFlight}
-			}
-			m.removeLocked(existing)
-		case !existing.alive():
-			m.removeLocked(existing)
+		case reconnect && existing.peer == peer:
+			// second register on this connection would close our own peer
+			return nil, nil, wire.NewError(wire.CodeDuplicateRegistration,
+				"adapter already registered on this connection: "+p.Name).
+				WithData(&wire.ErrorData{Adapter: p.Name})
+		case reconnect, !existing.alive():
+			// replaceable: validated below, removed only on success
 		default:
 			return nil, nil, wire.NewError(wire.CodeDuplicateRegistration,
 				"adapter name already registered: "+p.Name).
@@ -81,8 +73,27 @@ func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Reco
 		}
 	}
 
+	// validate before any destructive mutation, excluding the record being replaced
 	if rpcErr := m.checkConflicts(p, early, upgrade); rpcErr != nil {
 		return nil, nil, rpcErr
+	}
+
+	// commit: consume resume state and replace the old record only now
+	var carried *resumeEntry
+	if p.InstanceID != "" {
+		if st, ok := m.resumeState[p.InstanceID]; ok {
+			if p.Resume {
+				carried = st
+			}
+			delete(m.resumeState, p.InstanceID) // discard stale stash even on a fresh reconnect
+		}
+	}
+	if hasExisting {
+		if reconnect && p.Resume && carried == nil {
+			owned, inFlight := existing.snapshotOwnership()
+			carried = &resumeEntry{ownedFlows: owned, inFlight: inFlight}
+		}
+		m.removeLocked(existing)
 	}
 
 	now := m.now()
