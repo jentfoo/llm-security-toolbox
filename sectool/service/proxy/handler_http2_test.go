@@ -380,14 +380,33 @@ func TestH2ConnConsumeRecvWindow(t *testing.T) {
 			recvWindowStream:  make(map[uint32]int32),
 		}
 
-		err := h.consumeRecvWindow(1, 1000)
+		err := h.consumeRecvWindow(1, 1000, true)
 		require.NoError(t, err)
 		assert.Equal(t, int32(65535-1000), h.recvWindowConn)
 		assert.Equal(t, int32(65535-1000), h.recvWindowStream[1])
 
-		err = h.consumeRecvWindow(1, 2000)
+		err = h.consumeRecvWindow(1, 2000, true)
 		require.NoError(t, err)
 		assert.Equal(t, int32(65535-3000), h.recvWindowConn)
+	})
+
+	t.Run("no_track_skips_stream", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			recvWindowConn:    65535,
+			recvWindowStream:  make(map[uint32]int32),
+		}
+
+		require.NoError(t, h.consumeRecvWindow(1, 1000, false))
+		assert.Equal(t, int32(65535-1000), h.recvWindowConn)
+		_, ok := h.recvWindowStream[1]
+		assert.False(t, ok)
+
+		h.recvWindowConn = 500
+		err := h.consumeRecvWindow(1, 2000, false)
+		var fcErr *flowControlError
+		require.ErrorAs(t, err, &fcErr)
+		assert.Equal(t, uint32(0), fcErr.StreamID)
 	})
 
 	t.Run("connection_level_violation", func(t *testing.T) {
@@ -397,7 +416,7 @@ func TestH2ConnConsumeRecvWindow(t *testing.T) {
 			recvWindowStream:  make(map[uint32]int32),
 		}
 
-		err := h.consumeRecvWindow(1, 2000)
+		err := h.consumeRecvWindow(1, 2000, true)
 		require.Error(t, err)
 
 		var fcErr *flowControlError
@@ -414,7 +433,7 @@ func TestH2ConnConsumeRecvWindow(t *testing.T) {
 			recvWindowStream:  map[uint32]int32{1: 500},
 		}
 
-		err := h.consumeRecvWindow(1, 1000)
+		err := h.consumeRecvWindow(1, 1000, true)
 		require.Error(t, err)
 
 		var fcErr *flowControlError
@@ -439,7 +458,7 @@ func TestH2ConnNeedsWindowUpdate(t *testing.T) {
 	assert.Equal(t, uint32(0), connUp)
 	assert.Equal(t, uint32(0), streamUp)
 
-	require.NoError(t, h.consumeRecvWindow(1, 40000))
+	require.NoError(t, h.consumeRecvWindow(1, 40000, true))
 
 	connUp, streamUp = h.needsWindowUpdate(1)
 	assert.Positive(t, connUp)
@@ -458,8 +477,8 @@ func TestH2ConnRemoveStreamWindow(t *testing.T) {
 		recvWindowStream:  make(map[uint32]int32),
 	}
 
-	require.NoError(t, h.consumeRecvWindow(1, 1000))
-	require.NoError(t, h.consumeRecvWindow(3, 500))
+	require.NoError(t, h.consumeRecvWindow(1, 1000, true))
+	require.NoError(t, h.consumeRecvWindow(3, 500, true))
 	assert.Len(t, h.recvWindowStream, 2)
 
 	h.removeStreamWindow(1)
@@ -866,6 +885,22 @@ func TestPumpDataFrame(t *testing.T) {
 		p.pumpDataFrame(&bytes.Buffer{}, dst, nil,
 			h2WorkItem{kind: wiData, streamID: 1, data: []byte("hello"), endStream: true})
 		assert.Empty(t, dst.writeCh)
+	})
+
+	t.Run("aborted_stream_replenishes", func(t *testing.T) {
+		p, dst := newProxy(t)
+		src, _ := net.Pipe()
+		t.Cleanup(func() { _ = src.Close() })
+		srcConn := newH2Conn(src)
+		srcConn.recvWindowConn = 1000 // drained below the update threshold
+
+		dst.markStreamAborted(1)
+		p.pumpDataFrame(&bytes.Buffer{}, dst, srcConn,
+			h2WorkItem{kind: wiData, streamID: 1, data: []byte("hello"), endStream: true, replenish: true})
+
+		assert.Empty(t, dst.writeCh)
+		assert.Len(t, srcConn.writeCh, 1) // connection WINDOW_UPDATE
+		assert.Equal(t, int32(localInitialWindow), srcConn.recvWindowConn)
 	})
 }
 

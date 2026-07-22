@@ -286,11 +286,12 @@ func (e *flowControlError) Error() string {
 // consumeRecvWindow deducts from receive windows when data is received.
 // Returns an error if the peer violated flow control (sent more than allowed).
 // Per RFC 9113 section 6.9, exceeding the window is a connection/stream error.
-func (h *h2Conn) consumeRecvWindow(streamID uint32, size int) error {
+// trackStream=false accounts only the connection window, so discarded streams
+// (reset, removed) neither check nor resurrect a per-stream entry.
+func (h *h2Conn) consumeRecvWindow(streamID uint32, size int, trackStream bool) error {
 	h.flowMu.Lock()
 	defer h.flowMu.Unlock()
 
-	// Check connection-level window
 	if size > int(h.recvWindowConn) {
 		return &flowControlError{
 			StreamID: 0,
@@ -298,22 +299,21 @@ func (h *h2Conn) consumeRecvWindow(streamID uint32, size int) error {
 		}
 	}
 
-	// Check stream-level window
-	streamWindow, ok := h.recvWindowStream[streamID]
-	if !ok {
-		streamWindow = localInitialWindow
-	}
-	if size > int(streamWindow) {
-		return &flowControlError{
-			StreamID: streamID,
-			Message:  "stream flow control window exceeded",
+	if trackStream {
+		streamWindow, ok := h.recvWindowStream[streamID]
+		if !ok {
+			streamWindow = localInitialWindow
 		}
+		if size > int(streamWindow) {
+			return &flowControlError{
+				StreamID: streamID,
+				Message:  "stream flow control window exceeded",
+			}
+		}
+		h.recvWindowStream[streamID] = streamWindow - int32(size)
 	}
 
-	// Deduct from both windows
 	h.recvWindowConn -= int32(size)
-	h.recvWindowStream[streamID] = streamWindow - int32(size)
-
 	return nil
 }
 

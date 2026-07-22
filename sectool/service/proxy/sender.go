@@ -893,7 +893,7 @@ func (s *Sender) readH2Response(framer *http2.Framer, h2c *h2Conn, streamID uint
 			// f.Data() strips; use Header().Length for the window math.
 			dataLen := int(f.Header().Length)
 			if dataLen > 0 {
-				if err := h2c.consumeRecvWindow(streamID, dataLen); err != nil {
+				if err := h2c.consumeRecvWindow(streamID, dataLen, true); err != nil {
 					return nil, fmt.Errorf("flow control error: %w", err)
 				}
 			}

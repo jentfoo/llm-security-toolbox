@@ -765,7 +765,9 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 	// Flow control counts the full frame payload including padding and the pad-length
 	// octet, which f.Data() strips; use Header().Length for the window math.
 	dataLen := int(f.Header().Length)
-	if err := src.consumeRecvWindow(streamID, dataLen); err != nil {
+	stream, exists := p.streams.get(streamID)
+	aborted := src.isStreamAborted(streamID)
+	if err := src.consumeRecvWindow(streamID, dataLen, exists && !aborted); err != nil {
 		var fcErr *flowControlError
 		if errors.As(err, &fcErr) {
 			if fcErr.StreamID == 0 {
@@ -789,7 +791,13 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 		return
 	}
 
-	stream, exists := p.streams.get(streamID)
+	// reset stream still receiving in-flight DATA: drop it, but replenish here so
+	// the consumed connection credit is not lost
+	if aborted {
+		p.replenishRecvWindow(buf, src, streamID)
+		return
+	}
+
 	if !exists {
 		// Unknown stream, forward anyway; pump replenishes after sending
 		p.enqueueData(dst, streamID, data, endStream, true)
@@ -807,9 +815,7 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 		p.copyToHistoryBufferLocked(stream, data, fromClient)
 		stream.lastActivity = time.Now()
 		stream.mu.Unlock()
-		if connUpd, streamUpd := src.needsWindowUpdate(streamID); connUpd > 0 || streamUpd > 0 {
-			p.sendWindowUpdates(buf, src, streamID, connUpd, streamUpd)
-		}
+		p.replenishRecvWindow(buf, src, streamID)
 		if endStream {
 			p.storeStreamInHistory(stream, "")
 			p.cleanupStream(streamID)
@@ -1134,6 +1140,13 @@ func (p *h2Proxy) sendWindowUpdates(buf *bytes.Buffer, dst *h2Conn, streamID uin
 	if streamIncrement > 0 {
 		_ = framer.WriteWindowUpdate(streamID, streamIncrement)
 		dst.enqueueWrite(p.ctx, buf.Bytes())
+	}
+}
+
+// replenishRecvWindow credits conn's receive window for streamID when it has drained below the update threshold.
+func (p *h2Proxy) replenishRecvWindow(buf *bytes.Buffer, conn *h2Conn, streamID uint32) {
+	if connUpd, streamUpd := conn.needsWindowUpdate(streamID); connUpd > 0 || streamUpd > 0 {
+		p.sendWindowUpdates(buf, conn, streamID, connUpd, streamUpd)
 	}
 }
 
@@ -1477,6 +1490,9 @@ func (p *h2Proxy) pumpDataFrame(buf *bytes.Buffer, dst, src *h2Conn, item h2Work
 
 	for len(data) > 0 || endStream {
 		if dst.isStreamAborted(streamID) {
+			if item.replenish {
+				p.replenishRecvWindow(buf, src, streamID)
+			}
 			return
 		}
 
@@ -1502,6 +1518,9 @@ func (p *h2Proxy) pumpDataFrame(buf *bytes.Buffer, dst, src *h2Conn, item h2Work
 					p.storeStreamInHistory(s, reasonUpstreamError)
 				}
 				p.cleanupStream(streamID)
+				if item.replenish {
+					p.replenishRecvWindow(buf, src, streamID)
+				}
 				return
 			case <-flowCh:
 				continue
@@ -1547,9 +1566,7 @@ func (p *h2Proxy) pumpDataFrame(buf *bytes.Buffer, dst, src *h2Conn, item h2Work
 
 	// Replenish the source now that data has drained; gates the sender on our progress
 	if item.replenish {
-		if connUpdate, streamUpdate := src.needsWindowUpdate(streamID); connUpdate > 0 || streamUpdate > 0 {
-			p.sendWindowUpdates(buf, src, streamID, connUpdate, streamUpdate)
-		}
+		p.replenishRecvWindow(buf, src, streamID)
 	}
 }
 
