@@ -75,15 +75,6 @@ func NewPeer(conn net.Conn, h Handler) *Peer {
 	return &Peer{rw: conn, h: h, notifyCh: make(chan *Message, notifyQueue), done: make(chan struct{})}
 }
 
-// SetHandler swaps the inbound handler. Safe to call before Run starts handling
-// traffic (e.g. between Dial's handshake and Serve).
-func (p *Peer) SetHandler(h Handler) {
-	if h == nil {
-		h = HandlerFuncs{}
-	}
-	p.h = h
-}
-
 // Run reads and dispatches messages until the connection closes or errors.
 // Returns nil on a clean close (local Close or remote EOF), otherwise the read
 // error.
@@ -135,7 +126,11 @@ func (p *Peer) dispatchNotifications(ctx context.Context) {
 }
 
 func (p *Peer) deliverResponse(msg *Message) {
-	id, err := strconv.ParseUint(string(msg.ID), 10, 64)
+	raw := string(msg.ID)
+	if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		raw = raw[1 : len(raw)-1] // accept quoted-numeric ids from non-Go peers
+	}
+	id, err := strconv.ParseUint(raw, 10, 64)
 	if err != nil {
 		return
 	}

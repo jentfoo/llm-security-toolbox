@@ -13,13 +13,23 @@ import (
 )
 
 // fakeServer accepts one connection on a loopback TCP listener and drives it
-// with the supplied request handler. It returns the dial address.
-func fakeServer(t *testing.T, req func(method string, params json.RawMessage) (any, *wire.Error)) (string, chan *wire.Peer) {
+// with the supplied request handler and optional notification handler. It
+// returns the dial address and the accepted peer.
+func fakeServer(t *testing.T, req func(method string, params json.RawMessage) (any, *wire.Error), notif ...func(ctx context.Context, method string, params json.RawMessage)) (string, chan *wire.Peer) {
 	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
+
+	hf := wire.HandlerFuncs{
+		Request: func(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
+			return req(method, params)
+		},
+	}
+	if len(notif) > 0 {
+		hf.Notification = notif[0]
+	}
 
 	peerCh := make(chan *wire.Peer, 1)
 	go func() {
@@ -27,11 +37,7 @@ func fakeServer(t *testing.T, req func(method string, params json.RawMessage) (a
 		if err != nil {
 			return
 		}
-		p := wire.NewPeer(conn, wire.HandlerFuncs{
-			Request: func(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
-				return req(method, params)
-			},
-		})
+		p := wire.NewPeer(conn, hf)
 		peerCh <- p
 		go func() { _ = p.Run(t.Context()) }()
 	}()
@@ -169,25 +175,21 @@ func TestConnInvokeTool(t *testing.T) {
 func TestConnHeartbeatAndShutdown(t *testing.T) {
 	t.Parallel()
 
-	addr, peerCh := fakeServer(t, registerOK)
+	// ping auto-answered with pong
+	pong := make(chan struct{}, 1)
+	addr, peerCh := fakeServer(t, registerOK, func(_ context.Context, method string, _ json.RawMessage) {
+		if method == wire.MethodPong {
+			select {
+			case pong <- struct{}{}:
+			default:
+			}
+		}
+	})
 	conn, err := Dial(t.Context(), addr, Registration{Name: "demo"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
 	srv := <-peerCh
-
-	// ping auto-answered with pong
-	pong := make(chan struct{}, 1)
-	srv.SetHandler(wire.HandlerFuncs{
-		Notification: func(_ context.Context, method string, _ json.RawMessage) {
-			if method == wire.MethodPong {
-				select {
-				case pong <- struct{}{}:
-				default:
-				}
-			}
-		},
-	})
 
 	drained := make(chan int, 1)
 	// install up front: Serve's own install races the shutdown request below,

@@ -117,8 +117,8 @@ func TestManagerInvokeTool(t *testing.T) {
 
 		var gotName string
 		var gotArgs json.RawMessage
-		p := wire.NewPeer(cli, nil)
-		p.SetHandler(wire.HandlerFuncs{
+		var p *wire.Peer
+		p = wire.NewPeer(cli, wire.HandlerFuncs{
 			Notification: func(_ context.Context, method string, _ json.RawMessage) {
 				if method == wire.MethodPing {
 					_ = p.Notify(wire.MethodPong, nil)

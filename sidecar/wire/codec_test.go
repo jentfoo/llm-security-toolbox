@@ -55,4 +55,13 @@ func TestReadFrame(t *testing.T) {
 		_, err := ReadFrame(&buf)
 		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	})
+
+	t.Run("oversized_prefix", func(t *testing.T) {
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], uint32(MaxFrameBytes)+1) // no body follows
+		_, err := ReadFrame(bytes.NewReader(hdr[:]))
+		var werr *Error
+		require.ErrorAs(t, err, &werr)
+		assert.Equal(t, CodeOversizedMessage, werr.Code)
+	})
 }

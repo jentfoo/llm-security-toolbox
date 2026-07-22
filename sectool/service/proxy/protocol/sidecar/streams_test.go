@@ -60,8 +60,8 @@ func streamPeers(t *testing.T, ss *streamSet, reply func(sc *wire.Peer, method s
 	t.Cleanup(func() { _ = rec.peer.Close() })
 
 	ended := make(chan string, 8)
-	p := wire.NewPeer(cli, nil)
-	p.SetHandler(wire.HandlerFuncs{
+	var p *wire.Peer
+	p = wire.NewPeer(cli, wire.HandlerFuncs{
 		Request: func(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
 			var sp wire.StreamWriteParams
 			_ = json.Unmarshal(params, &sp)

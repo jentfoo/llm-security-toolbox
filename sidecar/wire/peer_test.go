@@ -84,6 +84,26 @@ func TestPeerCall(t *testing.T) {
 	})
 }
 
+func TestPeerDeliverResponse(t *testing.T) {
+	t.Parallel()
+
+	// non-Go peers may echo the numeric id as a quoted string
+	ca, _ := net.Pipe()
+	p := NewPeer(ca, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	ch := make(chan *Message, 1)
+	p.pending.Store(uint64(7), ch)
+	p.deliverResponse(&Message{ID: json.RawMessage(`"7"`), Result: json.RawMessage(`{"ok":true}`)})
+
+	select {
+	case got := <-ch:
+		assert.JSONEq(t, `"7"`, string(got.ID))
+	default:
+		t.Fatal("string-form id not matched")
+	}
+}
+
 // TestPeerNestedRequest verifies deadlock freedom: while peer A handles a
 // request from B, A issues its own request back to B; both must complete
 // without the reader loops blocking.

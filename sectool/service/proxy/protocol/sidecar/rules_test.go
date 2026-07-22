@@ -90,8 +90,8 @@ func dialRecorder(t *testing.T, m *Manager, rec *syncRecorder) *wire.Peer {
 	srvConn, cliConn := net.Pipe()
 	go m.HandleConn(t.Context(), srvConn)
 
-	p := wire.NewPeer(cliConn, nil)
-	p.SetHandler(wire.HandlerFuncs{
+	var p *wire.Peer
+	p = wire.NewPeer(cliConn, wire.HandlerFuncs{
 		Request: rec.handle,
 		Notification: func(_ context.Context, method string, _ json.RawMessage) {
 			if method == wire.MethodPing {

@@ -444,7 +444,7 @@ A single connection carries a sequence of length-prefixed messages:
 - **4 bytes** — big-endian `uint32` payload length (counts the JSON bytes only).
 - **N bytes** — the JSON-RPC 2.0 message.
 
-No delimiter, no trailing newline. The only ceiling is the `uint32` prefix (`0xFFFFFFFF`); a write exceeding it errors with `-33201`. `max_body_bytes` governs only what history retains, never what is forwarded.
+No delimiter, no trailing newline. Frames are bounded to **128 MiB** on both read and write; a frame exceeding it errors with `-33201` (a write is refused, an oversized read prefix is rejected before allocating). `max_body_bytes` governs only what history retains, never what is forwarded.
 
 ### Message envelope
 
@@ -467,7 +467,7 @@ Message kind is discriminated by presence:
 - **Response** — has `id`, no `method` (carries `result` or `error`).
 - **Notification** — has `method`, no `id` (fire-and-forget).
 
-Both peers are symmetric: either may issue requests and notifications. `id` is an incrementing unsigned integer, unique per outstanding request per direction, echoed verbatim in the response. **The reader must dispatch each inbound request to a separate task**, so a handler awaiting a nested request never blocks the read loop and deadlocks the connection. Malformed frames are silently skipped, not answered.
+Both peers are symmetric: either may issue requests and notifications. `id` is an incrementing unsigned integer, unique per outstanding request per direction, echoed verbatim in the response (a quoted-numeric echo, e.g. `"1"`, is also accepted). **The reader must dispatch each inbound request to a separate task**, so a handler awaiting a nested request never blocks the read loop and deadlocks the connection. Malformed frames are silently skipped, not answered.
 
 Binary fields (`body`, `body_raw`, stream/probe `data`, `magic_bytes_prefix`) use standard-alphabet padded base64. Fields typed as raw JSON (schemas, `annotations`, structured tool output, and the adapter-validated `target`/`payload`/`params`) are embedded verbatim, not re-encoded; each method's params note which applies.
 

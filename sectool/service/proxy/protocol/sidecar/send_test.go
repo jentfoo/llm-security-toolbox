@@ -90,8 +90,8 @@ func dialManagerReq(t *testing.T, m *Manager, onReq func(method string, params j
 	t.Helper()
 	srv, cli := net.Pipe()
 	go m.HandleConn(t.Context(), srv)
-	p := wire.NewPeer(cli, nil)
-	p.SetHandler(wire.HandlerFuncs{
+	var p *wire.Peer
+	p = wire.NewPeer(cli, wire.HandlerFuncs{
 		Request: func(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
 			return onReq(method, params)
 		},

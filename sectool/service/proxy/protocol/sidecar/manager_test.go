@@ -40,8 +40,8 @@ func dialManager(t *testing.T, m *Manager, answerPing bool) *wire.Peer {
 	srv, cli := net.Pipe()
 	go m.HandleConn(t.Context(), srv)
 
-	p := wire.NewPeer(cli, nil)
-	p.SetHandler(wire.HandlerFuncs{
+	var p *wire.Peer
+	p = wire.NewPeer(cli, wire.HandlerFuncs{
 		Notification: func(_ context.Context, method string, _ json.RawMessage) {
 			if answerPing && method == wire.MethodPing {
 				_ = p.Notify(wire.MethodPong, nil)
@@ -364,8 +364,7 @@ func TestManagerShutdown(t *testing.T) {
 	srv, cli := net.Pipe()
 	go m.HandleConn(t.Context(), srv)
 
-	p := wire.NewPeer(cli, nil)
-	p.SetHandler(wire.HandlerFuncs{
+	p := wire.NewPeer(cli, wire.HandlerFuncs{
 		Request: func(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
 			if method == wire.MethodShutdown {
 				var sp wire.ShutdownParams
