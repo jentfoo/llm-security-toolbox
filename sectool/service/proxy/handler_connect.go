@@ -35,7 +35,6 @@ type connectHandler struct {
 	http2Handler *http2Handler
 	reg          *protocol.Registry
 	history      *HistoryStore
-	maxBodyBytes int
 
 	// Server capability cache: host:port -> negotiated protocol; avoids repeated probe latency
 	capsMu     sync.RWMutex
@@ -50,13 +49,12 @@ type serverCap struct {
 }
 
 // newConnectHandler creates a new CONNECT handler.
-func newConnectHandler(certManager *CertManager, http1Handler *http1Handler, http2Handler *http2Handler, history *HistoryStore, maxBodyBytes int, timeouts TimeoutConfig) *connectHandler {
+func newConnectHandler(certManager *CertManager, http1Handler *http1Handler, http2Handler *http2Handler, history *HistoryStore, timeouts TimeoutConfig) *connectHandler {
 	return &connectHandler{
 		certManager:  certManager,
 		http1Handler: http1Handler,
 		http2Handler: http2Handler,
 		history:      history,
-		maxBodyBytes: maxBodyBytes,
 		serverCaps:   make(map[string]serverCap),
 		timeouts:     timeouts,
 	}
@@ -164,7 +162,7 @@ func (h *connectHandler) parseConnectRequest(reader *bufio.Reader) (*types.Targe
 // post-CONNECT stream by negotiated protocol. Upstream protocol probing is
 // deferred until the client hello is seen so the presented ALPN can be matched.
 func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader, target *types.Target) {
-	targetAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
+	targetAddr := target.Addr()
 
 	// Variables to capture from GetConfigForClient callback
 	var upstreamConn net.Conn

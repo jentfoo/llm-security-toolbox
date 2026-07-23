@@ -60,13 +60,9 @@ type h2Conn struct {
 	closeOnce sync.Once // ensures closeCh is only closed once
 
 	// Settings received from peer
-	maxFrameSize         uint32
-	maxHeaderListSize    uint32
-	initialWindowSize    uint32
-	headerTableSize      uint32
-	enablePush           bool
-	maxConcurrentStreams uint32
-	settingsMu           sync.RWMutex
+	maxFrameSize      uint32
+	initialWindowSize uint32
+	settingsMu        sync.RWMutex
 
 	// Flow control: receive windows (how much data we can receive)
 	// These track our local receive window for this connection/stream
@@ -112,22 +108,19 @@ func newH2ConnReader(conn net.Conn, r io.Reader) *h2Conn {
 	framer.ReadMetaHeaders = nil // We decode HPACK ourselves
 
 	h := &h2Conn{
-		conn:                 conn,
-		framer:               framer,
-		writeCh:              make(chan []byte, 256),
-		closeCh:              make(chan struct{}),
-		maxFrameSize:         16384, // HTTP/2 default
-		maxHeaderListSize:    maxHeaderListSize,
-		initialWindowSize:    65535, // HTTP/2 default (peer's window for send logic)
-		headerTableSize:      hpackDynamicTableSize,
-		maxConcurrentStreams: 100,                // reasonable default
-		recvWindowConn:       localInitialWindow, // our advertised receive window
-		recvWindowStream:     make(map[uint32]int32),
-		sendWindowConn:       65535, // HTTP/2 default (peer's receive window)
-		sendWindowStream:     make(map[uint32]int32),
-		flowCtrlCh:           make(chan struct{}),
-		pumpSignal:           make(chan struct{}, 1),
-		abortedStreams:       make(map[uint32]struct{}),
+		conn:              conn,
+		framer:            framer,
+		writeCh:           make(chan []byte, 256),
+		closeCh:           make(chan struct{}),
+		maxFrameSize:      16384,              // HTTP/2 default
+		initialWindowSize: 65535,              // HTTP/2 default (peer's window for send logic)
+		recvWindowConn:    localInitialWindow, // our advertised receive window
+		recvWindowStream:  make(map[uint32]int32),
+		sendWindowConn:    65535, // HTTP/2 default (peer's receive window)
+		sendWindowStream:  make(map[uint32]int32),
+		flowCtrlCh:        make(chan struct{}),
+		pumpSignal:        make(chan struct{}, 1),
+		abortedStreams:    make(map[uint32]struct{}),
 	}
 
 	h.hpackDec = hpack.NewDecoder(hpackDynamicTableSize, nil)
@@ -236,8 +229,6 @@ func (h *h2Conn) updateSettings(settings []http2.Setting) {
 		switch s.ID {
 		case http2.SettingMaxFrameSize:
 			h.maxFrameSize = s.Val
-		case http2.SettingMaxHeaderListSize:
-			h.maxHeaderListSize = s.Val
 		case http2.SettingInitialWindowSize:
 			// Handled by updateSendWindowFromSettings() under flowMu - skip here to avoid race
 		case http2.SettingHeaderTableSize:
@@ -246,14 +237,9 @@ func (h *h2Conn) updateSettings(settings []http2.Setting) {
 			if tableSize > hpackDynamicTableSize {
 				tableSize = hpackDynamicTableSize
 			}
-			h.headerTableSize = tableSize
 			h.hpackMu.Lock()
 			h.hpackEnc.SetMaxDynamicTableSize(tableSize)
 			h.hpackMu.Unlock()
-		case http2.SettingEnablePush:
-			h.enablePush = s.Val == 1
-		case http2.SettingMaxConcurrentStreams:
-			h.maxConcurrentStreams = s.Val
 		}
 	}
 }

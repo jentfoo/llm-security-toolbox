@@ -34,7 +34,6 @@ func Connect(ctx context.Context, url string) (*Client, error) {
 // Client wraps the MCP client for CLI usage.
 type Client struct {
 	mcpClient *client.Client
-	mcpURL    string
 }
 
 // New creates a new MCP client and connects to the server.
@@ -57,7 +56,6 @@ func New(ctx context.Context, mcpURL string) (*Client, error) {
 
 	c := &Client{
 		mcpClient: mcpClient,
-		mcpURL:    mcpURL,
 	}
 
 	initReq := mcp.InitializeRequest{}
@@ -167,15 +165,6 @@ func (c *Client) ListTools(ctx context.Context) ([]mcp.Tool, error) {
 		return nil, translateTimeoutError(err)
 	}
 	return result.Tools, nil
-}
-
-// CallToolText calls an MCP tool and returns the text result.
-func (c *Client) CallToolText(ctx context.Context, name string, args map[string]interface{}) (string, error) {
-	result, err := c.CallTool(ctx, name, args)
-	if err != nil {
-		return "", err
-	}
-	return extractTextContent(result.Content), nil
 }
 
 // extractTextContent extracts text from MCP content items.

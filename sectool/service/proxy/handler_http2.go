@@ -20,8 +20,6 @@ import (
 )
 
 const (
-	// initialWindowSize is the HTTP/2 default window (64KB)
-	initialWindowSize = 65535
 	streamIdleTimeout = 5 * time.Minute
 	cleanupInterval   = 1 * time.Minute
 	h2Preface         = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -135,13 +133,6 @@ type h2Stream struct {
 	startTime    time.Time
 	lastActivity time.Time
 
-	// Flow control
-	window int32
-
-	// Buffering for body rules
-	reqBodyComplete  bool
-	respBodyComplete bool
-
 	// discardClientBody drains client DATA locally after an intercepted response was served mid-request-body.
 	discardClientBody bool
 }
@@ -150,14 +141,12 @@ type h2Stream struct {
 // Returns true if stream is now fully closed. Caller must hold stream.mu.
 func (s *h2Stream) markEndStream(fromClient bool) bool {
 	if fromClient {
-		s.reqBodyComplete = true
 		if s.state == streamHalfClosedRemote {
 			s.state = streamClosed
 		} else {
 			s.state = streamHalfClosedLocal
 		}
 	} else {
-		s.respBodyComplete = true
 		if s.state == streamHalfClosedLocal {
 			s.state = streamClosed
 		} else {
@@ -197,7 +186,6 @@ func (t *h2StreamTracker) getOrCreate(id uint32) *h2Stream {
 		state:        streamOpen,
 		startTime:    time.Now(),
 		lastActivity: time.Now(),
-		window:       initialWindowSize,
 	}
 	t.streams[id] = s
 	return s
@@ -338,7 +326,7 @@ func (p *h2Proxy) exchangeSettings() error {
 	// This prevents deadlock when server waits for client SETTINGS before sending its own
 	ourSettings := []http2.Setting{
 		{ID: http2.SettingMaxHeaderListSize, Val: maxHeaderListSize},
-		{ID: http2.SettingInitialWindowSize, Val: initialWindowSize},
+		{ID: http2.SettingInitialWindowSize, Val: localInitialWindow},
 		{ID: http2.SettingEnablePush, Val: 0}, // disable server push
 	}
 	var buf bytes.Buffer
@@ -1159,15 +1147,6 @@ func (p *h2Proxy) handleWindowUpdate(f *http2.WindowUpdateFrame, src *h2Conn) {
 	// This tracks how much data we can send to that peer
 	// Do NOT forward to other connection - flow control is per-hop
 	src.updateSendWindow(f.StreamID, f.Increment)
-
-	// Update stream tracking if stream-level
-	if f.StreamID != 0 {
-		if stream, exists := p.streams.get(f.StreamID); exists {
-			stream.mu.Lock()
-			stream.window += int32(f.Increment)
-			stream.mu.Unlock()
-		}
-	}
 }
 
 // handlePingFrame handles PING frames per Phase 5 spec.

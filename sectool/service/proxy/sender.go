@@ -227,7 +227,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *types.RawHTTP
 		return nil, errors.New("HTTP/2 requires HTTPS; cannot send h2 request to non-TLS target")
 	}
 
-	targetAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
+	targetAddr := target.Addr()
 	var conn net.Conn
 	var err error
 
@@ -313,7 +313,7 @@ func (s *Sender) sendRequestWithProtocol(ctx context.Context, req *types.RawHTTP
 func (s *Sender) sendRawRequest(ctx context.Context, opts SendOptions) (*types.RawHTTP1Response, error) {
 	method := ExtractMethod(opts.RawRequest)
 
-	targetAddr := fmt.Sprintf("%s:%d", opts.Target.Hostname, opts.Target.Port)
+	targetAddr := opts.Target.Addr()
 	var conn net.Conn
 	var err error
 
@@ -389,10 +389,7 @@ func buildRedirectRequest(originalReq *types.RawHTTP1Request, location string, c
 	}
 
 	// Build Host header
-	host := newTarget.Hostname
-	if (newTarget.UsesHTTPS && newTarget.Port != 443) || (!newTarget.UsesHTTPS && newTarget.Port != 80) {
-		host = fmt.Sprintf("%s:%d", newTarget.Hostname, newTarget.Port)
-	}
+	host := newTarget.HostHeader()
 
 	// Copy headers, applying redirect rules
 	for _, h := range originalReq.Headers {
@@ -536,10 +533,7 @@ func (s *Sender) sendH2Request(ctx context.Context, conn net.Conn, req *types.Ra
 	// Fall back to target if Host header is absent
 	authority := req.GetHeader("Host")
 	if authority == "" {
-		authority = target.Hostname
-		if target.Port != 443 {
-			authority = fmt.Sprintf("%s:%d", target.Hostname, target.Port)
-		}
+		authority = target.HostHeader()
 	}
 
 	// Build pseudo-headers

@@ -82,26 +82,21 @@ type HistoryDeleteResponse struct {
 
 // FlowGetResponse is the response for flow_get.
 type FlowGetResponse struct {
-	FlowID            string              `json:"flow_id"`
-	Source            string              `json:"source"`
-	Method            string              `json:"method"`
-	URL               string              `json:"url"`
-	ReqHeaders        string              `json:"request_headers"`
-	ReqHeadersParsed  map[string][]string `json:"request_headers_parsed,omitempty"`
-	ReqLine           *RequestLine        `json:"request_line,omitempty"`
-	ReqBody           string              `json:"request_body"`
-	ReqSize           int                 `json:"request_size"`
-	Status            int                 `json:"status"`
-	StatusLine        string              `json:"status_line"`
-	RespHeaders       string              `json:"response_headers"`
-	RespHeadersParsed map[string][]string `json:"response_headers_parsed,omitempty"`
-	RespBody          string              `json:"response_body"`
-	RespSize          int                 `json:"response_size"`
-	Duration          string              `json:"duration,omitempty"`
-	FoundOn           string              `json:"found_on,omitempty"`
-	Depth             int                 `json:"depth,omitempty"`
-	Truncated         bool                `json:"truncated,omitempty"`
-	Note              string              `json:"note,omitempty"`
+	FlowID      string `json:"flow_id"`
+	Source      string `json:"source"`
+	Method      string `json:"method"`
+	URL         string `json:"url"`
+	ReqHeaders  string `json:"request_headers"`
+	ReqBody     string `json:"request_body"`
+	ReqSize     int    `json:"request_size"`
+	Status      int    `json:"status"`
+	StatusLine  string `json:"status_line"`
+	RespHeaders string `json:"response_headers"`
+	RespBody    string `json:"response_body"`
+	RespSize    int    `json:"response_size"`
+	Duration    string `json:"duration,omitempty"`
+	FoundOn     string `json:"found_on,omitempty"`
+	Note        string `json:"note,omitempty"`
 	// Annotations is sidecar-authored flow metadata; empty for HTTP flows.
 	Annotations       map[string]any `json:"annotations,omitempty"`
 	InvokedBy         string         `json:"invoked_by,omitempty"`
@@ -559,7 +554,6 @@ type JSAnalyzeResponse struct {
 	ScriptSrc     []string            `json:"script_src,omitempty"`
 	SourceMaps    []string            `json:"source_maps,omitempty"`
 	OriginSummary []OriginCount       `json:"origin_summary,omitempty"`
-	Warnings      []string            `json:"warnings,omitempty"`
 }
 
 // OriginCount is a per-host endpoint tally, used by the "summary" origin mode to

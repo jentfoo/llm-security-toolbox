@@ -159,6 +159,10 @@ func (m *Manager) heartbeatLoop(ctx context.Context, s *session) {
 	}
 }
 
+// AnnotationDisconnected is the Flow.Annotations key sectool sets when it finalizes
+// a flow left open by a sidecar that disconnected without resume.
+const AnnotationDisconnected = "sidecar_disconnected"
+
 // detachSession removes a record when its connection closes, stashing resume
 // state for a resuming sidecar.
 func (m *Manager) detachSession(s *session) {
@@ -171,8 +175,19 @@ func (m *Manager) detachSession(s *session) {
 		instanceTag = "-"
 	}
 
+	var abandoned map[string]struct{}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		// finalize the non-resuming sidecar's still-open flows off-lock
+		for id := range abandoned {
+			flow, ok := m.flows.Get(id)
+			if !ok || flow.Response != nil || !flow.CompletedAt.IsZero() {
+				continue // gone or already completed
+			}
+			m.flows.Complete(id, nil, m.now(), map[string]any{AnnotationDisconnected: true})
+		}
+	}()
 	if cur, ok := m.records[rec.Name]; !ok || cur != rec {
 		return // already replaced by a reconnect
 	}
@@ -182,8 +197,9 @@ func (m *Manager) detachSession(s *session) {
 	}
 	m.releaseClaims(rec)
 	if rec.resume && rec.InstanceID != "" {
-		owned, inFlight := rec.snapshotOwnership()
-		m.resumeState[rec.InstanceID] = &resumeEntry{ownedFlows: owned, inFlight: inFlight}
+		m.resumeState[rec.InstanceID] = &resumeEntry{ownedFlows: rec.snapshotOwnership()}
+	} else {
+		abandoned = rec.snapshotOwnership()
 	}
 
 	log.Printf("sidecar[%s]: disconnected instance_id=%s", rec.Name, instanceTag)

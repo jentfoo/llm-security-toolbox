@@ -160,7 +160,7 @@ func (h *http1Handler) handleExchange(ctx context.Context, clientConn net.Conn, 
 	// dial on the plain path; the TLS path reuses the pre-dialed tunnel upstream
 	up := x.upstream
 	if up == nil {
-		upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
+		upstreamAddr := target.Addr()
 		dialer := net.Dialer{Timeout: h.timeouts.DialTimeout}
 		upstreamConn, derr := dialer.DialContext(ctx, "tcp", upstreamAddr)
 		if derr != nil {
@@ -327,11 +327,7 @@ func (h *http1Handler) rewriteToOriginForm(req *types.RawHTTP1Request, target *t
 	}
 
 	// Ensure Host header is set correctly
-	hostHeader := target.Hostname
-	if (target.UsesHTTPS && target.Port != 443) || (!target.UsesHTTPS && target.Port != 80) {
-		hostHeader = fmt.Sprintf("%s:%d", target.Hostname, target.Port)
-	}
-	req.SetHeader("Host", hostHeader)
+	req.SetHeader("Host", target.HostHeader())
 }
 
 // isTimeoutError checks if the error is a network timeout.

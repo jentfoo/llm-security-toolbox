@@ -91,9 +91,6 @@ func TestH2StreamInitialState(t *testing.T) {
 	assert.Equal(t, streamOpen, stream.state)
 	assert.WithinDuration(t, now, stream.startTime, time.Second)
 	assert.WithinDuration(t, now, stream.lastActivity, time.Second)
-	assert.Equal(t, int32(initialWindowSize), stream.window)
-	assert.False(t, stream.reqBodyComplete)
-	assert.False(t, stream.respBodyComplete)
 }
 
 // h2MockRuleApplier is a mock implementation for testing

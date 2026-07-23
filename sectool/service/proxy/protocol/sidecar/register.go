@@ -90,8 +90,7 @@ func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Reco
 	}
 	if hasExisting {
 		if reconnect && p.Resume && carried == nil {
-			owned, inFlight := existing.snapshotOwnership()
-			carried = &resumeEntry{ownedFlows: owned, inFlight: inFlight}
+			carried = &resumeEntry{ownedFlows: existing.snapshotOwnership()}
 		}
 		m.removeLocked(existing)
 	}
@@ -100,7 +99,6 @@ func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Reco
 	rec := &Record{
 		Name:         p.Name,
 		ProtoVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: effMinor},
-		Protocols:    p.Protocols,
 		Capabilities: p.Capabilities,
 		MCPTools:     p.MCPTools,
 		InstanceID:   p.InstanceID,
@@ -113,9 +111,9 @@ func (m *Manager) handleRegister(peer *wire.Peer, p *wire.RegisterParams) (*Reco
 	rec.healthy.Store(true)
 	rec.bridge = newBridge(rec, m.flows)
 	if carried != nil {
-		rec.ownedFlows, rec.inFlight = carried.ownedFlows, carried.inFlight
+		rec.ownedFlows = carried.ownedFlows
 	} else {
-		rec.ownedFlows, rec.inFlight = map[string]struct{}{}, map[string]struct{}{}
+		rec.ownedFlows = map[string]struct{}{}
 	}
 
 	m.records[p.Name] = rec

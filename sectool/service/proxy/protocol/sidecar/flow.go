@@ -49,7 +49,6 @@ func (s *session) handlePushFlow(p *wire.Flow) (any, *wire.Error) {
 			return nil, wire.NewError(wire.CodeFlowRejected, "push_flow: unknown flow_id").
 				WithData(&wire.ErrorData{Adapter: rec.Name, FlowID: p.FlowID})
 		}
-		rec.markComplete(p.FlowID)
 		return wire.PushFlowResult{FlowID: p.FlowID}, nil
 	}
 
@@ -59,7 +58,7 @@ func (s *session) handlePushFlow(p *wire.Flow) (any, *wire.Error) {
 		return wire.PushFlowResult{}, nil
 	}
 	flowID := s.m.flows.Store(flow)
-	rec.trackOwned(flowID, flow.Response == nil && flow.CompletedAt.IsZero())
+	rec.trackOwned(flowID)
 	return wire.PushFlowResult{FlowID: flowID}, nil
 }
 

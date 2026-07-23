@@ -190,39 +190,6 @@ func TestRead(t *testing.T) {
 	})
 }
 
-func TestReconstructRequest(t *testing.T) {
-	t.Parallel()
-
-	t.Run("removes_placeholder", func(t *testing.T) {
-		headers := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n" + BodyPlaceholder + "\n")
-		body := []byte("request body")
-
-		result := ReconstructRequest(headers, body)
-
-		assert.Contains(t, string(result), "GET / HTTP/1.1")
-		assert.Contains(t, string(result), "request body")
-		assert.NotContains(t, string(result), BodyPlaceholder)
-	})
-
-	t.Run("adds_crlf_if_missing", func(t *testing.T) {
-		headers := []byte("GET / HTTP/1.1\r\nHost: example.com")
-		body := []byte("body")
-
-		result := ReconstructRequest(headers, body)
-
-		assert.Contains(t, string(result), "\r\n\r\nbody")
-	})
-
-	t.Run("handles_empty_body", func(t *testing.T) {
-		headers := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
-		body := []byte{}
-
-		result := ReconstructRequest(headers, body)
-
-		assert.Equal(t, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", string(result))
-	})
-}
-
 func TestResolvePath(t *testing.T) {
 	// Not parallel - subtest uses os.Chdir
 

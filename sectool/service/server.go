@@ -55,7 +55,6 @@ type Server struct {
 	mcpServer *mcpServer
 	mcpReady  atomic.Pointer[mcpServer] // set once mcpServer is built; backs sidecar core_invoke
 	started   chan struct{}
-	startedAt time.Time
 
 	// Backend implementations
 	httpBackend    HttpBackend
@@ -148,7 +147,6 @@ func (s *Server) WaitTillStarted() {
 // Run starts the MCP server and blocks until shutdown.
 func (s *Server) Run(ctx context.Context) error {
 	markStarted := sync.OnceFunc(func() {
-		s.startedAt = time.Now()
 		close(s.started)
 	})
 	defer markStarted()

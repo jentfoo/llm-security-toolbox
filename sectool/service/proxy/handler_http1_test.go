@@ -355,7 +355,7 @@ func TestRewriteToOriginForm(t *testing.T) {
 				UsesHTTPS: false,
 			},
 			wantPath:    "/api",
-			wantHostHdr: "::1:8080", // no brackets added by rewriteToOriginForm
+			wantHostHdr: "[::1]:8080", // IPv6 literal is bracketed
 		},
 		{
 			name:       "standard_https_port",

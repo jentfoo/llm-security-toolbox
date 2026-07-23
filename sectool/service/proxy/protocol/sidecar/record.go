@@ -13,7 +13,6 @@ import (
 type Record struct {
 	Name         string
 	ProtoVersion wire.ProtocolVersion
-	Protocols    []string
 	Capabilities wire.Capabilities
 	MCPTools     []wire.MCPTool // tool definitions the sidecar provides
 	InstanceID   string
@@ -31,9 +30,8 @@ type Record struct {
 
 	mu       sync.Mutex
 	liveness Liveness
-	// Ownership and in-flight bookkeeping used to reclaim state on reconnect/resume.
+	// ownedFlows reclaims completion authz on reconnect/resume and drives disconnect cleanup.
 	ownedFlows map[string]struct{}
-	inFlight   map[string]struct{}
 }
 
 // Liveness tracks heartbeat responses.
@@ -45,7 +43,6 @@ type Liveness struct {
 // resume=true can reclaim it.
 type resumeEntry struct {
 	ownedFlows map[string]struct{}
-	inFlight   map[string]struct{}
 }
 
 // Healthy reports whether the sidecar is answering heartbeats. An unhealthy
@@ -67,15 +64,11 @@ func (r *Record) lastPong() time.Time {
 	return r.liveness.LastPongRecv
 }
 
-// trackOwned records a newly emitted flow as owned, and in-flight when it still
-// awaits a two-phase completion.
-func (r *Record) trackOwned(flowID string, inFlight bool) {
+// trackOwned records a newly emitted flow as owned by the adapter.
+func (r *Record) trackOwned(flowID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.ownedFlows[flowID] = struct{}{}
-	if inFlight {
-		r.inFlight[flowID] = struct{}{}
-	}
 }
 
 // owns reports whether the adapter emitted the flow.
@@ -86,16 +79,9 @@ func (r *Record) owns(flowID string) bool {
 	return ok
 }
 
-// snapshotOwnership returns private clones of the ownership maps for stash and reclaim.
-func (r *Record) snapshotOwnership() (ownedFlows, inFlight map[string]struct{}) {
+// snapshotOwnership returns a private clone of the owned-flow set for stash and reclaim.
+func (r *Record) snapshotOwnership() map[string]struct{} {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return maps.Clone(r.ownedFlows), maps.Clone(r.inFlight)
-}
-
-// markComplete clears a flow's in-flight status after two-phase completion.
-func (r *Record) markComplete(flowID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.inFlight, flowID)
+	return maps.Clone(r.ownedFlows)
 }

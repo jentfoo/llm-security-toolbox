@@ -11,8 +11,6 @@ import (
 // EarlyClaimCtx is the byte stream offered to early adapters at accept time:
 // a raw TCP connection, or a TLS-decrypted post-CONNECT stream when TLSTerminated.
 type EarlyClaimCtx struct {
-	// Peek holds the opening bytes from ClientReader; nil for a post-CONNECT stream.
-	Peek []byte
 	// TLSTerminated is true for a decrypted post-CONNECT stream.
 	TLSTerminated bool
 	// ALPN is the negotiated protocol ("h2"/"http/1.1"/""); empty at raw accept.

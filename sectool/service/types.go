@@ -1,12 +1,5 @@
 package service
 
-import (
-	"context"
-	"errors"
-	"net"
-	"os"
-)
-
 // Flow source constants for display and sorting.
 const (
 	SourceProxy  = "proxy"
@@ -22,22 +15,6 @@ const (
 	OutputModeErrors  = "errors"
 	OutputModeEvents  = "events"
 )
-
-// IsTimeoutError returns true if the error is a timeout.
-func IsTimeoutError(err error) bool {
-	if err == nil {
-		return false
-	} else if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	} else if errors.Is(err, os.ErrDeadlineExceeded) {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return true
-	}
-	return false
-}
 
 // ProxyListRequest contains filters for proxy list queries.
 type ProxyListRequest struct {

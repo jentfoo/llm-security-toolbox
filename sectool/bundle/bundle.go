@@ -196,22 +196,6 @@ func Read(bundleDir string) (headers, body []byte, meta *Meta, err error) {
 	return headers, body, meta, nil
 }
 
-// ReconstructRequest rebuilds the full HTTP request from headers and body.
-func ReconstructRequest(headers, body []byte) []byte {
-	placeholder := []byte(BodyPlaceholder + "\n")
-	headers = bytes.Replace(headers, placeholder, nil, 1)
-
-	if !bytes.HasSuffix(headers, []byte("\r\n\r\n")) {
-		if bytes.HasSuffix(headers, []byte("\r\n")) {
-			headers = append(headers, []byte("\r\n")...)
-		} else {
-			headers = append(headers, []byte("\r\n\r\n")...)
-		}
-	}
-
-	return append(headers, body...)
-}
-
 // ResolvePath resolves a bundle path argument.
 // Tries the argument as-is first, then as ./sectool-requests/<arg>/.
 func ResolvePath(arg string) (string, error) {

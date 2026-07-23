@@ -67,7 +67,7 @@ func (h *webSocketHandler) Handle(
 	// Strip compression extensions so rules can be applied to uncompressed text
 	h.stripExtensions(req)
 
-	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
+	upstreamAddr := target.Addr()
 	dialer := net.Dialer{Timeout: h.timeouts.DialTimeout}
 	upstreamConn, err := dialer.DialContext(ctx, "tcp", upstreamAddr)
 	if err != nil {
@@ -92,7 +92,7 @@ func (h *webSocketHandler) HandleTLS(
 
 	h.stripExtensions(req)
 
-	upstreamAddr := fmt.Sprintf("%s:%d", target.Hostname, target.Port)
+	upstreamAddr := target.Addr()
 	tlsDialer := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: h.timeouts.DialTimeout},
 		Config: &tls.Config{

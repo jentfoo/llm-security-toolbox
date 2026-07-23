@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -470,6 +471,23 @@ func (t *Target) Scheme() string {
 		return SchemeHTTPS
 	}
 	return SchemeHTTP
+}
+
+// Addr returns the host:port dial address, bracketing an IPv6 literal.
+func (t *Target) Addr() string {
+	return net.JoinHostPort(t.Hostname, strconv.Itoa(t.Port))
+}
+
+// HostHeader returns the Host / :authority value, omitting the port when it is
+// the scheme default and bracketing an IPv6 literal.
+func (t *Target) HostHeader() string {
+	if (t.UsesHTTPS && t.Port == 443) || (!t.UsesHTTPS && t.Port == 80) {
+		if strings.Contains(t.Hostname, ":") {
+			return "[" + t.Hostname + "]"
+		}
+		return t.Hostname
+	}
+	return net.JoinHostPort(t.Hostname, strconv.Itoa(t.Port))
 }
 
 // RuleApplier applies find/replace rules to requests and responses.

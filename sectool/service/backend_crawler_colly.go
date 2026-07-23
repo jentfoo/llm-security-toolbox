@@ -106,7 +106,6 @@ type capturedData struct {
 	RespBodySize int    // Actual response body size (before truncation)
 	Duration     time.Duration
 	Truncated    bool
-	Error        error
 }
 
 // capturingTransport wraps http.RoundTripper to capture raw request/response bytes.

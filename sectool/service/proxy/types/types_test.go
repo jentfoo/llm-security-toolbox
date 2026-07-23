@@ -98,3 +98,32 @@ func TestMessage(t *testing.T) {
 		assert.Nil(t, m.Chunks)
 	})
 }
+
+func TestTarget_Addr(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "example.com:8443", (&Target{Hostname: "example.com", Port: 8443}).Addr())
+	assert.Equal(t, "[::1]:8080", (&Target{Hostname: "::1", Port: 8080}).Addr())
+}
+
+func TestTarget_HostHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		tgt  Target
+		want string
+	}{
+		{"http_default_port", Target{Hostname: "example.com", Port: 80}, "example.com"},
+		{"https_default_port", Target{Hostname: "example.com", Port: 443, UsesHTTPS: true}, "example.com"},
+		{"http_custom_port", Target{Hostname: "example.com", Port: 8080}, "example.com:8080"},
+		{"https_custom_port", Target{Hostname: "example.com", Port: 8443, UsesHTTPS: true}, "example.com:8443"},
+		{"ipv6_default_port", Target{Hostname: "::1", Port: 80}, "[::1]"},
+		{"ipv6_custom_port", Target{Hostname: "::1", Port: 8080}, "[::1]:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.tgt.HostHeader())
+		})
+	}
+}

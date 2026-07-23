@@ -723,7 +723,7 @@ func TestGetAvailableSendWindowUnknownStream(t *testing.T) {
 
 	// Get window for unknown stream - should return connection window
 	available := h.getAvailableSendWindow(999)
-	assert.Equal(t, int(initialWindowSize), available)
+	assert.Equal(t, int(localInitialWindow), available)
 }
 
 func TestEncodeHeadersTEFiltering(t *testing.T) {

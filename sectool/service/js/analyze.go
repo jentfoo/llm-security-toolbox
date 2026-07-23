@@ -22,7 +22,6 @@ type Result struct {
 	Secrets      []protocol.ExtractedSecret
 	ScriptSrc    []string
 	SourceMaps   []string
-	Warnings     []string
 }
 
 // AnalyzeJS analyzes a JavaScript bundle body.

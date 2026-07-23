@@ -30,13 +30,6 @@ func run(mcpURL, flowID, origin string, includeAssets bool) error {
 	_, _ = fmt.Printf("Flow %s, source=%s\n", cliutil.ID(flowID), resp.Source)
 	_, _ = fmt.Printf("Bytes=%d, script_blocks=%d\n\n", resp.Stats.InputBytes, resp.Stats.ScriptBlocks)
 
-	for _, w := range resp.Warnings {
-		_, _ = fmt.Printf("  %s %s\n", cliutil.Warning("!"), w)
-	}
-	if len(resp.Warnings) > 0 {
-		_, _ = fmt.Println()
-	}
-
 	if len(resp.OriginSummary) > 0 {
 		_, _ = fmt.Println(cliutil.Bold("Origins"))
 		t := cliutil.NewTable(nil)

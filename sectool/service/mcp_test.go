@@ -352,20 +352,6 @@ func (t *TestMCPServer) AddProxyEntries(entries ...testProxyEntry) {
 	t.proxyHistory = append(t.proxyHistory, entries...)
 }
 
-// SetSendResponse sets the response for the next send_http1_request call.
-func (t *TestMCPServer) SetSendResponse(response string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.sendResponses = append(t.sendResponses, response)
-}
-
-// LastSentRequest returns the last raw request sent via send_http1_request.
-func (t *TestMCPServer) LastSentRequest() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.lastSentRequest
-}
-
 // ClearProxyHistory clears all proxy history entries.
 func (t *TestMCPServer) ClearProxyHistory() {
 	t.mu.Lock()
@@ -396,13 +382,6 @@ func (t *TestMCPServer) LastTabName() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.lastTabName
-}
-
-// ClearToolCallLog resets the tool call log.
-func (t *TestMCPServer) ClearToolCallLog() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.toolCallLog = nil
 }
 
 // SetConfigEditingDisabled simulates Burp's config editing being disabled.

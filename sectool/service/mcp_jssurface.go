@@ -114,7 +114,6 @@ func (m *mcpServer) handleJSAnalyze(ctx context.Context, req mcp.CallToolRequest
 		ScriptSrc:     result.ScriptSrc,
 		SourceMaps:    result.SourceMaps,
 		OriginSummary: summary,
-		Warnings:      result.Warnings,
 	}
 
 	log.Printf("js_surface: flow=%s source=%s origin=%s endpoints=%d routes=%d secrets=%d parse_errors=%d",

@@ -32,9 +32,6 @@ type ProxyServer struct {
 	listener net.Listener
 	addr     string
 
-	// Configuration
-	maxBodyBytes int
-
 	// Certificate management for HTTPS MITM
 	certManager *CertManager
 
@@ -93,7 +90,7 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage
 	http2Handler := newHTTP2Handler(history, maxBodyBytes, timeouts)
 	http2Handler.fullBuffer = fullBuffer
 
-	connectHandler := newConnectHandler(certManager, http1Handler, http2Handler, history, maxBodyBytes, timeouts)
+	connectHandler := newConnectHandler(certManager, http1Handler, http2Handler, history, timeouts)
 
 	// http1 is the unconditional fallthrough and must be registered last
 	registry := &protocol.Registry{
@@ -111,7 +108,6 @@ func NewProxyServer(port int, configDir string, maxBodyBytes int, historyStorage
 	s := &ProxyServer{
 		listener:       listener,
 		addr:           listener.Addr().String(),
-		maxBodyBytes:   maxBodyBytes,
 		certManager:    certManager,
 		history:        history,
 		http1Handler:   http1Handler,
@@ -254,7 +250,6 @@ func (s *ProxyServer) handleConnection(conn net.Conn) {
 
 	// raw accept; http1 adapter is the fallthrough
 	s.registry.DispatchEarly(s.ctx, &protocol.EarlyClaimCtx{
-		Peek:         peek,
 		ClientConn:   conn,
 		ClientReader: br,
 	})
