@@ -28,8 +28,9 @@ const (
 	caCertFile = "ca.pem" // CA certificate filename in config directory
 
 	// gracefulShutdownTimeout bounds how long shutdown lets in-flight
-	// connections drain before force-closing them
-	gracefulShutdownTimeout = 4 * time.Second
+	// connections drain before force-closing them. Streaming MCP sessions
+	// never idle, so this is the effective exit latency; keep it short.
+	gracefulShutdownTimeout = 1 * time.Second
 )
 
 // Server is the sectool MCP server.

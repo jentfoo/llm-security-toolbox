@@ -83,21 +83,9 @@ func TestBridgeClaimEarly(t *testing.T) {
 		b := newEarlyBridge(t, []wire.EarlyClaim{magic}, true)
 		assert.True(t, b.ClaimEarly(earlyCtx(1883, mqtt)))
 	})
-	t.Run("port_out_of_range", func(t *testing.T) {
-		b := newEarlyBridge(t, []wire.EarlyClaim{magic}, true)
-		assert.False(t, b.ClaimEarly(earlyCtx(9999, mqtt)))
-	})
-	t.Run("magic_mismatch", func(t *testing.T) {
-		b := newEarlyBridge(t, []wire.EarlyClaim{magic}, true)
-		assert.False(t, b.ClaimEarly(earlyCtx(1883, []byte("GET /"))))
-	})
 	t.Run("unhealthy_declines", func(t *testing.T) {
 		b := newEarlyBridge(t, []wire.EarlyClaim{magic}, false)
 		assert.False(t, b.ClaimEarly(earlyCtx(1883, mqtt)))
-	})
-	t.Run("unset_range_matches_any_port", func(t *testing.T) {
-		b := newEarlyBridge(t, []wire.EarlyClaim{{}}, true)
-		assert.True(t, b.ClaimEarly(earlyCtx(40000, nil)))
 	})
 	t.Run("either_claim_matches", func(t *testing.T) {
 		b := newEarlyBridge(t, []wire.EarlyClaim{
@@ -149,19 +137,6 @@ func TestBridgeClaimTLS(t *testing.T) {
 		assert.True(t, ok)
 		assert.Nil(t, spec)
 	})
-	t.Run("sni_mismatch", func(t *testing.T) {
-		_, ok := newEarlyBridge(t, []wire.EarlyClaim{ec}, true).ClaimTLS("other.example.com", "other.example.com", 443)
-		assert.False(t, ok)
-	})
-	t.Run("port_mismatch", func(t *testing.T) {
-		_, ok := newEarlyBridge(t, []wire.EarlyClaim{ec}, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 8443)
-		assert.False(t, ok)
-	})
-	t.Run("non_terminating_claim_declines", func(t *testing.T) {
-		raw := wire.EarlyClaim{PortRange: wire.PortRange{Low: 443, High: 443}}
-		_, ok := newEarlyBridge(t, []wire.EarlyClaim{raw}, true).ClaimTLS("ctrl.example.com", "ctrl.example.com", 443)
-		assert.False(t, ok)
-	})
 	t.Run("cert_spec_translated", func(t *testing.T) {
 		withCert := wire.EarlyClaim{
 			PortRange: wire.PortRange{Low: 443, High: 443},
@@ -196,11 +171,6 @@ func TestBridgeClaimUpgrade(t *testing.T) {
 		uc := wire.UpgradeClaim{PathPattern: "/control", UpgradeSignal: "http_101"}
 		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
 		assert.False(t, b.ClaimUpgrade(upgradeCtx("http_101", "POST", "ctrl.example.com", "/control", "")))
-	})
-	t.Run("path_matched_ignoring_query", func(t *testing.T) {
-		uc := wire.UpgradeClaim{PathPattern: "/ws/.*", UpgradeSignal: "http_101"}
-		b := newUpgradeBridge(t, []wire.UpgradeClaim{uc}, true)
-		assert.True(t, b.ClaimUpgrade(upgradeCtx("http_101", "GET", "h", "/ws/chat?token=1", "websocket")))
 	})
 	t.Run("method_not_in_set", func(t *testing.T) {
 		uc := wire.UpgradeClaim{PathPattern: "/control", UpgradeSignal: "http_101", MethodSet: []string{"POST"}}

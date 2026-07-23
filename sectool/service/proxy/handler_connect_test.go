@@ -337,79 +337,6 @@ func TestHandle(t *testing.T) {
 	})
 }
 
-func TestHandleClientProtoReconciliation(t *testing.T) {
-	t.Parallel()
-
-	testServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("proto=" + r.Proto))
-	}))
-	testServer.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
-	testServer.StartTLS()
-	t.Cleanup(testServer.Close)
-
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = proxy.Serve() }()
-	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
-
-	caCertPool := x509.NewCertPool()
-	caCertPool.AddCert(proxy.CertManager().CACert())
-	target := mustParseURL(t, testServer.URL).Host
-
-	// seed the caps cache to h2 with an ALPN-offering client
-	h2Client := &http.Client{Transport: &http.Transport{
-		Proxy:             http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
-		TLSClientConfig:   &tls.Config{RootCAs: caCertPool, InsecureSkipVerify: true},
-		ForceAttemptHTTP2: true,
-	}}
-	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/seed", nil)
-	require.NoError(t, err)
-	resp, err := h2Client.Do(req)
-	require.NoError(t, err)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-	require.Equal(t, "HTTP/2.0", resp.Proto)
-	require.Contains(t, string(body), "proto=HTTP/2.0")
-
-	// no-ALPN client to the same host must be reconciled to HTTP/1.1, not misrouted to h2
-	var d net.Dialer
-	raw, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = raw.Close() })
-	require.NoError(t, raw.SetDeadline(time.Now().Add(10*time.Second)))
-
-	_, err = raw.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
-	require.NoError(t, err)
-	br := bufio.NewReader(raw)
-	statusLine, err := br.ReadString('\n')
-	require.NoError(t, err)
-	require.Contains(t, statusLine, "200 Connection Established")
-	for { // drain remaining CONNECT response headers
-		line, err := br.ReadString('\n')
-		require.NoError(t, err)
-		if strings.TrimSpace(line) == "" {
-			break
-		}
-	}
-
-	// nil NextProtos means the client offers no ALPN
-	tlsConn := tls.Client(&readerConn{Conn: raw, r: br}, &tls.Config{RootCAs: caCertPool, InsecureSkipVerify: true})
-	require.NoError(t, tlsConn.HandshakeContext(t.Context()))
-	require.Empty(t, tlsConn.ConnectionState().NegotiatedProtocol)
-
-	_, err = tlsConn.Write([]byte("GET /noalpn HTTP/1.1\r\nHost: " + target + "\r\nConnection: close\r\n\r\n"))
-	require.NoError(t, err)
-	noAlpnResp, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
-	require.NoError(t, err)
-	noAlpnBody, err := io.ReadAll(noAlpnResp.Body)
-	require.NoError(t, err)
-	_ = noAlpnResp.Body.Close()
-
-	assert.Equal(t, 200, noAlpnResp.StatusCode)
-	assert.Contains(t, string(noAlpnBody), "proto=HTTP/1.1")
-}
-
 func TestRouteByProtocol(t *testing.T) {
 	t.Parallel()
 
@@ -558,6 +485,55 @@ func TestProbeOrConnect(t *testing.T) {
 
 		// h2 traffic is still able to negotiate h2
 		assert.Equal(t, "proto=HTTP/2.0", fetch(t, alpnClient(proxy, pool, alpnH2), target))
+	})
+
+	t.Run("no_alpn_client_reconciled", func(t *testing.T) {
+		t.Parallel()
+
+		target, pool, proxy := dualProtoProxy(t)
+
+		// seed the caps cache to h2 with an ALPN-offering client
+		require.Equal(t, "proto=HTTP/2.0", fetch(t, alpnClient(proxy, pool, alpnH2, alpnHTTP1), target))
+		cached, ok := proxy.connectHandler.cachedProto(target)
+		require.True(t, ok)
+		require.Equal(t, alpnH2, cached)
+
+		// a no-ALPN client to the same host must be reconciled to HTTP/1.1, not misrouted to h2
+		var d net.Dialer
+		raw, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = raw.Close() })
+		require.NoError(t, raw.SetDeadline(time.Now().Add(10*time.Second)))
+
+		_, err = raw.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
+		require.NoError(t, err)
+		br := bufio.NewReader(raw)
+		statusLine, err := br.ReadString('\n')
+		require.NoError(t, err)
+		require.Contains(t, statusLine, "200 Connection Established")
+		for { // drain remaining CONNECT response headers
+			line, err := br.ReadString('\n')
+			require.NoError(t, err)
+			if strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+
+		// nil NextProtos means the client offers no ALPN
+		tlsConn := tls.Client(&readerConn{Conn: raw, r: br}, &tls.Config{RootCAs: pool, InsecureSkipVerify: true})
+		require.NoError(t, tlsConn.HandshakeContext(t.Context()))
+		require.Empty(t, tlsConn.ConnectionState().NegotiatedProtocol)
+
+		_, err = tlsConn.Write([]byte("GET /noalpn HTTP/1.1\r\nHost: " + target + "\r\nConnection: close\r\n\r\n"))
+		require.NoError(t, err)
+		noAlpnResp, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
+		require.NoError(t, err)
+		noAlpnBody, err := io.ReadAll(noAlpnResp.Body)
+		require.NoError(t, err)
+		_ = noAlpnResp.Body.Close()
+
+		assert.Equal(t, 200, noAlpnResp.StatusCode)
+		assert.Contains(t, string(noAlpnBody), "proto=HTTP/1.1")
 	})
 }
 

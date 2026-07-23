@@ -417,7 +417,8 @@ func TestMCP_CrawlValidation(t *testing.T) {
 		var pollResp protocol.CrawlPollResponse
 		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, result)), &pollResp))
 		assert.NotEmpty(t, pollResp.State)
-		assert.Contains(t, pollResp.Note, `unknown output_mode "form", used summary`)
+		// exact wording is owned by TestNormalizeOutputMode; here just confirm it propagates
+		assert.Contains(t, pollResp.Note, "unknown output_mode")
 	})
 
 	t.Run("summary_invalid_session_id", func(t *testing.T) {

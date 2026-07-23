@@ -825,7 +825,7 @@ func TestCollyBackend_CreateSession(t *testing.T) {
 		cfg.Crawler.MaxRequests = 2
 
 		paths := runCrawl(t, cfg, CrawlOptions{Seeds: []CrawlSeed{{URL: ts.URL + "/"}}})
-		assert.Len(t, paths, 2)
+		assert.ElementsMatch(t, []string{"/", "/a"}, paths)
 	})
 
 	t.Run("negative_requests_unlimited", func(t *testing.T) {
@@ -847,7 +847,7 @@ func TestCollyBackend_CreateSession(t *testing.T) {
 		cfg.Crawler.SubmitForms = true
 
 		runCrawl(t, cfg, CrawlOptions{Seeds: []CrawlSeed{{URL: ts.URL + "/"}}})
-		assert.Positive(t, posts.Load())
+		assert.EqualValues(t, 1, posts.Load())
 	})
 
 	t.Run("submit_forms_option_override", func(t *testing.T) {

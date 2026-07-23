@@ -933,42 +933,35 @@ func TestExecuteSend_WireFidelity(t *testing.T) {
 		assert.Contains(t, sent, "Content-Length: 16")
 	})
 
-	t.Run("h2_unframed_body_replayed", func(t *testing.T) {
-		h2FlowID := mockHTTP.AddProxyEntryProtocol(
-			"POST /api HTTP/1.1\r\nhost: h2.test\r\ncontent-type: application/json\r\n\r\n{\"a\":1}",
-			"HTTP/2 200 OK\r\n\r\nok",
-			types.ProtocolH2,
-		)
-		mockHTTP.SetSendResult(
-			"HTTP/2 200 OK\r\n",
-			"ok",
-		)
-		CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id": h2FlowID,
-		})
-		sent := mockHTTP.LastSentRequest()
-		assert.Contains(t, sent, `{"a":1}`)
-		assert.NotContains(t, strings.ToLower(sent), "content-length")
-	})
+	// H2 requests carry the body in DATA frames, so replay never adds content-length,
+	// whether the body is sent verbatim or mutated.
+	for _, tc := range []struct {
+		name     string
+		setJSON  map[string]interface{}
+		wantBody string
+	}{
+		{name: "h2_unframed_body_replayed", wantBody: `{"a":1}`},
+		{name: "h2_body_mod_adds_no_cl", setJSON: map[string]interface{}{"a": 2}, wantBody: `{"a":2}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h2FlowID := mockHTTP.AddProxyEntryProtocol(
+				"POST /api HTTP/1.1\r\nhost: h2.test\r\ncontent-type: application/json\r\n\r\n{\"a\":1}",
+				"HTTP/2 200 OK\r\n\r\nok",
+				types.ProtocolH2,
+			)
+			mockHTTP.SetSendResult("HTTP/2 200 OK\r\n", "ok")
 
-	t.Run("h2_body_mod_adds_no_cl", func(t *testing.T) {
-		h2FlowID := mockHTTP.AddProxyEntryProtocol(
-			"POST /api HTTP/1.1\r\nhost: h2.test\r\ncontent-type: application/json\r\n\r\n{\"a\":1}",
-			"HTTP/2 200 OK\r\n\r\nok",
-			types.ProtocolH2,
-		)
-		mockHTTP.SetSendResult(
-			"HTTP/2 200 OK\r\n",
-			"ok",
-		)
-		CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id":  h2FlowID,
-			"set_json": map[string]interface{}{"a": 2},
+			args := map[string]interface{}{"flow_id": h2FlowID}
+			if tc.setJSON != nil {
+				args["set_json"] = tc.setJSON
+			}
+			CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", args)
+
+			sent := mockHTTP.LastSentRequest()
+			assert.Contains(t, sent, tc.wantBody)
+			assert.NotContains(t, strings.ToLower(sent), "content-length")
 		})
-		sent := mockHTTP.LastSentRequest()
-		assert.Contains(t, sent, `{"a":2}`)
-		assert.NotContains(t, strings.ToLower(sent), "content-length")
-	})
+	}
 
 	t.Run("explicit_cl_preserved_with_body_mod", func(t *testing.T) {
 		mockHTTP.SetSendResult(

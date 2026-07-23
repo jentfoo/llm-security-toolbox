@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,15 +279,17 @@ func pushLoop(t *testing.T, p *wire.Peer, stop <-chan struct{}) {
 func TestManagerHeartbeat(t *testing.T) {
 	t.Parallel()
 
-	t.Run("healthy_while_answering", func(t *testing.T) {
-		// timeout wide vs interval so -race jitter can't delay a pong past it
+	t.Run("healthy_after_register", func(t *testing.T) {
 		m := testManager(Config{HeartbeatInterval: 15 * time.Millisecond, HeartbeatTimeout: 150 * time.Millisecond})
 		p := dialManager(t, m, true)
 		_, err := register(t, p, baseParams("demo"))
 		require.Nil(t, err)
 		rec, _ := m.Get("demo")
 
-		require.Never(t, func() bool { return !rec.Healthy() }, 300*time.Millisecond, 20*time.Millisecond)
+		require.True(t, rec.Healthy())
+		rec.healthy.Store(false)
+		rec.recordPong(time.Unix(0, 0))
+		require.True(t, rec.Healthy())
 	})
 
 	t.Run("unhealthy_on_timeout", func(t *testing.T) {
@@ -391,7 +394,7 @@ func TestManagerShutdown(t *testing.T) {
 	assert.Eventually(t, func() bool { return m.Count() == 0 }, 2*time.Second, 10*time.Millisecond)
 }
 
-func TestSessionDiag(t *testing.T) {
+func TestSessionQueueDiag(t *testing.T) {
 	t.Parallel()
 
 	srv, cli := net.Pipe()
@@ -417,12 +420,22 @@ func TestSessionDiag(t *testing.T) {
 	})
 
 	t.Run("drops_when_full", func(t *testing.T) {
-		// a wedged first diagnostic keeps the writer busy while the queue fills
+		// wedge the writer so the queue fills without draining
+		started := make(chan struct{})
 		block := make(chan struct{})
-		s.queueDiag(func() { <-block })
-		for range diagQueue + 100 {
-			s.queueDiag(func() {})
+		s.queueDiag(func() { close(started); <-block })
+		<-started // writer pulled the wedge; the buffer is empty again
+
+		var ran, dropped atomic.Int32
+		for range diagQueue {
+			s.queueDiag(func() { ran.Add(1) })
 		}
-		close(block) // never blocked the caller
+		for range 100 {
+			s.queueDiag(func() { dropped.Add(1) })
+		}
+		close(block)
+
+		require.Eventually(t, func() bool { return ran.Load() == diagQueue }, 2*time.Second, 10*time.Millisecond)
+		assert.Zero(t, dropped.Load())
 	})
 }

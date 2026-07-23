@@ -85,6 +85,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 
 	t.Run("since_last", func(t *testing.T) {
 		backend := NewInteractshBackend("", "")
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        "test123",
@@ -122,6 +123,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 
 	t.Run("since_id", func(t *testing.T) {
 		backend := NewInteractshBackend("", "")
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        "test456",
@@ -159,6 +161,7 @@ func TestInteractshBackend_PollSession(t *testing.T) {
 
 	t.Run("buffer_limit", func(t *testing.T) {
 		backend := NewInteractshBackend("", "")
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
 		sess := &oastSession{
 			info: OastSessionInfo{
 				ID:        "testlimit",
@@ -732,17 +735,20 @@ func TestNewInteractshBackend(t *testing.T) {
 
 	t.Run("empty_server_url", func(t *testing.T) {
 		backend := NewInteractshBackend("", "")
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
 		assert.Empty(t, backend.serverURL)
 	})
 
 	t.Run("custom_server_url", func(t *testing.T) {
 		backend := NewInteractshBackend("oast.internal.example.com", "")
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
 		assert.Equal(t, "oast.internal.example.com", backend.serverURL)
 		assert.Empty(t, backend.authToken)
 	})
 
 	t.Run("auth_token_stored", func(t *testing.T) {
 		backend := NewInteractshBackend("oast.internal.example.com", "secret-token")
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
 		assert.Equal(t, "secret-token", backend.authToken)
 	})
 }

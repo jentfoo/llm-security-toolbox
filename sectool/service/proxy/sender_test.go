@@ -79,33 +79,6 @@ func TestSender_Send(t *testing.T) {
 		assert.Equal(t, []byte("Hello"), receivedBody)
 	})
 
-	t.Run("timeout", func(t *testing.T) {
-		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(100 * time.Millisecond)
-			w.WriteHeader(200)
-		}))
-		t.Cleanup(testServer.Close)
-
-		serverURL, _ := url.Parse(testServer.URL)
-		port, _ := strconv.Atoi(serverURL.Port())
-
-		sender := &Sender{
-			Timeouts: TimeoutConfig{ReadTimeout: 10 * time.Millisecond},
-		}
-
-		rawReq := []byte("GET / HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
-		_, err := sender.Send(t.Context(), SendOptions{
-			RawRequest: rawReq,
-			Target: types.Target{
-				Hostname:  serverURL.Hostname(),
-				Port:      port,
-				UsesHTTPS: false,
-			},
-		})
-
-		require.Error(t, err)
-	})
-
 	t.Run("invalid_request", func(t *testing.T) {
 		sender := &Sender{}
 

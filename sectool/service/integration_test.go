@@ -278,12 +278,23 @@ func TestNativeProxyIntegrationTest(t *testing.T) {
 
 					var accumulated []byte
 					buf := make([]byte, 65536)
+					// No EOF on the kept-alive upstream conn: read until the full
+					// expected request arrives, then probe once for trailing bytes
+					overall := time.Now().Add(2 * time.Second)
+					var sawExpected bool
 					for {
-						_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+						_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 						if n, err := conn.Read(buf); n > 0 {
 							accumulated = append(accumulated, buf[:n]...)
 						} else if err != nil {
-							break // timeout or EOF
+							var nerr net.Error
+							isTimeout := errors.As(err, &nerr) && nerr.Timeout()
+							if sawExpected || !isTimeout || time.Now().After(overall) {
+								break // done, EOF, or gave up waiting
+							}
+						}
+						if len(accumulated) >= len(tt.expected) {
+							sawExpected = true
 						}
 					}
 					// Minimal response lets the proxy finish its read-response phase cleanly;
@@ -315,7 +326,7 @@ func TestNativeProxyIntegrationTest(t *testing.T) {
 
 				// Drain the synthetic 204 response so the proxy's writeback doesn't race
 				// the deferred client Close during the next subtest's setup.
-				_ = clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+				_ = clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 				_, _ = io.Copy(io.Discard, clientConn)
 			})
 		}

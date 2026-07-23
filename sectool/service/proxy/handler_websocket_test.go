@@ -850,7 +850,7 @@ func wsUpgradeRequest(host string) *types.RawHTTP1Request {
 	}
 }
 
-func TestWebSocketHandshakeDeadline(t *testing.T) {
+func TestWebSocketHandlerHandshakeTimeout(t *testing.T) {
 	t.Parallel()
 
 	// upstream accepts but never answers the upgrade
@@ -900,7 +900,7 @@ func TestWebSocketHandshakeDeadline(t *testing.T) {
 
 	select {
 	case resp := <-got:
-		assert.Contains(t, string(resp), "502")
+		assert.Contains(t, string(resp), "HTTP/1.1 502 Bad Gateway")
 	case <-time.After(time.Second):
 		t.Fatal("no error response sent to client")
 	}

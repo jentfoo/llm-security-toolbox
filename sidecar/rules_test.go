@@ -100,35 +100,36 @@ func TestRuleCacheApplyBody(t *testing.T) {
 func TestRuleCacheApplyHeaders(t *testing.T) {
 	t.Parallel()
 
-	c := &RuleCache{adapter: "alpha"}
-	require.NoError(t, c.replace([]wire.Rule{
-		{RuleID: "rewrite", Type: wire.RuleTypeRequestHeader, Find: "secret: a", Replace: "Secret: b"},
-		{RuleID: "append", Type: wire.RuleTypeRequestHeader, Replace: "X-Added: 1"},
-	}))
+	t.Run("rewrite_and_append", func(t *testing.T) {
+		c := &RuleCache{adapter: "alpha"}
+		require.NoError(t, c.replace([]wire.Rule{
+			{RuleID: "rewrite", Type: wire.RuleTypeRequestHeader, Find: "secret: a", Replace: "Secret: b"},
+			{RuleID: "append", Type: wire.RuleTypeRequestHeader, Replace: "X-Added: 1"},
+		}))
 
-	headers := []wire.Header{{Name: "Host", Value: "x"}, {Name: "Secret", Value: "a"}}
-	out, fired := c.ApplyHeaders(headers, wire.RuleTypeRequestHeader)
+		headers := []wire.Header{{Name: "Host", Value: "x"}, {Name: "Secret", Value: "a"}}
+		out, fired := c.ApplyHeaders(headers, wire.RuleTypeRequestHeader)
 
-	assert.Equal(t, []string{"rewrite", "append"}, fired)
-	assert.Equal(t, []wire.Header{
-		{Name: "Host", Value: "x"},
-		{Name: "Secret", Value: "b"},
-		{Name: "X-Added", Value: "1"},
-	}, out)
-}
+		assert.Equal(t, []string{"rewrite", "append"}, fired)
+		assert.Equal(t, []wire.Header{
+			{Name: "Host", Value: "x"},
+			{Name: "Secret", Value: "b"},
+			{Name: "X-Added", Value: "1"},
+		}, out)
+	})
 
-func TestRuleCacheApplyHeadersNonASCII(t *testing.T) {
-	t.Parallel()
+	// case-insensitive fold must not disturb surrounding non-ASCII runes
+	t.Run("nonascii_fold", func(t *testing.T) {
+		c := &RuleCache{adapter: "alpha"}
+		require.NoError(t, c.replace([]wire.Rule{
+			{RuleID: "fold", Type: wire.RuleTypeRequestHeader, Find: "SECRET", Replace: "REDACTED"},
+		}))
 
-	c := &RuleCache{adapter: "alpha"}
-	require.NoError(t, c.replace([]wire.Rule{
-		{RuleID: "fold", Type: wire.RuleTypeRequestHeader, Find: "SECRET", Replace: "REDACTED"},
-	}))
+		out, fired := c.ApplyHeaders([]wire.Header{{Name: "X-Data", Value: "İ secret Ⱥ"}}, wire.RuleTypeRequestHeader)
 
-	out, fired := c.ApplyHeaders([]wire.Header{{Name: "X-Data", Value: "İ secret Ⱥ"}}, wire.RuleTypeRequestHeader)
-
-	assert.Equal(t, []string{"fold"}, fired)
-	assert.Equal(t, []wire.Header{{Name: "X-Data", Value: "İ REDACTED Ⱥ"}}, out)
+		assert.Equal(t, []string{"fold"}, fired)
+		assert.Equal(t, []wire.Header{{Name: "X-Data", Value: "İ REDACTED Ⱥ"}}, out)
+	})
 }
 
 func TestRuleCacheReplaceRejectsBadRegex(t *testing.T) {

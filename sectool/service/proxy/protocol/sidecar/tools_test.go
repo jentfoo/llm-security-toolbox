@@ -177,14 +177,16 @@ func TestManagerAdapterTools(t *testing.T) {
 	})
 
 	t.Run("excludes_unhealthy", func(t *testing.T) {
-		m := NewManager(
-			Config{HeartbeatInterval: 15 * time.Millisecond, HeartbeatTimeout: 40 * time.Millisecond, ReservedNames: []string{"http/1.1", "http/2", "websocket"}},
-			&protocol.Registry{}, newFakeFlows(), fakeCoreTools{names: []string{"proxy_poll"}}, fakeRules{},
-		)
-		p := dialManager(t, m, false) // silent: never answers ping -> goes unhealthy
-		_, err := register(t, p, toolParams("silent", "q_tool"))
+		m := toolManager([]string{"proxy_poll"})
+		p := dialManager(t, m, true)
+		_, err := register(t, p, toolParams("demo", "q_tool"))
 		require.Nil(t, err)
+		require.Len(t, m.AdapterTools(), 1)
 
-		assert.Eventually(t, func() bool { return len(m.AdapterTools()) == 0 }, 2*time.Second, 20*time.Millisecond)
+		rec, ok := m.Get("demo")
+		require.True(t, ok)
+		rec.healthy.Store(false)
+
+		assert.Empty(t, m.AdapterTools())
 	})
 }

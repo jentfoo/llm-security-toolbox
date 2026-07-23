@@ -49,6 +49,9 @@ type syncRecorder struct {
 	overlap  bool
 
 	gate chan struct{}
+	// entered is closed when a gated handler is about to block, letting a test
+	// wait for the stalled push deterministically.
+	entered chan struct{}
 }
 
 func (s *syncRecorder) handle(_ context.Context, method string, params json.RawMessage) (any, *wire.Error) {
@@ -64,10 +67,15 @@ func (s *syncRecorder) handle(_ context.Context, method string, params json.RawM
 		s.overlap = true
 	}
 	gate := s.gate
+	entered := s.entered
 	s.gate = nil // only the first push is held
+	s.entered = nil
 	s.mu.Unlock()
 
 	if gate != nil {
+		if entered != nil {
+			close(entered)
+		}
 		<-gate
 	}
 
@@ -160,15 +168,25 @@ func TestManagerPushRules(t *testing.T) {
 		_, rerr := register(t, p, baseParams("alpha"))
 		require.Nil(t, rerr)
 
-		// hold the next push open, so the bounded caller hits its deadline
+		// hold the next push open so the bounded caller must give up mid-push
 		got.mu.Lock()
 		got.gate = make(chan struct{})
+		got.entered = make(chan struct{})
 		gate := got.gate
+		entered := got.entered
 		got.mu.Unlock()
 
-		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		ctx, cancel := context.WithCancel(t.Context())
 		t.Cleanup(cancel)
-		m.PushRules(ctx)
+		pushDone := make(chan struct{})
+		go func() {
+			defer close(pushDone)
+			m.PushRules(ctx)
+		}()
+
+		<-entered // the stalled push is holding pushMu on the sidecar
+		cancel()  // bounded caller aborts
+		<-pushDone
 
 		// pushMu is released, so a later push proceeds once the sidecar answers again
 		close(gate)

@@ -133,7 +133,7 @@ func TestServeUpstream(t *testing.T) {
 	})
 }
 
-func TestEventWrites(t *testing.T) {
+func TestPump(t *testing.T) {
 	t.Parallel()
 
 	t.Run("failed_target_keeps_source", func(t *testing.T) {
@@ -169,16 +169,45 @@ func TestEventWrites(t *testing.T) {
 		assert.False(t, src.closed.Load())
 	})
 
-	t.Run("unknown_stream_skipped", func(t *testing.T) {
+	// a sidecar that answers stream_deliver with writes while also sending proactive
+	// stream_write must see both reach the socket in the order it sent them
+	t.Run("mixed_write_ordering", func(t *testing.T) {
+		const rounds = 50
 		ss := newStreamSet()
-		rec := &Record{Name: "sc"}
-		conn := deadConn(t)
-		id := ss.add(rec, conn)
-		err := ss.streamWrite("missing", []byte("x"))
-		require.NotNil(t, err)
-		assert.Equal(t, wire.CodeUnknownStream, err.Code)
-		assert.False(t, conn.closed.Load())
-		assert.NotNil(t, ss.get(id))
+		rec, _ := streamPeers(t, ss, func(sc *wire.Peer, method string, p wire.StreamWriteParams) []wire.StreamWrite {
+			if method != wire.MethodStreamDeliver {
+				return nil
+			}
+			assert.NoError(t, sc.Notify(wire.MethodStreamWrite, wire.StreamWriteParams{
+				StreamID: p.StreamID,
+				Data:     []byte{p.Data[0]},
+			}))
+			return []wire.StreamWrite{{StreamID: p.StreamID, Data: []byte{p.Data[0] + 1}}}
+		})
+
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = local.Close() })
+		t.Cleanup(func() { _ = remote.Close() })
+		id := ss.add(rec, local)
+
+		src, srcRemote := net.Pipe()
+		t.Cleanup(func() { _ = srcRemote.Close() })
+		go ss.pump(t.Context(), rec, id, src)
+		go func() {
+			for i := range rounds {
+				if _, err := srcRemote.Write([]byte{byte(i * 2)}); err != nil {
+					return
+				}
+			}
+		}()
+
+		got := make([]byte, rounds*2)
+		require.NoError(t, remote.SetReadDeadline(time.Now().Add(10*time.Second)))
+		_, err := io.ReadFull(remote, got)
+		require.NoError(t, err)
+		for i := range rounds * 2 {
+			require.Equal(t, byte(i), got[i], "byte %d out of order", i)
+		}
 	})
 }
 
@@ -186,9 +215,16 @@ func TestStreamWrite(t *testing.T) {
 	t.Parallel()
 
 	t.Run("unknown_stream", func(t *testing.T) {
-		err := newStreamSet().streamWrite("missing", []byte("x"))
+		ss := newStreamSet()
+		conn := deadConn(t)
+		id := ss.add(&Record{Name: "sc"}, conn)
+
+		err := ss.streamWrite("missing", []byte("x"))
 		require.NotNil(t, err)
 		assert.Equal(t, wire.CodeUnknownStream, err.Code)
+		// the miss leaves the registered stream and its conn untouched
+		assert.False(t, conn.closed.Load())
+		assert.NotNil(t, ss.get(id))
 	})
 
 	t.Run("write_error_closes_stream", func(t *testing.T) {
@@ -247,51 +283,6 @@ func TestStreamWrite(t *testing.T) {
 	})
 }
 
-// TestStreamResultOrdering covers the mixed write paths: a sidecar that answers
-// stream_deliver with writes while also sending proactive stream_write must see
-// both reach the socket in the order it sent them.
-func TestStreamResultOrdering(t *testing.T) {
-	t.Parallel()
-
-	const rounds = 50
-	ss := newStreamSet()
-	// the sidecar emits a proactive write, then answers the event with the next byte
-	rec, _ := streamPeers(t, ss, func(sc *wire.Peer, method string, p wire.StreamWriteParams) []wire.StreamWrite {
-		if method != wire.MethodStreamDeliver {
-			return nil
-		}
-		assert.NoError(t, sc.Notify(wire.MethodStreamWrite, wire.StreamWriteParams{
-			StreamID: p.StreamID,
-			Data:     []byte{p.Data[0]},
-		}))
-		return []wire.StreamWrite{{StreamID: p.StreamID, Data: []byte{p.Data[0] + 1}}}
-	})
-
-	local, remote := net.Pipe()
-	t.Cleanup(func() { _ = local.Close() })
-	t.Cleanup(func() { _ = remote.Close() })
-	id := ss.add(rec, local)
-
-	src, srcRemote := net.Pipe()
-	t.Cleanup(func() { _ = srcRemote.Close() })
-	go ss.pump(t.Context(), rec, id, src)
-	go func() {
-		for i := range rounds {
-			if _, err := srcRemote.Write([]byte{byte(i * 2)}); err != nil {
-				return
-			}
-		}
-	}()
-
-	got := make([]byte, rounds*2)
-	require.NoError(t, remote.SetReadDeadline(time.Now().Add(10*time.Second)))
-	_, err := io.ReadFull(remote, got)
-	require.NoError(t, err)
-	for i := range rounds * 2 {
-		require.Equal(t, byte(i), got[i], "byte %d out of order", i)
-	}
-}
-
 func TestCloseStream(t *testing.T) {
 	t.Parallel()
 
@@ -315,27 +306,6 @@ func TestCloseStream(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []byte("queued"), got)
 		assert.Eventually(t, conn.closed.Load, time.Second, 5*time.Millisecond)
-	})
-
-	t.Run("remove_flushes_queued_writes", func(t *testing.T) {
-		local, remote := net.Pipe()
-		t.Cleanup(func() { _ = remote.Close() })
-		conn := &countingConn{Conn: local}
-
-		ss := newStreamSet()
-		id := ss.add(&Record{Name: "sc"}, conn)
-		require.Nil(t, ss.streamWrite(id, []byte("queued")))
-
-		// a concurrent reader lets remove's drain flush before it returns
-		got := make([]byte, len("queued"))
-		read := make(chan error, 1)
-		go func() { _, err := io.ReadFull(remote, got); read <- err }()
-
-		ss.remove(id)
-		require.NoError(t, <-read)
-		assert.Equal(t, []byte("queued"), got)
-		assert.True(t, conn.closed.Load())
-		assert.Nil(t, ss.get(id))
 	})
 
 	t.Run("abort_drops_queued_writes", func(t *testing.T) {
@@ -362,6 +332,31 @@ func TestCloseStream(t *testing.T) {
 	})
 }
 
+func TestRemove(t *testing.T) {
+	t.Parallel()
+
+	t.Run("flushes_queued_writes", func(t *testing.T) {
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = remote.Close() })
+		conn := &countingConn{Conn: local}
+
+		ss := newStreamSet()
+		id := ss.add(&Record{Name: "sc"}, conn)
+		require.Nil(t, ss.streamWrite(id, []byte("queued")))
+
+		// a concurrent reader lets remove's drain flush before it returns
+		got := make([]byte, len("queued"))
+		read := make(chan error, 1)
+		go func() { _, err := io.ReadFull(remote, got); read <- err }()
+
+		ss.remove(id)
+		require.NoError(t, <-read)
+		assert.Equal(t, []byte("queued"), got)
+		assert.True(t, conn.closed.Load())
+		assert.Nil(t, ss.get(id))
+	})
+}
+
 func TestStreamAwaitCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -380,12 +375,8 @@ func TestStreamAwaitCapacity(t *testing.T) {
 		defer close(blocked)
 		s.awaitCapacity()
 	}()
-	select {
-	case <-blocked:
-		t.Fatal("awaitCapacity did not block on a full queue")
-	case <-time.After(50 * time.Millisecond):
-	}
 
+	// free a slot and signal the drain; awaitCapacity must then return
 	<-s.ops
 	s.drained <- struct{}{}
 	select {

@@ -231,11 +231,16 @@ func TestNativeProxyBackend_GetProxyEntryInProgress(t *testing.T) {
 	entry, err := backend.GetProxyEntry(context.Background(), flowID)
 	require.NoError(t, err)
 	assert.True(t, entry.InProgress)
+	// response head is visible while streaming, but the body has not arrived yet
+	assert.Contains(t, entry.Response, "text/event-stream")
+	assert.NotContains(t, entry.Response, "data")
 
 	require.True(t, backend.server.History().Complete(flowID, &types.Message{StatusCode: 200, Body: []byte("data")}, time.Now(), nil))
 	entry, err = backend.GetProxyEntry(context.Background(), flowID)
 	require.NoError(t, err)
 	assert.False(t, entry.InProgress)
+	// completion appends the body that was absent mid-stream
+	assert.Contains(t, entry.Response, "data")
 }
 
 func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
@@ -775,6 +780,27 @@ func TestApplyRequestRules(t *testing.T) {
 		assert.Equal(t, "user-NUMBER-session", modified.GetHeader("X-ID"))
 	})
 
+	t.Run("nonascii_fold", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "fold",
+			Type:    wire.RuleTypeRequestHeader,
+			Find:    "SECRET",
+			Replace: "REDACTED",
+		})
+		require.NoError(t, err)
+
+		req := &types.RawHTTP1Request{
+			Method: "GET", Path: "/", Version: "HTTP/1.1",
+			Headers: []types.Header{{Name: "X-Data", Value: "İ secret Ⱥ"}},
+		}
+		// case-insensitive fold must not disturb surrounding non-ASCII runes
+		assert.Equal(t, "İ REDACTED Ⱥ", backend.ApplyRequestRules(req).GetHeader("X-Data"))
+	})
+
 	t.Run("body_literal", func(t *testing.T) {
 		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
 		require.NoError(t, err)
@@ -865,7 +891,7 @@ func TestApplyRequestRules(t *testing.T) {
 		assert.Equal(t, "gzip, deflate, br, zstd", modified.GetHeader("Accept-Encoding"))
 	})
 
-	t.Run("identity_not_upgraded", func(t *testing.T) {
+	t.Run("client_encoding_not_upgraded", func(t *testing.T) {
 		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = backend.Close(context.Background()) })
@@ -878,48 +904,22 @@ func TestApplyRequestRules(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		req := &types.RawHTTP1Request{
-			Method:  "GET",
-			Path:    "/test",
-			Version: "HTTP/1.1",
-			Headers: []types.Header{
-				{Name: "Host", Value: "example.com"},
-				{Name: "Accept-Encoding", Value: "identity"},
-			},
+		// a client offering only encodings sectool can't decode (identity, or the
+		// unsupported "compress") is never upgraded to an advertised supported set
+		for _, in := range []string{"identity", "compress"} {
+			req := &types.RawHTTP1Request{
+				Method:  "GET",
+				Path:    "/test",
+				Version: "HTTP/1.1",
+				Headers: []types.Header{
+					{Name: "Host", Value: "example.com"},
+					{Name: "Accept-Encoding", Value: in},
+				},
+			}
+
+			modified := backend.ApplyRequestRules(req)
+			assert.Equal(t, "identity", modified.GetHeader("Accept-Encoding"), "input %q", in)
 		}
-
-		modified := backend.ApplyRequestRules(req)
-
-		// client refused compression, never advertise it upstream
-		assert.Equal(t, "identity", modified.GetHeader("Accept-Encoding"))
-	})
-
-	t.Run("unsupported_falls_back_to_identity", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
-
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-			Label:   "resp-body",
-			Type:    wire.RuleTypeResponseBody,
-			Find:    "false",
-			Replace: "true",
-		})
-		require.NoError(t, err)
-
-		req := &types.RawHTTP1Request{
-			Method:  "GET",
-			Path:    "/test",
-			Version: "HTTP/1.1",
-			Headers: []types.Header{
-				{Name: "Host", Value: "example.com"},
-				{Name: "Accept-Encoding", Value: "compress"},
-			},
-		}
-
-		modified := backend.ApplyRequestRules(req)
-
-		assert.Equal(t, "identity", modified.GetHeader("Accept-Encoding"))
 	})
 
 	t.Run("preserves_accept_encoding", func(t *testing.T) {
