@@ -233,6 +233,50 @@ func (h *myHandler) OnStreamDeliver(p wire.StreamWriteParams) ([]wire.StreamWrit
 }
 ```
 
+#### StreamConn and StreamRouter
+
+When an adapter wraps a library that expects a blocking `net.Conn` (a TLS/Noise handshake, a relay protocol), use `StreamRouter` instead of the callbacks. It turns a claim's stream events into `Accept`-able `StreamConn`s, each a `net.Conn` whose `Read` returns delivered bytes and whose `Write`/`Close` emit `stream_write`/`close_stream`. Embed the router in your handler; it supplies the three stream callbacks and you override the rest:
+
+```go
+type myHandler struct {
+    *sidecar.StreamRouter
+}
+
+conn, _ := sidecar.Dial(ctx, addr, reg)
+h := &myHandler{StreamRouter: sidecar.NewStreamRouter(conn)}
+go conn.Serve(ctx, h)
+
+for {
+    sc, err := h.Accept(ctx) // pump in a loop; a full backlog backpressures stream_open
+    if err != nil {
+        return err
+    }
+    go handle(conn, sc) // sc is a net.Conn: blocking Read/Write, deadlines
+}
+```
+
+Inside the handler, read frames and emit what you observe with `conn.PushFlow` (see [Emitting flows](#emitting-flows)). Most protocol libraries want frame boundaries, not raw bytes, so layer a `Reassembler` over `StreamConn.Read`:
+
+```go
+func handle(conn *sidecar.Conn, sc *sidecar.StreamConn) {
+    defer sc.Close()
+    var reasm sidecar.Reassembler
+    b := make([]byte, 4096)
+    for {
+        n, err := sc.Read(b)
+        if err != nil {
+            return
+        }
+        reasm.Append(b[:n])
+        for frame, ok := reasm.Next(splitFrame); ok; frame, ok = reasm.Next(splitFrame) {
+            conn.PushFlow(ctx, toFlow(frame))
+        }
+    }
+}
+```
+
+`Close` is graceful (after queued writes); call `conn.CloseStream(id, reason, true)` to abort. A successful `Write` means the bytes were accepted for delivery, not that they reached the socket.
+
 ### Emitting flows
 
 #### PushFlow
