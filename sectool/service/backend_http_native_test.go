@@ -1153,6 +1153,41 @@ func TestApplyResponseRules(t *testing.T) {
 		assert.Equal(t, "17", modified.GetHeader("Content-Length"))
 	})
 
+	t.Run("identity_body", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "identity-body-rule",
+			Type:    wire.RuleTypeResponseBody,
+			IsRegex: false,
+			Find:    "secret",
+			Replace: "HIDDEN",
+		})
+		require.NoError(t, err)
+
+		body := []byte("The secret data is here")
+
+		resp := &types.RawHTTP1Response{
+			Version:    "HTTP/1.1",
+			StatusCode: 200,
+			StatusText: "OK",
+			Headers: []types.Header{
+				{Name: "Content-Encoding", Value: "identity"},
+				{Name: "Content-Length", Value: strconv.Itoa(len(body))},
+			},
+			Body: body,
+		}
+
+		modified := backend.ApplyResponseRules(resp)
+
+		// identity is uncompressed - rules apply directly, header preserved
+		assert.Equal(t, "The HIDDEN data is here", string(modified.Body))
+		assert.Equal(t, strconv.Itoa(len("The HIDDEN data is here")), modified.GetHeader("Content-Length"))
+		assert.Equal(t, "identity", modified.GetHeader("Content-Encoding"))
+	})
+
 	t.Run("compressed_body", func(t *testing.T) {
 		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
 		require.NoError(t, err)

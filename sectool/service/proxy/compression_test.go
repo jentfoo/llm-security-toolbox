@@ -30,7 +30,7 @@ func TestNormalizeEncoding(t *testing.T) {
 		{"x_gzip_alias", "x-gzip", "gzip", true},
 		{"deflate", "deflate", "deflate", true},
 		{"deflate_uppercase", "DEFLATE", "deflate", true},
-		{"identity", "identity", "identity", false},
+		{"identity", "identity", "identity", true},
 		{"brotli", "br", "br", true},
 		{"brotli_uppercase", "BR", "br", true},
 		{"empty", "", "", false},

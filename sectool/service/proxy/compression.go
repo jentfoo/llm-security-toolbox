@@ -19,13 +19,13 @@ const (
 	encodingDeflate = "deflate"
 	encodingBrotli  = "br"
 	encodingZstd    = "zstd"
-	// encodingIdentity is never decompressed, only requested when nothing else is decodable
+	// encodingIdentity is the uncompressed/no-op encoding (RFC 7231)
 	encodingIdentity = "identity"
 )
 
 // NormalizeEncoding normalizes a Content-Encoding header value.
-// Returns the normalized encoding and whether it's a single supported encoding.
-// Multiple encodings (e.g., "gzip, br") return ("", false) since we can't partially decode.
+// Returns the canonical encoding and whether it's a single supported encoding.
+// Multiple encodings return ("", false) since we can't partially decode.
 func NormalizeEncoding(encoding string) (string, bool) {
 	encoding = strings.TrimSpace(strings.ToLower(encoding))
 
@@ -45,6 +45,8 @@ func NormalizeEncoding(encoding string) (string, bool) {
 		return encodingBrotli, true
 	case encodingZstd:
 		return encodingZstd, true
+	case encodingIdentity:
+		return encodingIdentity, true // no-op, uncompressed
 	default:
 		return encoding, false
 	}
@@ -211,9 +213,6 @@ func FilterSupportedEncodings(acceptEncoding string) string {
 		name := trimmed
 		if idx := strings.IndexByte(trimmed, ';'); idx >= 0 {
 			name = strings.TrimSpace(trimmed[:idx])
-		}
-		if strings.EqualFold(name, encodingIdentity) {
-			return true // identity needs no decoding, keep client preference as-is
 		}
 		_, supported := NormalizeEncoding(name)
 		return supported
