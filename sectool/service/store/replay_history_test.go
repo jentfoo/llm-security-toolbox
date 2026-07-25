@@ -156,7 +156,8 @@ func TestReplayHistoryComplete(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, 200, got.RespStatus)
 		assert.Equal(t, "data: one\n\n", string(got.RespBody))
-		assert.Equal(t, 250*time.Millisecond, got.Duration)
+		assert.True(t, completedAt.Equal(got.CompletedAt))
+		assert.Equal(t, 250*time.Millisecond, got.Duration())
 
 		// Cached meta stays in sync; Complete does not change count
 		assert.Equal(t, 1, store.Count())
@@ -164,7 +165,7 @@ func TestReplayHistoryComplete(t *testing.T) {
 		require.Len(t, metas, 1)
 		assert.Equal(t, 200, metas[0].RespStatus)
 		assert.Equal(t, len("data: one\n\n"), metas[0].RespLen)
-		assert.Equal(t, 250*time.Millisecond, metas[0].Duration)
+		assert.True(t, completedAt.Equal(metas[0].CompletedAt))
 	})
 
 	t.Run("unknown_flow", func(t *testing.T) {
@@ -174,7 +175,7 @@ func TestReplayHistoryComplete(t *testing.T) {
 		assert.False(t, store.Complete("missing", nil, nil, 200, time.Now(), nil))
 	})
 
-	t.Run("in_progress_leaves_duration_zero", func(t *testing.T) {
+	t.Run("in_progress_leaves_completion_zero", func(t *testing.T) {
 		storage := NewMemStorage()
 		t.Cleanup(func() { _ = storage.Close() })
 		store := NewReplayHistoryStore(storage)
@@ -185,7 +186,8 @@ func TestReplayHistoryComplete(t *testing.T) {
 		got, ok := store.Get("f2")
 		require.True(t, ok)
 		assert.Equal(t, "partial", string(got.RespBody))
-		assert.Zero(t, got.Duration)
+		assert.True(t, got.CompletedAt.IsZero())
+		assert.Zero(t, got.Duration())
 	})
 
 	t.Run("annotations_merged", func(t *testing.T) {

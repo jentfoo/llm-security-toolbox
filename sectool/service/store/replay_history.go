@@ -18,18 +18,18 @@ const replayPayloadSuffix = ":p"
 // ReplayHistoryMeta holds lightweight metadata for a replay entry.
 // Used by summary/list paths to avoid deserializing full request/response bodies.
 type ReplayHistoryMeta struct {
-	FlowID       string        `msgpack:"fid"`
-	Method       string        `msgpack:"m"`
-	Host         string        `msgpack:"h"`
-	Path         string        `msgpack:"p"`
-	Scheme       string        `msgpack:"sc,omitempty"` // "http" or "https"
-	Port         int           `msgpack:"po,omitempty"` // original port (0 = infer from scheme)
-	Protocol     string        `msgpack:"pr"`
-	SourceFlowID string        `msgpack:"sf"`
-	CreatedAt    time.Time     `msgpack:"ca"`
-	RespStatus   int           `msgpack:"rs"`
-	RespLen      int           `msgpack:"rl"`
-	Duration     time.Duration `msgpack:"d"`
+	FlowID       string    `msgpack:"fid"`
+	Method       string    `msgpack:"m"`
+	Host         string    `msgpack:"h"`
+	Path         string    `msgpack:"p"`
+	Scheme       string    `msgpack:"sc,omitempty"` // "http" or "https"
+	Port         int       `msgpack:"po,omitempty"` // original port (0 = infer from scheme)
+	Protocol     string    `msgpack:"pr"`
+	SourceFlowID string    `msgpack:"sf"`
+	CreatedAt    time.Time `msgpack:"ca"`
+	CompletedAt  time.Time `msgpack:"cp,omitempty"` // zero until the response is recorded
+	RespStatus   int       `msgpack:"rs"`
+	RespLen      int       `msgpack:"rl"`
 	// Annotations carries sidecar-authored flow metadata; nil for native sends.
 	Annotations map[string]any `msgpack:"an,omitempty"`
 	// InvokedBy names the sidecar that originated a native send via invoke_adapter.
@@ -65,7 +65,7 @@ type ReplayHistoryEntry struct {
 	RespHeaders []byte
 	RespBody    []byte
 	RespStatus  int
-	Duration    time.Duration
+	CompletedAt time.Time // zero until the response is recorded
 
 	// Lineage
 	SourceFlowID string // Original flow_id that was replayed (empty for request_send)
@@ -76,6 +76,14 @@ type ReplayHistoryEntry struct {
 	InvokedBy string
 	// Adapter names the sidecar that performed a replay; empty for native sends.
 	Adapter string
+}
+
+// Duration reports the replay round-trip time, or zero if not yet completed.
+func (e *ReplayHistoryEntry) Duration() time.Duration {
+	if e.CompletedAt.IsZero() {
+		return 0
+	}
+	return e.CompletedAt.Sub(e.CreatedAt)
 }
 
 // TODO - Consider combining the HistoryStore and ReplayHistoryStore into a single unified storage
@@ -108,8 +116,8 @@ func (s *ReplayHistoryStore) Store(entry *ReplayHistoryEntry) {
 }
 
 // Complete attaches a response to an already-stored replay entry: the two-phase
-// form used for deferred and streaming replays. A non-zero completedAt records the
-// elapsed duration; annotations merge over existing keys. Returns false when flowID
+// form used for deferred and streaming replays. A non-zero completedAt marks the
+// entry completed; annotations merge over existing keys. Returns false when flowID
 // is unknown.
 func (s *ReplayHistoryStore) Complete(flowID string, respHeaders, respBody []byte, status int, completedAt time.Time, annotations map[string]any) bool {
 	s.mu.Lock()
@@ -123,7 +131,7 @@ func (s *ReplayHistoryStore) Complete(flowID string, respHeaders, respBody []byt
 	entry.RespBody = respBody
 	entry.RespStatus = status
 	if !completedAt.IsZero() {
-		entry.Duration = completedAt.Sub(entry.CreatedAt)
+		entry.CompletedAt = completedAt
 	}
 	if len(annotations) > 0 {
 		if entry.Annotations == nil {
@@ -161,9 +169,9 @@ func (s *ReplayHistoryStore) persistLocked(entry *ReplayHistoryEntry) bool {
 		Protocol:     entry.Protocol,
 		SourceFlowID: entry.SourceFlowID,
 		CreatedAt:    entry.CreatedAt,
+		CompletedAt:  entry.CompletedAt,
 		RespStatus:   entry.RespStatus,
 		RespLen:      len(entry.RespBody),
-		Duration:     entry.Duration,
 		Annotations:  entry.Annotations,
 		InvokedBy:    entry.InvokedBy,
 		Adapter:      entry.Adapter,
@@ -242,7 +250,7 @@ func (s *ReplayHistoryStore) getLocked(flowID string) (*ReplayHistoryEntry, bool
 		RespHeaders:     payload.RespHeaders,
 		RespBody:        payload.RespBody,
 		RespStatus:      meta.RespStatus,
-		Duration:        meta.Duration,
+		CompletedAt:     meta.CompletedAt,
 		SourceFlowID:    meta.SourceFlowID,
 		Annotations:     meta.Annotations,
 		InvokedBy:       meta.InvokedBy,

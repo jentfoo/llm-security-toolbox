@@ -31,6 +31,9 @@ const (
 	// connections drain before force-closing them. Streaming MCP sessions
 	// never idle, so this is the effective exit latency; keep it short.
 	gracefulShutdownTimeout = 1 * time.Second
+
+	// shutdownBackstop bounds a deadline-less Close ctx so its waits always unblock.
+	shutdownBackstop = 5 * time.Second
 )
 
 // Server is the sectool MCP server.

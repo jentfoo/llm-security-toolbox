@@ -170,8 +170,34 @@ func TestReplayRoutingSink(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, 200, entry.RespStatus)
 		assert.Contains(t, string(entry.RespBody), "late")
-		assert.Equal(t, 300*time.Millisecond, entry.Duration)
+		assert.Equal(t, 300*time.Millisecond, entry.Duration())
 		assert.Equal(t, "mutated", entry.Annotations["phase"])
+	})
+
+	t.Run("zero_duration_completion_not_in_progress", func(t *testing.T) {
+		history := newFakeFlowSink()
+		replay := store.NewReplayHistoryStore(store.NewMemStorage())
+		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+
+		f := replayFlow()
+		f.Response = nil
+		f.CompletedAt = time.Time{}
+		id := sink.Store(f)
+
+		// completion stamp equal to creation: zero elapsed, still completed
+		entry, ok := replay.Get(id)
+		require.True(t, ok)
+		resp := &types.Message{Version: "HTTP/1.1", StatusCode: 200, StatusText: "OK", Body: []byte("done")}
+		require.True(t, sink.Complete(id, resp, entry.CreatedAt, nil))
+
+		got, ok := sink.Get(id)
+		require.True(t, ok)
+		assert.False(t, got.CompletedAt.IsZero(), "completed replay must not look in-progress")
+		require.NotNil(t, got.Response)
+
+		re, ok := replay.Get(id)
+		require.True(t, ok)
+		assert.Zero(t, re.Duration())
 	})
 
 	t.Run("set_invoked_by_replay_flow", func(t *testing.T) {

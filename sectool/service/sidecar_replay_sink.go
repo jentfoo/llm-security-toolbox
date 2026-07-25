@@ -90,10 +90,6 @@ func flowToReplayEntry(id string, flow *types.Flow) *store.ReplayHistoryEntry {
 	method, host, path := extractRequestMeta(string(rawReq))
 	respHeaders, respBody := splitHeadersBody(flow.FormatResponse(&buf))
 
-	var duration time.Duration
-	if !flow.CompletedAt.IsZero() {
-		duration = flow.CompletedAt.Sub(flow.StartedAt)
-	}
 	var status int
 	if flow.Response != nil {
 		status = flow.Response.StatusCode
@@ -112,7 +108,7 @@ func flowToReplayEntry(id string, flow *types.Flow) *store.ReplayHistoryEntry {
 		RespHeaders:  slices.Clone(respHeaders),
 		RespBody:     slices.Clone(respBody),
 		RespStatus:   status,
-		Duration:     duration,
+		CompletedAt:  flow.CompletedAt,
 		SourceFlowID: flow.ParentFlowID,
 		Annotations:  flow.Annotations,
 		InvokedBy:    flow.InvokedBy,
@@ -147,8 +143,6 @@ func replayEntryToFlow(entry *store.ReplayHistoryEntry) *types.Flow {
 			flow.Response = types.ResponseToMessage(resp)
 		}
 	}
-	if entry.Duration > 0 {
-		flow.CompletedAt = entry.CreatedAt.Add(entry.Duration)
-	}
+	flow.CompletedAt = entry.CompletedAt
 	return flow
 }

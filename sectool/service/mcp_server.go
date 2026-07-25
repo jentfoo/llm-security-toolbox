@@ -173,6 +173,13 @@ func (m *mcpServer) Addr() string {
 }
 
 func (m *mcpServer) Close(ctx context.Context) error {
+	// deadline-less ctx gets a backstop so streaming shutdowns always unblock
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, shutdownBackstop)
+		defer cancel()
+	}
+
 	var errs []error
 
 	// Close HTTP server - use short timeout then force close.
@@ -563,7 +570,7 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 			Scheme:          entry.Scheme,
 			Port:            entry.Port,
 			Protocol:        entry.Protocol,
-			Duration:        entry.Duration,
+			Duration:        entry.Duration(),
 			Annotations:     entry.Annotations,
 			InvokedBy:       entry.InvokedBy,
 		}, nil

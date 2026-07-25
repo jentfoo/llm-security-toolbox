@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-analyze/bulk"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -488,6 +489,8 @@ func (m *mcpServer) executeSendFlow(ctx context.Context, rawRequest []byte, http
 
 	// Store in replay history for proxy_poll visibility
 	// RawRequest = pre-rule (base for future replays), ModifiedRequest = post-rule (for display)
+	// native send measures elapsed time; anchor created/completed around it
+	now := time.Now()
 	m.service.replayHistoryStore.Store(&store.ReplayHistoryEntry{
 		FlowID:          replayID,
 		RawRequest:      rawRequest,
@@ -501,7 +504,8 @@ func (m *mcpServer) executeSendFlow(ctx context.Context, rawRequest []byte, http
 		RespHeaders:     result.Headers,
 		RespBody:        result.Body,
 		RespStatus:      respCode,
-		Duration:        result.Duration,
+		CreatedAt:       now.Add(-result.Duration),
+		CompletedAt:     now,
 		SourceFlowID:    sourceFlowID,
 		InvokedBy:       invokedBy,
 	})

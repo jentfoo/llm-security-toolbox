@@ -63,6 +63,12 @@ func (l *Listener) Close(ctx context.Context) error {
 	if l.closed.Swap(true) {
 		return nil
 	}
+	// deadline-less ctx gets a backstop so the waits below always unblock
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, shutdownBackstop)
+		defer cancel()
+	}
 	err := l.ln.Close()
 	l.mgr.Shutdown(ctx)
 	l.cancel() // after Shutdown so the drain RPC completes

@@ -255,7 +255,14 @@ func (s *ProxyServer) handleConnection(conn net.Conn) {
 	})
 }
 
-// Shutdown gracefully stops the server.
+const (
+	// forceCloseGrace bounds the post-force-close wait for handlers wedged off conn I/O.
+	forceCloseGrace = time.Second
+	// deadlessDrainGrace is the brief drain window a deadline-less ctx gets before force-close.
+	deadlessDrainGrace = 100 * time.Millisecond
+)
+
+// Shutdown gracefully stops the server, bounded by ctx.
 func (s *ProxyServer) Shutdown(ctx context.Context) error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil // already closed
@@ -265,27 +272,32 @@ func (s *ProxyServer) Shutdown(ctx context.Context) error {
 	// Stop accepting new connections; Accept returns via s.closed
 	_ = s.listener.Close()
 
-	// A context without a deadline has no drain window, so cancel handlers now to guarantee Shutdown returns
+	// deadline-less ctx gets a short drain window so in-flight conns can finish
 	if _, ok := ctx.Deadline(); !ok {
-		s.cancel()
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, deadlessDrainGrace)
+		defer cancel()
 	}
 
 	if s.serveStarted.CompareAndSwap(false, true) {
 		s.wg.Done()
 	}
 
-	// Drain in-flight connections until ctx fires, then force-close
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
 		close(done)
 	}()
 
+	var forced bool
 	select {
 	case <-done:
-		// All connections finished gracefully before the deadline
 	case <-ctx.Done():
-		// Deadline hit: cancel handlers, then force-close active conns
+		forced = true
+	}
+
+	if forced {
+		// cancel handlers, force-close active conns, then bound the final wait
 		s.cancel()
 		s.activeConns.Range(func(key, _ any) bool {
 			if conn, ok := key.(net.Conn); ok {
@@ -293,7 +305,16 @@ func (s *ProxyServer) Shutdown(ctx context.Context) error {
 			}
 			return true
 		})
-		<-done // wait for goroutines to exit after cancel + close
+		select {
+		case <-done:
+		case <-time.After(forceCloseGrace):
+			var stuck int
+			s.activeConns.Range(func(_, _ any) bool {
+				stuck++
+				return true
+			})
+			log.Printf("proxy: %d handler(s) did not exit after force-close", stuck)
+		}
 	}
 
 	s.history.Close()

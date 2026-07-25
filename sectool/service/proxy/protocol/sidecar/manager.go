@@ -16,7 +16,10 @@ import (
 )
 
 // shutdownDrainSeconds is requested of each sidecar on graceful shutdown.
-const shutdownDrainSeconds = 5
+const shutdownDrainSeconds = 4
+
+// shutdownBackstop bounds a deadline-less shutdown ctx so the drain waits always unblock.
+const shutdownBackstop = 5 * time.Second
 
 // Config configures the sidecar Manager and listener.
 type Config struct {
@@ -260,6 +263,13 @@ func (m *Manager) releaseClaims(rec *Record) {
 
 // Shutdown requests a graceful close of every sidecar and waits briefly.
 func (m *Manager) Shutdown(ctx context.Context) {
+	// deadline-less ctx gets a backstop so the wait below always unblocks
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, shutdownBackstop)
+		defer cancel()
+	}
+
 	m.mu.Lock()
 	recs := bulk.MapValuesSlice(m.records)
 	m.mu.Unlock()
@@ -276,7 +286,17 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			_ = r.peer.Close()
 		}(r)
 	}
-	wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// stuck peer writes finish on their own write deadline
+	}
 }
 
 // diagQueue bounds the diagnostics waiting to be written.

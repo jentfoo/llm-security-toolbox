@@ -544,6 +544,13 @@ func (b *InteractshBackend) deleteSession(sess *oastSession) error {
 }
 
 func (b *InteractshBackend) Close(ctx context.Context) error {
+	// deadline-less ctx gets a backstop so the client-close wait always unblocks
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, shutdownBackstop)
+		defer cancel()
+	}
+
 	b.initMu.Lock()
 	defer b.initMu.Unlock()
 
@@ -583,6 +590,7 @@ func (b *InteractshBackend) Close(ctx context.Context) error {
 	b.clients = nil
 	b.mu.Unlock()
 
+	// ctx bounds the wait; a lingering c.Close() finishes on the shared http client timeout
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {

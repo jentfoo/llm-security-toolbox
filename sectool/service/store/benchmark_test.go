@@ -99,9 +99,10 @@ func BenchmarkReplayHistoryStore_AddGetRemove(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				// Add records
 				for j := 0; j < benchRecordCount; j++ {
+					created := time.Now().Add(-time.Hour * time.Duration(j))
 					store.Store(&ReplayHistoryEntry{
 						FlowID:      fmt.Sprintf("replay-%d", j),
-						CreatedAt:   time.Now().Add(-time.Hour * time.Duration(j)),
+						CreatedAt:   created,
 						RawRequest:  rawRequest,
 						Method:      "GET",
 						Host:        "example.com",
@@ -110,7 +111,7 @@ func BenchmarkReplayHistoryStore_AddGetRemove(b *testing.B) {
 						RespHeaders: respHeaders,
 						RespBody:    fakeBodyContent,
 						RespStatus:  200,
-						Duration:    time.Duration(20+j) * time.Millisecond,
+						CompletedAt: created.Add(time.Duration(20+j) * time.Millisecond),
 					})
 				}
 				for j := 0; j < benchRecordCount; j++ {
@@ -134,9 +135,10 @@ func BenchmarkReplayHistoryStore_List(b *testing.B) {
 			// Prepare records
 			respHeaders := []byte("HTTP/1.1 200 OK\r\n\r\n")
 			for j := 0; j < benchRecordCount; j++ {
+				created := time.Now().Add(-time.Hour * time.Duration(j))
 				store.Store(&ReplayHistoryEntry{
 					FlowID:      fmt.Sprintf("replay-%d", j),
-					CreatedAt:   time.Now().Add(-time.Hour * time.Duration(j)),
+					CreatedAt:   created,
 					RawRequest:  []byte("GET /path" + strconv.Itoa(j) + " HTTP/1.1\r\nHost: example.com\r\n\r\n"),
 					Method:      "GET",
 					Host:        "example.com",
@@ -145,7 +147,7 @@ func BenchmarkReplayHistoryStore_List(b *testing.B) {
 					RespHeaders: respHeaders,
 					RespBody:    fakeBodyContent,
 					RespStatus:  200,
-					Duration:    time.Duration(20+j) * time.Millisecond,
+					CompletedAt: created.Add(time.Duration(20+j) * time.Millisecond),
 				})
 			}
 			if s, ok := storage.(*spillStore); ok && s.fileSize > 32 {
