@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +25,27 @@ type countingConn struct {
 func (c *countingConn) Close() error {
 	c.closed.Store(true)
 	return c.Conn.Close()
+}
+
+// recordConn records writes without blocking, so a test can assert whether the writer
+// applied an op without needing a reader to drain the socket.
+type recordConn struct {
+	net.Conn
+	mu      sync.Mutex
+	written int
+}
+
+func (c *recordConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	c.written++
+	c.mu.Unlock()
+	return len(b), nil
+}
+
+func (c *recordConn) writes() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.written
 }
 
 // deadConn returns a registered socket whose peer is already gone, so any write
@@ -325,6 +347,24 @@ func TestCloseStream(t *testing.T) {
 		// the queued write never reaches the socket
 		_, err := remote.Read(make([]byte, 8))
 		assert.Error(t, err)
+	})
+
+	// done closed with ops queued must drop every op; the writer priority-checks done
+	// ahead of the ops channel so the select cannot pick a queued op after abort
+	t.Run("abort_drops_all_queued", func(t *testing.T) {
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = local.Close() })
+		t.Cleanup(func() { _ = remote.Close() })
+		conn := &recordConn{Conn: local}
+
+		s := newStream(conn)
+		// pre-load ops directly; enqueue would reject once done is closed
+		s.ops <- streamOp{data: []byte("a")}
+		s.ops <- streamOp{data: []byte("b")}
+		close(s.done)
+
+		s.write(&Record{Name: "sc"}, "s1")
+		assert.Zero(t, conn.writes())
 	})
 
 	t.Run("unknown_stream_noop", func(t *testing.T) {
