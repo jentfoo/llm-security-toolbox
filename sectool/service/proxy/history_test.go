@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -474,6 +475,46 @@ func TestHistoryStore_Delete(t *testing.T) {
 		assert.Empty(t, h.Children(parent))
 	})
 
+	t.Run("parent_meta_delete_failure_keeps_subtree", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		h := newHistoryStore(storage)
+		t.Cleanup(h.Close)
+
+		parent := h.Store(newTestEntry("STREAM", "/s"))
+		c1 := h.Store(childFlow(parent, "a"))
+		c2 := h.Store(childFlow(parent, "b"))
+		h.storage = &failDeleteStorage{Storage: storage, key: historyMetaKey(parent)}
+
+		assert.Equal(t, 0, h.Delete(parent))
+		// parent keys survive
+		assert.Contains(t, storage.KeySet(), historyMetaKey(parent))
+		assert.Contains(t, storage.KeySet(), historyPayloadKey(parent))
+		assert.Equal(t, 1, h.Count())
+		// children not cascaded, still indexed in order
+		children := h.Children(parent)
+		require.Len(t, children, 2)
+		assert.Equal(t, []string{c1, c2}, []string{children[0].FlowID, children[1].FlowID})
+	})
+
+	t.Run("parent_payload_delete_failure_keeps_children", func(t *testing.T) {
+		storage := store.NewMemStorage()
+		h := newHistoryStore(storage)
+		t.Cleanup(h.Close)
+
+		parent := h.Store(newTestEntry("STREAM", "/s"))
+		c1 := h.Store(childFlow(parent, "a"))
+		c2 := h.Store(childFlow(parent, "b"))
+		h.storage = &failDeleteStorage{Storage: storage, key: historyPayloadKey(parent)}
+
+		assert.Equal(t, 0, h.Delete(parent))
+		// parent payload and children survive; cascade never ran
+		assert.Contains(t, storage.KeySet(), historyPayloadKey(parent))
+		assert.Equal(t, 1, h.Count())
+		children := h.Children(parent)
+		require.Len(t, children, 2)
+		assert.Equal(t, []string{c1, c2}, []string{children[0].FlowID, children[1].FlowID})
+	})
+
 	t.Run("cyclic_parent_link_terminates", func(t *testing.T) {
 		h := newHistoryStore(store.NewMemStorage())
 		t.Cleanup(h.Close)
@@ -485,6 +526,19 @@ func TestHistoryStore_Delete(t *testing.T) {
 		assert.Equal(t, 1, h.Delete(parent))
 		assert.Equal(t, 0, h.Count())
 	})
+}
+
+// failDeleteStorage fails Delete for one target key, else delegates.
+type failDeleteStorage struct {
+	store.Storage
+	key string
+}
+
+func (f *failDeleteStorage) Delete(key string) error {
+	if key == f.key {
+		return errors.New("injected delete failure")
+	}
+	return f.Storage.Delete(key)
 }
 
 // childFlow builds a payload-only child flow under parent.

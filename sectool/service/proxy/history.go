@@ -380,22 +380,33 @@ func (h *HistoryStore) Delete(flowIDs ...string) int {
 	seen := maps.Clone(requested)
 	for i := 0; i < len(queue); i++ {
 		fid := queue[i]
-		// children are reachable only through this parent, so they queue for
-		// deletion rather than being orphaned in storage
-		for _, child := range h.childOrder[fid] {
-			if _, dup := seen[child]; dup {
-				continue // guard against a cyclic parent link
+
+		ts, isTop := h.timestampByFlow[fid]
+		var parentFlowID string
+		if !isTop {
+			// child flow (payload-only) or unknown id
+			flow, ok := h.Get(fid)
+			if !ok {
+				continue
 			}
-			seen[child] = struct{}{}
-			queue = append(queue, child)
+			parentFlowID = flow.ParentFlowID
 		}
 
-		if ts, ok := h.timestampByFlow[fid]; ok {
-			// top-level flow: drop meta and listing order
+		// remove both storage keys before mutating the index or cascading, so a
+		// failed delete leaves the flow and its children intact and retriable
+		if isTop {
 			if err := h.storage.Delete(historyMetaKey(fid)); err != nil {
 				log.Printf("proxy: delete history meta %s: %v", fid, err)
 				continue
 			}
+		}
+		if err := h.storage.Delete(historyPayloadKey(fid)); err != nil {
+			log.Printf("proxy: delete history payload %s: %v", fid, err)
+			continue
+		}
+
+		// keys gone; drop the flow from the in-memory index
+		if isTop {
 			delete(h.timestampByFlow, fid)
 			idx := sort.Search(len(h.flowOrder), func(i int) bool {
 				return !lessOrder(h.flowOrder[i].timestamp, h.flowOrder[i].flowID, ts, fid)
@@ -403,24 +414,23 @@ func (h *HistoryStore) Delete(flowIDs ...string) int {
 			if idx < len(h.flowOrder) && h.flowOrder[idx].flowID == fid {
 				h.flowOrder = slices.Delete(h.flowOrder, idx, idx+1)
 			}
-		} else {
-			// child flow (payload-only) or unknown id
-			flow, ok := h.Get(fid)
-			if !ok {
-				continue
-			}
-			if flow.ParentFlowID != "" {
-				siblings := h.childOrder[flow.ParentFlowID]
-				if j := slices.Index(siblings, fid); j >= 0 {
-					h.childOrder[flow.ParentFlowID] = slices.Delete(siblings, j, j+1)
-				}
+		} else if parentFlowID != "" {
+			siblings := h.childOrder[parentFlowID]
+			if j := slices.Index(siblings, fid); j >= 0 {
+				h.childOrder[parentFlowID] = slices.Delete(siblings, j, j+1)
 			}
 		}
 
-		delete(h.childOrder, fid)
-		if err := h.storage.Delete(historyPayloadKey(fid)); err != nil {
-			log.Printf("proxy: delete history payload %s: %v", fid, err)
+		// cascade to children, reachable only through this parent
+		for _, child := range h.childOrder[fid] {
+			if _, dup := seen[child]; dup {
+				continue // guard against a cyclic parent link
+			}
+			seen[child] = struct{}{}
+			queue = append(queue, child)
 		}
+		delete(h.childOrder, fid)
+
 		if _, ok := requested[fid]; ok {
 			deleted++ // cascaded children are not counted
 		}
