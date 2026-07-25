@@ -107,13 +107,13 @@ func (s *stream) closeAfterDrain() {
 func (s *stream) write(rec *Record, id string) {
 	defer close(s.stopped)
 	for {
-		select { // re-check abort before draining the next queued op
-		case <-s.done:
-			return
-		default:
-		}
 		select {
 		case op := <-s.ops:
+			select { // abort may have won the receive race against a queued op
+			case <-s.done:
+				return
+			default:
+			}
 			if !s.apply(rec, id, op) {
 				return
 			}

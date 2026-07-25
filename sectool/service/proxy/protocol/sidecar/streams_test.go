@@ -48,6 +48,38 @@ func (c *recordConn) writes() int {
 	return c.written
 }
 
+// gateConn counts writes and blocks the first one until release is closed, so a test can
+// park the writer mid-apply while it queues more ops behind it.
+type gateConn struct {
+	net.Conn
+	mu      sync.Mutex
+	written int
+	gate    chan struct{}
+	release chan struct{}
+}
+
+func newGateConn(conn net.Conn) *gateConn {
+	return &gateConn{Conn: conn, gate: make(chan struct{}, 1), release: make(chan struct{})}
+}
+
+func (c *gateConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	first := c.written == 0
+	c.written++
+	c.mu.Unlock()
+	if first {
+		c.gate <- struct{}{}
+		<-c.release
+	}
+	return len(b), nil
+}
+
+func (c *gateConn) writes() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.written
+}
+
 // deadConn returns a registered socket whose peer is already gone, so any write
 // to it fails.
 func deadConn(t *testing.T) *countingConn {
@@ -349,8 +381,8 @@ func TestCloseStream(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	// done closed with ops queued must drop every op; the writer priority-checks done
-	// ahead of the ops channel so the select cannot pick a queued op after abort
+	// done closed with ops queued must drop every op; the post-receive re-check drops
+	// an op even when the select picks it over the closed done channel
 	t.Run("abort_drops_all_queued", func(t *testing.T) {
 		local, remote := net.Pipe()
 		t.Cleanup(func() { _ = local.Close() })
@@ -365,6 +397,27 @@ func TestCloseStream(t *testing.T) {
 
 		s.write(&Record{Name: "sc"}, "s1")
 		assert.Zero(t, conn.writes())
+	})
+
+	// an op queued while the writer already runs must drop once abort fires mid-run
+	t.Run("abort_drops_queued_mid_run", func(t *testing.T) {
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = local.Close() })
+		t.Cleanup(func() { _ = remote.Close() })
+		conn := newGateConn(local)
+
+		s := newStream(conn)
+		go s.write(&Record{Name: "sc"}, "s1")
+
+		require.True(t, s.enqueue(streamOp{data: []byte("a")}))
+		<-conn.gate // writer is parked inside Write of op a
+		require.True(t, s.enqueue(streamOp{data: []byte("b")}))
+		close(s.done)
+		close(conn.release)
+
+		<-s.stopped
+		// a flushed, b dropped by the pre-check on the next loop
+		assert.Equal(t, 1, conn.writes())
 	})
 
 	t.Run("unknown_stream_noop", func(t *testing.T) {
