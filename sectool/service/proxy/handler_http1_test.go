@@ -1089,6 +1089,94 @@ func writeChunk(w io.Writer, payload string) {
 	_, _ = io.WriteString(w, fmt.Sprintf("%x\r\n%s\r\n", len(payload), payload))
 }
 
+// chunkedTruncatedUpstream sends a chunked head and one full chunk, then writes
+// trailing before closing without a terminal 0-chunk. Returns the listener address.
+func chunkedTruncatedUpstream(t *testing.T, trailing string) string {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		br := bufio.NewReader(conn)
+		for { // drain the request head
+			line, rerr := br.ReadString('\n')
+			if rerr != nil || line == "\r\n" {
+				break
+			}
+		}
+
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+		writeChunk(conn, "data: one\n\n")
+		if trailing != "" {
+			_, _ = io.WriteString(conn, trailing)
+		}
+	}()
+
+	return ln.Addr().String()
+}
+
+func TestHTTP1StreamingTruncated(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		trailing string
+		wantRaw  string // extra bytes replayed to the client before close
+	}{
+		{"between_chunks", "", ""},
+		{"malformed_size_line", "zz\r\n", "zz"},
+		{"mid_chunk", "a\r\ndata", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstreamAddr := chunkedTruncatedUpstream(t, tc.trailing)
+
+			proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
+			require.NoError(t, err)
+			go func() { _ = proxy.Serve() }()
+			t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
+			require.NoError(t, proxy.WaitReady(t.Context()))
+
+			var d net.Dialer
+			conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
+
+			req := "GET http://" + upstreamAddr + "/events HTTP/1.1\r\nHost: " + upstreamAddr + "\r\n\r\n"
+			_, err = conn.Write([]byte(req))
+			require.NoError(t, err)
+
+			// io.Copy returns when the proxy closes the truncated connection
+			received := &syncBuf{}
+			_, _ = io.Copy(received, conn)
+
+			assert.Contains(t, received.String(), "data: one")
+			assert.NotContains(t, received.String(), "0\r\n\r\n")
+			if tc.wantRaw != "" {
+				assert.Contains(t, received.String(), tc.wantRaw)
+			}
+
+			require.Eventually(t, func() bool {
+				flows := proxy.History().Page(1, "")
+				if len(flows) != 1 || flows[0].CompletedAt.IsZero() {
+					return false
+				}
+				ann := flows[0].Annotations
+				return ann[annStreamReason] == reasonUpstreamError && ann[annStreamTruncated] == true
+			}, 2*time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
 // replaceBodyRuleApplier mutates response bodies (per unit) by replacing find with replace.
 type replaceBodyRuleApplier struct {
 	find, replace []byte

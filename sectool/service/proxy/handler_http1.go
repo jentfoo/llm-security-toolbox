@@ -561,35 +561,47 @@ func (h *http1Handler) forwardStreaming(clientConn, upstreamConn net.Conn, upstr
 
 	_, trailers, _, chunks, _, _, readErr := readResponseBodyWithWire(upstreamReader, resp, onUnit)
 
+	// a truncated body must not get a fabricated terminator, and the client conn
+	// must close so the truncation is visible on the wire
+	last := lastChunkFrame(chunks)
+	bodyComplete := readErr == nil
+	if isChunked {
+		bodyComplete = last != nil && !last.Malformed && last.Size == 0
+	}
+
 	// Forward the chunked terminator (0-chunk + trailers)
 	if isChunked && clientErr == nil {
 		var tbuf bytes.Buffer
-		if !hasBodyRules {
-			if last := lastChunkFrame(chunks); last != nil {
+		switch {
+		case !bodyComplete: // truncated: replay any raw partial size line, never fabricate a terminator
+			if last != nil && last.Malformed {
 				tbuf.Write(last.SizeLine)
 				tbuf.WriteString(last.SizeEnding.Bytes())
-				tbuf.Write(trailers)
-				tbuf.WriteString(last.DataEnding.Bytes())
-			} else {
-				types.WriteLastChunk(&tbuf, trailers, "\r\n")
 			}
-		} else {
+		case hasBodyRules: // re-framed body: synthesize a standard terminator
 			types.WriteLastChunk(&tbuf, trailers, "\r\n")
+		default: // verbatim terminal 0-chunk
+			tbuf.Write(last.SizeLine)
+			tbuf.WriteString(last.SizeEnding.Bytes())
+			tbuf.Write(trailers)
+			tbuf.WriteString(last.DataEnding.Bytes())
 		}
-		if h.timeouts.WriteTimeout > 0 {
-			_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
-		}
-		if _, werr := clientConn.Write(tbuf.Bytes()); werr != nil {
-			clientErr = werr
+		if tbuf.Len() > 0 {
+			if h.timeouts.WriteTimeout > 0 {
+				_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
+			}
+			if _, werr := clientConn.Write(tbuf.Bytes()); werr != nil {
+				clientErr = werr
+			}
 		}
 	}
 
 	if captured {
 		resp.Trailers = trailers
-		h.completeStreamFlow(flowID, resp, histBody.Bytes(), time.Now(), streamAnnotations(clientErr, readErr, truncated))
+		h.completeStreamFlow(flowID, resp, histBody.Bytes(), time.Now(), streamAnnotations(clientErr, bodyComplete, truncated))
 	}
 
-	if clientErr != nil || resp.CloseDelimited {
+	if clientErr != nil || resp.CloseDelimited || !bodyComplete {
 		return false
 	}
 	return strings.ToLower(resp.GetHeader("Connection")) != connectionClose
@@ -659,12 +671,13 @@ func lastChunkFrame(chunks []types.ChunkFrame) *types.ChunkFrame {
 	return &chunks[len(chunks)-1]
 }
 
-// streamAnnotations builds finalize-time annotations describing truncation.
-func streamAnnotations(clientErr, readErr error, truncated bool) map[string]any {
+// streamAnnotations builds finalize-time annotations for a streamed flow from the
+// client-write error and whether the upstream body completed.
+func streamAnnotations(clientErr error, bodyComplete, truncated bool) map[string]any {
 	var reason string
 	if clientErr != nil {
 		reason = reasonClientDisconnect
-	} else if readErr != nil && !errors.Is(readErr, io.EOF) {
+	} else if !bodyComplete {
 		reason = reasonUpstreamError
 	}
 	return truncationAnnotations(reason, truncated)
