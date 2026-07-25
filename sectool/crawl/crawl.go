@@ -17,7 +17,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/protocol"
 )
 
-func create(mcpURL string, urls, flows, domains []string, label string, maxDepth, maxRequests int, delay time.Duration, parallelism int, submitForms bool) error {
+func create(mcpURL string, urls, flows, domains []string, label string, maxDepth, maxRequests int, delay time.Duration, parallelism int, submitForms *bool) error {
 	ctx := context.Background()
 
 	client, err := mcpclient.Connect(ctx, mcpURL)

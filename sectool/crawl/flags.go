@@ -76,6 +76,7 @@ crawl create [options]
     --delay <dur>          delay between requests (default: 200ms)
     --parallelism <n>      concurrent requests (default: 2)
     --submit-forms         automatically submit discovered forms
+                           (--submit-forms=false disables, overriding config)
 
 ---
 
@@ -198,7 +199,7 @@ func parseCreate(args []string, mcpURL string) error {
 	fs.IntVar(&maxRequests, "max-requests", 0, "maximum total requests (0 = use config default, 2000; negative = unlimited)")
 	fs.DurationVar(&delay, "delay", 0, "delay between requests")
 	fs.IntVar(&parallelism, "parallelism", 0, "concurrent requests")
-	fs.BoolVar(&submitForms, "submit-forms", false, "automatically submit discovered forms")
+	fs.BoolVar(&submitForms, "submit-forms", false, "automatically submit discovered forms (--submit-forms=false disables, overriding config)")
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(os.Stderr, `Usage: sectool crawl create [options]
@@ -217,7 +218,13 @@ Options:
 		return errors.New("at least one --url or --flow is required")
 	}
 
-	return create(mcpURL, urls, flows, domains, label, maxDepth, maxRequests, delay, parallelism, submitForms)
+	// nil unless flag set, so config default applies when absent
+	var submitFormsOpt *bool
+	if fs.Changed("submit-forms") {
+		submitFormsOpt = &submitForms
+	}
+
+	return create(mcpURL, urls, flows, domains, label, maxDepth, maxRequests, delay, parallelism, submitFormsOpt)
 }
 
 func parseSeed(args []string, mcpURL string) error {

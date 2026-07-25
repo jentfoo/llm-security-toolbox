@@ -88,7 +88,8 @@ type CrawlCreateOpts struct {
 	MaxRequests int
 	Delay       string
 	Parallelism int
-	SubmitForms bool
+	// nil uses the config default; non-nil overrides it
+	SubmitForms *bool
 }
 
 // CrawlPollOpts are options for CrawlPoll.

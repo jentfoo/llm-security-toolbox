@@ -366,8 +366,8 @@ func (c *Client) CrawlCreate(ctx context.Context, opts CrawlCreateOpts) (*protoc
 	if opts.Parallelism > 0 {
 		args["parallelism"] = opts.Parallelism
 	}
-	if opts.SubmitForms {
-		args["submit_forms"] = opts.SubmitForms
+	if opts.SubmitForms != nil {
+		args["submit_forms"] = *opts.SubmitForms
 	}
 
 	var resp protocol.CrawlCreateResponse
