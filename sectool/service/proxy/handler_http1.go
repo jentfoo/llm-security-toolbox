@@ -580,17 +580,20 @@ func (h *http1Handler) forwardStreaming(clientConn, upstreamConn net.Conn, upstr
 	last := lastChunkFrame(chunks)
 	bodyComplete := readErr == nil
 	if isChunked {
-		bodyComplete = last != nil && !last.Malformed && last.Size == 0
+		// EndingNone on the 0-chunk means the trailer block was cut short
+		bodyComplete = last != nil && !last.Malformed && last.Size == 0 &&
+			last.DataEnding != types.EndingNone
 	}
 
 	// Forward the chunked terminator (0-chunk + trailers)
 	if isChunked && clientErr == nil {
 		var tbuf bytes.Buffer
 		switch {
-		case !bodyComplete: // truncated: replay any raw partial size line, never fabricate a terminator
-			if last != nil && last.Malformed {
+		case !bodyComplete: // truncated: replay raw partial size line and any partial trailers, never fabricate a terminator
+			if last != nil && (last.Malformed || last.Size == 0) {
 				tbuf.Write(last.SizeLine)
 				tbuf.WriteString(last.SizeEnding.Bytes())
+				tbuf.Write(trailers) // partial trailers after a 0-chunk; nil after a malformed size
 			}
 		case hasBodyRules: // re-framed body: synthesize a standard terminator
 			types.WriteLastChunk(&tbuf, trailers, "\r\n")

@@ -1137,9 +1137,10 @@ func (s *syncBuf) String() string {
 }
 
 // chunkedTrickleUpstream accepts one connection, sends a chunked response head
-// and the first chunk, then waits on gate before sending the second chunk and
-// terminator. Returns the listener address.
-func chunkedTrickleUpstream(t *testing.T, gate <-chan struct{}) string {
+// and the first chunk, then waits on gate before sending the second chunk and a
+// terminator carrying trailer (a "Name: value\r\n" block, may be empty). Returns
+// the listener address.
+func chunkedTrickleUpstream(t *testing.T, gate <-chan struct{}, trailer string) string {
 	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -1165,7 +1166,7 @@ func chunkedTrickleUpstream(t *testing.T, gate <-chan struct{}) string {
 		writeChunk(conn, "data: one\n\n")
 		<-gate
 		writeChunk(conn, "data: two\n\n")
-		_, _ = io.WriteString(conn, "0\r\n\r\n")
+		_, _ = io.WriteString(conn, "0\r\n"+trailer+"\r\n")
 	}()
 
 	return ln.Addr().String()
@@ -1176,7 +1177,7 @@ func writeChunk(w io.Writer, payload string) {
 }
 
 // chunkedTruncatedUpstream sends a chunked head and one full chunk, then writes
-// trailing before closing without a terminal 0-chunk. Returns the listener address.
+// trailing before closing. Returns the listener address.
 func chunkedTruncatedUpstream(t *testing.T, trailing string) string {
 	t.Helper()
 	var lc net.ListenConfig
@@ -1220,6 +1221,7 @@ func TestHTTP1StreamingTruncated(t *testing.T) {
 		{"between_chunks", "", ""},
 		{"malformed_size_line", "zz\r\n", "zz"},
 		{"mid_chunk", "a\r\ndata", ""},
+		{"trailers_truncated", "0\r\nTrailer: foo\r\n", "Trailer: foo"},
 	}
 
 	for _, tc := range cases {
@@ -1290,7 +1292,7 @@ func TestHTTP1StreamingResponseWithRules(t *testing.T) {
 
 	gate := make(chan struct{})
 	close(gate) // send both chunks immediately
-	upstreamAddr := chunkedTrickleUpstream(t, gate)
+	upstreamAddr := chunkedTrickleUpstream(t, gate, "")
 
 	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
 	require.NoError(t, err)
@@ -1329,58 +1331,76 @@ func TestHTTP1StreamingResponseWithRules(t *testing.T) {
 func TestHTTP1StreamingResponse(t *testing.T) {
 	t.Parallel()
 
-	gate := make(chan struct{})
-	upstreamAddr := chunkedTrickleUpstream(t, gate)
+	cases := []struct {
+		name    string
+		trailer string // trailer block on the terminator, empty for none
+	}{
+		{"no_trailers", ""},
+		{"with_trailers", "Trailer: foo\r\n"},
+	}
 
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = proxy.Serve() }()
-	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
-	require.NoError(t, proxy.WaitReady(t.Context()))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := make(chan struct{})
+			upstreamAddr := chunkedTrickleUpstream(t, gate, tc.trailer)
 
-	var d net.Dialer
-	conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
+			proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
+			require.NoError(t, err)
+			go func() { _ = proxy.Serve() }()
+			t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
+			require.NoError(t, proxy.WaitReady(t.Context()))
 
-	req := "GET http://" + upstreamAddr + "/events HTTP/1.1\r\nHost: " + upstreamAddr + "\r\n\r\n"
-	_, err = conn.Write([]byte(req))
-	require.NoError(t, err)
+			var d net.Dialer
+			conn, err := d.DialContext(t.Context(), "tcp", proxy.Addr())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
 
-	received := &syncBuf{}
-	go func() { _, _ = io.Copy(received, conn) }()
+			req := "GET http://" + upstreamAddr + "/events HTTP/1.1\r\nHost: " + upstreamAddr + "\r\n\r\n"
+			_, err = conn.Write([]byte(req))
+			require.NoError(t, err)
 
-	// First chunk reaches the client before the upstream sends the second
-	require.Eventually(t, func() bool {
-		return strings.Contains(received.String(), "data: one")
-	}, 2*time.Second, 10*time.Millisecond)
-	assert.NotContains(t, received.String(), "data: two")
+			received := &syncBuf{}
+			go func() { _, _ = io.Copy(received, conn) }()
 
-	// History shows the flow in progress with the partial body
-	var flowID string
-	require.Eventually(t, func() bool {
-		flows := proxy.History().Page(1, "")
-		if len(flows) != 1 || flows[0].Response == nil {
-			return false
-		}
-		flowID = flows[0].FlowID
-		return flows[0].CompletedAt.IsZero() && strings.Contains(string(flows[0].Response.Body), "one")
-	}, 2*time.Second, 10*time.Millisecond)
+			// First chunk reaches the client before the upstream sends the second
+			require.Eventually(t, func() bool {
+				return strings.Contains(received.String(), "data: one")
+			}, 2*time.Second, 10*time.Millisecond)
+			assert.NotContains(t, received.String(), "data: two")
 
-	// Release the second chunk
-	close(gate)
+			// History shows the flow in progress with the partial body
+			var flowID string
+			require.Eventually(t, func() bool {
+				flows := proxy.History().Page(1, "")
+				if len(flows) != 1 || flows[0].Response == nil {
+					return false
+				}
+				flowID = flows[0].FlowID
+				return flows[0].CompletedAt.IsZero() && strings.Contains(string(flows[0].Response.Body), "one")
+			}, 2*time.Second, 10*time.Millisecond)
 
-	require.Eventually(t, func() bool {
-		return strings.Contains(received.String(), "data: two")
-	}, 2*time.Second, 10*time.Millisecond)
+			// Release the second chunk
+			close(gate)
 
-	// History now shows the completed flow with the full body
-	require.Eventually(t, func() bool {
-		flow, ok := proxy.History().Get(flowID)
-		if !ok || flow.Response == nil {
-			return false
-		}
-		body := string(flow.Response.Body)
-		return !flow.CompletedAt.IsZero() && strings.Contains(body, "one") && strings.Contains(body, "two")
-	}, 2*time.Second, 10*time.Millisecond)
+			require.Eventually(t, func() bool {
+				return strings.Contains(received.String(), "data: two")
+			}, 2*time.Second, 10*time.Millisecond)
+
+			// a well-terminated trailer block completes cleanly, without truncation
+			if tc.trailer != "" {
+				assert.Contains(t, received.String(), "0\r\n"+tc.trailer+"\r\n")
+			}
+
+			// History now shows the completed flow with the full body
+			require.Eventually(t, func() bool {
+				flow, ok := proxy.History().Get(flowID)
+				if !ok || flow.Response == nil {
+					return false
+				}
+				body := string(flow.Response.Body)
+				return !flow.CompletedAt.IsZero() && flow.Annotations[annStreamTruncated] == nil &&
+					strings.Contains(body, "one") && strings.Contains(body, "two")
+			}, 2*time.Second, 10*time.Millisecond)
+		})
+	}
 }
