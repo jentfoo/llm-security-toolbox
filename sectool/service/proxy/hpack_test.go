@@ -503,6 +503,8 @@ func TestRemoveStreamWindow(t *testing.T) {
 	h := newH2Conn(serverConn)
 	h.recvWindowStream[1] = 1000
 	h.sendWindowStream[1] = 1000
+	h.recvWindowStream[3] = 500
+	h.sendWindowStream[3] = 500
 
 	h.removeStreamWindow(1)
 
@@ -510,6 +512,12 @@ func TestRemoveStreamWindow(t *testing.T) {
 	_, sendOk := h.sendWindowStream[1]
 	assert.False(t, recvOk)
 	assert.False(t, sendOk)
+
+	// sibling stream is untouched
+	_, recvOk3 := h.recvWindowStream[3]
+	_, sendOk3 := h.sendWindowStream[3]
+	assert.True(t, recvOk3)
+	assert.True(t, sendOk3)
 }
 
 func TestEnqueueWrite(t *testing.T) {
@@ -526,6 +534,7 @@ func TestEnqueueWrite(t *testing.T) {
 
 		ok := h.enqueueWrite(t.Context(), []byte("test"))
 		assert.True(t, ok)
+		assert.Equal(t, []byte("test"), <-h.writeCh)
 	})
 
 	t.Run("context_cancelled", func(t *testing.T) {
@@ -792,21 +801,205 @@ func TestEncodeHeadersTEFiltering(t *testing.T) {
 	}
 }
 
-func TestNeedsWindowUpdateNonExistentStream(t *testing.T) {
+func TestNeedsWindowUpdate(t *testing.T) {
 	t.Parallel()
 
-	clientConn, serverConn := net.Pipe()
-	t.Cleanup(func() {
-		_ = clientConn.Close()
-		_ = serverConn.Close()
+	t.Run("no_update_needed", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			recvWindowConn:    65535,
+			recvWindowStream:  make(map[uint32]int32),
+		}
+		// full connection window and an untracked stream need no update
+		connUp, streamUp := h.needsWindowUpdate(999)
+		assert.Equal(t, uint32(0), connUp)
+		assert.Equal(t, uint32(0), streamUp)
 	})
 
-	h := newH2Conn(serverConn)
+	t.Run("update_after_consume", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			recvWindowConn:    65535,
+			recvWindowStream:  make(map[uint32]int32),
+		}
+		require.NoError(t, h.consumeRecvWindow(1, 40000, true))
 
-	// Call needsWindowUpdate for a stream that doesn't exist
-	connUpdate, streamUpdate := h.needsWindowUpdate(999)
+		connUp, streamUp := h.needsWindowUpdate(1)
+		assert.Positive(t, connUp)
+		assert.Positive(t, streamUp)
 
-	// Should return 0 for both since stream doesn't exist
-	assert.Equal(t, uint32(0), connUpdate)
-	assert.Equal(t, uint32(0), streamUpdate)
+		// needsWindowUpdate replenishes both windows back to full
+		assert.Equal(t, int32(65535), h.recvWindowConn)
+		assert.Equal(t, int32(65535), h.recvWindowStream[1])
+	})
+}
+
+func TestConsumeRecvWindow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("successful_consume", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			recvWindowConn:    65535,
+			recvWindowStream:  make(map[uint32]int32),
+		}
+
+		err := h.consumeRecvWindow(1, 1000, true)
+		require.NoError(t, err)
+		assert.Equal(t, int32(65535-1000), h.recvWindowConn)
+		assert.Equal(t, int32(65535-1000), h.recvWindowStream[1])
+
+		err = h.consumeRecvWindow(1, 2000, true)
+		require.NoError(t, err)
+		assert.Equal(t, int32(65535-3000), h.recvWindowConn)
+	})
+
+	t.Run("no_track_skips_stream", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			recvWindowConn:    65535,
+			recvWindowStream:  make(map[uint32]int32),
+		}
+
+		require.NoError(t, h.consumeRecvWindow(1, 1000, false))
+		assert.Equal(t, int32(65535-1000), h.recvWindowConn)
+		_, ok := h.recvWindowStream[1]
+		assert.False(t, ok)
+
+		h.recvWindowConn = 500
+		err := h.consumeRecvWindow(1, 2000, false)
+		var fcErr *flowControlError
+		require.ErrorAs(t, err, &fcErr)
+		assert.Equal(t, uint32(0), fcErr.StreamID)
+	})
+
+	t.Run("connection_level_violation", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			recvWindowConn:    1000,
+			recvWindowStream:  make(map[uint32]int32),
+		}
+
+		err := h.consumeRecvWindow(1, 2000, true)
+		require.Error(t, err)
+
+		var fcErr *flowControlError
+		require.ErrorAs(t, err, &fcErr)
+		assert.Equal(t, uint32(0), fcErr.StreamID)
+
+		assert.Equal(t, int32(1000), h.recvWindowConn)
+	})
+
+	t.Run("stream_level_violation", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			recvWindowConn:    65535,
+			recvWindowStream:  map[uint32]int32{1: 500},
+		}
+
+		err := h.consumeRecvWindow(1, 1000, true)
+		require.Error(t, err)
+
+		var fcErr *flowControlError
+		require.ErrorAs(t, err, &fcErr)
+		assert.Equal(t, uint32(1), fcErr.StreamID)
+
+		assert.Equal(t, int32(65535), h.recvWindowConn)
+		assert.Equal(t, int32(500), h.recvWindowStream[1])
+	})
+}
+
+func TestClose(t *testing.T) {
+	t.Parallel()
+
+	h := &h2Conn{
+		closeCh: make(chan struct{}),
+	}
+
+	h.close()
+	select {
+	case <-h.closeCh:
+	default:
+		t.Fatal("closeCh should be closed")
+	}
+
+	h.close() // idempotent, must not panic
+}
+
+func TestFlowCtrlWait(t *testing.T) {
+	t.Parallel()
+
+	t.Run("signaled_on_window_update", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			sendWindowConn:    0,
+			sendWindowStream:  make(map[uint32]int32),
+			flowCtrlCh:        make(chan struct{}),
+		}
+
+		waitCh := h.flowCtrlWait()
+
+		select {
+		case <-waitCh:
+			t.Fatal("channel should not be closed yet")
+		default:
+		}
+
+		h.updateSendWindow(0, 1000)
+
+		select {
+		case <-waitCh:
+		default:
+			t.Fatal("channel should be closed after updateSendWindow")
+		}
+
+		waitCh2 := h.flowCtrlWait()
+		select {
+		case <-waitCh2:
+			t.Fatal("new channel should not be closed")
+		default:
+		}
+	})
+
+	t.Run("signaled_on_settings_increase", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			sendWindowConn:    65535,
+			sendWindowStream:  make(map[uint32]int32),
+			flowCtrlCh:        make(chan struct{}),
+		}
+
+		h.initStreamSendWindow(1)
+
+		waitCh := h.flowCtrlWait()
+
+		h.updateSendWindowFromSettings(131070)
+
+		select {
+		case <-waitCh:
+		default:
+			t.Fatal("channel should be closed after settings increase")
+		}
+	})
+
+	t.Run("not_signaled_on_decrease", func(t *testing.T) {
+		h := &h2Conn{
+			initialWindowSize: 65535,
+			sendWindowConn:    65535,
+			sendWindowStream:  make(map[uint32]int32),
+			flowCtrlCh:        make(chan struct{}),
+		}
+
+		h.initStreamSendWindow(1)
+
+		waitCh := h.flowCtrlWait()
+
+		h.updateSendWindowFromSettings(32768)
+
+		select {
+		case <-waitCh:
+			t.Fatal("channel should not be closed on settings decrease")
+		default:
+		}
+	})
 }

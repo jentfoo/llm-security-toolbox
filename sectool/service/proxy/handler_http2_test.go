@@ -34,10 +34,15 @@ func TestStreamTracker(t *testing.T) {
 
 	t.Run("get_or_create", func(t *testing.T) {
 		tracker := newStreamTracker()
+		now := time.Now()
 
 		s1 := tracker.getOrCreate(5)
 		assert.NotNil(t, s1)
 		assert.Equal(t, uint32(5), s1.id)
+		// getOrCreate initializes state and both timestamps
+		assert.Equal(t, streamOpen, s1.state)
+		assert.WithinDuration(t, now, s1.startTime, time.Second)
+		assert.WithinDuration(t, now, s1.lastActivity, time.Second)
 
 		s2 := tracker.getOrCreate(5)
 		assert.Equal(t, s1, s2)
@@ -73,24 +78,6 @@ func TestStreamTracker(t *testing.T) {
 		_, exists = tracker.get(3)
 		assert.True(t, exists)
 	})
-
-	t.Run("remove_nonexistent", func(t *testing.T) {
-		tracker := newStreamTracker()
-		tracker.remove(999) // should not panic
-		assert.Empty(t, tracker.all())
-	})
-}
-
-func TestH2StreamInitialState(t *testing.T) {
-	t.Parallel()
-
-	tracker := newStreamTracker()
-	stream := tracker.getOrCreate(1)
-	now := time.Now()
-
-	assert.Equal(t, streamOpen, stream.state)
-	assert.WithinDuration(t, now, stream.startTime, time.Second)
-	assert.WithinDuration(t, now, stream.lastActivity, time.Second)
 }
 
 // h2MockRuleApplier is a mock implementation for testing
@@ -367,249 +354,6 @@ func TestStoreStreamInHistory(t *testing.T) {
 	})
 }
 
-func TestH2ConnConsumeRecvWindow(t *testing.T) {
-	t.Parallel()
-
-	t.Run("successful_consume", func(t *testing.T) {
-		h := &h2Conn{
-			initialWindowSize: 65535,
-			recvWindowConn:    65535,
-			recvWindowStream:  make(map[uint32]int32),
-		}
-
-		err := h.consumeRecvWindow(1, 1000, true)
-		require.NoError(t, err)
-		assert.Equal(t, int32(65535-1000), h.recvWindowConn)
-		assert.Equal(t, int32(65535-1000), h.recvWindowStream[1])
-
-		err = h.consumeRecvWindow(1, 2000, true)
-		require.NoError(t, err)
-		assert.Equal(t, int32(65535-3000), h.recvWindowConn)
-	})
-
-	t.Run("no_track_skips_stream", func(t *testing.T) {
-		h := &h2Conn{
-			initialWindowSize: 65535,
-			recvWindowConn:    65535,
-			recvWindowStream:  make(map[uint32]int32),
-		}
-
-		require.NoError(t, h.consumeRecvWindow(1, 1000, false))
-		assert.Equal(t, int32(65535-1000), h.recvWindowConn)
-		_, ok := h.recvWindowStream[1]
-		assert.False(t, ok)
-
-		h.recvWindowConn = 500
-		err := h.consumeRecvWindow(1, 2000, false)
-		var fcErr *flowControlError
-		require.ErrorAs(t, err, &fcErr)
-		assert.Equal(t, uint32(0), fcErr.StreamID)
-	})
-
-	t.Run("connection_level_violation", func(t *testing.T) {
-		h := &h2Conn{
-			initialWindowSize: 65535,
-			recvWindowConn:    1000,
-			recvWindowStream:  make(map[uint32]int32),
-		}
-
-		err := h.consumeRecvWindow(1, 2000, true)
-		require.Error(t, err)
-
-		var fcErr *flowControlError
-		require.ErrorAs(t, err, &fcErr)
-		assert.Equal(t, uint32(0), fcErr.StreamID)
-
-		assert.Equal(t, int32(1000), h.recvWindowConn)
-	})
-
-	t.Run("stream_level_violation", func(t *testing.T) {
-		h := &h2Conn{
-			initialWindowSize: 65535,
-			recvWindowConn:    65535,
-			recvWindowStream:  map[uint32]int32{1: 500},
-		}
-
-		err := h.consumeRecvWindow(1, 1000, true)
-		require.Error(t, err)
-
-		var fcErr *flowControlError
-		require.ErrorAs(t, err, &fcErr)
-		assert.Equal(t, uint32(1), fcErr.StreamID)
-
-		assert.Equal(t, int32(65535), h.recvWindowConn)
-		assert.Equal(t, int32(500), h.recvWindowStream[1])
-	})
-}
-
-func TestH2ConnNeedsWindowUpdate(t *testing.T) {
-	t.Parallel()
-
-	h := &h2Conn{
-		initialWindowSize: 65535,
-		recvWindowConn:    65535,
-		recvWindowStream:  make(map[uint32]int32),
-	}
-
-	connUp, streamUp := h.needsWindowUpdate(1)
-	assert.Equal(t, uint32(0), connUp)
-	assert.Equal(t, uint32(0), streamUp)
-
-	require.NoError(t, h.consumeRecvWindow(1, 40000, true))
-
-	connUp, streamUp = h.needsWindowUpdate(1)
-	assert.Positive(t, connUp)
-	assert.Positive(t, streamUp)
-
-	assert.Equal(t, int32(65535), h.recvWindowConn)
-	assert.Equal(t, int32(65535), h.recvWindowStream[1])
-}
-
-func TestH2ConnRemoveStreamWindow(t *testing.T) {
-	t.Parallel()
-
-	h := &h2Conn{
-		initialWindowSize: 65535,
-		recvWindowConn:    65535,
-		recvWindowStream:  make(map[uint32]int32),
-	}
-
-	require.NoError(t, h.consumeRecvWindow(1, 1000, true))
-	require.NoError(t, h.consumeRecvWindow(3, 500, true))
-	assert.Len(t, h.recvWindowStream, 2)
-
-	h.removeStreamWindow(1)
-	assert.Len(t, h.recvWindowStream, 1)
-	_, ok := h.recvWindowStream[1]
-	assert.False(t, ok)
-	_, ok = h.recvWindowStream[3]
-	assert.True(t, ok)
-}
-
-func TestH2ConnClose(t *testing.T) {
-	t.Parallel()
-
-	h := &h2Conn{
-		closeCh: make(chan struct{}),
-	}
-
-	h.close()
-	select {
-	case <-h.closeCh:
-	default:
-		t.Fatal("closeCh should be closed")
-	}
-
-	h.close() // should not panic
-}
-
-func TestH2ConnEnqueueWrite(t *testing.T) {
-	t.Parallel()
-
-	t.Run("closed_connection", func(t *testing.T) {
-		h := &h2Conn{
-			writeCh: make(chan []byte),
-			closeCh: make(chan struct{}),
-		}
-
-		h.close()
-
-		ok := h.enqueueWrite(t.Context(), []byte("test"))
-		assert.False(t, ok)
-	})
-
-	t.Run("successful_enqueue", func(t *testing.T) {
-		h := &h2Conn{
-			writeCh: make(chan []byte, 1),
-			closeCh: make(chan struct{}),
-		}
-
-		ok := h.enqueueWrite(t.Context(), []byte("test"))
-		assert.True(t, ok)
-
-		data := <-h.writeCh
-		assert.Equal(t, []byte("test"), data)
-	})
-}
-
-func TestH2ConnFlowCtrlWait(t *testing.T) {
-	t.Parallel()
-
-	t.Run("signaled_on_window_update", func(t *testing.T) {
-		h := &h2Conn{
-			initialWindowSize: 65535,
-			sendWindowConn:    0,
-			sendWindowStream:  make(map[uint32]int32),
-			flowCtrlCh:        make(chan struct{}),
-		}
-
-		waitCh := h.flowCtrlWait()
-
-		select {
-		case <-waitCh:
-			t.Fatal("channel should not be closed yet")
-		default:
-		}
-
-		h.updateSendWindow(0, 1000)
-
-		select {
-		case <-waitCh:
-		default:
-			t.Fatal("channel should be closed after updateSendWindow")
-		}
-
-		waitCh2 := h.flowCtrlWait()
-		select {
-		case <-waitCh2:
-			t.Fatal("new channel should not be closed")
-		default:
-		}
-	})
-
-	t.Run("signaled_on_settings_increase", func(t *testing.T) {
-		h := &h2Conn{
-			initialWindowSize: 65535,
-			sendWindowConn:    65535,
-			sendWindowStream:  make(map[uint32]int32),
-			flowCtrlCh:        make(chan struct{}),
-		}
-
-		h.initStreamSendWindow(1)
-
-		waitCh := h.flowCtrlWait()
-
-		h.updateSendWindowFromSettings(131070)
-
-		select {
-		case <-waitCh:
-		default:
-			t.Fatal("channel should be closed after settings increase")
-		}
-	})
-
-	t.Run("not_signaled_on_decrease", func(t *testing.T) {
-		h := &h2Conn{
-			initialWindowSize: 65535,
-			sendWindowConn:    65535,
-			sendWindowStream:  make(map[uint32]int32),
-			flowCtrlCh:        make(chan struct{}),
-		}
-
-		h.initStreamSendWindow(1)
-
-		waitCh := h.flowCtrlWait()
-
-		h.updateSendWindowFromSettings(32768)
-
-		select {
-		case <-waitCh:
-			t.Fatal("channel should not be closed on settings decrease")
-		default:
-		}
-	})
-}
-
 func TestHTTP2ProxyEndToEnd(t *testing.T) {
 	t.Parallel()
 
@@ -621,23 +365,7 @@ func TestHTTP2ProxyEndToEnd(t *testing.T) {
 	})
 	t.Cleanup(testServer.Close)
 
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = proxy.Serve() }()
-	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
-
-	caCertPool := x509.NewCertPool()
-	caCertPool.AddCert(proxy.CertManager().CACert())
-
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
-		TLSClientConfig: &tls.Config{
-			RootCAs:            caCertPool,
-			InsecureSkipVerify: true,
-		},
-		ForceAttemptHTTP2: true,
-	}
-	client := &http.Client{Transport: transport}
+	proxy, client := newTestHTTP2Proxy(t)
 
 	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/test", nil)
 	require.NoError(t, err)
@@ -695,10 +423,7 @@ func TestHTTP2ProxyInterceptWithRequestBody(t *testing.T) {
 	server.StartTLS()
 	t.Cleanup(server.Close)
 
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = proxy.Serve() }()
-	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
+	proxy, client := newTestHTTP2Proxy(t)
 
 	const cannedBody = "intercepted-response"
 	proxy.SetResponseInterceptor(&h2MockInterceptor{
@@ -709,15 +434,6 @@ func TestHTTP2ProxyInterceptWithRequestBody(t *testing.T) {
 			Body:       []byte(cannedBody),
 		},
 	})
-
-	caCertPool := x509.NewCertPool()
-	caCertPool.AddCert(proxy.CertManager().CACert())
-	transport := &http.Transport{
-		Proxy:             http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
-		TLSClientConfig:   &tls.Config{RootCAs: caCertPool, InsecureSkipVerify: true},
-		ForceAttemptHTTP2: true,
-	}
-	client := &http.Client{Transport: transport}
 
 	// Body large enough that DATA frames hit the proxy before the canned response is processed by the client
 	reqBody := strings.Repeat("A", 128*1024)
@@ -756,10 +472,7 @@ func TestHTTP2ProxyHeaderRules(t *testing.T) {
 	})
 	t.Cleanup(testServer.Close)
 
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = proxy.Serve() }()
-	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
+	proxy, client := newTestHTTP2Proxy(t)
 
 	applier := &h2MockRuleApplier{
 		reqHeaderMod: func(headers []types.Header) []types.Header {
@@ -767,19 +480,6 @@ func TestHTTP2ProxyHeaderRules(t *testing.T) {
 		},
 	}
 	proxy.SetRuleApplier(applier)
-
-	caCertPool := x509.NewCertPool()
-	caCertPool.AddCert(proxy.CertManager().CACert())
-
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
-		TLSClientConfig: &tls.Config{
-			RootCAs:            caCertPool,
-			InsecureSkipVerify: true,
-		},
-		ForceAttemptHTTP2: true,
-	}
-	client := &http.Client{Transport: transport}
 
 	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/test", nil)
 	require.NoError(t, err)
@@ -817,22 +517,7 @@ func TestHTTP2ProxyBidirectionalLargeBody(t *testing.T) {
 	})
 	t.Cleanup(testServer.Close)
 
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = proxy.Serve() }()
-	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
-
-	caCertPool := x509.NewCertPool()
-	caCertPool.AddCert(proxy.CertManager().CACert())
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
-		TLSClientConfig: &tls.Config{
-			RootCAs:            caCertPool,
-			InsecureSkipVerify: true,
-		},
-		ForceAttemptHTTP2: true,
-	}
-	client := &http.Client{Transport: transport}
+	_, client := newTestHTTP2Proxy(t)
 
 	const size = 4 * 1024 * 1024
 	payload := make([]byte, size)
@@ -951,42 +636,10 @@ func newHTTP2TestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server
 	return server
 }
 
-func TestH2StreamTimestamps(t *testing.T) {
-	t.Parallel()
-
-	tracker := newStreamTracker()
-
-	now := time.Now()
-	stream := tracker.getOrCreate(1)
-
-	assert.WithinDuration(t, now, stream.startTime, 100*time.Millisecond)
-	assert.WithinDuration(t, now, stream.lastActivity, 100*time.Millisecond)
-
-	// Update last activity slightly in the future
-	stream.mu.Lock()
-	stream.lastActivity = stream.startTime.Add(10 * time.Millisecond)
-	stream.mu.Unlock()
-
-	assert.True(t, stream.lastActivity.After(stream.startTime))
-}
-
-func TestHTTP2StreamingResponse(t *testing.T) {
-	t.Parallel()
-
-	gate := make(chan struct{})
-	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		flusher := w.(http.Flusher)
-		_, _ = w.Write([]byte("data: one\n\n"))
-		flusher.Flush()
-		<-gate
-		_, _ = w.Write([]byte("data: two\n\n"))
-		flusher.Flush()
-	}))
-	upstream.TLS = &tls.Config{NextProtos: []string{"h2"}}
-	upstream.StartTLS()
-	t.Cleanup(upstream.Close)
+// newTestHTTP2Proxy starts a proxy and returns it with an HTTP client that trusts the
+// proxy CA and prefers HTTP/2. Cleaned up on test end.
+func newTestHTTP2Proxy(t *testing.T) (*ProxyServer, *http.Client) {
+	t.Helper()
 
 	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
 	require.NoError(t, err)
@@ -996,125 +649,123 @@ func TestHTTP2StreamingResponse(t *testing.T) {
 
 	caPool := x509.NewCertPool()
 	caPool.AddCert(proxy.CertManager().CACert())
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
-		TLSClientConfig: &tls.Config{
-			RootCAs:            caPool,
-			InsecureSkipVerify: true,
-		},
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:             http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
+		TLSClientConfig:   &tls.Config{RootCAs: caPool, InsecureSkipVerify: true},
 		ForceAttemptHTTP2: true,
-	}
-	client := &http.Client{Transport: transport}
-
-	req, err := http.NewRequestWithContext(t.Context(), "GET", upstream.URL+"/events", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = resp.Body.Close() })
-	require.Equal(t, 2, resp.ProtoMajor)
-
-	received := &syncBuf{}
-	go func() { _, _ = io.Copy(received, resp.Body) }()
-
-	// First event reaches the client before the second is released
-	require.Eventually(t, func() bool {
-		return strings.Contains(received.String(), "data: one")
-	}, 3*time.Second, 10*time.Millisecond)
-	assert.NotContains(t, received.String(), "data: two")
-
-	// History shows the flow in progress with the partial body
-	var flowID string
-	require.Eventually(t, func() bool {
-		flows := proxy.History().Page(1, "")
-		if len(flows) != 1 || flows[0].Response == nil {
-			return false
-		}
-		flowID = flows[0].FlowID
-		return flows[0].CompletedAt.IsZero() && strings.Contains(string(flows[0].Response.Body), "one")
-	}, 3*time.Second, 10*time.Millisecond)
-
-	close(gate)
-
-	require.Eventually(t, func() bool {
-		return strings.Contains(received.String(), "data: two")
-	}, 3*time.Second, 10*time.Millisecond)
-
-	require.Eventually(t, func() bool {
-		flow, ok := proxy.History().Get(flowID)
-		if !ok || flow.Response == nil {
-			return false
-		}
-		body := string(flow.Response.Body)
-		return !flow.CompletedAt.IsZero() && strings.Contains(body, "one") && strings.Contains(body, "two")
-	}, 3*time.Second, 10*time.Millisecond)
+	}}
+	return proxy, client
 }
 
-func TestHTTP2StreamingClientCancelFinalizes(t *testing.T) {
+func TestHTTP2Streaming(t *testing.T) {
 	t.Parallel()
 
-	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		flusher := w.(http.Flusher)
-		_, _ = w.Write([]byte("data: one\n\n"))
-		flusher.Flush()
-		<-r.Context().Done() // hold the stream open until the client goes away
-	}))
-	upstream.TLS = &tls.Config{NextProtos: []string{"h2"}}
-	upstream.StartTLS()
-	t.Cleanup(upstream.Close)
+	t.Run("in_progress_then_complete", func(t *testing.T) {
+		gate := make(chan struct{})
+		upstream := newHTTP2TestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			flusher := w.(http.Flusher)
+			_, _ = w.Write([]byte("data: one\n\n"))
+			flusher.Flush()
+			<-gate
+			_, _ = w.Write([]byte("data: two\n\n"))
+			flusher.Flush()
+		})
+		t.Cleanup(upstream.Close)
 
-	proxy, err := NewProxyServer(0, t.TempDir(), 10*1024*1024, store.NewMemStorage(), TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = proxy.Serve() }()
-	t.Cleanup(func() { _ = proxy.Shutdown(context.Background()) })
-	require.NoError(t, proxy.WaitReady(t.Context()))
+		proxy, client := newTestHTTP2Proxy(t)
 
-	caPool := x509.NewCertPool()
-	caPool.AddCert(proxy.CertManager().CACert())
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(mustParseURL(t, "http://"+proxy.Addr())),
-		TLSClientConfig: &tls.Config{
-			RootCAs:            caPool,
-			InsecureSkipVerify: true,
-		},
-		ForceAttemptHTTP2: true,
-	}
-	client := &http.Client{Transport: transport}
+		req, err := http.NewRequestWithContext(t.Context(), "GET", upstream.URL+"/events", nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		require.Equal(t, 2, resp.ProtoMajor)
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	req, err := http.NewRequestWithContext(ctx, "GET", upstream.URL+"/events", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	require.Equal(t, 2, resp.ProtoMajor)
+		received := &syncBuf{}
+		go func() { _, _ = io.Copy(received, resp.Body) }()
 
-	head := make([]byte, len("data: one\n\n"))
-	_, err = io.ReadFull(resp.Body, head)
-	require.NoError(t, err)
-	assert.Contains(t, string(head), "data: one")
+		// First event reaches the client before the second is released
+		require.Eventually(t, func() bool {
+			return strings.Contains(received.String(), "data: one")
+		}, 3*time.Second, 10*time.Millisecond)
+		assert.NotContains(t, received.String(), "data: two")
 
-	// Flow is head-stored and in progress while the server holds the stream open
-	var flowID string
-	require.Eventually(t, func() bool {
-		flows := proxy.History().Page(1, "")
-		if len(flows) != 1 || flows[0].Response == nil {
-			return false
-		}
-		flowID = flows[0].FlowID
-		return flows[0].CompletedAt.IsZero()
-	}, 3*time.Second, 10*time.Millisecond)
+		// History shows the flow in progress with the partial body
+		var flowID string
+		require.Eventually(t, func() bool {
+			flows := proxy.History().Page(1, "")
+			if len(flows) != 1 || flows[0].Response == nil {
+				return false
+			}
+			flowID = flows[0].FlowID
+			return flows[0].CompletedAt.IsZero() && strings.Contains(string(flows[0].Response.Body), "one")
+		}, 3*time.Second, 10*time.Millisecond)
 
-	// Cancel mid-stream: abnormal teardown must finalize and mark the flow truncated
-	cancel()
-	_ = resp.Body.Close()
+		close(gate)
 
-	require.Eventually(t, func() bool {
-		flow, ok := proxy.History().Get(flowID)
-		if !ok || flow.CompletedAt.IsZero() {
-			return false
-		}
-		return flow.Annotations[annStreamTruncated] == true
-	}, 5*time.Second, 20*time.Millisecond)
+		require.Eventually(t, func() bool {
+			return strings.Contains(received.String(), "data: two")
+		}, 3*time.Second, 10*time.Millisecond)
+
+		require.Eventually(t, func() bool {
+			flow, ok := proxy.History().Get(flowID)
+			if !ok || flow.Response == nil {
+				return false
+			}
+			body := string(flow.Response.Body)
+			return !flow.CompletedAt.IsZero() && strings.Contains(body, "one") && strings.Contains(body, "two")
+		}, 3*time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("client_cancel_finalizes", func(t *testing.T) {
+		upstream := newHTTP2TestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			flusher := w.(http.Flusher)
+			_, _ = w.Write([]byte("data: one\n\n"))
+			flusher.Flush()
+			<-r.Context().Done() // hold the stream open until the client goes away
+		})
+		t.Cleanup(upstream.Close)
+
+		proxy, client := newTestHTTP2Proxy(t)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+		req, err := http.NewRequestWithContext(ctx, "GET", upstream.URL+"/events", nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, 2, resp.ProtoMajor)
+
+		head := make([]byte, len("data: one\n\n"))
+		_, err = io.ReadFull(resp.Body, head)
+		require.NoError(t, err)
+		assert.Contains(t, string(head), "data: one")
+
+		// Flow is head-stored and in progress while the server holds the stream open
+		var flowID string
+		require.Eventually(t, func() bool {
+			flows := proxy.History().Page(1, "")
+			if len(flows) != 1 || flows[0].Response == nil {
+				return false
+			}
+			flowID = flows[0].FlowID
+			return flows[0].CompletedAt.IsZero()
+		}, 3*time.Second, 10*time.Millisecond)
+
+		// Cancel mid-stream: abnormal teardown must finalize and mark the flow truncated
+		cancel()
+		_ = resp.Body.Close()
+
+		require.Eventually(t, func() bool {
+			flow, ok := proxy.History().Get(flowID)
+			if !ok || flow.CompletedAt.IsZero() {
+				return false
+			}
+			return flow.Annotations[annStreamTruncated] == true
+		}, 5*time.Second, 20*time.Millisecond)
+	})
 }

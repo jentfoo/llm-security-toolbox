@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -42,6 +41,40 @@ type nonClosingStorage struct{ store.Storage }
 
 func (nonClosingStorage) Close() error { return nil }
 
+// newTestNativeBackend returns a non-serving backend over fresh in-memory storage.
+func newTestNativeBackend(t *testing.T) *NativeProxyBackend {
+	t.Helper()
+	return newTestNativeBackendDir(t, t.TempDir())
+}
+
+// newTestNativeBackendDir is newTestNativeBackend with an explicit config dir, letting
+// a group of subtests share one generated CA cert.
+func newTestNativeBackendDir(t *testing.T, configDir string) *NativeProxyBackend {
+	t.Helper()
+	backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	return backend
+}
+
+// newServingNativeBackend returns a backend with its proxy accept loop running.
+func newServingNativeBackend(t *testing.T) *NativeProxyBackend {
+	t.Helper()
+	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+	require.NoError(t, err)
+	go func() { _ = backend.Serve() }()
+	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	return backend
+}
+
+// newProxiedClient returns an HTTP client routing through backend's proxy.
+func newProxiedClient(t *testing.T, backend *NativeProxyBackend) *http.Client {
+	t.Helper()
+	proxyURL, err := url.Parse("http://" + backend.Addr())
+	require.NoError(t, err)
+	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+}
+
 func TestNativeProxyBackend_CreateAndServe(t *testing.T) {
 	t.Parallel()
 
@@ -59,29 +92,17 @@ func TestNativeProxyBackend_CreateAndServe(t *testing.T) {
 func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 	t.Parallel()
 
-	// Start test server
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("OK"))
 	}))
 	t.Cleanup(testServer.Close)
 
-	// Start native proxy backend
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = backend.Serve() }()
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newServingNativeBackend(t)
+	client := newProxiedClient(t, backend)
 
-	// Configure client to use proxy
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-		},
-	}
-
-	// Make request through proxy
-	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/test", nil)
+	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/test?q=1", nil)
 	require.NoError(t, err)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
@@ -89,24 +110,42 @@ func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 
 	testutil.WaitForCount(t, func() int { return backend.server.History().Count() }, 1)
 
-	entries, err := backend.GetProxyHistory(t.Context(), 10, "")
+	testURL, err := url.Parse(testServer.URL)
+	require.NoError(t, err)
+	wantPort, err := strconv.Atoi(testURL.Port())
 	require.NoError(t, err)
 
-	assert.Len(t, entries, 1)
-	assert.NotEmpty(t, entries[0].FlowID)
-	assert.Contains(t, entries[0].Request, "GET")
-	assert.Contains(t, entries[0].Response, "200")
+	t.Run("full_entries", func(t *testing.T) {
+		entries, err := backend.GetProxyHistory(t.Context(), 10, "")
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		assert.NotEmpty(t, entries[0].FlowID)
+		assert.Contains(t, entries[0].Request, "GET")
+		assert.Contains(t, entries[0].Response, "200")
 
-	// Plaintext upstream on a non-80 port must be recorded as http, not inferred https
-	assert.Equal(t, "http", entries[0].Scheme)
-	testURL, _ := url.Parse(testServer.URL)
-	wantPort, _ := strconv.Atoi(testURL.Port())
-	assert.Equal(t, wantPort, entries[0].Port)
+		// Plaintext upstream on a non-80 port must be recorded as http, not inferred https
+		assert.Equal(t, "http", entries[0].Scheme)
+		assert.Equal(t, wantPort, entries[0].Port)
 
-	entry, err := backend.GetProxyEntry(t.Context(), entries[0].FlowID)
-	require.NoError(t, err)
-	assert.Equal(t, "http", entry.Scheme)
-	assert.Equal(t, wantPort, entry.Port)
+		entry, err := backend.GetProxyEntry(t.Context(), entries[0].FlowID)
+		require.NoError(t, err)
+		assert.Equal(t, "http", entry.Scheme)
+		assert.Equal(t, wantPort, entry.Port)
+	})
+
+	t.Run("meta", func(t *testing.T) {
+		metas, err := backend.GetProxyHistoryMeta(t.Context(), 10, "")
+		require.NoError(t, err)
+		require.Len(t, metas, 1)
+		assert.NotEmpty(t, metas[0].FlowID)
+		assert.False(t, metas[0].Timestamp.IsZero())
+		assert.Equal(t, "GET", metas[0].Method)
+		assert.Equal(t, 200, metas[0].Status)
+		assert.Contains(t, metas[0].Path, "/test")
+		assert.NotEmpty(t, metas[0].Host)
+		assert.Equal(t, "http/1.1", metas[0].Protocol)
+		assert.Equal(t, "http", metas[0].Scheme)
+	})
 }
 
 func TestNativeProxyBackend_ExpectContinueInterims(t *testing.T) {
@@ -119,10 +158,7 @@ func TestNativeProxyBackend_ExpectContinueInterims(t *testing.T) {
 	}))
 	t.Cleanup(testServer.Close)
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = backend.Serve() }()
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newServingNativeBackend(t)
 
 	var d net.Dialer
 	conn, err := d.DialContext(t.Context(), "tcp", backend.Addr())
@@ -164,60 +200,10 @@ func TestNativeProxyBackend_ExpectContinueInterims(t *testing.T) {
 	assert.False(t, entry.InterimResponses[1].Relayed)
 }
 
-func TestNativeProxyBackend_GetProxyHistoryMeta(t *testing.T) {
-	t.Parallel()
-
-	// Start test server
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("OK"))
-	}))
-	t.Cleanup(testServer.Close)
-
-	// Start native proxy backend
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = backend.Serve() }()
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
-
-	// Configure client to use proxy
-	proxyURL, _ := url.Parse("http://" + backend.Addr())
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-		},
-	}
-
-	// Make request through proxy
-	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL+"/test?q=1", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-
-	testutil.WaitForCount(t, func() int { return backend.server.History().Count() }, 1)
-
-	metas, err := backend.GetProxyHistoryMeta(t.Context(), 10, "")
-	require.NoError(t, err)
-
-	assert.Len(t, metas, 1)
-	assert.NotEmpty(t, metas[0].FlowID)
-	assert.False(t, metas[0].Timestamp.IsZero())
-	assert.Equal(t, "GET", metas[0].Method)
-	assert.Equal(t, 200, metas[0].Status)
-	assert.Contains(t, metas[0].Path, "/test")
-	assert.NotEmpty(t, metas[0].Host)
-	assert.Equal(t, "http/1.1", metas[0].Protocol)
-	assert.Equal(t, "http", metas[0].Scheme)
-}
-
 func TestNativeProxyBackend_GetProxyEntryInProgress(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newTestNativeBackend(t)
 
 	flowID := backend.server.History().Store(&types.Flow{
 		Adapter:     types.ProtocolHTTP11,
@@ -243,199 +229,166 @@ func TestNativeProxyBackend_GetProxyEntryInProgress(t *testing.T) {
 	assert.Contains(t, entry.Response, "data")
 }
 
-func TestNativeProxyBackend_Rules_CRUD(t *testing.T) {
+func TestNativeProxyBackend_AddRule(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	t.Run("valid", func(t *testing.T) {
+		backend := newTestNativeBackend(t)
 
-	// Add rule
-	rule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "test-rule",
-		Type:    wire.RuleTypeRequestHeader,
-		IsRegex: false,
-		Find:    "old-value",
-		Replace: "new-value",
+		rule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "test-rule",
+			Type:    wire.RuleTypeRequestHeader,
+			IsRegex: false,
+			Find:    "old-value",
+			Replace: "new-value",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "test-rule", rule.Label)
+		assert.Equal(t, wire.RuleTypeRequestHeader, rule.Type)
+		assert.Equal(t, "old-value", rule.Find)
+
+		rules, err := backend.ListRules(t.Context(), false)
+		require.NoError(t, err)
+		require.Len(t, rules, 1)
+		assert.Equal(t, "test-rule", rules[0].Label)
 	})
-	require.NoError(t, err)
-	assert.Equal(t, "test-rule", rule.Label)
-	assert.Equal(t, wire.RuleTypeRequestHeader, rule.Type)
-	assert.Equal(t, "old-value", rule.Find)
 
-	// List rules
-	rules, err := backend.ListRules(t.Context(), false)
-	require.NoError(t, err)
-	assert.Len(t, rules, 1)
+	t.Run("duplicate_label", func(t *testing.T) {
+		backend := newTestNativeBackend(t)
 
-	// Delete rule
-	err = backend.DeleteRule(t.Context(), "test-rule")
-	require.NoError(t, err)
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "unique-label", Type: wire.RuleTypeRequestHeader, Find: "a", Replace: "b",
+		})
+		require.NoError(t, err)
 
-	// Verify deleted
-	rules, err = backend.ListRules(t.Context(), false)
-	require.NoError(t, err)
-	assert.Empty(t, rules)
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "unique-label", Type: wire.RuleTypeRequestHeader, Find: "c", Replace: "d",
+		})
+		assert.ErrorIs(t, err, ErrLabelExists)
+	})
+
+	t.Run("invalid_type", func(t *testing.T) {
+		backend := newTestNativeBackend(t)
+
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Type: "invalid_type", Find: "a", Replace: "b",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid rule type")
+	})
+
+	t.Run("invalid_regex", func(t *testing.T) {
+		backend := newTestNativeBackend(t)
+
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Type: wire.RuleTypeRequestHeader, IsRegex: true, Find: `[invalid`, Replace: "x",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid regex")
+	})
+
+	t.Run("valid_regex", func(t *testing.T) {
+		backend := newTestNativeBackend(t)
+
+		rule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Type: wire.RuleTypeRequestHeader, IsRegex: true, Find: `\d+`, Replace: "NUMBER",
+		})
+		require.NoError(t, err)
+		assert.True(t, rule.IsRegex)
+	})
+}
+
+func TestNativeProxyBackend_DeleteRule(t *testing.T) {
+	t.Parallel()
+
+	t.Run("deletes_by_label", func(t *testing.T) {
+		backend := newTestNativeBackend(t)
+
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "test-rule", Type: wire.RuleTypeRequestHeader, Find: "old-value", Replace: "new-value",
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, backend.DeleteRule(t.Context(), "test-rule"))
+
+		rules, err := backend.ListRules(t.Context(), false)
+		require.NoError(t, err)
+		assert.Empty(t, rules)
+	})
+
+	t.Run("not_found", func(t *testing.T) {
+		backend := newTestNativeBackend(t)
+		assert.ErrorIs(t, backend.DeleteRule(t.Context(), "missing"), ErrNotFound)
+	})
 }
 
 func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 	t.Parallel()
 
-	ruleStorage := store.NewMemStorage()
-	provider := sharedMemProvider("rule", ruleStorage)
+	newBackend := func(provider store.Provider) *NativeProxyBackend {
+		b, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{}, false)
+		require.NoError(t, err)
+		return b
+	}
 
-	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
+	t.Run("http_and_ws_reload", func(t *testing.T) {
+		provider := sharedMemProvider("rule", store.NewMemStorage())
 
-	_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "http-rule",
-		Type:    wire.RuleTypeRequestHeader,
-		IsRegex: false,
-		Find:    "old",
-		Replace: "new",
+		backend1 := newBackend(provider)
+		_, err := backend1.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "http-rule", Type: wire.RuleTypeRequestHeader, Find: "old", Replace: "new",
+		})
+		require.NoError(t, err)
+		_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "ws-rule", Type: "ws:both", IsRegex: true, Find: `\d+`, Replace: "NUM",
+		})
+		require.NoError(t, err)
+		require.NoError(t, backend1.Close(t.Context()))
+
+		// New backend over the same rule storage loads persisted rules
+		backend2 := newBackend(provider)
+		t.Cleanup(func() { _ = backend2.Close(context.Background()) })
+
+		httpRules, err := backend2.ListRules(t.Context(), false)
+		require.NoError(t, err)
+		require.Len(t, httpRules, 1)
+		assert.Equal(t, "http-rule", httpRules[0].Label)
+		assert.Equal(t, "old", httpRules[0].Find)
+
+		wsRules, err := backend2.ListRules(t.Context(), true)
+		require.NoError(t, err)
+		require.Len(t, wsRules, 1)
+		assert.Equal(t, "ws-rule", wsRules[0].Label)
+		assert.True(t, wsRules[0].IsRegex)
+
+		// regex was recompiled: applying the reloaded WS rule works
+		assert.Equal(t, "id=NUM", string(backend2.ApplyWSRules([]byte("id=42"), "ws:both")))
 	})
-	require.NoError(t, err)
 
-	_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "ws-rule",
-		Type:    "ws:both",
-		IsRegex: true,
-		Find:    `\d+`,
-		Replace: "NUM",
+	t.Run("delete_persists", func(t *testing.T) {
+		provider := sharedMemProvider("rule", store.NewMemStorage())
+
+		backend1 := newBackend(provider)
+		_, err := backend1.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "to-delete", Type: wire.RuleTypeRequestHeader, Find: "a", Replace: "b",
+		})
+		require.NoError(t, err)
+		_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "to-keep", Type: wire.RuleTypeRequestBody, Find: "c", Replace: "d",
+		})
+		require.NoError(t, err)
+		require.NoError(t, backend1.DeleteRule(t.Context(), "to-delete"))
+		require.NoError(t, backend1.Close(t.Context()))
+
+		// New backend sees only the surviving rule
+		backend2 := newBackend(provider)
+		t.Cleanup(func() { _ = backend2.Close(context.Background()) })
+
+		rules, err := backend2.ListRules(t.Context(), false)
+		require.NoError(t, err)
+		require.Len(t, rules, 1)
+		assert.Equal(t, "to-keep", rules[0].Label)
 	})
-	require.NoError(t, err)
-
-	require.NoError(t, backend1.Close(t.Context()))
-
-	// New backend over the same rule storage should load persisted rules.
-	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend2.Close(context.Background()) })
-
-	httpRules, err := backend2.ListRules(t.Context(), false)
-	require.NoError(t, err)
-	require.Len(t, httpRules, 1)
-	assert.Equal(t, "http-rule", httpRules[0].Label)
-	assert.Equal(t, "old", httpRules[0].Find)
-
-	wsRules, err := backend2.ListRules(t.Context(), true)
-	require.NoError(t, err)
-	require.Len(t, wsRules, 1)
-	assert.Equal(t, "ws-rule", wsRules[0].Label)
-	assert.True(t, wsRules[0].IsRegex)
-
-	// Verify regex was recompiled by applying WS rule
-	modified := backend2.ApplyWSRules([]byte("id=42"), "ws:both")
-	assert.Equal(t, "id=NUM", string(modified))
-}
-
-func TestNativeProxyBackend_Rules_DeletePersists(t *testing.T) {
-	t.Parallel()
-
-	ruleStorage := store.NewMemStorage()
-	provider := sharedMemProvider("rule", ruleStorage)
-
-	backend1, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-
-	_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
-		Label: "to-delete", Type: wire.RuleTypeRequestHeader,
-		IsRegex: false, Find: "a", Replace: "b",
-	})
-	require.NoError(t, err)
-	_, err = backend1.AddRule(t.Context(), protocol.RuleEntry{
-		Label: "to-keep", Type: wire.RuleTypeRequestBody,
-		IsRegex: false, Find: "c", Replace: "d",
-	})
-	require.NoError(t, err)
-
-	err = backend1.DeleteRule(t.Context(), "to-delete")
-	require.NoError(t, err)
-	require.NoError(t, backend1.Close(t.Context()))
-
-	// New backend should only see the surviving rule
-	backend2, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, provider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend2.Close(context.Background()) })
-
-	rules, err := backend2.ListRules(t.Context(), false)
-	require.NoError(t, err)
-	require.Len(t, rules, 1)
-	assert.Equal(t, "to-keep", rules[0].Label)
-}
-
-func TestNativeProxyBackend_Rules_LabelUniqueness(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
-
-	// Add first rule
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "unique-label",
-		Type:    wire.RuleTypeRequestHeader,
-		IsRegex: false,
-		Find:    "a",
-		Replace: "b",
-	})
-	require.NoError(t, err)
-
-	// Try to add duplicate label
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label:   "unique-label",
-		Type:    wire.RuleTypeRequestHeader,
-		IsRegex: false,
-		Find:    "c",
-		Replace: "d",
-	})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrLabelExists)
-}
-
-func TestNativeProxyBackend_Rules_InvalidType(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
-
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Type:    "invalid_type",
-		IsRegex: false,
-		Find:    "a",
-		Replace: "b",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid rule type")
-}
-
-func TestNativeProxyBackend_Rules_Regex(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
-
-	// Valid regex
-	rule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
-		Type:    wire.RuleTypeRequestHeader,
-		IsRegex: true,
-		Find:    `\d+`,
-		Replace: "NUMBER",
-	})
-	require.NoError(t, err)
-	assert.True(t, rule.IsRegex)
-
-	// Invalid regex
-	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
-		Type:    wire.RuleTypeRequestHeader,
-		IsRegex: true,
-		Find:    `[invalid`,
-		Replace: "x",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid regex")
 }
 
 func TestNativeProxyBackend_SendRequest(t *testing.T) {
@@ -454,9 +407,7 @@ func TestNativeProxyBackend_SendRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create backend (doesn't need to serve for SendRequest)
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newTestNativeBackend(t)
 
 	// Send request directly (not through proxy)
 	rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
@@ -495,9 +446,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		serverURL, err := url.Parse(testServer.URL)
 		require.NoError(t, err)
 
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackend(t)
 
 		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
 			Type:    wire.RuleTypeRequestHeader,
@@ -534,9 +483,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		serverURL, err := url.Parse(testServer.URL)
 		require.NoError(t, err)
 
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackend(t)
 
 		rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
 		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
@@ -566,9 +513,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		serverURL, err := url.Parse(testServer.URL)
 		require.NoError(t, err)
 
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackend(t)
 
 		// Add a rule that won't match
 		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
@@ -611,9 +556,7 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 		serverURL, err := url.Parse(testServer.URL)
 		require.NoError(t, err)
 
-		backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackend(t)
 
 		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
 			Type:    wire.RuleTypeRequestHeader,
@@ -670,10 +613,7 @@ func TestNativeProxyBackend_HTTPS_Proxy(t *testing.T) {
 	t.Cleanup(testServer.Close)
 
 	// Start native proxy backend
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	go func() { _ = backend.Serve() }()
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newServingNativeBackend(t)
 
 	// Client trusting our CA and the test server's CA
 	proxyURL, _ := url.Parse("http://" + backend.Addr())
@@ -707,8 +647,7 @@ func mustParsePort(t *testing.T, portStr string) int {
 	if portStr == "" {
 		return 80
 	}
-	var port int
-	_, err := fmt.Sscanf(portStr, "%d", &port)
+	port, err := strconv.Atoi(portStr)
 	require.NoError(t, err)
 	return port
 }
@@ -723,11 +662,9 @@ func TestApplyRequestRules(t *testing.T) {
 	configDir := t.TempDir() // shared so CA cert is generated once
 
 	t.Run("header_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "header-rule",
 			Type:    wire.RuleTypeRequestHeader,
 			IsRegex: false,
@@ -752,11 +689,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("header_regex", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "regex-header-rule",
 			Type:    wire.RuleTypeRequestHeader,
 			IsRegex: true,
@@ -781,11 +716,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("nonascii_fold", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "fold",
 			Type:    wire.RuleTypeRequestHeader,
 			Find:    "SECRET",
@@ -802,11 +735,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("body_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "body-rule",
 			Type:    wire.RuleTypeRequestBody,
 			IsRegex: false,
@@ -834,11 +765,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("no_matching_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "no-match-rule",
 			Type:    wire.RuleTypeRequestHeader,
 			IsRegex: false,
@@ -863,11 +792,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("strips_unsupported_accept_encoding", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "resp-body",
 			Type:    wire.RuleTypeResponseBody,
 			Find:    "false",
@@ -892,11 +819,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("client_encoding_not_upgraded", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "resp-body",
 			Type:    wire.RuleTypeResponseBody,
 			Find:    "false",
@@ -923,11 +848,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("identity_forbidden_left_unchanged", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "resp-body",
 			Type:    wire.RuleTypeResponseBody,
 			Find:    "false",
@@ -951,11 +874,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("preserves_accept_encoding", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "req-header-only",
 			Type:    wire.RuleTypeRequestHeader,
 			Replace: "X-Test: value",
@@ -979,12 +900,10 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("multiple_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
 		// Add multiple rules - they should apply in order
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "rule1",
 			Type:    wire.RuleTypeRequestHeader,
 			IsRegex: false,
@@ -1018,11 +937,9 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 
 	t.Run("empty_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "body-rule",
 			Type:    wire.RuleTypeRequestBody,
 			IsRegex: false,
@@ -1031,7 +948,6 @@ func TestApplyRequestRules(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		// Request with no body
 		req := &types.RawHTTP1Request{
 			Method:  "GET",
 			Path:    "/test",
@@ -1041,18 +957,16 @@ func TestApplyRequestRules(t *testing.T) {
 			},
 		}
 
-		// Should not panic or error with empty body
+		// a body rule against a request with no body leaves the body empty
 		modified := backend.ApplyRequestRules(req)
 
 		assert.Empty(t, modified.Body)
 	})
 
 	t.Run("compressed_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "body-rule",
 			Type:    wire.RuleTypeRequestBody,
 			IsRegex: false,
@@ -1094,11 +1008,9 @@ func TestApplyResponseRules(t *testing.T) {
 	configDir := t.TempDir() // shared so CA cert is generated once
 
 	t.Run("header_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "resp-header-rule",
 			Type:    wire.RuleTypeResponseHeader,
 			IsRegex: false,
@@ -1123,11 +1035,9 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("body_literal", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "resp-body-rule",
 			Type:    wire.RuleTypeResponseBody,
 			IsRegex: false,
@@ -1154,11 +1064,9 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("identity_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "identity-body-rule",
 			Type:    wire.RuleTypeResponseBody,
 			IsRegex: false,
@@ -1189,11 +1097,9 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("compressed_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "compressed-body-rule",
 			Type:    wire.RuleTypeResponseBody,
 			IsRegex: false,
@@ -1227,11 +1133,9 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("brotli_body", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "brotli-body-rule",
 			Type:    wire.RuleTypeResponseBody,
 			IsRegex: false,
@@ -1263,11 +1167,9 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("invalid_brotli_skips_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "body-rule",
 			Type:    wire.RuleTypeResponseBody,
 			IsRegex: false,
@@ -1297,11 +1199,9 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 
 	t.Run("multiple_encoding_skips_rules", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "body-rule",
 			Type:    wire.RuleTypeResponseBody,
 			IsRegex: false,
@@ -1338,12 +1238,10 @@ func TestApplyWSRules(t *testing.T) {
 	configDir := t.TempDir() // shared so CA cert is generated once
 
 	t.Run("to_server", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
 		// Add WebSocket rule for to-server direction
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "ws-to-server-rule",
 			Type:    "ws:to-server",
 			IsRegex: false,
@@ -1364,12 +1262,10 @@ func TestApplyWSRules(t *testing.T) {
 	})
 
 	t.Run("to_client", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
 		// Add WebSocket rule for to-client direction
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "ws-to-client-rule",
 			Type:    "ws:to-client",
 			IsRegex: false,
@@ -1390,12 +1286,10 @@ func TestApplyWSRules(t *testing.T) {
 	})
 
 	t.Run("both_directions", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
 		// Add WebSocket rule for both directions
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "ws-both-rule",
 			Type:    "ws:both",
 			IsRegex: false,
@@ -1415,12 +1309,10 @@ func TestApplyWSRules(t *testing.T) {
 	})
 
 	t.Run("regex", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
 		// Add regex WebSocket rule
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "ws-regex-rule",
 			Type:    "ws:both",
 			IsRegex: true,
@@ -1600,11 +1492,9 @@ func TestApplyRequestHeaderOnlyRules(t *testing.T) {
 	}
 
 	t.Run("negotiates_for_response_body_rule", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "resp-body",
 			Type:    wire.RuleTypeResponseBody,
 			Find:    "false",
@@ -1618,11 +1508,9 @@ func TestApplyRequestHeaderOnlyRules(t *testing.T) {
 	})
 
 	t.Run("preserved_without_body_rule", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "req-header",
 			Type:    wire.RuleTypeRequestHeader,
 			Replace: "x-test: value",
@@ -1642,12 +1530,10 @@ func TestApplyRequestBodyOnlyRules(t *testing.T) {
 	configDir := t.TempDir() // shared so CA cert is generated once
 
 	t.Run("compression", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
 		// Add body rule
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "body-rule",
 			Type:    wire.RuleTypeRequestBody,
 			IsRegex: false,
@@ -1675,11 +1561,9 @@ func TestApplyRequestBodyOnlyRules(t *testing.T) {
 	})
 
 	t.Run("invalid_compressed", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "body-rule",
 			Type:    wire.RuleTypeRequestBody,
 			IsRegex: false,
@@ -1702,12 +1586,10 @@ func TestApplyRequestBodyOnlyRules(t *testing.T) {
 	})
 
 	t.Run("no_encoding", func(t *testing.T) {
-		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+		backend := newTestNativeBackendDir(t, configDir)
 
 		// Add body rule
-		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
 			Label:   "body-rule",
 			Type:    wire.RuleTypeRequestBody,
 			IsRegex: false,
@@ -1729,9 +1611,7 @@ func TestApplyRequestBodyOnlyRules(t *testing.T) {
 func TestNativeProxyBackend_RuleSnapshot(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newTestNativeBackend(t)
 
 	add := func(label, adapter string) {
 		_, err := backend.AddRule(t.Context(), protocol.RuleEntry{
