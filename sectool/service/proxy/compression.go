@@ -199,10 +199,11 @@ func Compress(data []byte, encoding string) ([]byte, error) {
 	}
 }
 
-// FilterSupportedEncodings filters an Accept-Encoding header value to only include encodings the
-// proxy can decompress/recompress. Preserves quality values and ordering.
-// Falls back to "identity" when the input contains no encoding supported by the proxy, so the
-// client never receives an encoding it did not offer.
+// FilterSupportedEncodings filters an Accept-Encoding header value to the encodings the proxy can
+// decompress/recompress, preserving quality values and ordering. Any identity token (including
+// identity;q=0) is a client preference and passes through unchanged; unsupported encodings are
+// always dropped so upstream never returns an undecodable body. Returns "identity" when nothing
+// remains (RFC 7231 implicit identity).
 func FilterSupportedEncodings(acceptEncoding string) string {
 	supported := bulk.SliceFilterInPlace(func(part string) bool {
 		trimmed := strings.TrimSpace(part)
@@ -210,6 +211,9 @@ func FilterSupportedEncodings(acceptEncoding string) string {
 		name := trimmed
 		if idx := strings.IndexByte(trimmed, ';'); idx >= 0 {
 			name = strings.TrimSpace(trimmed[:idx])
+		}
+		if strings.EqualFold(name, encodingIdentity) {
+			return true // identity needs no decoding, keep client preference as-is
 		}
 		_, supported := NormalizeEncoding(name)
 		return supported

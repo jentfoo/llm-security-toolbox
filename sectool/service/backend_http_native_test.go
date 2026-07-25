@@ -922,6 +922,34 @@ func TestApplyRequestRules(t *testing.T) {
 		}
 	})
 
+	t.Run("identity_forbidden_left_unchanged", func(t *testing.T) {
+		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = backend.Close(context.Background()) })
+
+		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label:   "resp-body",
+			Type:    wire.RuleTypeResponseBody,
+			Find:    "false",
+			Replace: "true",
+		})
+		require.NoError(t, err)
+
+		req := &types.RawHTTP1Request{
+			Method:  "GET",
+			Path:    "/test",
+			Version: "HTTP/1.1",
+			Headers: []types.Header{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Accept-Encoding", Value: "identity;q=0"},
+			},
+		}
+
+		modified := backend.ApplyRequestRules(req)
+		// client forbade identity, never invent an encoding it refused
+		assert.Equal(t, "identity;q=0", modified.GetHeader("Accept-Encoding"))
+	})
+
 	t.Run("preserves_accept_encoding", func(t *testing.T) {
 		backend, err := NewNativeProxyBackend(0, configDir, 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
 		require.NoError(t, err)
