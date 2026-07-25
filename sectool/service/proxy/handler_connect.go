@@ -39,6 +39,7 @@ type connectHandler struct {
 	// Server capability cache: host:port -> negotiated protocol; avoids repeated probe latency
 	capsMu     sync.RWMutex
 	serverCaps map[string]serverCap
+	nextSweep  time.Time // soonest cache entry expiry; gates the on-write sweep
 
 	timeouts TimeoutConfig
 }
@@ -319,7 +320,28 @@ func (h *connectHandler) setCachedProto(targetAddr, proto string) {
 	h.capsMu.Lock()
 	defer h.capsMu.Unlock()
 
-	h.serverCaps[targetAddr] = serverCap{proto: proto, seen: time.Now()}
+	now := time.Now()
+	h.serverCaps[targetAddr] = serverCap{proto: proto, seen: now}
+	if now.After(h.nextSweep) {
+		h.sweepExpiredLocked(now)
+	}
+}
+
+// sweepExpiredLocked drops entries past serverCapTTL and reschedules nextSweep
+// to the soonest remaining expiry; caller holds capsMu.
+func (h *connectHandler) sweepExpiredLocked(now time.Time) {
+	var soonest time.Time
+	for addr, entry := range h.serverCaps {
+		expiry := entry.seen.Add(serverCapTTL)
+		if now.After(expiry) { // matches cachedProto: expired when age > TTL
+			delete(h.serverCaps, addr)
+			continue
+		}
+		if soonest.IsZero() || expiry.Before(soonest) {
+			soonest = expiry
+		}
+	}
+	h.nextSweep = soonest
 }
 
 // clearCachedProto drops any cached protocol for targetAddr.

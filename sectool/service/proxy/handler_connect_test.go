@@ -537,6 +537,51 @@ func TestProbeOrConnect(t *testing.T) {
 	})
 }
 
+func TestSetCachedProto(t *testing.T) {
+	t.Parallel()
+
+	t.Run("prunes_expired_on_write", func(t *testing.T) {
+		t.Parallel()
+
+		now := time.Now()
+		h := &connectHandler{serverCaps: map[string]serverCap{
+			"stale:443": {proto: alpnH2, seen: now.Add(-2 * serverCapTTL)},
+			"fresh:443": {proto: alpnH2, seen: now.Add(-time.Minute)},
+		}}
+
+		// nextSweep zero: the write triggers a sweep
+		h.setCachedProto("new:443", alpnHTTP1)
+
+		_, ok := h.serverCaps["stale:443"]
+		assert.False(t, ok) // removed, not merely ignored on read
+
+		proto, ok := h.cachedProto("fresh:443")
+		require.True(t, ok)
+		assert.Equal(t, alpnH2, proto)
+		_, ok = h.cachedProto("new:443")
+		assert.True(t, ok)
+
+		assert.False(t, h.nextSweep.IsZero()) // rescheduled to soonest survivor
+	})
+
+	t.Run("skips_sweep_before_next", func(t *testing.T) {
+		t.Parallel()
+
+		now := time.Now()
+		h := &connectHandler{
+			serverCaps: map[string]serverCap{
+				"stale:443": {proto: alpnH2, seen: now.Add(-2 * serverCapTTL)},
+			},
+			nextSweep: now.Add(time.Hour),
+		}
+
+		h.setCachedProto("new:443", alpnHTTP1)
+
+		_, ok := h.serverCaps["stale:443"]
+		assert.True(t, ok) // sweep deferred until nextSweep
+	})
+}
+
 func TestAlpnForClient(t *testing.T) {
 	t.Parallel()
 
