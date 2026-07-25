@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -233,6 +234,10 @@ var ErrRouterClosed = errors.New("sidecar: stream router closed")
 // streamAcceptQueue bounds streams opened but not yet Accepted.
 const streamAcceptQueue = 64
 
+// streamPendingLimit bounds bytes buffered for dialed streams not yet registered,
+// guarding against stream_deliver for ids that never register.
+const streamPendingLimit = 256 * 1024
+
 // StreamRouter turns a claim's stream events into Accept-able StreamConns, so an
 // adapter writes ordinary blocking net.Conn code instead of the stream callbacks.
 // Embed it in a Handler and it supplies OnStreamOpen/OnStreamDeliver/OnStreamEnded;
@@ -244,6 +249,7 @@ type StreamRouter struct {
 	mu      sync.Mutex
 	streams map[string]*StreamConn
 	accept  chan *StreamConn
+	pending map[string][]byte // deliver bytes arrived before the stream registered
 }
 
 // NewStreamRouter returns a router that opens StreamConns over conn.
@@ -252,6 +258,7 @@ func NewStreamRouter(conn *Conn) *StreamRouter {
 		conn:    conn,
 		streams: map[string]*StreamConn{},
 		accept:  make(chan *StreamConn, streamAcceptQueue),
+		pending: map[string][]byte{},
 	}
 	go r.watchClose()
 	return r
@@ -266,7 +273,20 @@ func (r *StreamRouter) watchClose() {
 		sc.markClosed()
 	}
 	r.streams = map[string]*StreamConn{}
+	r.pending = map[string][]byte{}
 	r.mu.Unlock()
+}
+
+// register publishes sc under id, flushing any deliver bytes buffered before it registered.
+func (r *StreamRouter) register(id string, sc *StreamConn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if buf := r.pending[id]; len(buf) > 0 {
+		sc.deliver(buf) // sc not yet visible, ordered ahead of future delivers
+		delete(r.pending, id)
+	}
+	r.streams[id] = sc
 }
 
 // Accept returns the next newly opened stream, blocking until one arrives, ctx is cancelled, or the conn closes.
@@ -294,18 +314,14 @@ func (r *StreamRouter) DialUpstream(ctx context.Context, p wire.DialUpstreamPara
 		Host:     p.Host,
 		PeerAddr: net.JoinHostPort(p.Host, strconv.Itoa(p.Port)),
 	})
-	r.mu.Lock()
-	r.streams[id] = sc
-	r.mu.Unlock()
+	r.register(id, sc)
 	return sc, nil
 }
 
 // OnStreamOpen registers the stream and queues it for Accept.
 func (r *StreamRouter) OnStreamOpen(p wire.StreamOpenParams) ([]wire.StreamWrite, error) {
 	sc := newStreamConn(r.conn, p)
-	r.mu.Lock()
-	r.streams[p.StreamID] = sc
-	r.mu.Unlock()
+	r.register(p.StreamID, sc)
 	// block until Accept drains a slot or the conn closes
 	// only this stream's dispatch goroutine waits, so other streams keep flowing
 	select {
@@ -315,12 +331,32 @@ func (r *StreamRouter) OnStreamOpen(p wire.StreamOpenParams) ([]wire.StreamWrite
 	return nil, nil
 }
 
-// OnStreamDeliver hands inbound bytes to the stream's Read buffer.
+// OnStreamDeliver hands inbound bytes to the stream's Read buffer, buffering them
+// when the stream has not registered yet (a dialed upstream that wrote first).
 func (r *StreamRouter) OnStreamDeliver(p wire.StreamWriteParams) ([]wire.StreamWrite, error) {
-	if sc := r.lookup(p.StreamID); sc != nil {
-		sc.deliver(p.Data)
+	r.mu.Lock()
+	sc := r.streams[p.StreamID]
+	if sc == nil {
+		r.bufferPending(p.StreamID, p.Data)
+		r.mu.Unlock()
+		return nil, nil
 	}
+	r.mu.Unlock()
+	sc.deliver(p.Data)
 	return nil, nil
+}
+
+// bufferPending holds deliver bytes for a not-yet-registered stream; caller holds mu.
+func (r *StreamRouter) bufferPending(id string, data []byte) {
+	var total int
+	for _, buf := range r.pending {
+		total += len(buf)
+	}
+	if total+len(data) > streamPendingLimit {
+		log.Printf("sidecar: dropping %d bytes for unregistered stream_id=%s: pending buffer full", len(data), id)
+		return
+	}
+	r.pending[id] = append(r.pending[id], data...)
 }
 
 // OnStreamEnded marks the stream drained and drops it from the registry.
@@ -328,6 +364,7 @@ func (r *StreamRouter) OnStreamEnded(p wire.StreamEndedParams) {
 	r.mu.Lock()
 	sc := r.streams[p.StreamID]
 	delete(r.streams, p.StreamID)
+	delete(r.pending, p.StreamID)
 	r.mu.Unlock()
 	if sc != nil {
 		sc.end()

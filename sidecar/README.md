@@ -622,7 +622,7 @@ Internal tools are not invocable.
 
 **params:** `host` (string, optional), `port` (int, optional), `tls` (`{enabled, sni?, alpn?, skip_verify?}`, optional), `parent_flow_id` (string, optional, supplies the default destination and links the dial). Omitting `host`/`port` dials `parent_flow_id`'s original destination.
 
-**result:** `{ "stream_id": string }`, or a `-3330x` error on scope/dial/TLS failure. Bytes then flow via `stream_deliver` events and `stream_write`.
+**result:** `{ "stream_id": string }`, or a `-3330x` error on scope/dial/TLS failure. Bytes then flow via `stream_deliver` events and `stream_write`. `stream_deliver` for the dialed stream is not ordered against this result and may arrive first, so a consumer must buffer deliveries for a stream it has not yet registered (`StreamRouter` does this).
 
 #### invoke_adapter (sidecar → sectool)
 

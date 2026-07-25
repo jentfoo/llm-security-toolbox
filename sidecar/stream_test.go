@@ -18,11 +18,13 @@ import (
 // streamServer is a fake sectool that registers, records the sidecar's stream
 // notifications (stream_write, close_stream), and lets the test drive stream events.
 type streamServer struct {
-	mu     sync.Mutex
-	writes map[string][]byte
-	closed map[string]bool
-	dialID string
-	peer   chan *wire.Peer
+	mu         sync.Mutex
+	writes     map[string][]byte
+	closed     map[string]bool
+	dialID     string
+	dialBanner []byte // emitted as stream_deliver before the dial_upstream reply
+	srv        *wire.Peer
+	peer       chan *wire.Peer
 }
 
 func newStreamServer(t *testing.T) (*streamServer, *Conn, *StreamRouter) {
@@ -34,7 +36,8 @@ func newStreamServer(t *testing.T) (*streamServer, *Conn, *StreamRouter) {
 	t.Cleanup(func() { _ = conn.Close() })
 	router := NewStreamRouter(conn)
 	conn.SetHandler(router)
-	s.peer <- <-peerCh
+	s.srv = <-peerCh
+	s.peer <- s.srv
 	return s, conn, router
 }
 
@@ -48,6 +51,12 @@ func (s *streamServer) srvPeer(t *testing.T) *wire.Peer {
 
 func (s *streamServer) onRequest(method string, params json.RawMessage) (any, *wire.Error) {
 	if method == wire.MethodDialUpstream {
+		if len(s.dialBanner) > 0 {
+			// deliver a banner before the dial reply is on the wire, racing registration
+			var res wire.StreamResult
+			_ = s.srv.Call(context.Background(), wire.MethodStreamDeliver,
+				wire.StreamWriteParams{StreamID: s.dialID, Data: s.dialBanner}, &res)
+		}
 		return wire.DialUpstreamResult{StreamID: s.dialID}, nil
 	}
 	return registerOK(method, params)
@@ -188,6 +197,19 @@ func TestStreamRouterDialUpstream(t *testing.T) {
 		n, err := io.ReadFull(sc, got)
 		require.NoError(t, err)
 		assert.Equal(t, "pong", string(got[:n]))
+	})
+
+	t.Run("banner_before_dial_response", func(t *testing.T) {
+		s, _, router := newStreamServer(t)
+		s.dialBanner = []byte("SSH-2.0-OpenSSH_9.0\r\n")
+
+		sc, err := router.DialUpstream(t.Context(), wire.DialUpstreamParams{Host: "up", Port: 22})
+		require.NoError(t, err)
+
+		got := make([]byte, len(s.dialBanner))
+		_, err = io.ReadFull(sc, got)
+		require.NoError(t, err)
+		assert.Equal(t, string(s.dialBanner), string(got))
 	})
 
 	t.Run("stream_ended_cleans_up", func(t *testing.T) {
