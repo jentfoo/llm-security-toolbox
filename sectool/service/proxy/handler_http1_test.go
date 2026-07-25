@@ -43,6 +43,41 @@ func TestMustBufferResponse(t *testing.T) {
 	}
 }
 
+// fakeNetError is a net.Error with a controllable Timeout result.
+type fakeNetError struct{ timeout bool }
+
+func (e fakeNetError) Error() string   { return "fake net error" }
+func (e fakeNetError) Timeout() bool   { return e.timeout }
+func (e fakeNetError) Temporary() bool { return false }
+
+func TestStreamAnnotations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		clientErr    error
+		readErr      error
+		bodyComplete bool
+		wantReason   any
+	}{
+		{"client_disconnect", io.EOF, fakeNetError{timeout: true}, false, reasonClientDisconnect},
+		{"complete", nil, nil, true, nil},
+		{"stream_idle", nil, fakeNetError{timeout: true}, false, reasonStreamIdle},
+		{"upstream_error", nil, io.ErrUnexpectedEOF, false, reasonUpstreamError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ann := streamAnnotations(tt.clientErr, tt.readErr, tt.bodyComplete, false)
+			if tt.wantReason == nil {
+				assert.Nil(t, ann)
+				return
+			}
+			assert.Equal(t, tt.wantReason, ann[annStreamReason])
+			assert.Equal(t, true, ann[annStreamTruncated])
+		})
+	}
+}
+
 func newTestHTTP1Handler(t *testing.T) *http1Handler {
 	t.Helper()
 

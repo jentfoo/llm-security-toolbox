@@ -557,9 +557,9 @@ func (h *http1Handler) forwardStreaming(clientConn, upstreamConn net.Conn, upstr
 			return werr
 		}
 
-		// Refresh the upstream idle deadline per unit for long-lived streams
+		// refresh the upstream idle deadline per unit, widened for long-lived streams
 		if h.timeouts.ReadTimeout > 0 {
-			_ = upstreamConn.SetReadDeadline(time.Now().Add(h.timeouts.ReadTimeout))
+			_ = upstreamConn.SetReadDeadline(time.Now().Add(max(h.timeouts.ReadTimeout, streamIdleTimeout)))
 		}
 
 		appendCapped(&histBody, out, h.maxBodyBytes, &truncated)
@@ -612,7 +612,7 @@ func (h *http1Handler) forwardStreaming(clientConn, upstreamConn net.Conn, upstr
 
 	if captured {
 		resp.Trailers = trailers
-		h.completeStreamFlow(flowID, resp, histBody.Bytes(), time.Now(), streamAnnotations(clientErr, bodyComplete, truncated))
+		h.completeStreamFlow(flowID, resp, histBody.Bytes(), time.Now(), streamAnnotations(clientErr, readErr, bodyComplete, truncated))
 	}
 
 	if clientErr != nil || resp.CloseDelimited || !bodyComplete {
@@ -686,13 +686,17 @@ func lastChunkFrame(chunks []types.ChunkFrame) *types.ChunkFrame {
 }
 
 // streamAnnotations builds finalize-time annotations for a streamed flow from the
-// client-write error and whether the upstream body completed.
-func streamAnnotations(clientErr error, bodyComplete, truncated bool) map[string]any {
+// client-write error, the upstream read error, and whether the body completed.
+func streamAnnotations(clientErr, readErr error, bodyComplete, truncated bool) map[string]any {
 	var reason string
 	if clientErr != nil {
 		reason = reasonClientDisconnect
 	} else if !bodyComplete {
-		reason = reasonUpstreamError
+		if isTimeoutError(readErr) { // idle stream, not an error
+			reason = reasonStreamIdle
+		} else {
+			reason = reasonUpstreamError
+		}
 	}
 	return truncationAnnotations(reason, truncated)
 }

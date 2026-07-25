@@ -7,6 +7,8 @@ const (
 	streamFlushBytes = 64 << 10
 	// streamFlushInterval coalesces history writes: flush at least this often while data trickles.
 	streamFlushInterval = 250 * time.Millisecond
+	// streamIdleTimeout is the max gap between stream units before an idle stream is closed.
+	streamIdleTimeout = 5 * time.Minute
 )
 
 // Annotation keys and reasons recorded on a finalized streaming flow.
@@ -16,8 +18,9 @@ const (
 	annBodyTruncated       = "body_truncated_in_history" // stored body hit maxBodyBytes; wire was complete
 	reasonClientDisconnect = "client_disconnect"
 	reasonUpstreamError    = "upstream_error"
-	reasonStreamIdle       = "stream_idle" // stream reaped after idle timeout
-	reasonConnClosed       = "conn_closed" // connection torn down with the stream still open
+	reasonStreamIdle       = "stream_idle"        // stream reaped after idle timeout
+	reasonConnClosed       = "conn_closed"        // connection torn down with the stream still open
+	reasonFlowStall        = "flow_control_stall" // peer stopped granting send window, so the stream was reset
 )
 
 // flushThrottle gates coalesced two-phase history writes during a streaming

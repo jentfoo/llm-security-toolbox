@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	streamIdleTimeout = 5 * time.Minute
-	cleanupInterval   = 1 * time.Minute
-	h2Preface         = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	cleanupInterval = 1 * time.Minute
+	h2Preface       = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 	// shutdownFlushGrace bounds the per-write flush of queued frames at teardown
 	shutdownFlushGrace = 2 * time.Second
 )
@@ -770,8 +769,13 @@ func (p *h2Proxy) handleDataFrame(buf *bytes.Buffer, f *http2.DataFrame, src, ds
 				framer := http2.NewFramer(buf, nil)
 				_ = framer.WriteRSTStream(streamID, http2.ErrCodeFlowControl)
 				src.enqueueWrite(p.ctx, buf.Bytes())
+				// src is the violating peer
+				reason := reasonUpstreamError
+				if fromClient {
+					reason = reasonClientDisconnect
+				}
 				if s, ok := p.streams.get(streamID); ok {
-					p.storeStreamInHistory(s, reasonUpstreamError)
+					p.storeStreamInHistory(s, reason)
 				}
 				p.cleanupStream(streamID)
 			}
@@ -1494,7 +1498,7 @@ func (p *h2Proxy) pumpDataFrame(buf *bytes.Buffer, dst, src *h2Conn, item h2Work
 				p.sendRSTStream(buf, dst, streamID, http2.ErrCodeFlowControl)
 				p.sendRSTStream(buf, src, streamID, http2.ErrCodeFlowControl)
 				if s, ok := p.streams.get(streamID); ok {
-					p.storeStreamInHistory(s, reasonUpstreamError)
+					p.storeStreamInHistory(s, reasonFlowStall)
 				}
 				p.cleanupStream(streamID)
 				if item.replenish {
