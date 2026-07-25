@@ -122,6 +122,10 @@ func TestBridgeClaimEarly(t *testing.T) {
 		b := newEarlyBridge(t, []wire.EarlyClaim{{MagicBytesPrefix: base64.StdEncoding.EncodeToString(mqtt)}}, true)
 		assert.True(t, b.ClaimEarly(terminatedCtx("mqtt.example.com", "mqtt.example.com", 8883, mqtt)))
 	})
+	t.Run("terminate_declines_raw_accept", func(t *testing.T) {
+		b := newEarlyBridge(t, []wire.EarlyClaim{{TLS: &wire.TLSClaim{Terminate: true}}}, true)
+		assert.False(t, b.ClaimEarly(earlyCtx(8080, nil)))
+	})
 }
 
 func TestBridgeClaimTLS(t *testing.T) {

@@ -116,6 +116,9 @@ func (e *earlyClaim) matchTLS(sni, host string, port int) bool {
 // Magic bytes and probe are evaluated separately by the caller.
 func (e *earlyClaim) matchScope(c *protocol.EarlyClaimCtx) bool {
 	if !c.TLSTerminated {
+		if e.terminate {
+			return false // terminate claims match only at the TLS seam
+		}
 		var port int
 		if a, ok := c.ClientConn.LocalAddr().(*net.TCPAddr); ok {
 			port = a.Port
@@ -135,7 +138,8 @@ func (e *earlyClaim) matchScope(c *protocol.EarlyClaimCtx) bool {
 }
 
 // blanketOnPort reports whether the claim would swallow every connection reaching
-// the native proxy port, leaving the proxy unusable.
+// the native proxy port, leaving the proxy unusable. Terminate claims are exempt
+// because matchScope declines them at the raw-accept seam.
 func (e *earlyClaim) blanketOnPort(port int) bool {
 	return port != 0 && !e.terminate && !e.probe && len(e.prefix) == 0 && e.matchPort(port)
 }
