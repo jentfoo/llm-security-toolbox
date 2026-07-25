@@ -22,7 +22,7 @@ The captured representation maps to an HTTP-shaped envelope (`method`, `path`, `
 1. **Connect & register.** Sidecar dials the socket and sends a `register` request (see [register](#register-sidecar--sectool)). Sectool replies with the effective version, or rejects with `-33001` on version mismatch.
 2. **Rule sync.** Rules arrive only through `sync_rules`, pushed at registration and on every change (see [sync_rules](#sync_rules-sectool--sidecar)).
 3. **Capture.** Sidecar emits flows via `push_flow`; two-phase completion, streams, and sessions all use the same method (see [Flow model](#flow-model)).
-4. **Data path.** For claimed connections, sectool drives `stream_open` then `stream_deliver`, awaiting each response before the next chunk; the sidecar sends outbound bytes as `stream_write` and names them in the response `wrote_to`, and may nest `dial_upstream`, `core_invoke`, or `push_flow` (see [stream_deliver](#stream_deliver-sectool--sidecar)).
+4. **Data path.** For claimed connections, sectool delivers inbound bytes to the sidecar, which returns bytes to write back (possibly to a different stream) and may nest `dial_upstream`, `core_invoke`, or `push_flow` (see [stream_deliver](#stream_deliver-sectool--sidecar)).
 5. **Heartbeat.** `ping` / `pong` keep the connection alive in both directions.
 6. **Shutdown.** Sectool sends `shutdown`; the sidecar drains, emits final metrics, and closes.
 
@@ -225,7 +225,7 @@ func (h *myHandler) splitFrame(buf []byte) (n int, ok bool) {
 }
 ```
 
-The returned writes tell sectool what bytes to write back. A write may target a **different** `stream_id` than the event arrived on; that is how client data is forwarded upstream. The SDK sends them as `stream_write` so they share one ordered path with proactive `StreamWrite`, keeping a stream's bytes in send order. `sidecar.Forward(streamID, bytes)` builds a single-target writes slice:
+The returned writes tell sectool what bytes to write back. A write may target a **different** `stream_id` than the event arrived on; that is how client data is forwarded upstream. Returned writes stay ordered against proactive `StreamWrite` calls on the same stream. `sidecar.Forward(streamID, bytes)` builds a single-target writes slice:
 
 ```go
 func (h *myHandler) OnStreamDeliver(p wire.StreamWriteParams) ([]wire.StreamWrite, error) {
@@ -395,7 +395,7 @@ result, err := conn.InvokeAdapter(ctx, wire.InvokeAdapterParams{
 })
 ```
 
-The reserved destination `sectool` originates through the in-process HTTP proxy's native send path.
+The reserved destination `sectool` routes to native HTTP origination.
 
 ### Invoking sectool core tools
 
@@ -428,7 +428,7 @@ func (h *myHandler) OnSidecarSend(p wire.SidecarSendParams) (wire.SidecarSendRes
 }
 ```
 
-Set the result flow's `parent_flow_id` to the source (`p.FlowID`). sectool files any flow you push from `OnSidecarSend` whose parent is the flow being replayed into replay history automatically, reported with source `replay` like a native replay.
+Set the result flow's `parent_flow_id` to the source (`p.FlowID`); sectool then files it into replay history automatically, like a native replay.
 
 #### Mutation operations
 
@@ -473,7 +473,7 @@ conn.CloseStream(streamID, "stale", true)           // abort now, dropping queue
 conn.StreamWrite(streamID, keepaliveBytes)          // write without a triggering event
 ```
 
-`StreamWrite` calls are applied in send order, so they also suit a synchronous state machine that produces output with no triggering event, and they stay ordered against writes returned from stream events.
+`StreamWrite` calls are applied in send order and stay ordered against writes returned from stream events.
 
 ### Logging and metrics
 
@@ -652,7 +652,7 @@ Internal tools are not invocable.
 
 **result:** `ack` (bool). On an unsupported rule shape, return `-33102` naming the `rule_id`; the sidecar keeps its previous rules.
 
-Pushed once at registration (before the `register` result, even when the list is empty, so a reconnecting sidecar never keeps a stale cache) and again on every change. Sectool serializes pushes to a sidecar and waits for each ack before the next, so a later snapshot never overwrites a newer one; each push is bounded by a timeout and fails open (the sidecar keeps capturing its traffic) so a stalled sidecar can't wedge later pushes. A stalled frame write will eventually close the connection.
+Pushed once at registration (before the `register` result, even when the list is empty, so a reconnecting sidecar never keeps a stale cache) and again on every change. Sectool waits for each ack before sending the next push, so a later snapshot never overwrites a newer one.
 
 #### sidecar_send (sectool → sidecar)
 
