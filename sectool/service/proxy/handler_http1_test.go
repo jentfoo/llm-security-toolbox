@@ -563,7 +563,7 @@ func TestStoreEntry(t *testing.T) {
 		}
 		startTime := time.Now()
 
-		h.storeEntry(&types.Target{Hostname: "example.com", Port: 80}, req, resp, nil, startTime)
+		h.storeEntry(&types.Target{Hostname: "example.com", Port: 80}, req, resp, nil, startTime, nil)
 
 		// Verify entry was stored
 		assert.Equal(t, 1, h.history.Count())
@@ -587,7 +587,7 @@ func TestStoreEntry(t *testing.T) {
 		}
 		startTime := time.Now()
 
-		h.storeEntry(&types.Target{Hostname: "example.com", Port: 8443, UsesHTTPS: true}, req, nil, nil, startTime)
+		h.storeEntry(&types.Target{Hostname: "example.com", Port: 8443, UsesHTTPS: true}, req, nil, nil, startTime, nil)
 
 		entry := firstEntry(t, h.history)
 		assert.Equal(t, "https", entry.Scheme)
@@ -605,7 +605,7 @@ func TestStoreEntry(t *testing.T) {
 		}
 		startTime := time.Now()
 
-		h.storeEntry(&types.Target{Hostname: "example.com", Port: 80}, req, nil, nil, startTime)
+		h.storeEntry(&types.Target{Hostname: "example.com", Port: 80}, req, nil, nil, startTime, nil)
 
 		assert.Equal(t, 1, h.history.Count())
 
@@ -1029,6 +1029,57 @@ func TestHandleExchange(t *testing.T) {
 		assert.Equal(t, 103, entry.InterimResponses[0].Message.StatusCode)
 		assert.Equal(t, types.InterimSourceOrigin, entry.InterimResponses[0].Source)
 		assert.True(t, entry.InterimResponses[0].Relayed)
+	})
+
+	t.Run("buffered_upstream_reset_mid_body", func(t *testing.T) {
+		const partial = "data one partial"
+		// Content-Length declares more than is sent, then the conn resets
+		var lc net.ListenConfig
+		upstream, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = upstream.Close() })
+
+		go func() {
+			conn, aerr := upstream.Accept()
+			if aerr != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			br := bufio.NewReader(conn)
+			for { // drain request headers
+				line, rerr := br.ReadString('\n')
+				if rerr != nil || line == "\r\n" {
+					break
+				}
+			}
+			_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 4096\r\n\r\n"+partial)
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0) // deferred Close sends RST, not a clean EOF
+			}
+		}()
+
+		h := newTestHTTP1Handler(t)
+		h.ruleApplier = replaceBodyRuleApplier{find: []byte("x"), replace: []byte("y")} // body rules + Content-Length force buffering
+		clientConn, proxyConn := net.Pipe()
+		t.Cleanup(func() { _ = clientConn.Close() })
+
+		go func() {
+			h.handleExchange(t.Context(), proxyConn, bufio.NewReader(proxyConn), h1Exchange{logParseErrors: true})
+			_ = proxyConn.Close()
+		}()
+
+		_, err = clientConn.Write([]byte("GET / HTTP/1.1\r\nHost: " + upstream.Addr().String() + "\r\n\r\n"))
+		require.NoError(t, err)
+
+		respData, err := io.ReadAll(clientConn)
+		require.NoError(t, err)
+		assert.Contains(t, string(respData), "502") // synthetic gateway error, not a bare close
+
+		entry := firstEntry(t, h.history)
+		require.NotNil(t, entry.Response) // head kept despite the body failure
+		assert.Contains(t, string(entry.Response.Body), partial)
+		assert.Equal(t, reasonUpstreamError, entry.Annotations[annStreamReason])
+		assert.Equal(t, true, entry.Annotations[annStreamTruncated])
 	})
 }
 

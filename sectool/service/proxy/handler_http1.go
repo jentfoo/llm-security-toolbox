@@ -132,7 +132,7 @@ func (h *http1Handler) handleExchange(ctx context.Context, clientConn net.Conn, 
 			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
 				req.SetBody(req.Body[:h.maxBodyBytes])
 			}
-			h.storeEntry(target, req, resp, localInterim(contResp), startTime) // store before forward
+			h.storeEntry(target, req, resp, localInterim(contResp), startTime, nil) // store before forward
 			if h.timeouts.WriteTimeout > 0 {
 				_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))
 			}
@@ -170,7 +170,7 @@ func (h *http1Handler) handleExchange(ctx context.Context, clientConn net.Conn, 
 			} else {
 				sendError(clientConn, 502, "Bad Gateway: connection refused")
 			}
-			h.storeEntry(target, req, nil, localInterim(contResp), startTime)
+			h.storeEntry(target, req, nil, localInterim(contResp), startTime, nil)
 			return false
 		}
 		defer func() { _ = upstreamConn.Close() }() // only close the conn we dialed
@@ -188,7 +188,7 @@ func (h *http1Handler) handleExchange(ctx context.Context, clientConn net.Conn, 
 		} else {
 			sendError(clientConn, 502, "Bad Gateway: failed to send request")
 		}
-		h.storeEntry(target, req, nil, localInterim(contResp), startTime)
+		h.storeEntry(target, req, nil, localInterim(contResp), startTime, nil)
 		return false
 	}
 
@@ -346,8 +346,9 @@ func (h *http1Handler) forwardInterim(clientConn net.Conn, ir *types.RawHTTP1Res
 	return err
 }
 
-// storeEntry saves the request/response pair, plus any interim 1xx responses, to history.
-func (h *http1Handler) storeEntry(target *types.Target, req *types.RawHTTP1Request, resp *types.RawHTTP1Response, interim []*types.InterimResponse, startTime time.Time) {
+// storeEntry saves the request/response pair, plus any interim 1xx responses and
+// optional annotations, to history.
+func (h *http1Handler) storeEntry(target *types.Target, req *types.RawHTTP1Request, resp *types.RawHTTP1Response, interim []*types.InterimResponse, startTime time.Time, annotations map[string]any) {
 	flow := &types.Flow{
 		Adapter:     types.ProtocolHTTP11,
 		ProtocolTag: types.ProtocolHTTP11,
@@ -356,6 +357,7 @@ func (h *http1Handler) storeEntry(target *types.Target, req *types.RawHTTP1Reque
 		Request:     types.RequestToMessage(req),
 		StartedAt:   startTime,
 		CompletedAt: time.Now(),
+		Annotations: annotations,
 	}
 	if resp != nil {
 		flow.Response = types.ResponseToMessage(resp)
@@ -401,7 +403,7 @@ func (h *http1Handler) streamResponse(clientConn, upstreamConn net.Conn, upstrea
 				sendError(clientConn, 502, "Bad Gateway: malformed response")
 			}
 		}
-		h.storeEntry(target, req, nil, interim, startTime)
+		h.storeEntry(target, req, nil, interim, startTime, nil)
 		return false
 	}
 
@@ -441,7 +443,19 @@ func (h *http1Handler) forwardBuffered(clientConn net.Conn, upstreamReader *bufi
 		var rerr error
 		if resp.Body, resp.Trailers, wasChunked, resp.Chunks, trailersBareLF, trailersBareCR, rerr = readResponseBodyWithWire(upstreamReader, resp, nil); rerr != nil && !errors.Is(rerr, io.EOF) {
 			log.Printf("proxy: failed to read response body from %s: %v", target.Hostname, rerr)
-			h.storeEntry(target, req, nil, interim, startTime)
+			// nothing on the wire yet; send a synthetic gateway error
+			if isTimeoutError(rerr) {
+				sendError(clientConn, 504, "Gateway Timeout: read timeout")
+			} else {
+				sendError(clientConn, 502, "Bad Gateway: truncated response")
+			}
+			// store the head plus partial body so flow_get shows the failure
+			h.capBody(req)
+			if h.maxBodyBytes > 0 && len(resp.Body) > h.maxBodyBytes {
+				resp.SetBody(resp.Body[:h.maxBodyBytes])
+			}
+			resp.Chunks = nil // partial frames are not retained
+			h.storeEntry(target, req, resp, interim, startTime, truncationAnnotations(reasonUpstreamError, false))
 			return false
 		}
 		chunksBareLF, chunksBareCR := chunksBareFlags(resp.Chunks)
@@ -464,7 +478,7 @@ func (h *http1Handler) forwardBuffered(clientConn net.Conn, upstreamReader *bufi
 	if h.maxBodyBytes > 0 && len(resp.Body) > h.maxBodyBytes {
 		resp.SetBody(resp.Body[:h.maxBodyBytes])
 	}
-	h.storeEntry(target, req, resp, interim, startTime)
+	h.storeEntry(target, req, resp, interim, startTime, nil)
 
 	if h.timeouts.WriteTimeout > 0 {
 		_ = clientConn.SetWriteDeadline(time.Now().Add(h.timeouts.WriteTimeout))

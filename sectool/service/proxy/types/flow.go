@@ -45,7 +45,7 @@ type Flow struct {
 	StartedAt   time.Time `json:"started_at" msgpack:"ts"`
 	CompletedAt time.Time `json:"completed_at,omitempty" msgpack:"ca,omitempty"`
 
-	// Annotations is open-ended, exclusively sidecar-authored metadata.
+	// Annotations is open-ended flow-level metadata (truncation, attribution, etc.).
 	Annotations map[string]any `json:"annotations,omitempty" msgpack:"an,omitempty"`
 
 	// InvokedBy names the sidecar that originated a cross-adapter message.
