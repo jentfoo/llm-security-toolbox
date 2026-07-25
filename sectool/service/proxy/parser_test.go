@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -1724,6 +1725,45 @@ func TestReadChunkedBody(t *testing.T) {
 		full.Write(trailers)
 		full.WriteString(chunks[0].DataEnding.Bytes())
 		assert.Equal(t, input, full.String())
+	})
+
+	// A chunk larger than streamReadChunk streams in bounded sub-slices; the wire
+	// units still reconstruct the original chunk verbatim.
+	t.Run("streaming_large_chunk_subsliced", func(t *testing.T) {
+		payload := bytes.Repeat([]byte("abcdefgh"), streamReadChunk/8*2+16) // > streamReadChunk
+		input := strconv.FormatInt(int64(len(payload)), 16) + "\r\n" + string(payload) + "\r\n0\r\n\r\n"
+		br := bufio.NewReader(bytes.NewReader([]byte(input)))
+
+		var decoded, wire bytes.Buffer
+		var units int
+		body, trailers, chunks, _, _, err := readChunkedBody(br, func(d, w []byte) error {
+			units++
+			decoded.Write(d)
+			wire.Write(w)
+			return nil
+		})
+		require.NoError(t, err)
+
+		assert.Empty(t, body)
+		assert.Greater(t, units, 1) // sub-sliced, not one giant read
+		assert.Equal(t, string(payload), decoded.String())
+		var full bytes.Buffer
+		full.Write(wire.Bytes())
+		require.Len(t, chunks, 1)
+		full.Write(chunks[0].SizeLine)
+		full.WriteString(chunks[0].SizeEnding.Bytes())
+		full.Write(trailers)
+		full.WriteString(chunks[0].DataEnding.Bytes())
+		assert.Equal(t, input, full.String())
+	})
+
+	// An oversized declared size with short data must error gracefully without
+	// allocating the declared size up front.
+	t.Run("streaming_oversized_declared_size", func(t *testing.T) {
+		input := "40000000\r\nshort" // declares ~1GB, sends a few bytes then EOF
+		br := bufio.NewReader(bytes.NewReader([]byte(input)))
+		_, _, _, _, _, err := readChunkedBody(br, func(d, w []byte) error { return nil })
+		assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	})
 
 	// edge cases

@@ -582,22 +582,33 @@ func readChunkedBody(br *bufio.Reader, onUnit bodyUnitFunc) (body, trailers []by
 		}
 
 		if onUnit != nil {
-			// Streaming: read the data out, emit its wire frame, don't accumulate
-			if cap(dataBuf) < int(size) {
-				dataBuf = make([]byte, size)
+			// Streaming: emit the chunk in sub-slices, bounding allocation against a hostile
+			// declared size; reassembled wire reconstructs the original chunk verbatim
+			readCap := min(int(size), streamReadChunk)
+			if cap(dataBuf) < readCap {
+				dataBuf = make([]byte, readCap)
 			}
-			dataBuf = dataBuf[:size]
-			if _, err = io.ReadFull(br, dataBuf); err != nil {
-				return nil, nil, chunks, trailersBareLF, trailersBareCR, err
-			}
-			_, dataEnding, _ := readLineWithEnding(br)
-			wireBuf.Reset()
-			wireBuf.Write(sizeLine)
-			wireBuf.WriteString(sizeEnding.Bytes())
-			wireBuf.Write(dataBuf)
-			wireBuf.WriteString(dataEnding.Bytes())
-			if cerr := onUnit(dataBuf, wireBuf.Bytes()); cerr != nil {
-				return nil, nil, chunks, trailersBareLF, trailersBareCR, cerr
+			remaining := size
+			for remaining > 0 {
+				n := int(min(remaining, int64(streamReadChunk)))
+				piece := dataBuf[:n]
+				if _, err = io.ReadFull(br, piece); err != nil {
+					return nil, nil, chunks, trailersBareLF, trailersBareCR, err
+				}
+				wireBuf.Reset()
+				if remaining == size { // first sub-slice carries the size line
+					wireBuf.Write(sizeLine)
+					wireBuf.WriteString(sizeEnding.Bytes())
+				}
+				wireBuf.Write(piece)
+				remaining -= int64(n)
+				if remaining == 0 { // last sub-slice carries the data terminator
+					_, dataEnding, _ := readLineWithEnding(br)
+					wireBuf.WriteString(dataEnding.Bytes())
+				}
+				if cerr := onUnit(piece, wireBuf.Bytes()); cerr != nil {
+					return nil, nil, chunks, trailersBareLF, trailersBareCR, cerr
+				}
 			}
 			continue
 		}
