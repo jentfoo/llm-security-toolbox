@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,6 +13,18 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/protocol"
 )
+
+// gzipBytes returns s gzip-compressed.
+func gzipBytes(t *testing.T, s string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	_, err := w.Write([]byte(s))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	return buf.Bytes()
+}
 
 func TestHandleDiffFlow(t *testing.T) {
 	t.Parallel()
@@ -334,6 +348,163 @@ func TestHandleDiffFlow(t *testing.T) {
 		require.NotNil(t, resp.Response.Body)
 		// Should auto-detect JSON despite text/html content-type
 		assert.Equal(t, "json", resp.Response.Body.Format)
+	})
+
+	t.Run("undecodable_response_body", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		valid := gzipBytes(t, `{"a":1}`)
+		truncated := gzipBytes(t, `{"a":2}`)
+		truncated = truncated[:len(truncated)/2]
+
+		mockHTTP.AddProxyEntry(
+			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\r\n"+string(valid),
+			"",
+		)
+		mockHTTP.AddProxyEntry(
+			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\r\n"+string(truncated),
+			"",
+		)
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"host":        "example.com",
+		})
+		require.Len(t, listResp.Flows, 2)
+		flowB := listResp.Flows[1].FlowID
+
+		result := CallMCPTool(t, mcpClient, "diff_flow", map[string]interface{}{
+			"flow_a": listResp.Flows[0].FlowID,
+			"flow_b": flowB,
+			"scope":  "response_body",
+		})
+		assert.True(t, result.IsError)
+		text := ExtractMCPText(t, result)
+		assert.Contains(t, text, flowB)
+		assert.Contains(t, text, "response body")
+		assert.Contains(t, text, "gzip")
+	})
+
+	t.Run("undecodable_request_body", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		valid := gzipBytes(t, `{"a":1}`)
+		truncated := gzipBytes(t, `{"a":2}`)
+		truncated = truncated[:len(truncated)/2]
+
+		mockHTTP.AddProxyEntry(
+			"POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\r\n"+string(valid),
+			"HTTP/1.1 200 OK\r\n\r\n",
+			"",
+		)
+		mockHTTP.AddProxyEntry(
+			"POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\r\n"+string(truncated),
+			"HTTP/1.1 200 OK\r\n\r\n",
+			"",
+		)
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"host":        "example.com",
+		})
+		require.Len(t, listResp.Flows, 2)
+
+		result := CallMCPTool(t, mcpClient, "diff_flow", map[string]interface{}{
+			"flow_a": listResp.Flows[0].FlowID,
+			"flow_b": listResp.Flows[1].FlowID,
+			"scope":  "request_body",
+		})
+		assert.True(t, result.IsError)
+		assert.Contains(t, ExtractMCPText(t, result), "request body")
+	})
+
+	t.Run("identical_undecodable_same", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		truncated := gzipBytes(t, `{"a":1}`)
+		truncated = truncated[:len(truncated)/2]
+		resp := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\r\n" + string(truncated)
+
+		mockHTTP.AddProxyEntry("GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n", resp, "")
+		mockHTTP.AddProxyEntry("GET /b HTTP/1.1\r\nHost: example.com\r\n\r\n", resp, "")
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"host":        "example.com",
+		})
+		require.Len(t, listResp.Flows, 2)
+
+		diffResp := CallMCPToolJSONOK[protocol.DiffFlowResponse](t, mcpClient, "diff_flow", map[string]interface{}{
+			"flow_a": listResp.Flows[0].FlowID,
+			"flow_b": listResp.Flows[1].FlowID,
+			"scope":  "response_body",
+		})
+		assert.True(t, diffResp.Same)
+	})
+
+	t.Run("header_scope_skips_body_check", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		truncated := gzipBytes(t, `{"a":1}`)
+		truncated = truncated[:len(truncated)/2]
+
+		mockHTTP.AddProxyEntry(
+			"GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nX-Tag: a\r\n\r\n"+string(truncated),
+			"",
+		)
+		mockHTTP.AddProxyEntry(
+			"GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nX-Tag: b\r\n\r\n"+string(truncated),
+			"",
+		)
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"host":        "example.com",
+		})
+		require.Len(t, listResp.Flows, 2)
+
+		diffResp := CallMCPToolJSONOK[protocol.DiffFlowResponse](t, mcpClient, "diff_flow", map[string]interface{}{
+			"flow_a": listResp.Flows[0].FlowID,
+			"flow_b": listResp.Flows[1].FlowID,
+			"scope":  "response_headers",
+		})
+		require.NotNil(t, diffResp.Response)
+		assert.Nil(t, diffResp.Response.Body)
+	})
+
+	t.Run("valid_gzip_regression", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		mockHTTP.AddProxyEntry(
+			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\r\n"+string(gzipBytes(t, `{"role":"admin"}`)),
+			"",
+		)
+		mockHTTP.AddProxyEntry(
+			"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\r\n"+string(gzipBytes(t, `{"role":"viewer"}`)),
+			"",
+		)
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"host":        "example.com",
+		})
+		require.Len(t, listResp.Flows, 2)
+
+		diffResp := CallMCPToolJSONOK[protocol.DiffFlowResponse](t, mcpClient, "diff_flow", map[string]interface{}{
+			"flow_a": listResp.Flows[0].FlowID,
+			"flow_b": listResp.Flows[1].FlowID,
+			"scope":  "response_body",
+		})
+		assert.False(t, diffResp.Same)
+		require.NotNil(t, diffResp.Response)
+		require.NotNil(t, diffResp.Response.Body)
+		assert.Equal(t, "json", diffResp.Response.Body.Format)
 	})
 }
 

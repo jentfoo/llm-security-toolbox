@@ -82,14 +82,16 @@ func (m *mcpServer) handleDiffFlow(ctx context.Context, req mcp.CallToolRequest)
 	respHeadersA, respBodyA := splitHeadersBody(flowA.RawResponse)
 	respHeadersB, respBodyB := splitHeadersBody(flowB.RawResponse)
 
-	// Decompress bodies before diffing
+	// Decode bodies before diffing; error on undecodable compressed content
 	if includeReqBody {
-		reqBodyA, _ = decompressForDisplay(reqBodyA, string(reqHeadersA))
-		reqBodyB, _ = decompressForDisplay(reqBodyB, string(reqHeadersB))
+		if reqBodyA, reqBodyB, errResult = checkBodyDiff(flowAID, flowBID, "request", reqBodyA, reqHeadersA, reqBodyB, reqHeadersB); errResult != nil {
+			return errResult, nil
+		}
 	}
 	if includeRespBody {
-		respBodyA, _ = decompressForDisplay(respBodyA, string(respHeadersA))
-		respBodyB, _ = decompressForDisplay(respBodyB, string(respHeadersB))
+		if respBodyA, respBodyB, errResult = checkBodyDiff(flowAID, flowBID, "response", respBodyA, respHeadersA, respBodyB, respHeadersB); errResult != nil {
+			return errResult, nil
+		}
 	}
 
 	if includeReqHeaders || includeReqBody {
@@ -266,6 +268,31 @@ func detectContentType(headersA, headersB []byte) string {
 		return extractHeader(string(headersB), "Content-Type")
 	}
 	return ct
+}
+
+// checkBodyDiff decodes both bodies for a scope and returns them ready to diff.
+// Returns an error result when the bodies differ and either side is a compressed
+// body that could not be decoded; identical bodies are always diffable.
+func checkBodyDiff(flowAID, flowBID, side string, bodyA, headersA, bodyB, headersB []byte) ([]byte, []byte, *mcp.CallToolResult) {
+	decA, undecA := decompressForDisplay(bodyA, string(headersA))
+	decB, undecB := decompressForDisplay(bodyB, string(headersB))
+	if bytes.Equal(decA, decB) {
+		return decA, decB, nil // identical, nothing to read
+	} else if undecA {
+		return nil, nil, undecodableBodyError(flowAID, side, string(headersA))
+	} else if undecB {
+		return nil, nil, undecodableBodyError(flowBID, side, string(headersB))
+	}
+	return decA, decB, nil
+}
+
+// undecodableBodyError builds an error result naming the flow, side, and encoding
+// of a compressed body that could not be decoded for diffing.
+func undecodableBodyError(flowID, side, headers string) *mcp.CallToolResult {
+	enc := extractHeader(headers, "Content-Encoding")
+	return errorResult(fmt.Sprintf(
+		"flow %s %s body: %s content could not be decoded (truncated at max_body_bytes or corrupt); cannot diff",
+		flowID, side, enc))
 }
 
 // diffBodies compares two bodies using content-type-aware diffing.
