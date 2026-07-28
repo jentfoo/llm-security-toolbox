@@ -342,7 +342,7 @@ Select the task that best matches your objective:
 - test-report: Validating a specific vulnerability report
 - explore: Security testing and vulnerability discovery (default if unsure)
 
-Returns necessary instructions on tool use and user interaction  strategies.`),
+Returns necessary instructions on tool use and user interaction strategies.`),
 		mcp.WithString("task", mcp.Required(), mcp.Description("Workflow type: 'test-report' for validating vulnerability reports, 'explore' for security testing/discovery")),
 	)
 }

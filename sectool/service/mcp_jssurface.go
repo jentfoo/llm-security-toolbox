@@ -57,13 +57,9 @@ For HTML responses, inline <script> blocks are parsed independently. When presen
 
 An endpoint with an "endpoint_id" field carries extractable request-shape detail (body fields, headers, or path-parameter names): expand it with js_endpoint using "<flow_id>.<endpoint_id>" to get everything needed to craft a request without an example flow.
 
-The "origin" parameter controls endpoint volume and focus:
-- "same-origin" (default): same-origin endpoints only.
-- "summary": per-host counts to guide follow-up calls.
-- "full": all endpoints, same and external.
-- "<host>" (e.g. "a.com,b.com"): full detail for the named host(s).`),
+Endpoint scope and focus are configurable to same-origin and by host set via the "origin" parameter.`),
 		mcp.WithString("flow_id", mcp.Required(), mcp.Description("Flow ID (from proxy_poll, replay_send, or crawl_poll)")),
-		mcp.WithString("origin", mcp.Description(`Endpoint scope: "same-origin" (default), "summary", "full", or a comma-separated host set`)),
+		mcp.WithString("origin", mcp.Description(`Endpoint scope: "same-origin" (default) same-origin only; "summary" per-host counts to guide follow-up calls; "full" all endpoints same and external; or a comma-separated host set (e.g. "a.com,b.com") for full detail on the named host(s)`)),
 		mcp.WithBoolean("include_assets", mcp.Description("Include static-asset references that are dropped by default")),
 	)
 }

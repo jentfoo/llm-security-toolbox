@@ -187,18 +187,12 @@ func (m *mcpServer) crawlPollTool() mcp.Tool {
 		sinceDesc = "flow_id"
 	}
 	return mcp.NewTool("crawl_poll",
-		mcp.WithDescription(`Query crawl session results: summary (default), flows, forms, or errors.
-
-Output modes:
-- "summary" (default): Returns traffic grouped by (host, path, method, status). Path patterns replace numeric IDs and UUIDs with * for grouping.
-- "flows": Returns crawled flows with flow_id for use with flow_get.
-- "forms": Returns discovered forms with field information.
-- "errors": Returns errors encountered during crawling.
+		mcp.WithDescription(`Query crawl session results across summary, flows, forms, and errors modes.
 
 Filters apply to summary and flows modes only.
 `+incremental),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID or label")),
-		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default), 'flows', 'forms', or 'errors'")),
+		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default) groups traffic by (host, path, method, status), mask path parameter segments with * to group effectively; 'flows' returns crawled flows with flow_id for flow_get; 'forms' returns forms with fields; 'errors' returns crawl errors")),
 		mcp.WithString("host", mcp.Description("Filter by host glob (*, ?). *.example.com = subdomains only; *example.com = domain + subdomains")),
 		mcp.WithString("path", mcp.Description("Filter by path+query glob (*, ?), e.g. '/api/*'")),
 		mcp.WithString("method", mcp.Description("Filter by HTTP method(s), comma-separated (e.g., 'GET,POST')")),

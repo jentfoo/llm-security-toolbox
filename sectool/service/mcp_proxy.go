@@ -36,15 +36,11 @@ func (m *mcpServer) proxyPollTool(extra ...mcp.ToolOption) mcp.Tool {
 		sinceDesc = "Entries after this flow_id"
 	}
 	return mcp.NewTool("proxy_poll", append([]mcp.ToolOption{
-		mcp.WithDescription(`Query proxy history: summary (default) or flows mode.
-
-Output modes:
-- "summary" (default): Returns traffic grouped by (host, path, method, status). Use first to understand available traffic.
-- "flows": Returns individual flows with flow_id for use with flow_get or replay_send. Requires at least one filter or limit.
+		mcp.WithDescription(`Query proxy history to map traffic and retrieve flow_ids, in summary or flows mode.
 
 Results include both proxy-captured traffic (source=proxy) and replay-sent traffic (source=replay) in chronological order.
 ` + incremental),
-		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default) or 'flows'")),
+		mcp.WithString("output_mode", mcp.Description("Output mode: 'summary' (default) groups traffic by (host, path, method, status); 'flows' returns individual flows with flow_id for flow_get or replay_send (requires at least one filter or limit)")),
 		mcp.WithString("source", mcp.Description("Filter by source: 'proxy', 'replay', or empty for both")),
 		mcp.WithString("host", mcp.Description("Filter by host glob (*, ?). *.example.com = subdomains only; *example.com = domain + subdomains")),
 		mcp.WithString("path", mcp.Description("Filter by path+query glob (*, ?), e.g. '/api/*'")),
@@ -67,13 +63,10 @@ func (m *mcpServer) flowGetTool() mcp.Tool {
 		mcp.WithDescription(`Get full request and response for a flow.
 
 Returns headers and body for both request and response. Binary bodies are returned as "<BINARY:N Bytes>" placeholder.
-Works with flow_id from any source: proxy_poll, replay_send, request_send, or crawl_poll.
-
-Scope: Sections to return (comma-separated): request_headers, request_body, response_headers, response_body, all (default).
-Pattern: Regex search within scoped sections; returns match context instead of full content. Sections without matches are omitted.`),
+Works with flow_id from any source: proxy_poll, replay_send, request_send, or crawl_poll.`),
 		mcp.WithString("flow_id", mcp.Required(), mcp.Description("Flow identifier")),
 		mcp.WithString("scope", mcp.Description("Sections to return (comma-separated): request_headers, request_body, response_headers, response_body, all (default)")),
-		mcp.WithString("pattern", mcp.Description("Regex (RE2) search within scoped sections; returns match context instead of full content")),
+		mcp.WithString("pattern", mcp.Description("Regex (RE2) search within scoped sections; returns match context instead of full content, omitting sections without matches")),
 	)
 }
 
@@ -124,8 +117,8 @@ func (m *mcpServer) cookieJarTool() mcp.Tool {
 		mcp.WithDescription(`Extract and deduplicate cookies from proxy and replay traffic.
 Returns cookies deduplicated by (name, domain) with security attributes (Secure, HttpOnly, SameSite) and origin flow_id.
 Without filters: overview only (no values). With name or domain filter: includes full values and auto-decoded JWT claims.`),
-		mcp.WithString("name", mcp.Description("Filter by cookie name (exact match); enables value and JWT decode in response")),
-		mcp.WithString("domain", mcp.Description("Filter by cookie domain (matches domain and subdomains); enables value and JWT decode in response")),
+		mcp.WithString("name", mcp.Description("Filter by cookie name (exact match)")),
+		mcp.WithString("domain", mcp.Description("Filter by cookie domain (matches domain and subdomains)")),
 	)
 }
 

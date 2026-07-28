@@ -33,7 +33,8 @@ Active proxy rules (proxy_rule_add) are applied before sending.
 Returns: flow_id, status, headers, response_preview. Full body via flow_get.
 Replayed requests appear in proxy_poll history alongside captured traffic.
 
-Processing: remove_* is applied before set_*. Content-Length auto-updates on body changes unless explicitly set. force=true skips validation for protocol-level tests (smuggling, CRLF injection).`),
+Processing: remove_* is applied before set_*. Content-Length auto-updates on body changes unless explicitly set.
+Supports protocol-level tests (smuggling, CRLF injection) via force.`),
 		mcp.WithString("flow_id", mcp.Required(), mcp.Description("Flow ID to use as base request")),
 		mcp.WithString("method", mcp.Description("Override HTTP method (GET, POST, PUT, DELETE, PATCH, etc.)")),
 		mcp.WithString("body", mcp.Description("Replace entire request body")),
