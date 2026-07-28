@@ -933,6 +933,34 @@ func chunkedFrame(data []byte) []byte {
 	return []byte(fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(data), data))
 }
 
+func TestTransferDecodedSize(t *testing.T) {
+	t.Parallel()
+
+	framed := chunkedFrame([]byte("hello world"))
+	multiChunk := []byte("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+
+	tests := []struct {
+		name    string
+		body    []byte
+		headers string
+		want    int
+	}{
+		{"chunked_framing", framed, "Transfer-Encoding: chunked\r\n", 11},
+		{"chunked_multi", multiChunk, "Transfer-Encoding: chunked\r\n", 11},
+		{"plain_body", []byte("hello world"), "", 11},
+		{"truncated_chunked", []byte("5\r\nhel"), "Transfer-Encoding: chunked\r\n", 6},
+		{"chunk_bytes_no_te_header", framed, "", len(framed)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, transferDecodedSize(tt.body, tt.headers))
+		})
+	}
+	// de-chunked size is strictly smaller than the on-wire framed length
+	assert.Less(t, transferDecodedSize(framed, "Transfer-Encoding: chunked\r\n"), len(framed))
+}
+
 func TestIsBinaryContentType(t *testing.T) {
 	t.Parallel()
 

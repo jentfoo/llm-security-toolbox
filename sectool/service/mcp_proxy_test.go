@@ -520,6 +520,20 @@ func TestMCP_FlowGet(t *testing.T) {
 		assert.Equal(t, "resp body here", string(decodedBody))
 	})
 
+	t.Run("chunked_size", func(t *testing.T) {
+		const framedBody = "5\r\nhello\r\n0\r\n\r\n" // de-chunks to "hello" (5 bytes)
+		chunkedID := mockHTTP.AddProxyEntry(
+			"GET /chunked HTTP/1.1\r\nHost: chunk.test\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n"+framedBody,
+			"",
+		)
+		resp := CallMCPToolJSONOK[protocol.FlowGetResponse](t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": chunkedID,
+		})
+		assert.Equal(t, 5, resp.RespSize)
+		assert.Less(t, resp.RespSize, len(framedBody))
+	})
+
 	t.Run("stored_http_scheme", func(t *testing.T) {
 		// Plaintext upstream on a non-80 port: stored scheme must win over inference
 		httpFlowID := mockHTTP.AddProxyEntryScheme(

@@ -468,8 +468,8 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 		"url":           fullURL,
 		"status":        respCode,
 		"status_line":   respStatusLine,
-		"request_size":  len(reqBody),
-		"response_size": len(respBody),
+		"request_size":  transferDecodedSize(reqBody, string(reqHeaders)),
+		"response_size": transferDecodedSize(respBody, string(respHeaders)),
 	}
 
 	// Streaming flow still in progress: body grows across polls
@@ -720,7 +720,7 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 				}
 				method, host, path := extractRequestMeta(entry.Request)
 				status := readResponseStatusCode([]byte(entry.Response))
-				_, respBody := splitHeadersBody([]byte(entry.Response))
+				respHeaders, respBody := splitHeadersBody([]byte(entry.Response))
 				page = append(page, flowEntry{
 					flowID:            entry.FlowID,
 					timestamp:         entry.Timestamp,
@@ -730,7 +730,7 @@ func drainProxyHistory(ctx context.Context, backend HttpBackend, full bool) ([]f
 					scheme:            entry.Scheme,
 					port:              entry.Port,
 					status:            status,
-					respLen:           len(respBody),
+					respLen:           transferDecodedSize(respBody, string(respHeaders)),
 					request:           entry.Request,
 					response:          entry.Response,
 					source:            SourceProxy,
@@ -803,7 +803,7 @@ func collectReplayHistory(replayStore *store.ReplayHistoryStore, full bool) []fl
 				scheme:      re.Scheme,
 				port:        re.Port,
 				status:      re.RespStatus,
-				respLen:     len(re.RespBody),
+				respLen:     transferDecodedSize(re.RespBody, string(re.RespHeaders)),
 				request:     string(re.RawRequest),
 				response:    string(re.RespHeaders) + string(re.RespBody),
 				source:      SourceReplay,
@@ -866,7 +866,7 @@ func (s *Server) fetchProxyChildren(ctx context.Context, parentFlowID string) ([
 	for _, entry := range children {
 		method, host, path := extractRequestMeta(entry.Request)
 		status := readResponseStatusCode([]byte(entry.Response))
-		_, respBody := splitHeadersBody([]byte(entry.Response))
+		respHeaders, respBody := splitHeadersBody([]byte(entry.Response))
 		out = append(out, flowEntry{
 			flowID:            entry.FlowID,
 			timestamp:         entry.Timestamp,
@@ -876,7 +876,7 @@ func (s *Server) fetchProxyChildren(ctx context.Context, parentFlowID string) ([
 			scheme:            entry.Scheme,
 			port:              entry.Port,
 			status:            status,
-			respLen:           len(respBody),
+			respLen:           transferDecodedSize(respBody, string(respHeaders)),
 			request:           entry.Request,
 			response:          entry.Response,
 			source:            SourceProxy,

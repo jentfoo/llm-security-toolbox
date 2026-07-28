@@ -301,6 +301,18 @@ func decompressForDisplay(body []byte, headers string) (out []byte, undecodable 
 	return decompressed, false
 }
 
+// transferDecodedSize returns the byte length of body after chunked transfer framing is
+// removed, leaving any Content-Encoding intact. Returns len(body) when the body is not
+// chunked or the chunked framing cannot be decoded.
+func transferDecodedSize(body []byte, headers string) int {
+	if te := extractHeader(headers, "Transfer-Encoding"); strings.Contains(strings.ToLower(te), "chunked") {
+		if dechunked, _, _, _, _, err := proxy.ReadChunkedBody(bufio.NewReader(bytes.NewReader(body)), nil); err == nil {
+			return len(dechunked)
+		}
+	}
+	return len(body)
+}
+
 // previewBody de-chunks and decompresses body per headers, then returns an agent-facing
 // preview.
 // Returns a hint naming the encoding when a supported Content-Encoding could not be decoded,

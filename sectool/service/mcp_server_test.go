@@ -297,7 +297,7 @@ func (b *mockHttpBackend) GetProxyHistoryMeta(ctx context.Context, count int, af
 	for i, e := range entries {
 		method, host, path := extractRequestMeta(e.Request)
 		status := readResponseStatusCode([]byte(e.Response))
-		_, respBody := splitHeadersBody([]byte(e.Response))
+		respHeaders, respBody := splitHeadersBody([]byte(e.Response))
 		result[i] = ProxyEntryMeta{
 			FlowID:      e.FlowID,
 			Timestamp:   e.Timestamp,
@@ -305,7 +305,7 @@ func (b *mockHttpBackend) GetProxyHistoryMeta(ctx context.Context, count int, af
 			Host:        host,
 			Path:        path,
 			Status:      status,
-			RespLen:     len(respBody),
+			RespLen:     transferDecodedSize(respBody, string(respHeaders)),
 			Protocol:    e.Protocol,
 			Scheme:      e.Scheme,
 			Port:        e.Port,
