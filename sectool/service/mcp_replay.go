@@ -178,7 +178,7 @@ func (m *mcpServer) replaySidecar(ctx context.Context, req mcp.CallToolRequest, 
 			Status:      r.StatusCode,
 			RespHeaders: headers,
 			RespSize:    len(r.Body),
-			RespPreview: previewBody(r.Body, responsePreviewSize, extractHeader(headers, "Content-Type")),
+			RespPreview: previewBody(r.Body, responsePreviewSize, headers),
 		}
 	}
 	return jsonResult(out)
@@ -335,7 +335,7 @@ func (m *mcpServer) executeSend(ctx context.Context, rawRequest []byte, httpProt
 			StatusLine:  respStatusLine,
 			RespHeaders: string(result.Headers),
 			RespSize:    len(result.Body),
-			RespPreview: previewBody(result.Body, responsePreviewSize, extractHeader(string(result.Headers), "Content-Type")),
+			RespPreview: previewBody(result.Body, responsePreviewSize, string(result.Headers)),
 		},
 	})
 }

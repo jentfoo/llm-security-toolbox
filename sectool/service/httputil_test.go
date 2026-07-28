@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -888,12 +889,16 @@ func TestPreviewBody(t *testing.T) {
 		binaryLarge[i] = 0xff // 0xff is invalid UTF-8
 	}
 
+	gzipBody := compressGzip(t, []byte("compressed hello world"))
+	chunkedText := []byte("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+	chunkedGzip := chunkedFrame(gzipBody)
+
 	tests := []struct {
-		name        string
-		body        []byte
-		maxLen      int
-		contentType string
-		want        string
+		name    string
+		body    []byte
+		maxLen  int
+		headers string
+		want    string
 	}{
 		{"empty", []byte{}, 100, "", ""},
 		{"utf8_short", []byte("hello world"), 100, "", "hello world"},
@@ -906,17 +911,26 @@ func TestPreviewBody(t *testing.T) {
 		{"cjk_only", []byte("\u65e5\u672c\u8a9e\u30c6\u30b9\u30c8"), 3, "", "\u65e5\u672c\u8a9e..."},
 		{"nul_bytes", []byte("hello\x00world"), 100, "", "<BINARY:11 Bytes>"},
 		{"control_chars_high", makeControlBody(100), 1000, "", "<BINARY:100 Bytes>"},
-		{"binary_content_type", []byte("mostly text"), 100, "image/png", "<BINARY:11 Bytes>"},
-		{"binary_ct_with_params", []byte("text"), 100, "application/octet-stream; charset=utf-8", "<BINARY:4 Bytes>"},
-		{"text_ct_no_heuristic", []byte("hello world"), 100, "text/plain", "hello world"},
+		{"binary_content_type", []byte("mostly text"), 100, "Content-Type: image/png\r\n", "<BINARY:11 Bytes>"},
+		{"binary_ct_with_params", []byte("text"), 100, "Content-Type: application/octet-stream; charset=utf-8\r\n", "<BINARY:4 Bytes>"},
+		{"text_ct_no_heuristic", []byte("hello world"), 100, "Content-Type: text/plain\r\n", "hello world"},
 		{"empty_ct_fallback", []byte("hello world"), 100, "", "hello world"},
+		{"gzip_decompressed", gzipBody, 100, "Content-Encoding: gzip\r\n", "compressed hello world"},
+		{"chunked_dechunked", chunkedText, 100, "Transfer-Encoding: chunked\r\n", "hello world"},
+		{"chunked_gzip", chunkedGzip, 100, "Content-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n", "compressed hello world"},
+		{"undecodable_gzip", []byte("not gzip at all"), 100, "Content-Encoding: gzip\r\n", "<COMPRESSED-UNDECODABLE: gzip body, 15 bytes (likely truncated at max_body_bytes)>"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, previewBody(tt.body, tt.maxLen, tt.contentType))
+			assert.Equal(t, tt.want, previewBody(tt.body, tt.maxLen, tt.headers))
 		})
 	}
+}
+
+// chunkedFrame wraps data in a single HTTP/1.1 chunk with a terminating 0-chunk.
+func chunkedFrame(data []byte) []byte {
+	return []byte(fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(data), data))
 }
 
 func TestIsBinaryContentType(t *testing.T) {
@@ -2002,61 +2016,68 @@ func TestDecompressForDisplay(t *testing.T) {
 	gzipBody := compressGzip(t, []byte("Hello, World!"))
 
 	tests := []struct {
-		name             string
-		body             []byte
-		headers          string
-		wantBody         string
-		wantDecompressed bool
+		name            string
+		body            []byte
+		headers         string
+		wantBody        string
+		wantUndecodable bool
 	}{
 		{
-			name:             "gzip_decompressed",
-			body:             gzipBody,
-			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
-			wantBody:         "Hello, World!",
-			wantDecompressed: true,
+			name:     "gzip_decompressed",
+			body:     gzipBody,
+			headers:  "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody: "Hello, World!",
 		},
 		{
-			name:             "no_encoding_passthrough",
-			body:             []byte("Plain text"),
-			headers:          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n",
-			wantBody:         "Plain text",
-			wantDecompressed: false,
+			name:     "no_encoding_passthrough",
+			body:     []byte("Plain text"),
+			headers:  "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n",
+			wantBody: "Plain text",
 		},
 		{
-			name:             "unsupported_encoding_passthrough",
-			body:             []byte{0x1f, 0x8b}, // looks like gzip magic but invalid
-			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: compress\r\n\r\n",
-			wantBody:         string([]byte{0x1f, 0x8b}),
-			wantDecompressed: false,
+			name:     "chunked_dechunked",
+			body:     chunkedFrame([]byte("Hello, World!")),
+			headers:  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+			wantBody: "Hello, World!",
 		},
 		{
-			name:             "multiple_encodings_passthrough",
-			body:             gzipBody,
-			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip, br\r\n\r\n",
-			wantBody:         string(gzipBody),
-			wantDecompressed: false,
+			name:     "chunked_gzip_decoded",
+			body:     chunkedFrame(gzipBody),
+			headers:  "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n",
+			wantBody: "Hello, World!",
 		},
 		{
-			name:             "corrupted_gzip_passthrough",
-			body:             []byte{0x1f, 0x8b, 0x08, 0x00, 0x00}, // invalid gzip
-			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
-			wantBody:         string([]byte{0x1f, 0x8b, 0x08, 0x00, 0x00}),
-			wantDecompressed: false,
+			name:     "unsupported_encoding_passthrough",
+			body:     []byte{0x1f, 0x8b}, // looks like gzip magic but invalid
+			headers:  "HTTP/1.1 200 OK\r\nContent-Encoding: compress\r\n\r\n",
+			wantBody: string([]byte{0x1f, 0x8b}),
 		},
 		{
-			name:             "empty_body",
-			body:             []byte{},
-			headers:          "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
-			wantBody:         "",
-			wantDecompressed: false,
+			name:     "multiple_encodings_passthrough",
+			body:     gzipBody,
+			headers:  "HTTP/1.1 200 OK\r\nContent-Encoding: gzip, br\r\n\r\n",
+			wantBody: string(gzipBody),
+		},
+		{
+			name:            "corrupted_gzip_undecodable",
+			body:            []byte{0x1f, 0x8b, 0x08, 0x00, 0x00}, // invalid gzip
+			headers:         "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody:        string([]byte{0x1f, 0x8b, 0x08, 0x00, 0x00}),
+			wantUndecodable: true,
+		},
+		{
+			name:     "empty_body",
+			body:     []byte{},
+			headers:  "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n",
+			wantBody: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, wasDecompressed := decompressForDisplay(tt.body, tt.headers)
+			result, undecodable := decompressForDisplay(tt.body, tt.headers)
 			assert.Equal(t, tt.wantBody, string(result))
-			assert.Equal(t, tt.wantDecompressed, wasDecompressed)
+			assert.Equal(t, tt.wantUndecodable, undecodable)
 		})
 	}
 }
@@ -2427,8 +2448,8 @@ func TestCompressBody(t *testing.T) {
 				assert.NotEqual(t, tt.body, result, "body should be compressed")
 				// Verify round-trip
 				headerStr := "Content-Encoding: " + tt.encoding + "\r\n"
-				decompressed, wasDecompressed := decompressForDisplay(result, headerStr)
-				assert.True(t, wasDecompressed || len(tt.body) == 0)
+				decompressed, undecodable := decompressForDisplay(result, headerStr)
+				assert.False(t, undecodable)
 				assert.Equal(t, string(tt.body), string(decompressed))
 			} else {
 				assert.Equal(t, string(tt.body), string(result), "body should be unchanged")

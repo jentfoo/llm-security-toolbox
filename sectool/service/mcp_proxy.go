@@ -457,16 +457,8 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 
 	log.Printf("flow/get: flow=%s method=%s url=%s source=%s", flowID, method, fullURL, resolved.Source)
 
-	// Decompress bodies lazily: only when scope/pattern needs them
 	needsReqBody := scopeSet["request_body"]
 	needsRespBody := scopeSet["response_body"]
-	var displayReqBody, displayRespBody []byte
-	if needsReqBody {
-		displayReqBody, _ = decompressForDisplay(reqBody, string(reqHeaders))
-	}
-	if needsRespBody {
-		displayRespBody, _ = decompressForDisplay(respBody, string(respHeaders))
-	}
 
 	// Build response map: always include metadata
 	result := map[string]interface{}{
@@ -520,7 +512,8 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 			}
 		}
 		if needsReqBody {
-			if match := extractMatchContext(patternRe, displayReqBody, maxMatchesPerSection); match != "" {
+			decoded, _ := decompressForDisplay(reqBody, string(reqHeaders))
+			if match := extractMatchContext(patternRe, decoded, maxMatchesPerSection); match != "" {
 				result["request_body"] = match
 			}
 		}
@@ -530,7 +523,8 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 			}
 		}
 		if needsRespBody {
-			if match := extractMatchContext(patternRe, displayRespBody, maxMatchesPerSection); match != "" {
+			decoded, _ := decompressForDisplay(respBody, string(respHeaders))
+			if match := extractMatchContext(patternRe, decoded, maxMatchesPerSection); match != "" {
 				result["response_body"] = match
 			}
 		}
@@ -543,9 +537,10 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 		}
 		if needsReqBody {
 			if fullBody {
-				result["request_body"] = base64.StdEncoding.EncodeToString(displayReqBody)
+				decoded, _ := decompressForDisplay(reqBody, string(reqHeaders))
+				result["request_body"] = base64.StdEncoding.EncodeToString(decoded)
 			} else {
-				result["request_body"] = previewBody(displayReqBody, fullBodyMaxSize, extractHeader(string(reqHeaders), "Content-Type"))
+				result["request_body"] = previewBody(reqBody, fullBodyMaxSize, string(reqHeaders))
 			}
 		}
 		if scopeSet["response_headers"] {
@@ -554,9 +549,10 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 		}
 		if needsRespBody {
 			if fullBody {
-				result["response_body"] = base64.StdEncoding.EncodeToString(displayRespBody)
+				decoded, _ := decompressForDisplay(respBody, string(respHeaders))
+				result["response_body"] = base64.StdEncoding.EncodeToString(decoded)
 			} else {
-				result["response_body"] = previewBody(displayRespBody, fullBodyMaxSize, extractHeader(string(respHeaders), "Content-Type"))
+				result["response_body"] = previewBody(respBody, fullBodyMaxSize, string(respHeaders))
 			}
 		}
 	}

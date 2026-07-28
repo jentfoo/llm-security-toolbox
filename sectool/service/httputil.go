@@ -272,12 +272,19 @@ func isFormEncodedContentType(ct string) bool {
 	return strings.EqualFold(strings.TrimSpace(ct), "application/x-www-form-urlencoded")
 }
 
-// decompressForDisplay decompresses body based on Content-Encoding header.
-// Returns (decompressed body, wasDecompressed).
-// If decompression fails or encoding unsupported, returns original body unchanged.
-func decompressForDisplay(body []byte, headers string) ([]byte, bool) {
+// decompressForDisplay transfer-decodes (de-chunks) then content-decodes body per the
+// Transfer-Encoding and Content-Encoding in headers.
+// Returns the decoded body, or the original body with undecodable=true when a supported
+// Content-Encoding is present but could not be decoded.
+func decompressForDisplay(body []byte, headers string) (out []byte, undecodable bool) {
+	if te := extractHeader(headers, "Transfer-Encoding"); strings.Contains(strings.ToLower(te), "chunked") {
+		if dechunked, _, _, _, _, err := proxy.ReadChunkedBody(bufio.NewReader(bytes.NewReader(body)), nil); err == nil {
+			body = dechunked
+		}
+	}
+
 	encoding := extractHeader(headers, "Content-Encoding")
-	if encoding == "" {
+	if encoding == "" || len(body) == 0 {
 		return body, false
 	}
 
@@ -286,12 +293,38 @@ func decompressForDisplay(body []byte, headers string) ([]byte, bool) {
 		return body, false
 	}
 
-	decompressed, wasCompressed := proxy.Decompress(body, normalized)
+	decompressed, _ := proxy.Decompress(body, normalized)
 	if decompressed == nil {
-		// Decompression failed, return original
-		return body, false
+		// supported encoding but decode failed (truncated or corrupt)
+		return body, true
 	}
-	return decompressed, wasCompressed
+	return decompressed, false
+}
+
+// previewBody de-chunks and decompresses body per headers, then returns an agent-facing
+// preview.
+// Returns a hint naming the encoding when a supported Content-Encoding could not be decoded,
+// "<BINARY:N Bytes>" for non-UTF-8 / binary content, otherwise a UTF-8 safe preview truncated
+// at maxLen runes.
+func previewBody(body []byte, maxLen int, headers string) string {
+	decoded, undecodable := decompressForDisplay(body, headers)
+	if undecodable {
+		return fmt.Sprintf("<COMPRESSED-UNDECODABLE: %s body, %d bytes (likely truncated at max_body_bytes)>",
+			extractHeader(headers, "Content-Encoding"), len(decoded))
+	}
+	if len(decoded) == 0 {
+		return ""
+	}
+	if !utf8.Valid(decoded) || hasBinarySignature(decoded) || isBinaryContentType(extractHeader(headers, "Content-Type")) {
+		return "<BINARY:" + strconv.Itoa(len(decoded)) + " Bytes>"
+	}
+	s := string(decoded)
+	if utf8.RuneCountInString(s) <= maxLen {
+		return s
+	}
+	// Truncate at rune boundary
+	runes := []rune(s)
+	return string(runes[:maxLen]) + "..."
 }
 
 // compressBody compresses body based on Content-Encoding value.
@@ -384,31 +417,6 @@ func hasBinarySignature(body []byte) bool {
 
 	// >10% control characters indicates binary
 	return len(sample) > 0 && controlCount*10 > len(sample)
-}
-
-// previewBody returns a UTF-8 safe preview of the body.
-// Returns "<BINARY:N Bytes>" for non-UTF-8 content, binary signatures,
-// or binary content types. Truncates text at maxLen runes.
-func previewBody(body []byte, maxLen int, contentType string) string {
-	if len(body) == 0 {
-		return ""
-	}
-	if !utf8.Valid(body) {
-		return "<BINARY:" + strconv.Itoa(len(body)) + " Bytes>"
-	}
-	if hasBinarySignature(body) {
-		return "<BINARY:" + strconv.Itoa(len(body)) + " Bytes>"
-	}
-	if isBinaryContentType(contentType) {
-		return "<BINARY:" + strconv.Itoa(len(body)) + " Bytes>"
-	}
-	s := string(body)
-	if utf8.RuneCountInString(s) <= maxLen {
-		return s
-	}
-	// Truncate at rune boundary
-	runes := []rune(s)
-	return string(runes[:maxLen]) + "..."
 }
 
 // transformRequestForValidation converts HTTP/2 request lines to HTTP/1.1 for Go's parser.

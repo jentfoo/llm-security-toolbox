@@ -423,7 +423,7 @@ func readRequestBodyWithWire(br *bufio.Reader, req *types.RawHTTP1Request, unfra
 	// Check for chunked encoding first (takes precedence over Content-Length)
 	te := req.GetHeader("Transfer-Encoding")
 	if strings.Contains(strings.ToLower(te), "chunked") {
-		body, trailers, chunks, trailersBareLF, trailersBareCR, err = readChunkedBody(br, nil)
+		body, trailers, chunks, trailersBareLF, trailersBareCR, err = ReadChunkedBody(br, nil)
 		return body, trailers, true, chunks, trailersBareLF, trailersBareCR, err
 	}
 
@@ -455,7 +455,7 @@ func readRequestBodyWithWire(br *bufio.Reader, req *types.RawHTTP1Request, unfra
 func readResponseBodyWithWire(br *bufio.Reader, resp *types.RawHTTP1Response, onUnit bodyUnitFunc) (body, trailers []byte, wasChunked bool, chunks []types.ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
 	te := resp.GetHeader("Transfer-Encoding")
 	if strings.Contains(strings.ToLower(te), "chunked") {
-		body, trailers, chunks, trailersBareLF, trailersBareCR, err = readChunkedBody(br, onUnit)
+		body, trailers, chunks, trailersBareLF, trailersBareCR, err = ReadChunkedBody(br, onUnit)
 		return body, trailers, true, chunks, trailersBareLF, trailersBareCR, err
 	}
 
@@ -532,12 +532,12 @@ func streamBody(br *bufio.Reader, limit int64, onUnit bodyUnitFunc) ([]byte, err
 	return nil, nil
 }
 
-// readChunkedBody reads chunked transfer encoding, returning the decoded body,
+// ReadChunkedBody reads chunked transfer encoding, returning the decoded body,
 // trailers, per-chunk framing, and bare-LF/CR flags observed in trailer lines.
 // When onUnit is non-nil each data chunk is emitted (decoded data plus its
 // reconstructed wire frame) instead of accumulated, so the returned body and
 // data-chunk frames are empty; the terminal 0-chunk frame and trailers still return.
-func readChunkedBody(br *bufio.Reader, onUnit bodyUnitFunc) (body, trailers []byte, chunks []types.ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
+func ReadChunkedBody(br *bufio.Reader, onUnit bodyUnitFunc) (body, trailers []byte, chunks []types.ChunkFrame, trailersBareLF, trailersBareCR bool, err error) {
 	var bodyBuf bytes.Buffer
 	// reused across chunks in streaming mode; onUnit consumes synchronously
 	var dataBuf []byte

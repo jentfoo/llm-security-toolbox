@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,6 +147,105 @@ func TestNativeProxyBackend_GetProxyHistory(t *testing.T) {
 		assert.Equal(t, "http/1.1", metas[0].Protocol)
 		assert.Equal(t, "http", metas[0].Scheme)
 	})
+}
+
+func TestNativeProxyBackend_ChunkedCompressedDecodes(t *testing.T) {
+	t.Parallel()
+
+	const plaintext = `{"config":"value","list":[1,2,3],"note":"chunked compressed body for display decoding"}`
+
+	for _, enc := range []string{"gzip", "zstd", "br"} {
+		t.Run(enc, func(t *testing.T) {
+			compressed, err := proxy.Compress([]byte(plaintext), enc)
+			require.NoError(t, err)
+
+			// Flush mid-write with no Content-Length => chunked transfer-encoding
+			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Encoding", enc)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(200)
+				fl := w.(http.Flusher)
+				half := len(compressed) / 2
+				_, _ = w.Write(compressed[:half])
+				fl.Flush()
+				_, _ = w.Write(compressed[half:])
+				fl.Flush()
+			}))
+			t.Cleanup(testServer.Close)
+
+			backend := newServingNativeBackend(t)
+			client := newProxiedClient(t, backend)
+
+			req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL, nil)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			_, err = io.Copy(io.Discard, resp.Body) // drain so the streamed flow completes
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+
+			// Streamed flows are stored at head-time and grow; poll until the body completes.
+			var decoded []byte
+			require.Eventually(t, func() bool {
+				entries, herr := backend.GetProxyHistory(t.Context(), 10, "")
+				if herr != nil || len(entries) != 1 {
+					return false
+				}
+				respHeaders, respBody := splitHeadersBody([]byte(entries[0].Response))
+				if !strings.Contains(string(respHeaders), "Transfer-Encoding: chunked") {
+					return false
+				}
+				var undecodable bool
+				decoded, undecodable = decompressForDisplay(respBody, string(respHeaders))
+				return !undecodable && string(decoded) == plaintext
+			}, 2*time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
+func TestNativeProxyBackend_ResponseBodyRuleRecompresses(t *testing.T) {
+	t.Parallel()
+
+	const original = "the quick brown fox jumps"
+	compressed, err := proxy.Compress([]byte(original), "gzip")
+	require.NoError(t, err)
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", strconv.Itoa(len(compressed)))
+		w.WriteHeader(200)
+		_, _ = w.Write(compressed)
+	}))
+	t.Cleanup(testServer.Close)
+
+	backend := newServingNativeBackend(t)
+	_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
+		Label: "brown-to-red", Type: wire.RuleTypeResponseBody, Find: "brown", Replace: "red",
+	})
+	require.NoError(t, err)
+
+	client := newProxiedClient(t, backend)
+	req, err := http.NewRequestWithContext(t.Context(), "GET", testServer.URL, nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	// client transport transparently decompresses; the rule applied to the plaintext
+	assert.Equal(t, "the quick red fox jumps", string(body))
+
+	testutil.WaitForCount(t, func() int { return backend.server.History().Count() }, 1)
+	entries, err := backend.GetProxyHistory(t.Context(), 10, "")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	respHeaders, respBody := splitHeadersBody([]byte(entries[0].Response))
+	decoded, undecodable := decompressForDisplay(respBody, string(respHeaders))
+	assert.False(t, undecodable)
+	assert.Equal(t, "the quick red fox jumps", string(decoded))
 }
 
 func TestNativeProxyBackend_ExpectContinueInterims(t *testing.T) {

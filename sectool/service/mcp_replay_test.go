@@ -458,6 +458,32 @@ func TestHandleReplaySend(t *testing.T) {
 		assert.Contains(t, parts[0], "Content-Length:")
 	})
 
+	t.Run("decompresses_response_preview", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		mockHTTP.AddProxyEntry(
+			"GET /api/data HTTP/1.1\r\nHost: test.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\n\r\nok",
+			"",
+		)
+		const plaintext = "decompressed response preview body"
+		mockHTTP.SetSendResult(
+			"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Type: text/plain\r\n",
+			string(compressGzip(t, []byte(plaintext))),
+		)
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"method":      "GET",
+		})
+		require.NotEmpty(t, listResp.Flows)
+
+		sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id": listResp.Flows[0].FlowID,
+		})
+		assert.Equal(t, plaintext, sendResp.RespPreview)
+	})
+
 	t.Run("no_compression_unmodified", func(t *testing.T) {
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 

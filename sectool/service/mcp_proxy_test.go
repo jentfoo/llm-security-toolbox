@@ -1168,51 +1168,69 @@ func TestMCP_CookieJar(t *testing.T) {
 	})
 }
 
-func TestMCP_FlowGetDecompressesGzipBody(t *testing.T) {
+func TestMCP_FlowGetCompressedBody(t *testing.T) {
 	t.Parallel()
 
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+	t.Run("decompressed", func(t *testing.T) {
+		_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
-	// Create crawl session
-	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
-		"seed_urls": "https://example.com",
+		createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://example.com",
+		})
+
+		const originalBody = "This is the decompressed crawl response"
+		compressedBody := compressGzip(t, []byte(originalBody))
+
+		const respHeaders = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"
+
+		const flowID = "crawl-compressed-flow"
+		err := mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
+			ID:             flowID,
+			SessionID:      createResp.SessionID,
+			URL:            "https://example.com/compressed",
+			Host:           "example.com",
+			Path:           "/compressed",
+			Method:         "GET",
+			StatusCode:     200,
+			ResponseLength: len(compressedBody),
+			Request:        []byte("GET /compressed HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+			Response:       append([]byte(respHeaders), compressedBody...),
+		})
+		require.NoError(t, err)
+
+		getResult := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id":   flowID,
+			"full_body": true,
+		})
+		require.False(t, getResult.IsError)
+
+		var getResp protocol.FlowGetResponse
+		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, getResult)), &getResp))
+
+		decodedBody, err := base64.StdEncoding.DecodeString(getResp.RespBody)
+		require.NoError(t, err)
+		assert.Equal(t, originalBody, string(decodedBody))
 	})
 
-	// Create gzip compressed response body
-	const originalBody = "This is the decompressed crawl response"
-	compressedBody := compressGzip(t, []byte(originalBody))
+	t.Run("truncated_undecodable", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
-	const respHeaders = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"
+		// truncated gzip stream: mirrors a body capped at max_body_bytes
+		full := compressGzip(t, []byte("a fairly long body that compresses to more than a handful of bytes so truncation breaks the stream"))
+		truncated := full[:len(full)/2]
 
-	const flowID = "crawl-compressed-flow"
-	err := mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
-		ID:             flowID,
-		SessionID:      createResp.SessionID,
-		URL:            "https://example.com/compressed",
-		Host:           "example.com",
-		Path:           "/compressed",
-		Method:         "GET",
-		StatusCode:     200,
-		ResponseLength: len(compressedBody),
-		Request:        []byte("GET /compressed HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-		Response:       append([]byte(respHeaders), compressedBody...),
+		flowID := mockHTTP.AddProxyEntry(
+			"GET /big HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"+string(truncated),
+			"",
+		)
+
+		getResp := CallMCPToolJSONOK[protocol.FlowGetResponse](t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": flowID,
+			"scope":   "response_body",
+		})
+		assert.Contains(t, getResp.RespBody, "COMPRESSED-UNDECODABLE")
 	})
-	require.NoError(t, err)
-
-	// Test full_body=true returns decompressed content
-	getResult := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
-		"flow_id":   flowID,
-		"full_body": true,
-	})
-	require.False(t, getResult.IsError)
-
-	var getResp protocol.FlowGetResponse
-	require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, getResult)), &getResp))
-
-	// Decode base64 body and verify it's decompressed
-	decodedBody, err := base64.StdEncoding.DecodeString(getResp.RespBody)
-	require.NoError(t, err)
-	assert.Equal(t, originalBody, string(decodedBody))
 }
 
 func TestHandleFlowGetForReplay(t *testing.T) {

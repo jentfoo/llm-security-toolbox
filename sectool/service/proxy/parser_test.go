@@ -1692,7 +1692,7 @@ func TestReadChunkedBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			br := bufio.NewReader(bytes.NewReader([]byte(tt.input)))
-			body, trailers, _, _, _, err := readChunkedBody(br, nil)
+			body, trailers, _, _, _, err := ReadChunkedBody(br, nil)
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.wantBody, string(body))
@@ -1707,7 +1707,7 @@ func TestReadChunkedBody(t *testing.T) {
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
 
 		var decoded, wire bytes.Buffer
-		body, trailers, chunks, _, _, err := readChunkedBody(br, func(d, w []byte) error {
+		body, trailers, chunks, _, _, err := ReadChunkedBody(br, func(d, w []byte) error {
 			decoded.Write(d) // copy, mirroring the real consumer
 			wire.Write(w)
 			return nil
@@ -1736,7 +1736,7 @@ func TestReadChunkedBody(t *testing.T) {
 
 		var decoded, wire bytes.Buffer
 		var units int
-		body, trailers, chunks, _, _, err := readChunkedBody(br, func(d, w []byte) error {
+		body, trailers, chunks, _, _, err := ReadChunkedBody(br, func(d, w []byte) error {
 			units++
 			decoded.Write(d)
 			wire.Write(w)
@@ -1762,7 +1762,7 @@ func TestReadChunkedBody(t *testing.T) {
 	t.Run("streaming_oversized_declared_size", func(t *testing.T) {
 		input := "40000000\r\nshort" // declares ~1GB, sends a few bytes then EOF
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		_, _, _, _, _, err := readChunkedBody(br, func(d, w []byte) error { return nil })
+		_, _, _, _, _, err := ReadChunkedBody(br, func(d, w []byte) error { return nil })
 		assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	})
 
@@ -1770,7 +1770,7 @@ func TestReadChunkedBody(t *testing.T) {
 	t.Run("invalid_hex_chunk_size", func(t *testing.T) {
 		input := "0x5\r\nhello\r\n0\r\n\r\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		body, _, chunks, _, _, err := readChunkedBody(br, nil)
+		body, _, chunks, _, _, err := ReadChunkedBody(br, nil)
 		require.NoError(t, err)
 		assert.Empty(t, body)
 		require.Len(t, chunks, 1)
@@ -1782,7 +1782,7 @@ func TestReadChunkedBody(t *testing.T) {
 		// Very large chunk size - should handle gracefully
 		input := "FFFFF\r\n" // Declares ~1MB chunk but has no data
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		_, _, _, _, _, err := readChunkedBody(br, nil)
+		_, _, _, _, _, err := ReadChunkedBody(br, nil)
 		// Should error due to missing data
 		assert.Error(t, err)
 	})
@@ -1790,7 +1790,7 @@ func TestReadChunkedBody(t *testing.T) {
 	t.Run("chunk_extension_with_quotes", func(t *testing.T) {
 		input := "5;name=\"val;ue\"\r\nHello\r\n0\r\n\r\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		body, _, chunks, _, _, err := readChunkedBody(br, nil)
+		body, _, chunks, _, _, err := ReadChunkedBody(br, nil)
 		require.NoError(t, err)
 		assert.Equal(t, "Hello", string(body))
 		require.GreaterOrEqual(t, len(chunks), 1)
@@ -1800,7 +1800,7 @@ func TestReadChunkedBody(t *testing.T) {
 	t.Run("bare_lf_in_chunked", func(t *testing.T) {
 		input := "5\nHello\n0\n\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		body, _, chunks, _, _, err := readChunkedBody(br, nil)
+		body, _, chunks, _, _, err := ReadChunkedBody(br, nil)
 		require.NoError(t, err)
 		assert.Equal(t, "Hello", string(body))
 		bareLF, bareCR := chunksBareFlags(chunks)
@@ -1812,7 +1812,7 @@ func TestReadChunkedBody(t *testing.T) {
 		// Chunk-size line terminated with bare CR - classic desync primitive
 		input := "5\rHello\r\n0\r\n\r\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		body, _, chunks, _, _, err := readChunkedBody(br, nil)
+		body, _, chunks, _, _, err := ReadChunkedBody(br, nil)
 		require.NoError(t, err)
 		assert.Equal(t, "Hello", string(body))
 		bareLF, bareCR := chunksBareFlags(chunks)
@@ -1824,7 +1824,7 @@ func TestReadChunkedBody(t *testing.T) {
 		// Trailer header uses bare CR terminator; flag and trailer bytes both preserve it
 		input := "5\r\nHello\r\n0\r\nX-Trailer: end\r\r\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		body, trailers, _, trailersBareLF, trailersBareCR, err := readChunkedBody(br, nil)
+		body, trailers, _, trailersBareLF, trailersBareCR, err := ReadChunkedBody(br, nil)
 		require.NoError(t, err)
 		assert.Equal(t, "Hello", string(body))
 		assert.False(t, trailersBareLF)
@@ -1837,7 +1837,7 @@ func TestReadChunkedBody(t *testing.T) {
 		// a bare-LF trailer line must serialize back as bare LF, not CRLF
 		input := "5\r\nHello\r\n0\r\nX-Trailer: end\n\r\n"
 		br := bufio.NewReader(bytes.NewReader([]byte(input)))
-		_, trailers, _, trailersBareLF, _, err := readChunkedBody(br, nil)
+		_, trailers, _, trailersBareLF, _, err := ReadChunkedBody(br, nil)
 		require.NoError(t, err)
 		assert.True(t, trailersBareLF)
 		assert.Equal(t, "X-Trailer: end\n", string(trailers))
