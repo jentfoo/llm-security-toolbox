@@ -28,7 +28,7 @@ Responders persist until explicitly deleted with proxy_respond_delete.`),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Exact URL path to intercept (e.g., '/set-cookies'). Query strings are ignored during matching.")),
 		mcp.WithString("method", mcp.Description("HTTP method to match (e.g., 'GET'). Empty matches all methods.")),
 		mcp.WithNumber("status_code", mcp.Description("Response status code (default: 200)")),
-		mcp.WithObject("headers", mcp.Description("Response headers as key-value pairs (e.g., {\"Set-Cookie\": \"session=abc123; Path=/\", \"Content-Type\": \"text/html\"})")),
+		withFlexKV("headers", "Response headers as an array of \"Name: Value\" strings."),
 		mcp.WithString("body", mcp.Description("Response body text")),
 		mcp.WithString("label", mcp.Description("Optional unique human-readable label (can be used as id in delete)")),
 	)
@@ -58,6 +58,11 @@ func (m *mcpServer) handleProxyRespondAdd(rb ResponderBackend) func(ctx context.
 			return errorResult("path is required"), nil
 		}
 
+		headers := getStringMapArg(req, "headers", ":")
+		if bad := unparsedArg(req, "headers", len(headers), `an object {"Name":"Value"} or an array of "Name: Value" strings`); bad != nil {
+			return bad, nil
+		}
+
 		input := protocol.ResponderEntry{
 			Origin:     origin,
 			Path:       path,
@@ -65,7 +70,7 @@ func (m *mcpServer) handleProxyRespondAdd(rb ResponderBackend) func(ctx context.
 			StatusCode: req.GetInt("status_code", 0),
 			Body:       req.GetString("body", ""),
 			Label:      req.GetString("label", ""),
-			Headers:    getStringMapArg(req, "headers"),
+			Headers:    headers,
 		}
 
 		responder, err := rb.AddResponder(ctx, input)

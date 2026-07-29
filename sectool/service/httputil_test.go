@@ -122,7 +122,17 @@ func TestParseHeaderArg(t *testing.T) {
 		{
 			name: "string_plain_text",
 			raw:  "not a JSON structure",
-			want: nil,
+			want: []string{},
+		},
+		{
+			name: "single_header_string",
+			raw:  "X-Custom: value",
+			want: []string{"X-Custom: value"},
+		},
+		{
+			name: "newline_separated_string",
+			raw:  "X-Custom: value\r\nAccept: application/json",
+			want: []string{"X-Custom: value", "Accept: application/json"},
 		},
 		{
 			name: "string_encoded_array",
@@ -160,10 +170,18 @@ func TestParseHeaderArg(t *testing.T) {
 			want: []string{},
 		},
 		{
-			name: "object_non_string_values_skipped",
+			name: "object_scalar_values_coerced",
 			raw: map[string]interface{}{
 				"X-Good": "value",
-				"X-Bad":  42,
+				"X-Num":  42,
+			},
+			want: []string{"X-Good: value", "X-Num: 42"},
+		},
+		{
+			name: "object_nested_values_skipped",
+			raw: map[string]interface{}{
+				"X-Good":   "value",
+				"X-Nested": map[string]interface{}{"a": "b"},
 			},
 			want: []string{"X-Good: value"},
 		},
@@ -171,6 +189,11 @@ func TestParseHeaderArg(t *testing.T) {
 			name: "array_non_string_items_skipped",
 			raw:  []interface{}{"X-Good: value", 42, true},
 			want: []string{"X-Good: value"},
+		},
+		{
+			name: "array_empty_strings_skipped",
+			raw:  []interface{}{"Content-Type: json", "", "  ", "Host: x"},
+			want: []string{"Content-Type: json", "Host: x"},
 		},
 	}
 

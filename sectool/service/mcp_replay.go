@@ -39,15 +39,15 @@ Supports protocol-level tests (smuggling, CRLF injection) via force.`),
 		mcp.WithString("method", mcp.Description("Override HTTP method (GET, POST, PUT, DELETE, PATCH, etc.)")),
 		mcp.WithString("body", mcp.Description("Replace entire request body")),
 		mcp.WithString("target", mcp.Description("Override destination scheme+host[:port]; keeps original path/query")),
-		mcp.WithArray("set_headers", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Headers to set (format: 'Name: Value'). A single entry replaces an existing header of the same name; multiple entries with the same name create duplicates.")),
+		withFlexKV("set_headers", "Headers to set as an array of \"Name: Value\" strings. A single entry replaces an existing header of the same name; multiple entries with the same name create duplicates."),
 		mcp.WithArray("remove_headers", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Header names to remove")),
 		mcp.WithString("path", mcp.Description("Override request path (include leading '/')")),
 		mcp.WithString("query", mcp.Description("Override entire query string (no leading '?')")),
 		mcp.WithArray("set_query", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Query params to set (format: 'name=value')")),
 		mcp.WithArray("remove_query", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Query param names to remove")),
-		mcp.WithObject("set_json", mcp.Description("JSON fields to set: {\"path\": value} using dot/bracket paths (e.g. {\"user.email\": \"x\", \"items[0].id\": 5}). Values auto-parse: null/true/false/numbers/{}/[], else string. Body must be valid JSON; for form-encoded bodies use set_form.")),
+		withFlexJSON("set_json", "JSON fields to set: {\"path\": value} using dot/bracket paths (e.g. {\"user.email\": \"x\", \"items[0].id\": 5}). Values auto-parse: null/true/false/numbers/{}/[], else string. Body must be valid JSON; for form-encoded bodies use set_form."),
 		mcp.WithArray("remove_json", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("JSON fields to remove (same dot/bracket path syntax as set_json: 'user.temp', 'items[2]')")),
-		mcp.WithObject("set_form", mcp.Description("Form fields to set as object {\"field\": \"value\"} for application/x-www-form-urlencoded bodies (e.g. OAuth2 grant_type, scope). Keys are form-field names; values are strings. Do NOT use on JSON bodies, use set_json.")),
+		withFlexKV("set_form", "Form fields to set as object {\"field\": \"value\"} for application/x-www-form-urlencoded bodies. Keys are form-field names; values are strings. Do NOT use on JSON bodies, use set_json."),
 		mcp.WithArray("remove_form", mcp.Items(map[string]interface{}{"type": "string"}), mcp.Description("Form field names to remove (form-encoded bodies only)")),
 		mcp.WithBoolean("follow_redirects", mcp.Description("Follow HTTP redirects (default: false)")),
 		mcp.WithBoolean("force", mcp.Description("Skip validation for protocol-level tests (smuggling, CRLF injection)")),
@@ -65,7 +65,7 @@ Returns: flow_id, status, headers, response_preview. Full body via flow_get.
 Sent requests appear in proxy_poll history alongside captured traffic if additional modifications or resending needed.`),
 		mcp.WithString("url", mcp.Required(), mcp.Description("Target URL (e.g., 'https://api.example.com/users')")),
 		mcp.WithString("method", mcp.Description("HTTP method (default: GET)")),
-		mcp.WithObject("headers", mcp.Description("Headers as object {\"Name\": \"Value\"} (alphabetical order) or array [\"Name: Value\"] (preserves order)")),
+		withFlexKV("headers", "Request headers as an array of \"Name: Value\" strings (order preserved)."),
 		mcp.WithString("body", mcp.Description("Request body content")),
 		mcp.WithBoolean("follow_redirects", mcp.Description("Follow HTTP redirects (default: false)")),
 		mcp.WithBoolean("force", mcp.Description("Skip validation for protocol-level tests")),
@@ -118,6 +118,17 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 	})
 
 	setHeaders := getHeaderArg(req, "set_headers")
+	setJSON := getJSONArg(req)
+	setForm := getFormArg(req)
+	for _, bad := range []*mcp.CallToolResult{
+		unparsedArg(req, "set_headers", len(setHeaders), `an object {"Name":"Value"} or an array of "Name: Value" strings`),
+		unparsedArg(req, "set_json", len(setJSON), `an object mapping dot/bracket paths to values`),
+		unparsedArg(req, "set_form", len(setForm), `an object {"field":"value"} or an array of "field=value" strings`),
+	} {
+		if bad != nil {
+			return bad, nil
+		}
+	}
 	target := req.GetString("target", "")
 
 	// When no explicit target, reconstruct from stored scheme/port so
@@ -133,9 +144,9 @@ func (m *mcpServer) handleReplaySend(ctx context.Context, req mcp.CallToolReques
 		RemoveHeaders:   req.GetStringSlice("remove_headers", nil),
 		Target:          target,
 		Body:            req.GetString("body", ""),
-		SetJSON:         getJSONArg(req),
+		SetJSON:         setJSON,
 		RemoveJSON:      req.GetStringSlice("remove_json", nil),
-		SetForm:         getFormArg(req),
+		SetForm:         setForm,
 		RemoveForm:      req.GetStringSlice("remove_form", nil),
 		Force:           req.GetBool("force", false),
 		FollowRedirects: req.GetBool("follow_redirects", false),
@@ -267,6 +278,20 @@ func splitPair(s, sep string) (name, value string, ok bool) {
 	return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+len(sep):]), true
 }
 
+// cutKV splits on the first sep, trimming the key; when trimSpace is set it also drops
+// a single conventional space after the separator (the "Name: Value" header convention),
+// leaving any further whitespace verbatim. ok is false when sep is absent or key empty.
+func cutKV(s, sep string, trimSpace bool) (name, value string, ok bool) {
+	name, value, found := strings.Cut(s, sep)
+	if name = strings.TrimSpace(name); !found || name == "" {
+		return "", "", false
+	}
+	if trimSpace {
+		value = strings.TrimPrefix(value, " ")
+	}
+	return name, value, true
+}
+
 func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	urlStr := req.GetString("url", "")
 	if urlStr == "" {
@@ -281,6 +306,9 @@ func (m *mcpServer) handleRequestSend(ctx context.Context, req mcp.CallToolReque
 		if headersRaw, ok := args["headers"]; ok && headersRaw != nil {
 			headers = parseHeaderArg(headersRaw)
 		}
+	}
+	if bad := unparsedArg(req, "headers", len(headers), `an object {"Name":"Value"} or an array of "Name: Value" strings`); bad != nil {
+		return bad, nil
 	}
 
 	body := []byte(req.GetString("body", ""))
@@ -524,6 +552,47 @@ func getHeaderArg(req mcp.CallToolRequest, name string) []string {
 	return nil
 }
 
+// argProvided reports whether key was supplied with a non-empty value. An explicitly
+// empty string/array/object counts as "not provided" so it doesn't trip unparsedArg.
+func argProvided(req mcp.CallToolRequest, key string) bool {
+	args := req.GetArguments()
+	if args == nil {
+		return false
+	}
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return false
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case []interface{}:
+		return len(v) > 0
+	case map[string]interface{}:
+		return len(v) > 0
+	default:
+		return true
+	}
+}
+
+// unparsedArg returns an error result when key was provided but parsed to nothing,
+// so a malformed value fails loudly instead of sending silently without it.
+func unparsedArg(req mcp.CallToolRequest, key string, parsedLen int, accepts string) *mcp.CallToolResult {
+	if parsedLen != 0 || !argProvided(req, key) {
+		return nil
+	}
+	got := "an unsupported value"
+	switch req.GetArguments()[key].(type) {
+	case string:
+		got = "a string"
+	case []interface{}:
+		got = "a json array"
+	case map[string]interface{}:
+		got = "a json object"
+	}
+	return errorResult(key + " was provided as " + got + " but could not be parsed; accepts " + accepts)
+}
+
 // rebuildReplayTarget builds a scheme://host[:port] target from a stored Host
 // header value, stripping any existing port and re-wrapping bare IPv6 addresses.
 func rebuildReplayTarget(host, scheme string, port int) string {
@@ -573,13 +642,13 @@ func jsonObjectArg(raw interface{}) map[string]interface{} {
 
 // getFormArg extracts set_form as a string-valued map.
 func getFormArg(req mcp.CallToolRequest) map[string]string {
-	return getStringMapArg(req, "set_form")
+	return getStringMapArg(req, "set_form", "=")
 }
 
 // getStringMapArg extracts the named argument as a string-valued map, accepting an
-// object or a string-encoded object literal. Scalar values are coerced to strings,
-// nested objects and arrays are skipped.
-func getStringMapArg(req mcp.CallToolRequest, key string) map[string]string {
+// object {"k":"v"}, an array of "k<sep>v" strings, a single "k<sep>v" string (one per
+// line), or a string-encoded object. Scalar values coerce to strings; nested skip.
+func getStringMapArg(req mcp.CallToolRequest, key, sep string) map[string]string {
 	args := req.GetArguments()
 	if args == nil {
 		return nil
@@ -588,22 +657,83 @@ func getStringMapArg(req mcp.CallToolRequest, key string) map[string]string {
 	if !ok || raw == nil {
 		return nil
 	}
-	rawMap := jsonObjectArg(raw)
-	if len(rawMap) == 0 {
+	return coerceStringMap(raw, sep)
+}
+
+func coerceStringMap(raw interface{}, sep string) map[string]string {
+	trimSpace := sep == ":" // only headers have a conventional space after the separator
+	switch v := raw.(type) {
+	case map[string]interface{}:
+		return scalarMap(v)
+	case []interface{}:
+		out := make(map[string]string, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				if name, value, ok := cutKV(s, sep, trimSpace); ok {
+					out[name] = value
+				}
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil
+		}
+		switch s[0] {
+		case '{':
+			return scalarMap(jsonObjectArg(s))
+		case '[':
+			var arr []interface{}
+			if json.Unmarshal([]byte(s), &arr) == nil {
+				return coerceStringMap(arr, sep)
+			}
+			return nil
+		}
+		out := make(map[string]string)
+		for _, line := range strings.Split(s, "\n") {
+			if name, value, ok := cutKV(strings.TrimSuffix(line, "\r"), sep, trimSpace); ok {
+				out[name] = value
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	return nil
+}
+
+// scalarMap coerces an object's scalar values to strings, skipping nested values.
+func scalarMap(in map[string]interface{}) map[string]string {
+	if len(in) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(rawMap))
-	for k, v := range rawMap {
-		switch val := v.(type) {
-		case nil:
-			out[k] = ""
-		case string:
-			out[k] = val
-		case bool, float64, int, int64, json.Number:
-			out[k] = fmt.Sprint(val)
-		default:
-			// skip maps/slices/objects, not valid header or form scalars
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if s, ok := scalarString(v); ok && k != "" {
+			out[k] = s
 		}
 	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
+}
+
+// scalarString coerces a JSON scalar to string form; ok=false for objects/arrays.
+func scalarString(v interface{}) (string, bool) {
+	switch val := v.(type) {
+	case nil:
+		return "", true
+	case string:
+		return val, true
+	case bool, float64, int, int64, json.Number:
+		return fmt.Sprint(val), true
+	default:
+		return "", false
+	}
 }

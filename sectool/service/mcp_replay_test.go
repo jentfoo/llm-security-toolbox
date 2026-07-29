@@ -723,6 +723,31 @@ func TestHandleRequestSend(t *testing.T) {
 		assert.Contains(t, sent, "X-String-Header: from-string-object")
 	})
 
+	t.Run("headers_single_string", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		mockHTTP.SetSendResult("HTTP/1.1 200 OK\r\n", "ok")
+		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
+			"url":     "https://example.com/test",
+			"headers": "X-Test-Header: single-string",
+		})
+		assert.NotEmpty(t, resp.FlowID)
+		assert.Contains(t, mockHTTP.LastSentRequest(), "X-Test-Header: single-string")
+	})
+
+	t.Run("headers_unparseable_errors", func(t *testing.T) {
+		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		result := CallMCPTool(t, mcpClient, "request_send", map[string]interface{}{
+			"url":     "https://example.com/test",
+			"headers": "no-colon-here",
+		})
+		assert.True(t, result.IsError)
+		msg := ExtractMCPText(t, result)
+		assert.Contains(t, msg, "headers was provided as a string but could not be parsed")
+		assert.Contains(t, msg, `an object {"Name":"Value"}`)
+	})
+
 	t.Run("compresses_with_encoding", func(t *testing.T) {
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 

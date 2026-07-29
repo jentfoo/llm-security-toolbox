@@ -62,21 +62,21 @@ func TestGetStringMapArg(t *testing.T) {
 	}
 
 	t.Run("missing_key", func(t *testing.T) {
-		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{}), "headers"))
+		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{}), "headers", ":"))
 	})
 
 	t.Run("nil_value", func(t *testing.T) {
-		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{"headers": nil}), "headers"))
+		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{"headers": nil}), "headers", ":"))
 	})
 
-	t.Run("wrong_type", func(t *testing.T) {
-		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{"headers": "oops"}), "headers"))
+	t.Run("bare_string_no_sep", func(t *testing.T) {
+		assert.Nil(t, getStringMapArg(newReq(map[string]interface{}{"headers": "oops"}), "headers", ":"))
 	})
 
 	t.Run("string_encoded_object", func(t *testing.T) {
 		got := getStringMapArg(newReq(map[string]interface{}{
 			"headers": `{"X-Test": "v", "X-Num": 2}`,
-		}), "headers")
+		}), "headers", ":")
 
 		assert.Equal(t, map[string]string{"X-Test": "v", "X-Num": "2"}, got)
 	})
@@ -89,7 +89,7 @@ func TestGetStringMapArg(t *testing.T) {
 			"null":   nil,
 			"nested": map[string]interface{}{"a": "b"},
 			"list":   []interface{}{"a"},
-		}}), "headers")
+		}}), "headers", ":")
 
 		assert.Equal(t, map[string]string{
 			"str":  "v",
@@ -97,6 +97,54 @@ func TestGetStringMapArg(t *testing.T) {
 			"flag": "true",
 			"null": "",
 		}, got)
+	})
+
+	t.Run("object_value_not_trimmed", func(t *testing.T) {
+		got := getStringMapArg(newReq(map[string]interface{}{
+			"headers": map[string]interface{}{"X-Test": "  spaced  "},
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": "  spaced  "}, got)
+	})
+
+	t.Run("array_of_kv_strings", func(t *testing.T) {
+		got := getStringMapArg(newReq(map[string]interface{}{
+			"headers": []interface{}{"X-Test: v", "Content-Type: text/html"},
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": "v", "Content-Type": "text/html"}, got)
+	})
+
+	t.Run("single_kv_string", func(t *testing.T) {
+		got := getStringMapArg(newReq(map[string]interface{}{
+			"headers": "X-Test: v",
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": "v"}, got)
+	})
+
+	t.Run("form_separator", func(t *testing.T) {
+		got := getStringMapArg(newReq(map[string]interface{}{
+			"set_form": []interface{}{"grant_type=client_credentials"},
+		}), "set_form", "=")
+
+		assert.Equal(t, map[string]string{"grant_type": "client_credentials"}, got)
+	})
+
+	t.Run("form_value_keeps_leading_space", func(t *testing.T) {
+		got := getStringMapArg(newReq(map[string]interface{}{
+			"set_form": []interface{}{"scope= openid profile"},
+		}), "set_form", "=")
+
+		assert.Equal(t, map[string]string{"scope": " openid profile"}, got)
+	})
+
+	t.Run("kv_value_keeps_inner_whitespace", func(t *testing.T) {
+		got := getStringMapArg(newReq(map[string]interface{}{
+			"headers": []interface{}{"X-Test:  v "},
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": " v "}, got)
 	})
 }
 

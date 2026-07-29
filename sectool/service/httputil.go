@@ -503,7 +503,7 @@ func parseHeaderArg(raw interface{}) []string {
 		sort.Strings(keys) // deterministic order since JSON objects are unordered
 		result := make([]string, 0, len(v))
 		for _, k := range keys {
-			if vs, ok := v[k].(string); ok {
+			if vs, ok := scalarString(v[k]); ok && k != "" {
 				result = append(result, k+": "+vs)
 			}
 		}
@@ -511,16 +511,15 @@ func parseHeaderArg(raw interface{}) []string {
 	case []interface{}:
 		result := make([]string, 0, len(v))
 		for _, item := range v {
-			if s, ok := item.(string); ok {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
 				result = append(result, s)
 			}
 		}
 		return result
 	case string:
-		// Handle string-encoded JSON: try to unmarshal as array or object.
-		// Agents sometimes pass '["Header: Value"]' as a JSON string literal.
+		// string-encoded JSON array/object, or literal "Name: Value" line(s).
 		s := strings.TrimSpace(v)
-		if len(s) < 2 {
+		if s == "" {
 			return nil
 		}
 		switch s[0] {
@@ -529,13 +528,23 @@ func parseHeaderArg(raw interface{}) []string {
 			if json.Unmarshal([]byte(s), &arr) == nil {
 				return parseHeaderArg(arr)
 			}
+			return nil
 		case '{':
 			var obj map[string]interface{}
 			if json.Unmarshal([]byte(s), &obj) == nil {
 				return parseHeaderArg(obj)
 			}
+			return nil
 		}
-		return nil
+		// literal "Name: Value" line(s); strip only the \n-split \r artifact so
+		// intentional whitespace stays wire-faithful
+		lines := strings.Split(s, "\n")
+		for i, line := range lines {
+			lines[i] = strings.TrimSuffix(line, "\r")
+		}
+		return bulk.SliceFilterInPlace(func(line string) bool {
+			return strings.Contains(line, ":")
+		}, lines)
 	default:
 		return nil
 	}

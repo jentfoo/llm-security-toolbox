@@ -318,6 +318,25 @@ func TestMCP_CrawlCreateOptions(t *testing.T) {
 			assert.Equal(t, want, *opts.SubmitForms)
 		}
 	})
+
+	t.Run("headers_unset", func(t *testing.T) {
+		opts := create(t, map[string]interface{}{})
+		assert.Nil(t, opts.Headers)
+	})
+
+	t.Run("headers_object", func(t *testing.T) {
+		opts := create(t, map[string]interface{}{
+			"headers": map[string]interface{}{"Authorization": "Bearer t", "X-Env": "test"},
+		})
+		assert.Equal(t, map[string]string{"Authorization": "Bearer t", "X-Env": "test"}, opts.Headers)
+	})
+
+	t.Run("headers_array", func(t *testing.T) {
+		opts := create(t, map[string]interface{}{
+			"headers": []interface{}{"Authorization: Bearer t"},
+		})
+		assert.Equal(t, map[string]string{"Authorization": "Bearer t"}, opts.Headers)
+	})
 }
 
 func TestMCP_CrawlValidation(t *testing.T) {

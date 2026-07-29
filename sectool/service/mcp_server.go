@@ -608,3 +608,31 @@ func (m *mcpServer) resolveFlow(ctx context.Context, flowID string) (*resolvedFl
 	}
 	return nil, errorResult("flow_id not found: run proxy_poll or crawl_poll to see available flows")
 }
+
+// flexUnion sets an anyOf list on a property schema (no fixed top-level type).
+// A bare WithObject emits empty properties + no additionalProperties, which strict
+// hosts read as "no valid keys" and strip; anyOf advertises every accepted shape.
+func flexUnion(branches ...any) mcp.PropertyOption {
+	return func(s map[string]any) { s["anyOf"] = branches }
+}
+
+// array of "Name: Value" strings, object of string->string, or one string
+var kvBranches = []any{
+	map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+	map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+	map[string]any{"type": "string"},
+}
+
+// withFlexKV declares a string-valued key/value param (headers, set_form).
+func withFlexKV(name, desc string) mcp.ToolOption {
+	return mcp.WithAny(name, mcp.Description(desc), flexUnion(kvBranches...))
+}
+
+// withFlexJSON declares an object param with arbitrary-typed values (set_json),
+// also accepting a string-encoded object.
+func withFlexJSON(name, desc string) mcp.ToolOption {
+	return mcp.WithAny(name, mcp.Description(desc), flexUnion(
+		map[string]any{"type": "object"},
+		map[string]any{"type": "string"},
+	))
+}
