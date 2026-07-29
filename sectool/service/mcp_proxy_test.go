@@ -202,6 +202,37 @@ func TestMCP_ProxyPoll(t *testing.T) {
 			assert.LessOrEqual(t, len(resp.Flows), 2)
 		})
 
+		t.Run("remaining_count", func(t *testing.T) {
+			// limit-test.com has 5 flows; global history holds more.
+			truncated := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+				"output_mode": "flows",
+				"host":        "limit-test.com",
+				"limit":       2,
+			})
+			assert.Len(t, truncated.Flows, 2)
+			// reflects the filtered match count (5), not global history
+			assert.Equal(t, 3, truncated.RemainingCount)
+
+			// limit past the match count: no remaining
+			full := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+				"output_mode": "flows",
+				"host":        "limit-test.com",
+				"limit":       10,
+			})
+			assert.Len(t, full.Flows, 5)
+			assert.Zero(t, full.RemainingCount)
+
+			// offset consumes matches before the page
+			offset := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+				"output_mode": "flows",
+				"host":        "limit-test.com",
+				"limit":       2,
+				"offset":      1,
+			})
+			assert.Len(t, offset.Flows, 2)
+			assert.Equal(t, 2, offset.RemainingCount) // 5 - 1 - 2
+		})
+
 		t.Run("with_offset", func(t *testing.T) {
 			allResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
 				"output_mode": "flows",

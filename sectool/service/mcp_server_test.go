@@ -815,10 +815,10 @@ func (b *mockCrawlerBackend) GetStatus(ctx context.Context, sessionID string) (*
 	return &copy, nil
 }
 
-func (b *mockCrawlerBackend) ListFlows(ctx context.Context, sessionID string, opts CrawlListOptions) ([]CrawlFlow, error) {
+func (b *mockCrawlerBackend) ListFlows(ctx context.Context, sessionID string, opts CrawlListOptions) ([]CrawlFlow, int, error) {
 	sess, err := b.resolveSession(sessionID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	hasSearch := opts.SearchHeaderRe != nil || opts.SearchBodyRe != nil
@@ -832,6 +832,7 @@ func (b *mockCrawlerBackend) ListFlows(ctx context.Context, sessionID string, op
 		}
 		flows = append(flows, *flow)
 	}
+	total := len(flows)
 
 	if opts.Offset > 0 && opts.Offset < len(flows) {
 		flows = flows[opts.Offset:]
@@ -843,7 +844,7 @@ func (b *mockCrawlerBackend) ListFlows(ctx context.Context, sessionID string, op
 		flows = flows[:opts.Limit]
 	}
 
-	return flows, nil
+	return flows, total, nil
 }
 
 func (b *mockCrawlerBackend) ListForms(ctx context.Context, sessionID string, limit int) ([]protocol.CrawlForm, error) {

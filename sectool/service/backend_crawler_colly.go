@@ -719,10 +719,10 @@ func (b *CollyBackend) GetStatus(ctx context.Context, sessionID string) (*CrawlS
 	}, nil
 }
 
-func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts CrawlListOptions) ([]CrawlFlow, error) {
+func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts CrawlListOptions) ([]CrawlFlow, int, error) {
 	sess, err := b.resolveSession(sessionID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	sess.mu.Lock()
@@ -753,7 +753,7 @@ func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts Cra
 	}
 
 	// Filter and collect matching flows with their original indices.
-	// When offset+limit is known, stop scanning once we have enough matches.
+	// Collection caps at offset+limit; total counts every match for remaining_count.
 	hasSearch := opts.SearchHeaderRe != nil || opts.SearchBodyRe != nil
 	var maxCollect int
 	if opts.Limit > 0 {
@@ -763,7 +763,11 @@ func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts Cra
 		flow *CrawlFlow
 		idx  int // original index in flowsOrdered
 	}
+	// no filters/timestamp-since: every flow from startIdx matches, so total is
+	// arithmetic and the page can stop at maxCollect
+	noFilter := !opts.hasFilters() && !useSinceTime
 	var filtered []indexedFlow
+	var total int
 	for i := startIdx; i < len(sess.flowsOrdered); i++ {
 		flow := sess.flowsOrdered[i]
 		// Apply timestamp filter if specified (exclusive - only flows after sinceTime)
@@ -774,8 +778,11 @@ func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts Cra
 		} else if hasSearch && !matchesFlowSearch(flow.Request, flow.Response, opts.SearchHeaderRe, opts.SearchBodyRe) {
 			continue
 		}
-		filtered = append(filtered, indexedFlow{flow: flow, idx: i})
-		if maxCollect > 0 && len(filtered) >= maxCollect {
+		total++
+		if maxCollect == 0 || len(filtered) < maxCollect {
+			filtered = append(filtered, indexedFlow{flow: flow, idx: i})
+		} else if noFilter {
+			total = len(sess.flowsOrdered) - startIdx
 			break
 		}
 	}
@@ -783,7 +790,7 @@ func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts Cra
 	// Apply offset (after filtering)
 	if opts.Offset > 0 {
 		if opts.Offset >= len(filtered) {
-			return []CrawlFlow{}, nil
+			return []CrawlFlow{}, total, nil
 		}
 		filtered = filtered[opts.Offset:]
 	}
@@ -806,7 +813,7 @@ func (b *CollyBackend) ListFlows(ctx context.Context, sessionID string, opts Cra
 	for i, f := range filtered {
 		result[i] = *f.flow
 	}
-	return result, nil
+	return result, total, nil
 }
 
 func (b *CollyBackend) ListForms(ctx context.Context, sessionID string, limit int) ([]protocol.CrawlForm, error) {

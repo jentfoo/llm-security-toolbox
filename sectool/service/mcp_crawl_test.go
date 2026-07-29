@@ -240,6 +240,34 @@ func TestMCP_CrawlLifecycleWithMock(t *testing.T) {
 	// TotalCount indicates how many aggregates exist before truncation
 	assert.Greater(t, limitSummary.TotalCount, 2)
 
+	// flows mode: session holds 5 flows, so limit=2 leaves 3 remaining
+	truncatedFlows := CallMCPToolJSONOK[protocol.CrawlPollResponse](t, mcpClient, "crawl_poll", map[string]interface{}{
+		"session_id":  createResp.SessionID,
+		"output_mode": "flows",
+		"limit":       2,
+	})
+	assert.Len(t, truncatedFlows.Flows, 2)
+	assert.Equal(t, 3, truncatedFlows.RemainingCount)
+
+	// offset consumes matches before the page
+	offsetFlows := CallMCPToolJSONOK[protocol.CrawlPollResponse](t, mcpClient, "crawl_poll", map[string]interface{}{
+		"session_id":  createResp.SessionID,
+		"output_mode": "flows",
+		"limit":       2,
+		"offset":      1,
+	})
+	assert.Len(t, offsetFlows.Flows, 2)
+	assert.Equal(t, 2, offsetFlows.RemainingCount) // 5 - 1 - 2
+
+	// limit past the match count: no remaining
+	fullFlows := CallMCPToolJSONOK[protocol.CrawlPollResponse](t, mcpClient, "crawl_poll", map[string]interface{}{
+		"session_id":  createResp.SessionID,
+		"output_mode": "flows",
+		"limit":       10,
+	})
+	assert.Len(t, fullFlows.Flows, 5)
+	assert.Zero(t, fullFlows.RemainingCount)
+
 	stopResult := CallMCPTool(t, mcpClient, "crawl_stop", map[string]interface{}{
 		"session_id": createResp.SessionID,
 	})

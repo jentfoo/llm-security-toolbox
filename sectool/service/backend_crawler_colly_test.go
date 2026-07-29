@@ -415,11 +415,12 @@ func TestCollyBackend_ListFlows_since_last_with_search(t *testing.T) {
 	secretRe := regexp.MustCompile(`X-Secret`)
 
 	// 1. Poll with search: should return flow-1 and flow-3, cursor at index 4
-	got, err := b.ListFlows(ctx, sessionID, CrawlListOptions{SearchHeaderRe: secretRe})
+	got, total, err := b.ListFlows(ctx, sessionID, CrawlListOptions{SearchHeaderRe: secretRe})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	assert.Equal(t, "flow-1", got[0].ID)
 	assert.Equal(t, "flow-3", got[1].ID)
+	assert.Equal(t, 2, total)
 
 	// Cursor should be at index 4 (after flow-3 at index 3)
 	sess := b.sessions[sessionID]
@@ -430,9 +431,10 @@ func TestCollyBackend_ListFlows_since_last_with_search(t *testing.T) {
 
 	// 2. Poll with since=last (no search): flow-0 and flow-2 are before the cursor,
 	// so nothing is returned. This is correct: the search advanced past them.
-	got, err = b.ListFlows(ctx, sessionID, CrawlListOptions{Since: sinceLast})
+	got, total, err = b.ListFlows(ctx, sessionID, CrawlListOptions{Since: sinceLast})
 	require.NoError(t, err)
 	assert.Empty(t, got)
+	assert.Equal(t, 0, total)
 
 	// 3. Add a new flow after the cursor
 	sess.mu.Lock()
@@ -444,10 +446,11 @@ func TestCollyBackend_ListFlows_since_last_with_search(t *testing.T) {
 	sess.mu.Unlock()
 
 	// 4. Poll with since=last: new flow is returned
-	got, err = b.ListFlows(ctx, sessionID, CrawlListOptions{Since: sinceLast})
+	got, total, err = b.ListFlows(ctx, sessionID, CrawlListOptions{Since: sinceLast})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "flow-4", got[0].ID)
+	assert.Equal(t, 1, total)
 }
 
 func TestCollyBackend_ListFlows_search_cursor_not_past_results(t *testing.T) {
@@ -472,10 +475,11 @@ func TestCollyBackend_ListFlows_search_cursor_not_past_results(t *testing.T) {
 	secretRe := regexp.MustCompile(`SECRET`)
 
 	// Search matches only flow-1 (index 1). Cursor should advance to 2, not 4.
-	got, err := b.ListFlows(ctx, sessionID, CrawlListOptions{SearchBodyRe: secretRe})
+	got, total, err := b.ListFlows(ctx, sessionID, CrawlListOptions{SearchBodyRe: secretRe})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "flow-1", got[0].ID)
+	assert.Equal(t, 1, total)
 
 	sess := b.sessions[sessionID]
 	sess.mu.RLock()
@@ -484,11 +488,12 @@ func TestCollyBackend_ListFlows_search_cursor_not_past_results(t *testing.T) {
 	assert.Equal(t, 2, cursor)
 
 	// since=last without search: should return flow-2 and flow-3
-	got, err = b.ListFlows(ctx, sessionID, CrawlListOptions{Since: sinceLast})
+	got, total, err = b.ListFlows(ctx, sessionID, CrawlListOptions{Since: sinceLast})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	assert.Equal(t, "flow-2", got[0].ID)
 	assert.Equal(t, "flow-3", got[1].ID)
+	assert.Equal(t, 2, total)
 }
 
 func TestCollyBackend_ListFlows_search_with_limit(t *testing.T) {
@@ -514,13 +519,15 @@ func TestCollyBackend_ListFlows_search_with_limit(t *testing.T) {
 	tagRe := regexp.MustCompile(`X-Tag`)
 
 	// limit=2 with search: should return flow-0 and flow-2, stop early
-	got, err := b.ListFlows(ctx, sessionID, CrawlListOptions{
+	got, total, err := b.ListFlows(ctx, sessionID, CrawlListOptions{
 		SearchHeaderRe: tagRe, Limit: 2,
 	})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	assert.Equal(t, "flow-0", got[0].ID)
 	assert.Equal(t, "flow-2", got[1].ID)
+	// total counts all 3 matches (flow-0, flow-2, flow-4) despite the limit
+	assert.Equal(t, 3, total)
 
 	// Cursor should be at 3 (after flow-2 at index 2), not at 5
 	sess := b.sessions[sessionID]
@@ -530,7 +537,7 @@ func TestCollyBackend_ListFlows_search_with_limit(t *testing.T) {
 	assert.Equal(t, 3, cursor)
 
 	// since=last with same search: should return flow-4 (the remaining match)
-	got, err = b.ListFlows(ctx, sessionID, CrawlListOptions{
+	got, _, err = b.ListFlows(ctx, sessionID, CrawlListOptions{
 		Since: sinceLast, SearchHeaderRe: tagRe,
 	})
 	require.NoError(t, err)
@@ -538,7 +545,7 @@ func TestCollyBackend_ListFlows_search_with_limit(t *testing.T) {
 	assert.Equal(t, "flow-4", got[0].ID)
 
 	// since=last without search: returns flow-5 (only remaining unseen flow)
-	got, err = b.ListFlows(ctx, sessionID, CrawlListOptions{Since: sinceLast})
+	got, _, err = b.ListFlows(ctx, sessionID, CrawlListOptions{Since: sinceLast})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "flow-5", got[0].ID)
@@ -601,9 +608,10 @@ func TestCollyBackend_CreateSession_follows_links(t *testing.T) {
 	}, 20*time.Second, 10*time.Millisecond)
 
 	// Should have visited at least 4 pages: /, /page1, /page2, /page3
-	flows, err := b.ListFlows(ctx, sessionID, CrawlListOptions{})
+	flows, total, err := b.ListFlows(ctx, sessionID, CrawlListOptions{})
 	require.NoError(t, err)
 	assert.Len(t, flows, 4)
+	assert.Len(t, flows, total)
 
 	// Collect visited paths for verification
 	visitedPaths := make(map[string]bool, len(flows))
@@ -666,8 +674,9 @@ func TestCollyBackend_capturesErrorStatusFlows(t *testing.T) {
 		return err == nil && status.State == crawlStateCompleted
 	}, 20*time.Second, 10*time.Millisecond)
 
-	flows, err := b.ListFlows(ctx, info.ID, CrawlListOptions{})
+	flows, total, err := b.ListFlows(ctx, info.ID, CrawlListOptions{})
 	require.NoError(t, err)
+	assert.Len(t, flows, total)
 
 	byPath := make(map[string]CrawlFlow, len(flows))
 	for _, f := range flows {
@@ -785,8 +794,9 @@ func runCrawl(t *testing.T, cfg *config.Config, opts CrawlOptions) []string {
 		return err == nil && status.State == crawlStateCompleted
 	}, 20*time.Second, 10*time.Millisecond)
 
-	flows, err := b.ListFlows(ctx, info.ID, CrawlListOptions{})
+	flows, total, err := b.ListFlows(ctx, info.ID, CrawlListOptions{})
 	require.NoError(t, err)
+	assert.Len(t, flows, total)
 
 	paths := make([]string, 0, len(flows))
 	for _, f := range flows {
@@ -929,8 +939,9 @@ func TestCollyBackend_addSeeds_completionRace(t *testing.T) {
 	}, 20*time.Second, 10*time.Millisecond)
 
 	// Every successfully-added seed must have been crawled (none lost to a premature completion)
-	flows, err := b.ListFlows(ctx, info.ID, CrawlListOptions{})
+	flows, total, err := b.ListFlows(ctx, info.ID, CrawlListOptions{})
 	require.NoError(t, err)
+	assert.Len(t, flows, total)
 	seedFlows := 0
 	for _, f := range flows {
 		if f.Path != "/" {

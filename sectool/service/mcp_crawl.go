@@ -252,9 +252,10 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 		return jsonResult(protocol.CrawlPollResponse{SessionID: sessionID, Errors: errs})
 
 	case OutputModeFlows:
-		opts, notes := crawlListOptions(req, limit, req.GetInt("offset", 0))
+		offset := req.GetInt("offset", 0)
+		opts, notes := crawlListOptions(req, limit, offset)
 
-		flows, err := m.service.crawlerBackend.ListFlows(ctx, sessionID, opts)
+		flows, totalMatched, err := m.service.crawlerBackend.ListFlows(ctx, sessionID, opts)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				return errorResult("session not found"), nil
@@ -278,7 +279,11 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 		m.attachCrawlFlowNotes(apiFlows)
 		log.Printf("crawl/poll: session %s %d flows (limit=%d)", sessionID, len(flows), limit)
 		noteStr := strings.Join(notes, "; ")
-		return jsonResult(protocol.CrawlPollResponse{SessionID: sessionID, Flows: apiFlows, Note: noteStr})
+		resp := protocol.CrawlPollResponse{SessionID: sessionID, Flows: apiFlows, Note: noteStr}
+		if remaining := totalMatched - offset - len(apiFlows); remaining > 0 {
+			resp.RemainingCount = remaining
+		}
+		return jsonResult(resp)
 
 	default: // summary
 		// Get status for state and duration
@@ -296,7 +301,7 @@ func (m *mcpServer) handleCrawlPoll(ctx context.Context, req mcp.CallToolRequest
 			notes = append(notes, modeNote)
 		}
 
-		flows, err := m.service.crawlerBackend.ListFlows(ctx, sessionID, opts)
+		flows, _, err := m.service.crawlerBackend.ListFlows(ctx, sessionID, opts)
 		if err != nil {
 			return errorResultFromErr("failed to get flows: ", err), nil
 		}

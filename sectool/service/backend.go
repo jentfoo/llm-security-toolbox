@@ -258,9 +258,9 @@ type CrawlerBackend interface {
 	// sessionID can be the ID or label. Returns ErrNotFound if session doesn't exist.
 	GetStatus(ctx context.Context, sessionID string) (*CrawlStatus, error)
 
-	// ListFlows returns flows matching filters.
-	// sessionID can be the ID or label.
-	ListFlows(ctx context.Context, sessionID string, opts CrawlListOptions) ([]CrawlFlow, error)
+	// ListFlows returns flows matching filters (page after limit/offset) and the
+	// total match count before limit/offset. sessionID can be the ID or label.
+	ListFlows(ctx context.Context, sessionID string, opts CrawlListOptions) ([]CrawlFlow, int, error)
 
 	// ListForms returns forms discovered in a session.
 	// sessionID can be the ID or label.
@@ -326,6 +326,14 @@ type CrawlListOptions struct {
 	// to the last flow that matches all filters including search.
 	SearchHeaderRe *regexp.Regexp
 	SearchBodyRe   *regexp.Regexp
+}
+
+// hasFilters reports whether any match filter (host, path, status, method,
+// exclude, or search) is set; the since cursor is not a match filter.
+func (o CrawlListOptions) hasFilters() bool {
+	return o.Host != "" || o.PathPattern != "" || !o.StatusCodes.Empty() ||
+		len(o.Methods) > 0 || o.ExcludeHost != "" || o.ExcludePath != "" ||
+		o.SearchHeaderRe != nil || o.SearchBodyRe != nil
 }
 
 // CrawlSessionInfo represents metadata about a crawl session.

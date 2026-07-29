@@ -48,10 +48,11 @@ type RequestLine struct {
 
 // ProxyPollResponse is the unified response for proxy_poll.
 type ProxyPollResponse struct {
-	Aggregates []SummaryEntry `json:"aggregates,omitempty"`  // summary mode
-	Flows      []FlowEntry    `json:"flows,omitempty"`       // list mode
-	TotalCount int            `json:"total_count,omitempty"` // total before limit truncation
-	Note       string         `json:"note,omitempty"`
+	Aggregates     []SummaryEntry `json:"aggregates,omitempty"`      // summary mode
+	Flows          []FlowEntry    `json:"flows,omitempty"`           // list mode
+	TotalCount     int            `json:"total_count,omitempty"`     // total aggregates before limit truncation (summary mode)
+	RemainingCount int            `json:"remaining_count,omitempty"` // matching flows after the last shown (flows mode)
+	Note           string         `json:"note,omitempty"`
 }
 
 // MarshalJSON preserves non-nil empty slices (as []) while omitting nil ones.
@@ -66,6 +67,9 @@ func (r ProxyPollResponse) MarshalJSON() ([]byte, error) {
 	}
 	if r.TotalCount > 0 {
 		m["total_count"] = r.TotalCount
+	}
+	if r.RemainingCount > 0 {
+		m["remaining_count"] = r.RemainingCount
 	}
 	if r.Note != "" {
 		m["note"] = r.Note
@@ -282,15 +286,16 @@ type CrawlStatusResponse struct {
 
 // CrawlPollResponse is the unified response for crawl_poll.
 type CrawlPollResponse struct {
-	SessionID  string         `json:"session_id"`
-	State      string         `json:"state,omitempty"`
-	Duration   string         `json:"duration,omitempty"` // summary only
-	Aggregates []SummaryEntry `json:"aggregates,omitempty"`
-	Flows      []CrawlFlow    `json:"flows,omitempty"`
-	Forms      []CrawlForm    `json:"forms,omitempty"`
-	Errors     []CrawlError   `json:"errors,omitempty"`
-	TotalCount int            `json:"total_count,omitempty"` // total before limit truncation
-	Note       string         `json:"note,omitempty"`
+	SessionID      string         `json:"session_id"`
+	State          string         `json:"state,omitempty"`
+	Duration       string         `json:"duration,omitempty"` // summary only
+	Aggregates     []SummaryEntry `json:"aggregates,omitempty"`
+	Flows          []CrawlFlow    `json:"flows,omitempty"`
+	Forms          []CrawlForm    `json:"forms,omitempty"`
+	Errors         []CrawlError   `json:"errors,omitempty"`
+	TotalCount     int            `json:"total_count,omitempty"`     // total aggregates before limit truncation (summary mode)
+	RemainingCount int            `json:"remaining_count,omitempty"` // matching flows after the last shown (flows mode)
+	Note           string         `json:"note,omitempty"`
 }
 
 // MarshalJSON preserves non-nil empty slices (as []) while omitting nil ones.
@@ -318,6 +323,9 @@ func (r CrawlPollResponse) MarshalJSON() ([]byte, error) {
 	}
 	if r.TotalCount > 0 {
 		m["total_count"] = r.TotalCount
+	}
+	if r.RemainingCount > 0 {
+		m["remaining_count"] = r.RemainingCount
 	}
 	if r.Note != "" {
 		m["note"] = r.Note

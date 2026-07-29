@@ -317,7 +317,7 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 	if outputMode == OutputModeFlows && listReq.Limit > 0 {
 		maxResults = listReq.Offset + listReq.Limit
 	}
-	filtered := applyProxyFilters(allEntries, listReq, lastFlowID, searchHeaderRe, searchBodyRe, maxResults)
+	filtered, totalMatched := applyProxyFilters(allEntries, listReq, lastFlowID, searchHeaderRe, searchBodyRe, maxResults)
 
 	switch outputMode {
 	case OutputModeFlows:
@@ -372,7 +372,11 @@ func (m *mcpServer) handleProxyPoll(ctx context.Context, req mcp.CallToolRequest
 		}
 
 		noteStr := strings.Join(notes, "; ")
-		return jsonResult(&protocol.ProxyPollResponse{Flows: flows, Note: noteStr})
+		resp := &protocol.ProxyPollResponse{Flows: flows, Note: noteStr}
+		if remaining := totalMatched - listReq.Offset - len(flows); remaining > 0 {
+			resp.RemainingCount = remaining
+		}
+		return jsonResult(resp)
 
 	default: // summary
 		agg := aggregateByTuple(filtered, func(e flowEntry) (string, string, string, int) {
@@ -883,11 +887,11 @@ func (s *Server) fetchProxyChildren(ctx context.Context, parentFlowID string) ([
 	return out, nil
 }
 
-// applyProxyFilters applies client-side filters to proxy history entries.
-// When maxResults > 0, stops after collecting that many matches (early termination for offset+limit).
-func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID string, searchHeaderRe, searchBodyRe *regexp.Regexp, maxResults int) []flowEntry {
+// applyProxyFilters returns the entries matching req (capped at maxResults when >0)
+// and total, the full match count ignoring maxResults.
+func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID string, searchHeaderRe, searchBodyRe *regexp.Regexp, maxResults int) (filtered []flowEntry, total int) {
 	if !req.HasFilters() {
-		return entries
+		return entries, len(entries)
 	}
 
 	methods := parseCommaSeparated(req.Method)
@@ -911,9 +915,6 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID st
 
 	result := entries[:0]
 	for _, e := range entries {
-		if maxResults > 0 && len(result) >= maxResults {
-			break
-		}
 		if req.Source != "" && req.Source != e.source {
 			continue
 		}
@@ -941,9 +942,13 @@ func applyProxyFilters(entries []flowEntry, req *ProxyListRequest, lastFlowID st
 				continue
 			}
 		}
-		result = append(result, e)
+		total++
+		// keep scanning past the cap so total is the full match count
+		if maxResults == 0 || len(result) < maxResults {
+			result = append(result, e)
+		}
 	}
-	return result
+	return result, total
 }
 
 var validRuleTypes = map[string]bool{
