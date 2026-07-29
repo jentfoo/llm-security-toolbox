@@ -33,7 +33,7 @@ func Parse(args []string, mcpURL string) error {
 		return parseStatus(args[1:], mcpURL)
 	case "summary":
 		return parseSummary(args[1:], mcpURL)
-	case "list":
+	case "list", "poll":
 		return parseList(args[1:], mcpURL)
 	case "get":
 		return parseGet(args[1:], mcpURL)

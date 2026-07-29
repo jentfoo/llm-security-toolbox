@@ -21,7 +21,7 @@ func Parse(args []string, mcpURL string) error {
 	switch args[0] {
 	case "summary":
 		return parseSummary(args[1:], mcpURL)
-	case "list":
+	case "list", "poll":
 		return parseList(args[1:], mcpURL)
 	case "get":
 		return parseGet(args[1:], mcpURL)
