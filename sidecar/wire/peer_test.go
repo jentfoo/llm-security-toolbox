@@ -18,9 +18,8 @@ func newPeerPair(t *testing.T, ha, hb Handler) (*Peer, *Peer) {
 	ca, cb := net.Pipe()
 	pa := NewPeer(ca, ha)
 	pb := NewPeer(cb, hb)
-	ctx := t.Context()
-	go func() { _ = pa.Run(ctx) }()
-	go func() { _ = pb.Run(ctx) }()
+	go func() { _ = pa.Run(t.Context()) }()
+	go func() { _ = pb.Run(t.Context()) }()
 	t.Cleanup(func() {
 		_ = pa.Close()
 		_ = pb.Close()

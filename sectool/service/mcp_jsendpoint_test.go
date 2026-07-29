@@ -1,6 +1,7 @@
 package service
 
 import (
+	"slices"
 	"testing"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
@@ -35,12 +36,9 @@ var bare = '/just/a/literal/path';
 
 		surface := CallMCPToolJSONOK[protocol.JSAnalyzeResponse](t, client, "js_surface",
 			map[string]interface{}{"flow_id": flowID})
-		var id string
-		for _, e := range surface.Endpoints {
-			if e.URL == "/api/users" {
-				id = e.EndpointID
-			}
-		}
+		i := slices.IndexFunc(surface.Endpoints, func(e protocol.ExtractedEndpoint) bool { return e.URL == "/api/users" })
+		require.GreaterOrEqual(t, i, 0, "no /api/users endpoint")
+		id := surface.Endpoints[i].EndpointID
 		require.NotEmpty(t, id, "expected endpoint_id on /api/users")
 
 		resp := CallMCPToolJSONOK[protocol.JSEndpointResponse](t, client, "js_endpoint",
@@ -73,11 +71,13 @@ var bare = '/just/a/literal/path';
 		client, _ := setup(t)
 		res := CallMCPTool(t, client, "js_endpoint", map[string]interface{}{"endpoint": "no-dot"})
 		assert.True(t, res.IsError)
+		assert.Contains(t, ExtractMCPText(t, res), `endpoint must be "<flow_id>.<endpoint_id>"`)
 	})
 
 	t.Run("unknown_endpoint_id", func(t *testing.T) {
 		client, flowID := setup(t)
 		res := CallMCPTool(t, client, "js_endpoint", map[string]interface{}{"endpoint": flowID + ".zzzzzz"})
 		assert.True(t, res.IsError)
+		assert.Contains(t, ExtractMCPText(t, res), "no endpoint with id zzzzzz")
 	})
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,9 +18,7 @@ import (
 	"github.com/go-appsec/toolbox/sectool/config"
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
 	"github.com/go-appsec/toolbox/sectool/protocol"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	scsidecar "github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
-	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -37,48 +36,20 @@ func startOriginateHarness(t *testing.T, allowedDomains []string) *originateHarn
 	t.Helper()
 	const adapter = "origin-sidecar"
 
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	var configPath string
 	if allowedDomains != nil {
+		configPath = filepath.Join(t.TempDir(), "config.json")
 		cfg := config.DefaultConfig()
 		cfg.AllowedDomains = allowedDomains
 		require.NoError(t, cfg.Save(configPath))
 	}
 
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   configPath,
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{
-		Socket: socket, NativeProxyPort: 0, NativeHTTPSend: srv.OriginateNative,
-	}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
+	sb := startSidecarBackend(t, scsidecar.Config{}, configPath)
+	conn := sb.dial(t, sidecar.Registration{
+		Name:      adapter,
+		Protocols: []string{"custom/1"},
 	})
-
-	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
-
-	conn, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
-		Name:            adapter,
-		Protocols:       []string{"custom/1"},
-		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
-
-	return &originateHarness{mcp: mcpClient, conn: conn, adapter: adapter}
+	return &originateHarness{mcp: sb.mcp, conn: conn, adapter: adapter}
 }
 
 func jsonRaw(t *testing.T, v any) json.RawMessage {
@@ -105,11 +76,10 @@ func TestSidecarOriginateNativeE2E(t *testing.T) {
 	t.Cleanup(upstream.Close)
 
 	h := startOriginateHarness(t, nil)
-	ctx := t.Context()
 
 	t.Run("mutations_and_attribution", func(t *testing.T) {
 		wait := true
-		res, err := h.conn.InvokeAdapter(ctx, wire.InvokeAdapterParams{
+		res, err := h.conn.InvokeAdapter(t.Context(), wire.InvokeAdapterParams{
 			Adapter: "sectool",
 			Target: jsonRaw(t, map[string]any{
 				"url":     upstream.URL + "/key",
@@ -134,21 +104,16 @@ func TestSidecarOriginateNativeE2E(t *testing.T) {
 		assert.JSONEq(t, `{"v":2}`, gotBody)
 
 		// Flow is in history, attributed to the calling sidecar.
-		poll, perr := h.mcp.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", Limit: 100})
+		poll, perr := h.mcp.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Limit: 100})
 		require.NoError(t, perr)
-		var found *protocol.FlowEntry
-		for i := range poll.Flows {
-			if poll.Flows[i].FlowID == res.NewFlowIDs[0] {
-				found = &poll.Flows[i]
-			}
-		}
-		require.NotNil(t, found)
-		assert.Equal(t, h.adapter, found.InvokedBy)
+		i := slices.IndexFunc(poll.Flows, func(f protocol.FlowEntry) bool { return f.FlowID == res.NewFlowIDs[0] })
+		require.GreaterOrEqual(t, i, 0)
+		assert.Equal(t, h.adapter, poll.Flows[i].InvokedBy)
 	})
 
 	t.Run("no_wait_omits_response", func(t *testing.T) {
 		var wait bool
-		res, err := h.conn.InvokeAdapter(ctx, wire.InvokeAdapterParams{
+		res, err := h.conn.InvokeAdapter(t.Context(), wire.InvokeAdapterParams{
 			Adapter:         "sectool",
 			Target:          jsonRaw(t, map[string]any{"url": upstream.URL + "/ping"}),
 			WaitForResponse: &wait,
@@ -168,7 +133,7 @@ func TestSidecarOriginateNativeE2E(t *testing.T) {
 		}))
 		t.Cleanup(gz.Close)
 
-		res, err := h.conn.InvokeAdapter(ctx, wire.InvokeAdapterParams{
+		res, err := h.conn.InvokeAdapter(t.Context(), wire.InvokeAdapterParams{
 			Adapter: "sectool",
 			Target:  jsonRaw(t, map[string]any{"url": gz.URL}),
 		})

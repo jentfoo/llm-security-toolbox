@@ -6,7 +6,7 @@ import (
 	"bufio"
 	"io"
 	"net"
-	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,10 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
-	"github.com/go-appsec/toolbox/sectool/protocol"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	scsidecar "github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
-	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -56,43 +53,16 @@ type upgradeHarness struct {
 // connects an upgrade sidecar declaring caps.
 func startUpgrade(t *testing.T, name string, caps wire.Capabilities) *upgradeHarness {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	require.NoError(t, backend.WaitReady(t.Context()))
-	t.Cleanup(func() {
-		srv.RequestShutdown()
+	sb := startSidecarBackend(t, scsidecar.Config{})
+	sc := sb.dial(t, sidecar.Registration{
+		Name:         name,
+		Protocols:    []string{"custom/1"},
+		Capabilities: caps,
 	})
-
-	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
-
-	sc, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
-		Name:            name,
-		Protocols:       []string{"custom/1"},
-		Capabilities:    caps,
-		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sc.Close() })
 
 	h := &upgradeHandler{opened: make(chan wire.StreamOpenParams, 4)}
 	go func() { _ = sc.Serve(t.Context(), h) }()
-	return &upgradeHarness{proxyAddr: backend.Addr(), mcp: mcpClient, opened: h.opened}
+	return &upgradeHarness{proxyAddr: sb.proxyAddr(), mcp: sb.mcp, opened: h.opened}
 }
 
 // readHeadersUntilBlank reads the status line and discards the rest of an HTTP
@@ -111,12 +81,11 @@ func readHeadersUntilBlank(t *testing.T, br *bufio.Reader) string {
 }
 
 func headerValue(hs []wire.Header, name string) string {
-	for _, h := range hs {
-		if strings.EqualFold(h.Name, name) {
-			return h.Value
-		}
+	i := slices.IndexFunc(hs, func(h wire.Header) bool { return strings.EqualFold(h.Name, name) })
+	if i < 0 {
+		return ""
 	}
-	return ""
+	return hs[i].Value
 }
 
 func TestSidecarUpgradeClaimHTTP101E2E(t *testing.T) {
@@ -124,7 +93,6 @@ func TestSidecarUpgradeClaimHTTP101E2E(t *testing.T) {
 
 	uc := &wire.UpgradeClaim{HostPattern: "ctrl.example.com", PathPattern: "/control", UpgradeSignal: "http_101", MethodSet: []string{"POST"}}
 	h := startUpgrade(t, "upgrade-sidecar", wire.Capabilities{UpgradeClaims: []wire.UpgradeClaim{*uc}})
-	ctx := t.Context()
 
 	var d net.Dialer
 	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
@@ -160,7 +128,7 @@ func TestSidecarUpgradeClaimHTTP101E2E(t *testing.T) {
 	assert.Equal(t, "noise-handshake", string(buf))
 
 	// The triggering request is captured as a normal flow visible in history.
-	resp, perr := h.mcp.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: "upgrade-sidecar", Limit: 100})
+	resp, perr := h.mcp.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: "upgrade-sidecar", Limit: 100})
 	require.NoError(t, perr)
 	assert.Contains(t, flowIDs(resp.Flows), open.RequestFlowID)
 }
@@ -170,7 +138,6 @@ func TestSidecarUpgradeClaimConnectE2E(t *testing.T) {
 
 	uc := &wire.UpgradeClaim{HostPattern: "tunnel.test", UpgradeSignal: "connect"}
 	h := startUpgrade(t, "connect-upgrade", wire.Capabilities{UpgradeClaims: []wire.UpgradeClaim{*uc}})
-	ctx := t.Context()
 
 	var d net.Dialer
 	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
@@ -203,7 +170,7 @@ func TestSidecarUpgradeClaimConnectE2E(t *testing.T) {
 	assert.Equal(t, "raw-proto-bytes", string(buf))
 
 	// The CONNECT trigger is captured as a flow attributed to the sidecar.
-	resp, perr := h.mcp.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: "connect-upgrade", Limit: 100})
+	resp, perr := h.mcp.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: "connect-upgrade", Limit: 100})
 	require.NoError(t, perr)
 	assert.Contains(t, flowIDs(resp.Flows), open.RequestFlowID)
 }

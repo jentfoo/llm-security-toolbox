@@ -3,8 +3,9 @@ package service
 import (
 	"encoding/base64"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,7 +15,7 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
-func TestMCP_ProxyPoll(t *testing.T) {
+func TestHandleProxyPoll(t *testing.T) {
 	t.Parallel()
 
 	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
@@ -142,6 +143,9 @@ func TestMCP_ProxyPoll(t *testing.T) {
 			statusEq  int
 			statusMin int
 			statusMax int
+			// uniqueHost/uniquePath: search matches exactly one flow with this identity
+			uniqueHost string
+			uniquePath string
 		}{
 			{
 				name:     "method_filter",
@@ -160,22 +164,33 @@ func TestMCP_ProxyPoll(t *testing.T) {
 				statusMax: 300,
 			},
 			{
-				name: "search_header",
-				args: map[string]interface{}{"output_mode": "flows", "search_header": "searchme"},
+				name:       "search_header",
+				args:       map[string]interface{}{"output_mode": "flows", "search_header": "searchme"},
+				uniqueHost: "test.com",
+				uniquePath: "/api/data",
 			},
 			{
-				name: "search_body",
-				args: map[string]interface{}{"output_mode": "flows", "search_body": "bodysearch"},
+				name:       "search_body",
+				args:       map[string]interface{}{"output_mode": "flows", "search_body": "bodysearch"},
+				uniqueHost: "test.com",
+				uniquePath: "/api/submit",
 			},
 			{
-				name: "search_header_regex",
-				args: map[string]interface{}{"output_mode": "flows", "search_header": "X-Custom:\\s+search.*"},
+				name:       "search_header_regex",
+				args:       map[string]interface{}{"output_mode": "flows", "search_header": "X-Custom:\\s+search.*"},
+				uniqueHost: "test.com",
+				uniquePath: "/api/data",
 			},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				resp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", tc.args)
 				require.NotEmpty(t, resp.Flows)
+				if tc.uniquePath != "" {
+					require.Len(t, resp.Flows, 1)
+					assert.Equal(t, tc.uniqueHost, resp.Flows[0].Host)
+					assert.Equal(t, tc.uniquePath, resp.Flows[0].Path)
+				}
 				for _, flow := range resp.Flows {
 					if tc.wantMeth != "" {
 						assert.Equal(t, tc.wantMeth, flow.Method)
@@ -402,10 +417,6 @@ func TestMCP_ProxyPoll(t *testing.T) {
 		assert.Contains(t, resp.Note, "treated as literal")
 		require.NotEmpty(t, resp.Flows)
 	})
-}
-
-func TestMCP_ProxyPollDomainScoping(t *testing.T) {
-	t.Parallel()
 
 	t.Run("allowed_domains_filters", func(t *testing.T) {
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
@@ -513,7 +524,7 @@ func TestMCP_ProxyPollDomainScoping(t *testing.T) {
 	})
 }
 
-func TestMCP_FlowGet(t *testing.T) {
+func TestHandleFlowGet(t *testing.T) {
 	t.Parallel()
 
 	_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
@@ -707,6 +718,98 @@ func TestMCP_FlowGet(t *testing.T) {
 		assert.True(t, result.IsError)
 		assert.Contains(t, ExtractMCPText(t, result), "not found")
 	})
+
+	// A gzip body truncated at max_body_bytes cannot be decoded and renders a marker.
+	t.Run("truncated_undecodable", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		full := compressGzip(t, []byte("a fairly long body that compresses to more than a handful of bytes so truncation breaks the stream"))
+		truncated := full[:len(full)/2]
+		fid := mockHTTP.AddProxyEntry(
+			"GET /big HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"+string(truncated),
+			"",
+		)
+		getResp := CallMCPToolJSONOK[protocol.FlowGetResponse](t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": fid,
+			"scope":   "response_body",
+		})
+		assert.Contains(t, getResp.RespBody, "COMPRESSED-UNDECODABLE")
+	})
+
+	// A replay-sourced flow resolves and is labeled source=replay.
+	t.Run("replay_source", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		mockHTTP.AddProxyEntry("GET /replay-test HTTP/1.1\r\nHost: mock.test\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\noriginal", "")
+		mockHTTP.SetSendResult("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n", "replayed response")
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"method":      "GET",
+		})
+		require.NotEmpty(t, listResp.Flows)
+		sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id": listResp.Flows[0].FlowID,
+		})
+
+		var raw map[string]interface{}
+		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{"flow_id": sendResp.FlowID})
+		require.NoError(t, json.Unmarshal([]byte(text), &raw))
+		assert.Equal(t, sendResp.FlowID, raw["flow_id"])
+		assert.Equal(t, "replay", raw["source"])
+		assert.Contains(t, raw, "response_headers")
+	})
+
+	// A crawl-sourced gzip body decodes for full_body.
+	t.Run("crawl_gzip_full_body", func(t *testing.T) {
+		_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://example.com",
+		})
+		const originalBody = "This is the decompressed crawl response"
+		compressedBody := compressGzip(t, []byte(originalBody))
+		require.NoError(t, mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
+			ID: "crawl-compressed-flow", SessionID: createResp.SessionID, URL: "https://example.com/compressed",
+			Host: "example.com", Path: "/compressed", Method: "GET", StatusCode: 200, ResponseLength: len(compressedBody),
+			Request:  []byte("GET /compressed HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+			Response: append([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"), compressedBody...),
+		}))
+
+		getResp := CallMCPToolJSONOK[protocol.FlowGetResponse](t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id":   "crawl-compressed-flow",
+			"full_body": true,
+		})
+		decoded, err := base64.StdEncoding.DecodeString(getResp.RespBody)
+		require.NoError(t, err)
+		assert.Equal(t, originalBody, string(decoded))
+	})
+
+	// A crawl-sourced flow honors scope selection.
+	t.Run("crawl_scope_response_body", func(t *testing.T) {
+		_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
+			"seed_urls": "https://example.com",
+		})
+		require.NoError(t, mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
+			ID: "scope-flow", SessionID: createResp.SessionID, URL: "https://example.com/scoped",
+			Host: "example.com", Path: "/scoped", Method: "GET", StatusCode: 200,
+			Request:  []byte("GET /scoped HTTP/1.1\r\nHost: example.com\r\n\r\nreq body"),
+			Response: []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nresp body content"),
+		}))
+
+		var raw map[string]interface{}
+		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{
+			"flow_id": "scope-flow",
+			"scope":   "response_body",
+		})
+		require.NoError(t, json.Unmarshal([]byte(text), &raw))
+		assert.Contains(t, raw, "response_body")
+		assert.NotContains(t, raw, "request_headers")
+		assert.Contains(t, raw, "flow_id")
+	})
 }
 
 // Note: Gzip decompression for full_body is tested via TestMCP_FlowGetDecompressesGzipBody
@@ -748,25 +851,38 @@ func TestMCP_ProxyRules(t *testing.T) {
 
 		t.Run("list_rules", func(t *testing.T) {
 			resp := CallMCPToolJSONOK[protocol.RuleListResponse](t, mcpClient, "proxy_rule_list", nil)
-
-			var found bool
-			for _, r := range resp.Rules {
-				if r.RuleID == ruleID {
-					found = true
-					break
-				}
-			}
-			assert.True(t, found)
+			assert.True(t, slices.ContainsFunc(resp.Rules, func(r protocol.RuleEntry) bool { return r.RuleID == ruleID }))
 		})
 
 		t.Run("list_with_type_filter", func(t *testing.T) {
-			for _, tf := range []string{"http", "websocket"} {
-				t.Run(tf, func(t *testing.T) {
-					_ = CallMCPToolJSONOK[protocol.RuleListResponse](t, mcpClient, "proxy_rule_list", map[string]interface{}{
-						"type_filter": tf,
-					})
+			wsRule := CallMCPToolJSONOK[protocol.RuleEntry](t, mcpClient, "proxy_rule_add", map[string]interface{}{
+				"type":    wire.RuleTypeWSBoth,
+				"label":   "ws-filter-rule",
+				"replace": "x",
+			})
+			require.NotEmpty(t, wsRule.RuleID)
+
+			t.Run("http_excludes_ws", func(t *testing.T) {
+				resp := CallMCPToolJSONOK[protocol.RuleListResponse](t, mcpClient, "proxy_rule_list", map[string]interface{}{
+					"type_filter": "http",
 				})
-			}
+				require.NotEmpty(t, resp.Rules)
+				for _, r := range resp.Rules {
+					assert.False(t, strings.HasPrefix(r.Type, "ws:"), r.Type)
+				}
+				assert.False(t, slices.ContainsFunc(resp.Rules, func(r protocol.RuleEntry) bool { return r.RuleID == wsRule.RuleID }))
+			})
+
+			t.Run("websocket_only_ws", func(t *testing.T) {
+				resp := CallMCPToolJSONOK[protocol.RuleListResponse](t, mcpClient, "proxy_rule_list", map[string]interface{}{
+					"type_filter": "websocket",
+				})
+				require.NotEmpty(t, resp.Rules)
+				for _, r := range resp.Rules {
+					assert.True(t, strings.HasPrefix(r.Type, "ws:"), r.Type)
+				}
+				assert.True(t, slices.ContainsFunc(resp.Rules, func(r protocol.RuleEntry) bool { return r.RuleID == wsRule.RuleID }))
+			})
 		})
 
 		t.Run("list_with_limit", func(t *testing.T) {
@@ -1210,226 +1326,6 @@ func TestMCP_CookieJar(t *testing.T) {
 		require.Len(t, resp.Cookies, 1)
 		assert.Equal(t, "plainvalue123", resp.Cookies[0].Value)
 		assert.Nil(t, resp.Cookies[0].Decoded)
-	})
-}
-
-func TestMCP_FlowGetCompressedBody(t *testing.T) {
-	t.Parallel()
-
-	t.Run("decompressed", func(t *testing.T) {
-		_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
-			"seed_urls": "https://example.com",
-		})
-
-		const originalBody = "This is the decompressed crawl response"
-		compressedBody := compressGzip(t, []byte(originalBody))
-
-		const respHeaders = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"
-
-		const flowID = "crawl-compressed-flow"
-		err := mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
-			ID:             flowID,
-			SessionID:      createResp.SessionID,
-			URL:            "https://example.com/compressed",
-			Host:           "example.com",
-			Path:           "/compressed",
-			Method:         "GET",
-			StatusCode:     200,
-			ResponseLength: len(compressedBody),
-			Request:        []byte("GET /compressed HTTP/1.1\r\nHost: example.com\r\n\r\n"),
-			Response:       append([]byte(respHeaders), compressedBody...),
-		})
-		require.NoError(t, err)
-
-		getResult := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
-			"flow_id":   flowID,
-			"full_body": true,
-		})
-		require.False(t, getResult.IsError)
-
-		var getResp protocol.FlowGetResponse
-		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, getResult)), &getResp))
-
-		decodedBody, err := base64.StdEncoding.DecodeString(getResp.RespBody)
-		require.NoError(t, err)
-		assert.Equal(t, originalBody, string(decodedBody))
-	})
-
-	t.Run("truncated_undecodable", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		// truncated gzip stream: mirrors a body capped at max_body_bytes
-		full := compressGzip(t, []byte("a fairly long body that compresses to more than a handful of bytes so truncation breaks the stream"))
-		truncated := full[:len(full)/2]
-
-		flowID := mockHTTP.AddProxyEntry(
-			"GET /big HTTP/1.1\r\nHost: example.com\r\n\r\n",
-			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"+string(truncated),
-			"",
-		)
-
-		getResp := CallMCPToolJSONOK[protocol.FlowGetResponse](t, mcpClient, "flow_get", map[string]interface{}{
-			"flow_id": flowID,
-			"scope":   "response_body",
-		})
-		assert.Contains(t, getResp.RespBody, "COMPRESSED-UNDECODABLE")
-	})
-}
-
-func TestHandleFlowGetForReplay(t *testing.T) {
-	t.Parallel()
-
-	t.Run("happy_path", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		mockHTTP.AddProxyEntry(
-			"GET /replay-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
-			"HTTP/1.1 200 OK\r\n\r\noriginal",
-			"",
-		)
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n",
-			"replayed response",
-		)
-
-		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
-			"output_mode": "flows",
-			"method":      "GET",
-		})
-		require.NotEmpty(t, listResp.Flows)
-		flowID := listResp.Flows[0].FlowID
-
-		sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id": flowID,
-		})
-
-		var raw map[string]interface{}
-		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{
-			"flow_id": sendResp.FlowID,
-		})
-		require.NoError(t, json.Unmarshal([]byte(text), &raw))
-		assert.Equal(t, sendResp.FlowID, raw["flow_id"])
-		assert.Equal(t, "replay", raw["source"])
-		assert.Contains(t, raw, "response_headers")
-	})
-
-	t.Run("missing_flow_id", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "flow_id is required")
-	})
-
-	t.Run("invalid_flow_id", func(t *testing.T) {
-		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		result := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
-			"flow_id": "nonexistent",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "not found")
-	})
-
-	t.Run("full_body_base64", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		mockHTTP.AddProxyEntry(
-			"GET /api/replay HTTP/1.1\r\nHost: test.com\r\n\r\n",
-			"HTTP/1.1 200 OK\r\n\r\noriginal",
-			"",
-		)
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n",
-			"replay response body",
-		)
-
-		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
-			"output_mode": "flows",
-			"host":        "test.com",
-		})
-		require.NotEmpty(t, listResp.Flows)
-		flowID := listResp.Flows[0].FlowID
-
-		sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id": flowID,
-		})
-		require.NotEmpty(t, sendResp.FlowID)
-
-		getResult := CallMCPTool(t, mcpClient, "flow_get", map[string]interface{}{
-			"flow_id":   sendResp.FlowID,
-			"full_body": true,
-		})
-		require.False(t, getResult.IsError)
-
-		var getResp protocol.FlowGetResponse
-		require.NoError(t, json.Unmarshal([]byte(ExtractMCPText(t, getResult)), &getResp))
-
-		decodedBody, err := base64.StdEncoding.DecodeString(getResp.RespBody)
-		require.NoError(t, err)
-		assert.Equal(t, "replay response body", string(decodedBody))
-	})
-}
-
-func TestMCP_FlowGetWithCrawlScope(t *testing.T) {
-	t.Parallel()
-
-	_, mcpClient, _, _, mockCrawler := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-	createResp := CallMCPToolJSONOK[protocol.CrawlCreateResponse](t, mcpClient, "crawl_create", map[string]interface{}{
-		"seed_urls": "https://example.com",
-	})
-
-	require.NoError(t, mockCrawler.AddFlow(createResp.SessionID, CrawlFlow{
-		ID:         "scope-flow",
-		SessionID:  createResp.SessionID,
-		URL:        "https://example.com/scoped",
-		Host:       "example.com",
-		Path:       "/scoped",
-		Method:     "GET",
-		StatusCode: 200,
-		Request:    []byte("GET /scoped HTTP/1.1\r\nHost: example.com\r\n\r\nreq body"),
-		Response:   []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nresp body content"),
-		Duration:   5 * time.Millisecond,
-	}))
-
-	t.Run("response_body_only", func(t *testing.T) {
-		var raw map[string]interface{}
-		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{
-			"flow_id": "scope-flow",
-			"scope":   "response_body",
-		})
-		require.NoError(t, json.Unmarshal([]byte(text), &raw))
-		assert.Contains(t, raw, "response_body")
-		assert.NotContains(t, raw, "request_headers")
-		assert.Contains(t, raw, "flow_id")
-	})
-
-	t.Run("pattern_matches", func(t *testing.T) {
-		var raw map[string]interface{}
-		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{
-			"flow_id": "scope-flow",
-			"scope":   "response_body",
-			"pattern": "resp.*content",
-		})
-		require.NoError(t, json.Unmarshal([]byte(text), &raw))
-		assert.Contains(t, raw, "response_body")
-		respBody, ok := raw["response_body"].(string)
-		require.True(t, ok)
-		assert.Contains(t, respBody, "resp body content")
-	})
-
-	t.Run("pattern_no_match_omits", func(t *testing.T) {
-		var raw map[string]interface{}
-		text := CallMCPToolTextOK(t, mcpClient, "flow_get", map[string]interface{}{
-			"flow_id": "scope-flow",
-			"scope":   "response_body",
-			"pattern": "NONEXISTENT_xyz",
-		})
-		require.NoError(t, json.Unmarshal([]byte(text), &raw))
-		assert.NotContains(t, raw, "response_body")
 	})
 }
 

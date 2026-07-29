@@ -46,28 +46,6 @@ func TestMCP_OastLifecycleWithMock(t *testing.T) {
 		assert.LessOrEqual(t, len(resp.Sessions), 1)
 	})
 
-	pollCases := []struct {
-		name string
-		args map[string]interface{}
-	}{
-		{name: "poll_basic", args: map[string]interface{}{}},
-		{name: "poll_no_wait", args: map[string]interface{}{"wait": "0s"}},
-		{name: "poll_with_wait", args: map[string]interface{}{"wait": "100ms"}},
-		{name: "poll_with_type_filter", args: map[string]interface{}{"type": "dns"}},
-		{name: "poll_with_limit", args: map[string]interface{}{"limit": 5}},
-	}
-	for _, tc := range pollCases {
-		t.Run(tc.name, func(t *testing.T) {
-			args := make(map[string]interface{}, len(tc.args)+1)
-			args["oast_id"] = oastID
-			for k, v := range tc.args {
-				args[k] = v
-			}
-			_ = CallMCPToolJSONOK[protocol.OastPollResponse](t, mcpClient, "oast_poll", args)
-			// Events may be empty, but response should parse.
-		})
-	}
-
 	t.Run("poll_with_since", func(t *testing.T) {
 		// Add an event to mock backend
 		mockOast.events[oastID] = append(mockOast.events[oastID], OastEventInfo{
@@ -257,49 +235,39 @@ func TestMCP_OastLifecycleWithMock(t *testing.T) {
 	})
 
 	t.Run("summary_limit", func(t *testing.T) {
-		// Add events that aggregate to 3 groups
-		for i := 0; i < 3; i++ {
-			mockOast.events[oastID] = append(mockOast.events[oastID], OastEventInfo{
-				ID:        fmt.Sprintf("dns-event-%d", i),
-				Time:      time.Now(),
-				Type:      "dns",
-				SourceIP:  "10.0.0.1",
-				Subdomain: "a",
+		// Fresh session so aggregate counts are exact (the shared session accumulates
+		// events across sibling subtests).
+		sess := CallMCPToolJSONOK[protocol.OastCreateResponse](t, mcpClient, "oast_create", map[string]interface{}{
+			"label": "oast-summary-limit",
+		})
+		// 3 dns from one source + 1 http + 1 smtp aggregate to 3 groups (dns count 3).
+		for i := range 3 {
+			mockOast.events[sess.OastID] = append(mockOast.events[sess.OastID], OastEventInfo{
+				ID: fmt.Sprintf("dns-event-%d", i), Time: time.Now(), Type: "dns", SourceIP: "10.0.0.1", Subdomain: "a",
 			})
 		}
-		mockOast.events[oastID] = append(mockOast.events[oastID], OastEventInfo{
-			ID:        "http-event-1",
-			Time:      time.Now(),
-			Type:      "http",
-			SourceIP:  "10.0.0.2",
-			Subdomain: "b",
+		mockOast.events[sess.OastID] = append(mockOast.events[sess.OastID], OastEventInfo{
+			ID: "http-event-1", Time: time.Now(), Type: "http", SourceIP: "10.0.0.2", Subdomain: "b",
 		})
-		mockOast.events[oastID] = append(mockOast.events[oastID], OastEventInfo{
-			ID:        "smtp-event-1",
-			Time:      time.Now(),
-			Type:      "smtp",
-			SourceIP:  "10.0.0.3",
-			Subdomain: "c",
+		mockOast.events[sess.OastID] = append(mockOast.events[sess.OastID], OastEventInfo{
+			ID: "smtp-event-1", Time: time.Now(), Type: "smtp", SourceIP: "10.0.0.3", Subdomain: "c",
 		})
 
-		// Without limit: should have at least 3 aggregate rows
 		allResp := CallMCPToolJSONOK[protocol.OastPollResponse](t, mcpClient, "oast_poll", map[string]interface{}{
-			"oast_id": oastID,
+			"oast_id": sess.OastID,
 			"wait":    "0s",
 		})
-		require.GreaterOrEqual(t, len(allResp.Aggregates), 3)
+		require.Len(t, allResp.Aggregates, 3)
 
-		// With limit=1: only top aggregate row
 		limitResp := CallMCPToolJSONOK[protocol.OastPollResponse](t, mcpClient, "oast_poll", map[string]interface{}{
-			"oast_id": oastID,
+			"oast_id": sess.OastID,
 			"wait":    "0s",
 			"limit":   1,
 		})
 		require.Len(t, limitResp.Aggregates, 1)
-		// Top aggregate should have the full count, not truncated by pre-aggregation limit
-		assert.GreaterOrEqual(t, limitResp.Aggregates[0].Count, 3)
-		// TotalCount indicates how many aggregates exist before truncation
-		assert.GreaterOrEqual(t, limitResp.TotalCount, 3)
+		// Top aggregate keeps its full count, not truncated by the pre-aggregation limit.
+		assert.Equal(t, 3, limitResp.Aggregates[0].Count)
+		assert.Equal(t, 3, limitResp.TotalCount) // aggregates before truncation
 	})
 
 	t.Run("delete", func(t *testing.T) {
@@ -349,54 +317,27 @@ func TestMCP_OastValidation(t *testing.T) {
 		assert.Contains(t, ExtractMCPText(t, result), "invalid wait duration")
 	})
 
-	t.Run("poll_missing_id", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "oast_poll", map[string]interface{}{})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "oast_id is required")
-	})
-
-	t.Run("poll_invalid_id", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "oast_poll", map[string]interface{}{
-			"oast_id": "nonexistent",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "not found")
-	})
-
-	t.Run("get_missing_event_id", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "oast_get", map[string]interface{}{})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "event_id is required")
-	})
-
-	t.Run("get_invalid_fields", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "oast_get", map[string]interface{}{
-			"event_id": "any",
-			"fields":   "invalid",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "invalid field")
-	})
-
-	t.Run("get_not_found", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "oast_get", map[string]interface{}{
-			"event_id": "nonexistent",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "event_id not found")
-	})
-
-	t.Run("delete_missing_id", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "oast_delete", map[string]interface{}{})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "oast_id is required")
-	})
-
-	t.Run("delete_invalid_id", func(t *testing.T) {
-		result := CallMCPTool(t, mcpClient, "oast_delete", map[string]interface{}{
-			"oast_id": "nonexistent",
-		})
-		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "not found")
+	t.Run("guard_clauses", func(t *testing.T) {
+		cases := []struct {
+			name string
+			tool string
+			args map[string]interface{}
+			want string
+		}{
+			{"poll_missing_id", "oast_poll", map[string]interface{}{}, "oast_id is required"},
+			{"poll_invalid_id", "oast_poll", map[string]interface{}{"oast_id": "nonexistent"}, "not found"},
+			{"get_missing_event_id", "oast_get", map[string]interface{}{}, "event_id is required"},
+			{"get_invalid_fields", "oast_get", map[string]interface{}{"event_id": "any", "fields": "invalid"}, "invalid field"},
+			{"get_not_found", "oast_get", map[string]interface{}{"event_id": "nonexistent"}, "event_id not found"},
+			{"delete_missing_id", "oast_delete", map[string]interface{}{}, "oast_id is required"},
+			{"delete_invalid_id", "oast_delete", map[string]interface{}{"oast_id": "nonexistent"}, "not found"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				result := CallMCPTool(t, mcpClient, tc.tool, tc.args)
+				assert.True(t, result.IsError)
+				assert.Contains(t, ExtractMCPText(t, result), tc.want)
+			})
+		}
 	})
 }

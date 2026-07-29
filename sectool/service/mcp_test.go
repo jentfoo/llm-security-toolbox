@@ -17,6 +17,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// toolNames returns the tool names from a tools/list result.
+func toolNames(result *mcp.ListToolsResult) []string {
+	names := make([]string, len(result.Tools))
+	for i, tool := range result.Tools {
+		names[i] = tool.Name
+	}
+	return names
+}
+
 func CallMCPTool(t *testing.T, client *mcpclient.Client, name string, args map[string]interface{}) *mcp.CallToolResult {
 	t.Helper()
 

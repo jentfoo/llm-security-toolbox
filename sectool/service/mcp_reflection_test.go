@@ -224,118 +224,68 @@ func TestHandleFindReflected(t *testing.T) {
 	})
 }
 
+// reflectionsByKey indexes extracted params by "source:name" for exact lookups.
+func reflectionsByKey(params []protocol.Reflection) map[string]protocol.Reflection {
+	m := make(map[string]protocol.Reflection, len(params))
+	for _, p := range params {
+		m[p.Source+":"+p.Name] = p
+	}
+	return m
+}
+
 func TestExtractParams(t *testing.T) {
 	t.Parallel()
 
 	t.Run("query_params", func(t *testing.T) {
 		raw := []byte("GET /search?q=hello&page=1 HTTP/1.1\r\nHost: example.com\r\n\r\n")
-		params := extractParams(raw)
-
-		var found bool
-		for _, p := range params {
-			if p.Name == "q" && p.Source == "query" && p.Value == "hello" {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found)
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "hello", byKey["query:q"].Value)
+		assert.Equal(t, "1", byKey["query:page"].Value)
 	})
 
 	t.Run("bare_lf_query", func(t *testing.T) {
 		// tolerant parser accepts bare-LF requests; query must still be extracted
 		raw := []byte("GET /search?q=hello&page=1 HTTP/1.1\nHost: example.com\n\n")
-		params := extractParams(raw)
-
-		assert.True(t, slices.ContainsFunc(params, func(p protocol.Reflection) bool {
-			return p.Name == "q" && p.Source == "query" && p.Value == "hello"
-		}))
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "hello", byKey["query:q"].Value)
 	})
 
 	t.Run("url_decoded_query", func(t *testing.T) {
 		raw := []byte("GET /search?q=%3Cscript%3E HTTP/1.1\r\nHost: example.com\r\n\r\n")
-		params := extractParams(raw)
-
-		var found bool
-		for _, p := range params {
-			if p.Name == "q" && p.Source == "query" && p.Value == "<script>" {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found)
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "<script>", byKey["query:q"].Value)
 	})
 
 	t.Run("form_body", func(t *testing.T) {
 		raw := []byte("POST /login HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nuser=alice&pass=secret")
-		params := extractParams(raw)
-
-		var userFound, passFound bool
-		for _, p := range params {
-			if p.Name == "user" && p.Source == "body" && p.Value == "alice" {
-				userFound = true
-			} else if p.Name == "pass" && p.Source == "body" && p.Value == "secret" {
-				passFound = true
-			}
-		}
-		assert.True(t, userFound)
-		assert.True(t, passFound)
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "alice", byKey["body:user"].Value)
+		assert.Equal(t, "secret", byKey["body:pass"].Value)
 	})
 
 	t.Run("json_body", func(t *testing.T) {
 		raw := []byte("POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\n\r\n" +
 			`{"user":{"name":"alice","active":true},"count":5,"items":["one","two"]}`)
-		params := extractParams(raw)
-
-		paramMap := make(map[string]protocol.Reflection)
-		for _, p := range params {
-			if p.Source == "json" {
-				paramMap[p.Name] = p
-			}
-		}
-
-		assert.Equal(t, "alice", paramMap["user.name"].Value)
-		assert.Equal(t, "one", paramMap["items[0]"].Value)
-		assert.Equal(t, "two", paramMap["items[1]"].Value)
-		assert.Equal(t, "true", paramMap["user.active"].Value)
-		assert.Equal(t, "5", paramMap["count"].Value)
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "alice", byKey["json:user.name"].Value)
+		assert.Equal(t, "one", byKey["json:items[0]"].Value)
+		assert.Equal(t, "two", byKey["json:items[1]"].Value)
+		assert.Equal(t, "true", byKey["json:user.active"].Value)
+		assert.Equal(t, "5", byKey["json:count"].Value)
 	})
 
 	t.Run("cookies", func(t *testing.T) {
 		raw := []byte("GET / HTTP/1.1\r\nHost: example.com\r\nCookie: session=abc123; theme=dark\r\n\r\n")
-		params := extractParams(raw)
-
-		var sessionFound, themeFound bool
-		for _, p := range params {
-			if p.Source != "cookie" {
-				continue
-			}
-			if p.Name == "session" && p.Value == "abc123" {
-				sessionFound = true
-			} else if p.Name == "theme" && p.Value == "dark" {
-				themeFound = true
-			}
-		}
-		assert.True(t, sessionFound)
-		assert.True(t, themeFound)
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "abc123", byKey["cookie:session"].Value)
+		assert.Equal(t, "dark", byKey["cookie:theme"].Value)
 	})
 
 	t.Run("headers", func(t *testing.T) {
 		raw := []byte("GET / HTTP/1.1\r\nHost: example.com\r\nReferer: https://evil.com\r\nX-Custom: test-value\r\n\r\n")
-		params := extractParams(raw)
-
-		var refererFound, customFound bool
-		for _, p := range params {
-			if p.Source != "header" {
-				continue
-			}
-			if p.Name == "Referer" && p.Value == "https://evil.com" {
-				refererFound = true
-			} else if p.Name == "X-Custom" && p.Value == "test-value" {
-				customFound = true
-			}
-		}
-		assert.True(t, refererFound)
-		assert.True(t, customFound)
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "https://evil.com", byKey["header:Referer"].Value)
+		assert.Equal(t, "test-value", byKey["header:X-Custom"].Value)
 	})
 
 	t.Run("multipart_body", func(t *testing.T) {
@@ -344,69 +294,42 @@ func TestExtractParams(t *testing.T) {
 			"--boundary\r\nContent-Disposition: form-data; name=\"field2\"\r\n\r\nvalue2\r\n" +
 			"--boundary--\r\n"
 		raw := []byte("POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Type: multipart/form-data; boundary=boundary\r\n\r\n" + body)
-		params := extractParams(raw)
-
-		var field1Found, field2Found, fileFound bool
-		for _, p := range params {
-			if p.Source != "body" {
-				continue
-			}
-			if p.Name == "field1" && p.Value == "value1" {
-				field1Found = true
-			} else if p.Name == "field2" && p.Value == "value2" {
-				field2Found = true
-			} else if p.Name == "file" {
-				fileFound = true
-			}
-		}
-		assert.True(t, field1Found)
-		assert.True(t, field2Found)
-		assert.False(t, fileFound) // file uploads should be skipped
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "value1", byKey["body:field1"].Value)
+		assert.Equal(t, "value2", byKey["body:field2"].Value)
+		_, fileExtracted := byKey["body:file"]
+		assert.False(t, fileExtracted) // file uploads should be skipped
 	})
 
 	t.Run("no_body", func(t *testing.T) {
 		raw := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
 		params := extractParams(raw)
-
-		for _, p := range params {
-			assert.NotEqual(t, "body", p.Source)
-			assert.NotEqual(t, "json", p.Source)
-		}
+		assert.False(t, slices.ContainsFunc(params, func(p protocol.Reflection) bool {
+			return p.Source == "body" || p.Source == "json"
+		}))
 	})
 
 	t.Run("h2_lowercase_headers", func(t *testing.T) {
 		// H2 headers are lowercase; standard headers should be skipped, custom headers extracted
 		raw := []byte("GET / HTTP/1.1\r\nhost: example.com\r\ncookie: sess=abc123\r\nreferer: https://evil.com\r\nx-custom: test-value\r\n\r\n")
 		params := extractParams(raw)
+		byKey := reflectionsByKey(params)
 
-		paramMap := make(map[string]protocol.Reflection)
-		for _, p := range params {
-			paramMap[p.Source+":"+p.Name] = p
-		}
+		assert.Equal(t, "abc123", byKey["cookie:sess"].Value)
+		assert.Equal(t, "test-value", byKey["header:X-Custom"].Value)
 
-		assert.Equal(t, "abc123", paramMap["cookie:sess"].Value)
-		assert.Equal(t, "test-value", paramMap["header:X-Custom"].Value)
-
-		// host should be skipped (standard header)
-		for _, p := range params {
-			if p.Source == "header" {
-				assert.NotEqual(t, "example.com", p.Value)
-			}
-		}
+		// host is a standard header and must be skipped
+		assert.False(t, slices.ContainsFunc(params, func(p protocol.Reflection) bool {
+			return p.Source == "header" && p.Value == "example.com"
+		}))
 	})
 
 	t.Run("h2_multiple_cookie_headers", func(t *testing.T) {
 		// H2 may split cookies across multiple headers
 		raw := []byte("GET / HTTP/1.1\r\nhost: example.com\r\ncookie: session=abc123\r\ncookie: theme=dark-mode\r\n\r\n")
-		params := extractParams(raw)
-
-		paramMap := make(map[string]protocol.Reflection)
-		for _, p := range params {
-			paramMap[p.Source+":"+p.Name] = p
-		}
-
-		assert.Equal(t, "abc123", paramMap["cookie:session"].Value)
-		assert.Equal(t, "dark-mode", paramMap["cookie:theme"].Value)
+		byKey := reflectionsByKey(extractParams(raw))
+		assert.Equal(t, "abc123", byKey["cookie:session"].Value)
+		assert.Equal(t, "dark-mode", byKey["cookie:theme"].Value)
 	})
 }
 
@@ -626,10 +549,9 @@ func TestClassifyReflectionContext(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		body   string
-		offset int // offset of the "MATCH" marker
-		want   string
+		name string
+		body string
+		want string
 	}{
 		{
 			name: "html_text",
@@ -687,9 +609,6 @@ func TestClassifyReflectionContext(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			idx := strings.Index(tt.body, "MATCH")
 			require.GreaterOrEqual(t, idx, 0)
-			if tt.offset > 0 {
-				idx = tt.offset
-			}
 			assert.Equal(t, tt.want, classifyReflectionContext(tt.body, idx))
 		})
 	}

@@ -131,17 +131,13 @@ func TestMCP_ListTools(t *testing.T) {
 		"find_reflected",
 	}
 
-	toolNames := make([]string, len(result.Tools))
-	for i, tool := range result.Tools {
-		toolNames[i] = tool.Name
-	}
-
+	names := toolNames(result)
 	for _, expected := range expectedTools {
-		assert.Contains(t, toolNames, expected)
+		assert.Contains(t, names, expected)
 	}
 
 	// Internal/CLI-only tools must not appear in tools/list
-	for _, name := range toolNames {
+	for _, name := range names {
 		assert.NotContains(t, name, InternalToolPrefix, "internal tool %s leaked into tools/list", name)
 	}
 }
@@ -260,6 +256,7 @@ type mockHttpBackend struct {
 	entries     []ProxyEntry
 	sendResults []*SendRequestResult // queue of responses for SendRequest
 	lastSentReq []byte               // last RawRequest from SendRequest
+	lastSendReq SendRequestInput     // last full input to SendRequest
 	rules       []protocol.RuleEntry // in-memory rules (both HTTP and WS)
 	responders  []protocol.ResponderEntry
 }
@@ -371,6 +368,7 @@ func (b *mockHttpBackend) SendRequest(ctx context.Context, name string, req Send
 	defer b.mu.Unlock()
 
 	b.lastSentReq = slices.Clone(req.RawRequest)
+	b.lastSendReq = req
 
 	if len(b.sendResults) > 0 {
 		result := b.sendResults[0]
@@ -595,6 +593,14 @@ func (b *mockHttpBackend) LastSentRequest() string {
 	defer b.mu.Unlock()
 
 	return string(b.lastSentReq)
+}
+
+// LastSendInput returns the last full input passed to SendRequest.
+func (b *mockHttpBackend) LastSendInput() SendRequestInput {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.lastSendReq
 }
 
 type mockOastBackend struct {

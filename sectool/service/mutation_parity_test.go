@@ -10,6 +10,10 @@ import (
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
 
+// TestMutationParity is a cross-implementation parity check: the service builds
+// mutation ops with buildMutations (op ordering covered by TestBuildMutations) and
+// the sidecar SDK applies them via sidecar.ApplyMutations. It verifies both sides
+// agree on the resulting body/query, mirroring the native replay path.
 func TestMutationParity(t *testing.T) {
 	t.Parallel()
 

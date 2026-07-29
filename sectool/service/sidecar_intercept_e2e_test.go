@@ -5,13 +5,11 @@ package service
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"io"
 	"net"
-	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -20,9 +18,7 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
 	"github.com/go-appsec/toolbox/sectool/protocol"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	scsidecar "github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
-	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -32,6 +28,7 @@ import (
 // when the opening bytes carry probeMarker.
 type echoHandler struct {
 	sidecar.BaseHandler
+	t           *testing.T
 	conn        *sidecar.Conn
 	probeMarker []byte
 	opened      chan string
@@ -48,7 +45,7 @@ func (h *echoHandler) OnStreamOpen(p wire.StreamOpenParams) ([]wire.StreamWrite,
 }
 
 func (h *echoHandler) OnStreamDeliver(p wire.StreamWriteParams) ([]wire.StreamWrite, error) {
-	_, _ = h.conn.PushFlow(context.Background(), wire.Flow{
+	_, _ = h.conn.PushFlow(h.t.Context(), wire.Flow{
 		ProtocolTag: "echo/1",
 		Direction:   "client_to_server",
 		Request:     &wire.FlowMessage{Method: "MSG", Path: "/echo", Body: p.Data},
@@ -73,43 +70,16 @@ type interceptHarness struct {
 // connects an echo sidecar declaring caps.
 func startIntercept(t *testing.T, name string, caps wire.Capabilities, probeMarker []byte) *interceptHarness {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	require.NoError(t, backend.WaitReady(t.Context()))
-	t.Cleanup(func() {
-		srv.RequestShutdown()
+	sb := startSidecarBackend(t, scsidecar.Config{})
+	sc := sb.dial(t, sidecar.Registration{
+		Name:         name,
+		Protocols:    []string{"echo/1"},
+		Capabilities: caps,
 	})
 
-	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
-
-	sc, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
-		Name:            name,
-		Protocols:       []string{"echo/1"},
-		Capabilities:    caps,
-		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sc.Close() })
-
-	echo := &echoHandler{conn: sc, probeMarker: probeMarker, opened: make(chan string, 4)}
+	echo := &echoHandler{t: t, conn: sc, probeMarker: probeMarker, opened: make(chan string, 4)}
 	go func() { _ = sc.Serve(t.Context(), echo) }()
-	return &interceptHarness{proxyAddr: backend.Addr(), mcp: mcpClient, sc: sc, echo: echo}
+	return &interceptHarness{proxyAddr: sb.proxyAddr(), mcp: sb.mcp, sc: sc, echo: echo}
 }
 
 // roundTrip writes msg to conn and reads exactly len(msg) bytes back.
@@ -132,7 +102,6 @@ func TestSidecarRawEarlyClaimE2E(t *testing.T) {
 
 	h := startIntercept(t, "echo-raw",
 		wire.Capabilities{EarlyClaims: []wire.EarlyClaim{{MagicBytesPrefix: magic("ECHO")}}}, nil)
-	ctx := t.Context()
 
 	var d net.Dialer
 	conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
@@ -147,11 +116,19 @@ func TestSidecarRawEarlyClaimE2E(t *testing.T) {
 	got = roundTrip(t, conn, []byte("ECHO again"))
 	assert.Equal(t, "ECHO again", string(got))
 
-	// The exchange is captured as a flow attributed to the sidecar.
+	// The exchange is captured as flows attributed to the sidecar, at the echo path.
+	var flows []protocol.FlowEntry
 	require.Eventually(t, func() bool {
-		resp, perr := h.mcp.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: "echo-raw", Limit: 100})
-		return perr == nil && len(resp.Flows) > 0
+		resp, perr := h.mcp.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: "echo-raw", Limit: 100})
+		if perr != nil || len(resp.Flows) == 0 {
+			return false
+		}
+		flows = resp.Flows
+		return true
 	}, 5*time.Second, 20*time.Millisecond)
+	assert.True(t, slices.ContainsFunc(flows, func(f protocol.FlowEntry) bool {
+		return f.Path == "/echo" && f.Method == "MSG"
+	}))
 }
 
 func TestSidecarRawEarlyClaimFallthrough(t *testing.T) {
@@ -167,12 +144,7 @@ func TestSidecarRawEarlyClaimFallthrough(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	_, err = conn.Write([]byte("GET http://127.0.0.1:9/ HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"))
-	require.NoError(t, err)
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	line, err := bufio.NewReader(conn).ReadString('\n')
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(line, "HTTP/"), "expected HTTP response, got %q", line)
+	assertHTTPFallthrough(t, conn)
 }
 
 func TestSidecarTLSTerminateEarlyClaimE2E(t *testing.T) {
@@ -229,12 +201,7 @@ func TestSidecarProbeEarlyClaimE2E(t *testing.T) {
 		conn, err := d.DialContext(t.Context(), "tcp", h.proxyAddr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
-		_, err = conn.Write([]byte("GET http://127.0.0.1:9/ HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"))
-		require.NoError(t, err)
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		line, rerr := bufio.NewReader(conn).ReadString('\n')
-		require.NoError(t, rerr)
-		assert.True(t, strings.HasPrefix(line, "HTTP/"))
+		assertHTTPFallthrough(t, conn)
 	})
 }
 
@@ -267,9 +234,7 @@ func TestSidecarProactiveStreamOutput(t *testing.T) {
 	assert.Equal(t, "PING", string(buf))
 
 	require.NoError(t, h.sc.CloseStream(id, "done", false))
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, err = conn.Read(make([]byte, 16))
-	require.ErrorIs(t, err, io.EOF)
+	assertClientClosed(t, conn)
 }
 
 func TestSidecarDeathTearsDownStream(t *testing.T) {
@@ -293,7 +258,5 @@ func TestSidecarDeathTearsDownStream(t *testing.T) {
 
 	// On sidecar disconnect the claimed client socket is closed, not orphaned
 	require.NoError(t, h.sc.Close())
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, err = conn.Read(make([]byte, 16))
-	require.ErrorIs(t, err, io.EOF)
+	assertClientClosed(t, conn)
 }

@@ -3,7 +3,6 @@
 package service
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,10 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/toolbox/sectool/protocol"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	scsidecar "github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
-	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -24,37 +20,20 @@ func TestSidecarDisconnectFinalizeE2E(t *testing.T) {
 
 	const adapterName = "disconnect-sidecar"
 
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
+	sb := startSidecarBackend(t, scsidecar.Config{})
+	backend, socket := sb.backend, sb.socket
 
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-	})
-
-	ctx := t.Context()
 	host := []wire.Header{{Name: "Host", Value: "unit.test"}}
 
 	t.Run("non_resume_finalizes_open_flow", func(t *testing.T) {
-		conn, derr := sidecar.Dial(ctx, socket, sidecar.Registration{
+		conn, derr := sidecar.Dial(t.Context(), socket, sidecar.Registration{
 			Name:            adapterName,
 			InstanceID:      uuid.NewString(),
 			ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
 		})
 		require.NoError(t, derr)
 
-		flowID, perr := conn.PushFlow(ctx, wire.Flow{
+		flowID, perr := conn.PushFlow(t.Context(), wire.Flow{
 			ProtocolTag: "custom/1.req",
 			Request:     &wire.FlowMessage{Method: "GET", Path: "/open", Headers: host},
 		})
@@ -80,10 +59,10 @@ func TestSidecarDisconnectFinalizeE2E(t *testing.T) {
 			Resume:          true,
 			ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
 		}
-		conn, derr := sidecar.Dial(ctx, socket, reg)
+		conn, derr := sidecar.Dial(t.Context(), socket, reg)
 		require.NoError(t, derr)
 
-		flowID, perr := conn.PushFlow(ctx, wire.Flow{
+		flowID, perr := conn.PushFlow(t.Context(), wire.Flow{
 			ProtocolTag: "custom/1.req",
 			Request:     &wire.FlowMessage{Method: "GET", Path: "/resumable", Headers: host},
 		})
@@ -91,10 +70,10 @@ func TestSidecarDisconnectFinalizeE2E(t *testing.T) {
 		require.NoError(t, conn.Close())
 
 		// reconnect with the same instance and complete the flow the sidecar left open
-		conn2, derr := sidecar.Dial(ctx, socket, reg)
+		conn2, derr := sidecar.Dial(t.Context(), socket, reg)
 		require.NoError(t, derr)
 		t.Cleanup(func() { _ = conn2.Close() })
-		require.NoError(t, conn2.CompleteFlow(ctx, flowID, &wire.FlowMessage{StatusCode: 200}, time.Now()))
+		require.NoError(t, conn2.CompleteFlow(t.Context(), flowID, &wire.FlowMessage{StatusCode: 200}, time.Now()))
 
 		flow, ok := backend.server.History().Get(flowID)
 		require.True(t, ok)

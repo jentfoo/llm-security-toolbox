@@ -494,49 +494,40 @@ func TestNativeProxyBackend_Rules_Persistence(t *testing.T) {
 func TestNativeProxyBackend_SendRequest(t *testing.T) {
 	t.Parallel()
 
-	// Start test server
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Test", "response")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("Hello from server"))
-	}))
-	t.Cleanup(testServer.Close)
+	t.Run("basic", func(t *testing.T) {
+		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Test", "response")
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("Hello from server"))
+		}))
+		t.Cleanup(testServer.Close)
 
-	// Parse test server URL
-	serverURL, err := url.Parse(testServer.URL)
-	require.NoError(t, err)
+		serverURL, err := url.Parse(testServer.URL)
+		require.NoError(t, err)
 
-	// Create backend (doesn't need to serve for SendRequest)
-	backend := newTestNativeBackend(t)
+		backend := newTestNativeBackend(t)
 
-	// Send request directly (not through proxy)
-	rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
-	result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
-		RawRequest: rawReq,
-		Target: types.Target{
-			Hostname:  serverURL.Hostname(),
-			Port:      mustParsePort(t, serverURL.Port()),
-			UsesHTTPS: false,
-		},
+		rawReq := []byte("GET /test HTTP/1.1\r\nHost: " + serverURL.Host + "\r\n\r\n")
+		result, err := backend.SendRequest(t.Context(), "test", SendRequestInput{
+			RawRequest: rawReq,
+			Target: types.Target{
+				Hostname:  serverURL.Hostname(),
+				Port:      mustParsePort(t, serverURL.Port()),
+				UsesHTTPS: false,
+			},
+		})
+		require.NoError(t, err)
+
+		assert.Contains(t, string(result.Headers), "200")
+		assert.Contains(t, string(result.Headers), "X-Test: response")
+		assert.Equal(t, "Hello from server", string(result.Body))
+
+		// Headers split must not leak the body, and must end with the terminator
+		assert.NotContains(t, string(result.Headers), "Hello from server")
+		assert.True(t, bytes.HasSuffix(result.Headers, []byte("\r\n\r\n")))
 	})
-	require.NoError(t, err)
-
-	assert.Contains(t, string(result.Headers), "200")
-	assert.Contains(t, string(result.Headers), "X-Test: response")
-	assert.Equal(t, "Hello from server", string(result.Body))
-
-	// Verify Headers does NOT contain the body (regression test)
-	assert.NotContains(t, string(result.Headers), "Hello from server")
-	// Headers should end with header terminator
-	assert.True(t, bytes.HasSuffix(result.Headers, []byte("\r\n\r\n")))
-}
-
-func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
-	t.Parallel()
 
 	t.Run("request_header_rule", func(t *testing.T) {
-		t.Parallel()
-
 		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Received", r.Header.Get("X-Rule-Added"))
 			w.WriteHeader(200)
@@ -572,8 +563,6 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 	})
 
 	t.Run("no_rules_unchanged", func(t *testing.T) {
-		t.Parallel()
-
 		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte("OK"))
@@ -603,8 +592,6 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 	})
 
 	t.Run("rules_no_match", func(t *testing.T) {
-		t.Parallel()
-
 		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(200)
 		}))
@@ -615,7 +602,6 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 
 		backend := newTestNativeBackend(t)
 
-		// Add a rule that won't match
 		_, err = backend.AddRule(t.Context(), protocol.RuleEntry{
 			Type:    wire.RuleTypeRequestHeader,
 			Find:    "X-Nonexistent: value",
@@ -639,8 +625,6 @@ func TestNativeProxyBackend_SendRequest_AppliesRules(t *testing.T) {
 	})
 
 	t.Run("redirect_request_header_rule_no_accumulation", func(t *testing.T) {
-		t.Parallel()
-
 		var hopCounts []int
 		testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hopCounts = append(hopCounts, len(r.Header.Values("X-Rule-Added")))
@@ -692,13 +676,8 @@ func TestNativeProxyBackend_Close(t *testing.T) {
 	go func() { _ = backend.Serve() }()
 	require.NoError(t, backend.WaitReady(t.Context()))
 
-	// Close should succeed
-	err = backend.Close(t.Context())
-	require.NoError(t, err)
-
-	// Double close should be safe
-	err = backend.Close(t.Context())
-	require.NoError(t, err)
+	require.NoError(t, backend.Close(t.Context()))
+	require.NoError(t, backend.Close(t.Context())) // double close is safe
 }
 
 func TestNativeProxyBackend_HTTPS_Proxy(t *testing.T) {
@@ -756,7 +735,7 @@ func mustParsePort(t *testing.T, portStr string) int {
 // Rule Application Tests
 // =============================================================================
 
-func TestApplyRequestRules(t *testing.T) {
+func TestNativeProxyBackend_ApplyRequestRules(t *testing.T) {
 	t.Parallel()
 
 	configDir := t.TempDir() // shared so CA cert is generated once
@@ -1102,7 +1081,7 @@ func TestApplyRequestRules(t *testing.T) {
 	})
 }
 
-func TestApplyResponseRules(t *testing.T) {
+func TestNativeProxyBackend_ApplyResponseRules(t *testing.T) {
 	t.Parallel()
 
 	configDir := t.TempDir() // shared so CA cert is generated once
@@ -1332,7 +1311,7 @@ func TestApplyResponseRules(t *testing.T) {
 	})
 }
 
-func TestApplyWSRules(t *testing.T) {
+func TestNativeProxyBackend_ApplyWSRules(t *testing.T) {
 	t.Parallel()
 
 	configDir := t.TempDir() // shared so CA cert is generated once
@@ -1579,7 +1558,7 @@ func TestParseHeadersFromText(t *testing.T) {
 	}
 }
 
-func TestApplyRequestHeaderOnlyRules(t *testing.T) {
+func TestNativeProxyBackend_ApplyRequestHeaderOnlyRules(t *testing.T) {
 	t.Parallel()
 
 	configDir := t.TempDir() // shared so CA cert is generated once
@@ -1624,7 +1603,7 @@ func TestApplyRequestHeaderOnlyRules(t *testing.T) {
 	})
 }
 
-func TestApplyRequestBodyOnlyRules(t *testing.T) {
+func TestNativeProxyBackend_ApplyRequestBodyOnlyRules(t *testing.T) {
 	t.Parallel()
 
 	configDir := t.TempDir() // shared so CA cert is generated once

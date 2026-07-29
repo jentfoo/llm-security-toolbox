@@ -51,7 +51,7 @@ func TestNativeProxyBackendSidecarLifecycle(t *testing.T) {
 		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
 		Protocols:       []string{"custom.foo"},
 	}
-	require.Nil(t, p.Call(ctx, wire.MethodRegister, params, &res))
+	require.Nil(t, p.Call(ctx, wire.MethodRegister, params, &res)) // Call returns *wire.Error, not error
 	assert.Equal(t, 1, backend.sidecarManager.Count())
 
 	require.NoError(t, backend.Close(t.Context()))

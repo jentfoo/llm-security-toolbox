@@ -36,7 +36,8 @@ func TestMCP_HistoryDelete(t *testing.T) {
 		assert.Equal(t, []string{pid}, resp.Skipped)
 
 		// Proxy entry and note both untouched
-		got, _ := mockHTTP.GetProxyHistory(t.Context(), 100, "")
+		got, err := mockHTTP.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, pid, got[0].FlowID)
 		n1, ok := srv.noteStore.Get("n1")
@@ -59,7 +60,8 @@ func TestMCP_HistoryDelete(t *testing.T) {
 		assert.Equal(t, []string{pid1}, resp.Skipped)
 
 		// pid1 (note-protected) survives; pid2 is gone
-		got, _ := mockHTTP.GetProxyHistory(t.Context(), 100, "")
+		got, err := mockHTTP.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, pid1, got[0].FlowID)
 	})
@@ -156,7 +158,8 @@ func TestMCP_HistoryDelete(t *testing.T) {
 		// Survivors remain
 		_, ok := srv.replayHistoryStore.Get("r2")
 		assert.True(t, ok)
-		got, _ := mockHTTP.GetProxyHistory(t.Context(), 100, "")
+		got, err := mockHTTP.GetProxyHistory(t.Context(), 100, "")
+		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, pid2, got[0].FlowID)
 	})

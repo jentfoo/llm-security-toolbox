@@ -16,49 +16,41 @@ import (
 func TestNativeProxyBackend_AddResponder(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newTestNativeBackend(t)
 
-	entry, err := backend.AddResponder(t.Context(), protocol.ResponderEntry{
-		Origin:     "https://example.com",
-		Path:       "/set-cookies",
-		StatusCode: 200,
-		Headers:    map[string]string{"Set-Cookie": "session=abc123"},
-		Body:       "<html>ok</html>",
-		Label:      "set-cookies",
+	t.Run("stores_response_and_generates_id", func(t *testing.T) {
+		entry, err := backend.AddResponder(t.Context(), protocol.ResponderEntry{
+			Origin:     "https://example.com",
+			Path:       "/set-cookies",
+			StatusCode: 200,
+			Headers:    map[string]string{"Set-Cookie": "session=abc123"},
+			Body:       "<html>ok</html>",
+			Label:      "set-cookies",
+		})
+		require.NoError(t, err)
+		assert.NotEmpty(t, entry.ResponderID)
+		assert.Equal(t, "https://example.com", entry.Origin)
+		assert.Equal(t, "/set-cookies", entry.Path)
+		assert.Equal(t, "set-cookies", entry.Label)
+		assert.Equal(t, 200, entry.StatusCode)
+		assert.Equal(t, "<html>ok</html>", entry.Body)
+		assert.Equal(t, map[string]string{"Set-Cookie": "session=abc123"}, entry.Headers)
 	})
-	require.NoError(t, err)
-	assert.NotEmpty(t, entry.ResponderID)
-	assert.Equal(t, "https://example.com", entry.Origin)
-	assert.Equal(t, "/set-cookies", entry.Path)
-	assert.Equal(t, 200, entry.StatusCode)
-	assert.Equal(t, "set-cookies", entry.Label)
-	assert.Equal(t, "<html>ok</html>", entry.Body)
-	assert.Equal(t, map[string]string{"Set-Cookie": "session=abc123"}, entry.Headers)
-}
 
-func TestNativeProxyBackend_AddResponder_DefaultStatus(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
-
-	entry, err := backend.AddResponder(t.Context(), protocol.ResponderEntry{
-		Origin: "https://example.com",
-		Path:   "/page",
+	t.Run("default_status", func(t *testing.T) {
+		entry, err := backend.AddResponder(t.Context(), protocol.ResponderEntry{
+			Origin: "https://example.com",
+			Path:   "/page",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 200, entry.StatusCode)
 	})
-	require.NoError(t, err)
-	assert.Equal(t, 200, entry.StatusCode)
 }
 
 func TestNativeProxyBackend_DeleteResponder(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newTestNativeBackend(t)
 
 	entry, err := backend.AddResponder(t.Context(), protocol.ResponderEntry{
 		Origin: "https://example.com",
@@ -90,9 +82,7 @@ func TestNativeProxyBackend_DeleteResponder(t *testing.T) {
 func TestNativeProxyBackend_ListResponders(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newTestNativeBackend(t)
 
 	// Empty list
 	list, err := backend.ListResponders(t.Context())
@@ -120,11 +110,9 @@ func TestNativeProxyBackend_ListResponders(t *testing.T) {
 func TestNativeProxyBackend_InterceptRequest(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newTestNativeBackend(t)
 
-	_, err = backend.AddResponder(t.Context(), protocol.ResponderEntry{
+	_, err := backend.AddResponder(t.Context(), protocol.ResponderEntry{
 		Origin:     "https://example.com",
 		Path:       "/set-state",
 		Method:     "GET",
@@ -166,34 +154,20 @@ func TestNativeProxyBackend_InterceptRequest(t *testing.T) {
 		require.NotNil(t, resp)
 	})
 
-	t.Run("query_ignored", func(t *testing.T) {
-		// The handler strips query before calling InterceptRequest,
-		// so passing path without query should match
-		resp := backend.InterceptRequest("example.com", 443, "/set-state", "GET")
-		require.NotNil(t, resp)
+	t.Run("empty_method_matches_all", func(t *testing.T) {
+		_, err := backend.AddResponder(t.Context(), protocol.ResponderEntry{
+			Origin:     "https://example.com",
+			Path:       "/any-method",
+			StatusCode: 204,
+		})
+		require.NoError(t, err)
+
+		for _, method := range []string{"GET", "POST", "PUT", "DELETE"} {
+			resp := backend.InterceptRequest("example.com", 443, "/any-method", method)
+			require.NotNilf(t, resp, "method %s", method)
+			assert.Equal(t, 204, resp.StatusCode)
+		}
 	})
-}
-
-func TestNativeProxyBackend_InterceptRequest_AllMethods(t *testing.T) {
-	t.Parallel()
-
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
-
-	// Empty method matches all
-	_, err = backend.AddResponder(t.Context(), protocol.ResponderEntry{
-		Origin:     "https://example.com",
-		Path:       "/any-method",
-		StatusCode: 204,
-	})
-	require.NoError(t, err)
-
-	for _, method := range []string{"GET", "POST", "PUT", "DELETE"} {
-		resp := backend.InterceptRequest("example.com", 443, "/any-method", method)
-		require.NotNil(t, resp, "should match method %s", method)
-		assert.Equal(t, 204, resp.StatusCode)
-	}
 }
 
 func TestNativeProxyBackend_Responder_Persistence(t *testing.T) {
@@ -234,11 +208,9 @@ func TestNativeProxyBackend_Responder_Persistence(t *testing.T) {
 func TestNativeProxyBackend_Responder_LabelUniqueness(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = backend.Close(context.Background()) })
+	backend := newTestNativeBackend(t)
 
-	_, err = backend.AddResponder(t.Context(), protocol.ResponderEntry{
+	_, err := backend.AddResponder(t.Context(), protocol.ResponderEntry{
 		Origin: "https://example.com",
 		Path:   "/a",
 		Label:  "my-label",

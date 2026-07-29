@@ -46,6 +46,7 @@ func TestCoreInvoke(t *testing.T) {
 	t.Run("rejects_unknown_tool", func(t *testing.T) {
 		_, _, err := srv.CoreInvoke(t.Context(), "definitely_not_a_tool", nil)
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown tool")
 	})
 
 	t.Run("flow_get_returns_flow", func(t *testing.T) {

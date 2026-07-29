@@ -3,7 +3,6 @@
 package service
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,7 +12,6 @@ import (
 	"io"
 	"math/big"
 	"net"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -23,10 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
-	"github.com/go-appsec/toolbox/sectool/protocol"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	scsidecar "github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
-	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -35,13 +30,13 @@ import (
 // upstream via dial_upstream and proxies bytes between the two streams.
 type forwardHandler struct {
 	sidecar.BaseHandler
+	t      *testing.T
 	conn   *sidecar.Conn
 	dialFn func(*forwardHandler, wire.StreamOpenParams) (wire.DialUpstreamParams, error)
 
 	mu      sync.Mutex
 	pair    map[string]string
 	dialErr chan error
-	opened  chan string
 }
 
 func (h *forwardHandler) OnShutdown(int) {}
@@ -50,15 +45,11 @@ func (h *forwardHandler) OnStreamOpen(p wire.StreamOpenParams) ([]wire.StreamWri
 	params, err := h.dialFn(h, p)
 	if err == nil {
 		var up string
-		if up, err = h.conn.DialUpstream(context.Background(), params); err == nil {
+		if up, err = h.conn.DialUpstream(h.t.Context(), params); err == nil {
 			h.mu.Lock()
 			h.pair[p.StreamID] = up
 			h.pair[up] = p.StreamID
 			h.mu.Unlock()
-			select {
-			case h.opened <- p.StreamID:
-			default:
-			}
 			return nil, nil
 		}
 	}
@@ -101,48 +92,17 @@ type forwardHarness struct {
 func startForward(t *testing.T, name string, caps wire.Capabilities, scope func(string) (bool, string),
 	dialFn func(*forwardHandler, wire.StreamOpenParams) (wire.DialUpstreamParams, error)) *forwardHarness {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{
-		Socket:          socket,
-		NativeProxyPort: 0,
-		ScopeCheck:      scope,
-	}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	require.NoError(t, backend.WaitReady(t.Context()))
-	t.Cleanup(func() {
-		srv.RequestShutdown()
+	sb := startSidecarBackend(t, scsidecar.Config{ScopeCheck: scope})
+	sc := sb.dial(t, sidecar.Registration{
+		Name:         name,
+		Protocols:    []string{"forward/1"},
+		Capabilities: caps,
 	})
 
-	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
-
-	sc, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
-		Name:            name,
-		Protocols:       []string{"forward/1"},
-		Capabilities:    caps,
-		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sc.Close() })
-
-	fwd := &forwardHandler{conn: sc, dialFn: dialFn, pair: map[string]string{},
-		dialErr: make(chan error, 4), opened: make(chan string, 4)}
+	fwd := &forwardHandler{t: t, conn: sc, dialFn: dialFn, pair: map[string]string{},
+		dialErr: make(chan error, 4)}
 	go func() { _ = sc.Serve(t.Context(), fwd) }()
-	return &forwardHarness{proxyAddr: backend.Addr(), mcp: mcpClient, sc: sc, fwd: fwd}
+	return &forwardHarness{proxyAddr: sb.proxyAddr(), mcp: sb.mcp, sc: sc, fwd: fwd}
 }
 
 // startEchoServer runs a TCP echo server, optionally over TLS, and returns its
@@ -263,9 +223,7 @@ func TestSidecarDialUpstreamOutOfScope(t *testing.T) {
 	assert.Equal(t, wire.CodeDialScopeRejected, werr.Code)
 
 	// The rejected stream is torn down (client socket is closed) not left to hit the deadline
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, err = conn.Read(make([]byte, 16))
-	require.ErrorIs(t, err, io.EOF)
+	assertClientClosed(t, conn)
 }
 
 func TestSidecarDialUpstreamTLS(t *testing.T) {
@@ -298,7 +256,7 @@ func TestSidecarDialUpstreamDefaultDest(t *testing.T) {
 	h := startForward(t, "fwd-default",
 		wire.Capabilities{EarlyClaims: []wire.EarlyClaim{{MagicBytesPrefix: magic("FWD")}}}, nil,
 		func(fh *forwardHandler, _ wire.StreamOpenParams) (wire.DialUpstreamParams, error) {
-			fid, perr := fh.conn.PushFlow(context.Background(), wire.Flow{
+			fid, perr := fh.conn.PushFlow(fh.t.Context(), wire.Flow{
 				ProtocolTag: "session/1",
 				Direction:   "bidirectional",
 				Scheme:      "http",
@@ -317,5 +275,7 @@ func TestSidecarDialUpstreamDefaultDest(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
+	// The round-trip echoes back only if the dial to the parent-flow-derived
+	// destination succeeded, so this exercises parent-flow destination resolution.
 	assert.Equal(t, "FWD defaulted", string(roundTrip(t, conn, []byte("FWD defaulted"))))
 }

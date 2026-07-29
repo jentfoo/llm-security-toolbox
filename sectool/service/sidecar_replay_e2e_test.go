@@ -3,7 +3,6 @@
 package service
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,10 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
-	"github.com/go-appsec/toolbox/sectool/protocol"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	scsidecar "github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
-	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -53,46 +49,21 @@ func TestSidecarReplaySendE2E(t *testing.T) {
 
 	const adapterName = "mqtt"
 
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
+	sb := startSidecarBackend(t, scsidecar.Config{})
+	backend, srv, mcpClient := sb.backend, sb.srv, sb.mcp
 
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
+	conn := sb.dial(t, sidecar.Registration{
+		Name:      adapterName,
+		Protocols: []string{"mqtt/3"},
 	})
-
-	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
-
-	conn, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
-		Name:            adapterName,
-		Protocols:       []string{"mqtt/3"},
-		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
-	ctx := t.Context()
 
 	// install up front: Serve's own install races the sidecar_send request below
 	h := &replaySendHandler{t: t, conn: conn, got: make(chan wire.SidecarSendParams, 1)}
 	conn.SetHandler(h)
-	go func() { _ = conn.Serve(ctx, h) }()
+	go func() { _ = conn.Serve(t.Context(), h) }()
 
 	// The adapter owns a flow in history.
-	flowID, err := conn.PushFlow(ctx, wire.Flow{
+	flowID, err := conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag: "mqtt/3.publish",
 		Request: &wire.FlowMessage{
 			Method:  "PUBLISH",
@@ -103,7 +74,7 @@ func TestSidecarReplaySendE2E(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resp, err := mcpClient.ReplaySend(ctx, mcpclient.ReplaySendOpts{
+	resp, err := mcpClient.ReplaySend(t.Context(), mcpclient.ReplaySendOpts{
 		FlowID:         flowID,
 		SetHeaders:     []string{"X-New: 1"},
 		Body:           "raw",

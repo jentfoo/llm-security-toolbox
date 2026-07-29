@@ -159,18 +159,17 @@ func TestBurpGetProxyHistoryRegex_MatchHost(t *testing.T) {
 }
 
 func TestBurpSetInterceptState(t *testing.T) {
-	ctx := t.Context()
 	client := connectOrSkip(t)
 
 	// Turn off interception
-	err := client.SetInterceptState(ctx, false)
+	err := client.SetInterceptState(t.Context(), false)
 	require.NoError(t, err)
 
 	// Turn it back on (but immediately off to not block user's Burp)
-	err = client.SetInterceptState(ctx, true)
+	err = client.SetInterceptState(t.Context(), true)
 	require.NoError(t, err)
 
-	err = client.SetInterceptState(ctx, false)
+	err = client.SetInterceptState(t.Context(), false)
 	require.NoError(t, err)
 }
 
@@ -411,15 +410,14 @@ func TestBurpGetProxyWebsocketHistoryRegex_NoMatch(t *testing.T) {
 }
 
 func TestBurpSetTaskExecutionEngineState(t *testing.T) {
-	ctx := t.Context()
 	client := connectOrSkip(t)
 
 	// Pause the engine (running=false)
-	err := client.SetTaskExecutionEngineState(ctx, false)
+	err := client.SetTaskExecutionEngineState(t.Context(), false)
 	require.NoError(t, err)
 
 	// Resume immediately (running=true)
-	err = client.SetTaskExecutionEngineState(ctx, true)
+	err = client.SetTaskExecutionEngineState(t.Context(), true)
 	require.NoError(t, err)
 }
 
@@ -485,11 +483,10 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 	t.Skip("tests only work if burp allows config edits")
 
 	t.Run("add_remove", func(t *testing.T) {
-		ctx := t.Context()
 		client := connectOrSkip(t)
 
 		// Get original rules to restore later
-		original, err := client.GetMatchReplaceRules(ctx)
+		original, err := client.GetMatchReplaceRules(t.Context())
 		require.NoError(t, err)
 		t.Cleanup(func() { // Restore original rules
 			_ = client.SetMatchReplaceRules(context.Background(), original)
@@ -506,11 +503,11 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 		}
 		newRules := append([]MatchReplaceRule{testRule}, original...)
 
-		err = client.SetMatchReplaceRules(ctx, newRules)
+		err = client.SetMatchReplaceRules(t.Context(), newRules)
 		require.NoError(t, err)
 
 		// Verify the rule was added
-		updated, err := client.GetMatchReplaceRules(ctx)
+		updated, err := client.GetMatchReplaceRules(t.Context())
 		require.NoError(t, err)
 
 		var found bool
@@ -527,10 +524,9 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 	})
 
 	t.Run("regex_rule", func(t *testing.T) {
-		ctx := t.Context()
 		client := connectOrSkip(t)
 
-		original, err := client.GetMatchReplaceRules(ctx)
+		original, err := client.GetMatchReplaceRules(t.Context())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = client.SetMatchReplaceRules(context.Background(), original) })
 
@@ -545,10 +541,10 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 		}
 		newRules := append([]MatchReplaceRule{testRule}, original...)
 
-		err = client.SetMatchReplaceRules(ctx, newRules)
+		err = client.SetMatchReplaceRules(t.Context(), newRules)
 		require.NoError(t, err)
 
-		updated, err := client.GetMatchReplaceRules(ctx)
+		updated, err := client.GetMatchReplaceRules(t.Context())
 		require.NoError(t, err)
 
 		var found bool
@@ -565,10 +561,9 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 	})
 
 	t.Run("all_rule_types", func(t *testing.T) {
-		ctx := t.Context()
 		client := connectOrSkip(t)
 
-		original, err := client.GetMatchReplaceRules(ctx)
+		original, err := client.GetMatchReplaceRules(t.Context())
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = client.SetMatchReplaceRules(context.Background(), original) })
 
@@ -593,10 +588,10 @@ func TestBurpSetMatchReplaceRules(t *testing.T) {
 		}
 		newRules := append(testRules, original...)
 
-		err = client.SetMatchReplaceRules(ctx, newRules)
+		err = client.SetMatchReplaceRules(t.Context(), newRules)
 		require.NoError(t, err)
 
-		updated, err := client.GetMatchReplaceRules(ctx)
+		updated, err := client.GetMatchReplaceRules(t.Context())
 		require.NoError(t, err)
 
 		// Verify rule types were added

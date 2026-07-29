@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1719,17 +1720,15 @@ func TestValidateWireAnomalies(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			issues := validateWireAnomalies([]byte(tt.headers))
-			if len(tt.wantChecks) == 0 {
-				assert.Empty(t, issues)
-				return
-			}
+			// Distinct check types (a header may repeat header-whitespace per line).
+			// Exact set so a spurious extra anomaly type is caught as a regression.
 			var gotChecks []string
 			for _, iss := range issues {
-				gotChecks = append(gotChecks, iss.Check)
+				if !slices.Contains(gotChecks, iss.Check) {
+					gotChecks = append(gotChecks, iss.Check)
+				}
 			}
-			for _, want := range tt.wantChecks {
-				assert.Contains(t, gotChecks, want)
-			}
+			assert.ElementsMatch(t, tt.wantChecks, gotChecks)
 		})
 	}
 }
@@ -2496,14 +2495,14 @@ func TestCompressBody(t *testing.T) {
 			result, failed := compressBody(tt.body, tt.encoding)
 			assert.Equal(t, tt.wantFailed, failed)
 			if tt.wantCompress {
-				assert.NotEqual(t, tt.body, result, "body should be compressed")
+				assert.NotEqual(t, tt.body, result)
 				// Verify round-trip
 				headerStr := "Content-Encoding: " + tt.encoding + "\r\n"
 				decompressed, undecodable := decompressForDisplay(result, headerStr)
 				assert.False(t, undecodable)
 				assert.Equal(t, string(tt.body), string(decompressed))
 			} else {
-				assert.Equal(t, string(tt.body), string(result), "body should be unchanged")
+				assert.Equal(t, string(tt.body), string(result))
 			}
 		})
 	}

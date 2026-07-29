@@ -17,7 +17,7 @@ func TestCompileSearchPattern(t *testing.T) {
 		pattern   string
 		input     string
 		wantMatch bool
-		wantNote  bool
+		wantNote  string
 	}{
 		{
 			name:      "valid_regex",
@@ -36,7 +36,7 @@ func TestCompileSearchPattern(t *testing.T) {
 			pattern:   `[invalid`,
 			input:     "text with [invalid inside",
 			wantMatch: true,
-			wantNote:  true,
+			wantNote:  `invalid regex "[invalid", treated as literal`,
 		},
 		{
 			name:      "literal_string",
@@ -50,21 +50,21 @@ func TestCompileSearchPattern(t *testing.T) {
 			pattern:   `www\\.google\\.com`,
 			input:     "https://www.google.com/",
 			wantMatch: true,
-			wantNote:  true,
+			wantNote:  `pattern had double-escaped regex metacharacters, auto-corrected to "www\\.google\\.com"`,
 		},
 		{
 			name:      "double_escaped_star",
 			pattern:   `Accept: \\*/\\*`,
 			input:     "Accept: */*",
 			wantMatch: true,
-			wantNote:  true,
+			wantNote:  `pattern had double-escaped regex metacharacters, auto-corrected to "Accept: \\*/\\*"`,
 		},
 		{
 			name:      "double_escaped_shorthand",
 			pattern:   `\\d+\\.\\d+`,
 			input:     "version 1.23",
 			wantMatch: true,
-			wantNote:  true,
+			wantNote:  `pattern had double-escaped regex metacharacters, auto-corrected to "\\d+\\.\\d+"`,
 		},
 		{
 			name:      "correct_single_escape",
@@ -77,7 +77,7 @@ func TestCompileSearchPattern(t *testing.T) {
 			pattern:   `www\\.google\.com`,
 			input:     "https://www.google.com/",
 			wantMatch: true,
-			wantNote:  true,
+			wantNote:  `pattern had double-escaped regex metacharacters, auto-corrected to "www\\.google\\.com"`,
 		},
 		{
 			name:      "unescaped_dot_wildcard",
@@ -91,7 +91,7 @@ func TestCompileSearchPattern(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			re, note := compileSearchPattern(tt.pattern, false)
 			require.NotNil(t, re)
-			assert.Equal(t, tt.wantNote, note != "")
+			assert.Equal(t, tt.wantNote, note)
 			assert.Equal(t, tt.wantMatch, re.MatchString(tt.input))
 		})
 	}
@@ -108,7 +108,7 @@ func TestCompileSearchPattern(t *testing.T) {
 	t.Run("case_insensitive_invalid_regex", func(t *testing.T) {
 		re, note := compileSearchPattern(`[invalid`, true)
 		require.NotNil(t, re)
-		assert.NotEmpty(t, note)
+		assert.Equal(t, `invalid regex "[invalid", treated as literal`, note)
 		assert.True(t, re.MatchString("text with [INVALID inside"))
 	})
 
@@ -135,44 +135,32 @@ func TestExtractMatchContext(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		pattern    string
-		data       string
-		maxMatches int
-		wantEmpty  bool
-		checks     func(t *testing.T, result string)
+		name         string
+		pattern      string
+		data         string
+		maxMatches   int
+		want         string // exact expected output for deterministic cases
+		wantContains string // used when exact output is too noisy to pin
+		wantEmpty    bool
 	}{
 		{
 			name:    "single_match",
 			pattern: "needle",
 			data:    "haystack needle haystack",
-			checks: func(t *testing.T, result string) {
-				t.Helper()
-
-				assert.Contains(t, result, "needle")
-				assert.NotContains(t, result, "----")
-			},
+			want:    "haystack needle haystack",
 		},
 		{
 			name:    "multiple_matches",
 			pattern: "find",
 			data:    "find me once and find me twice",
-			checks: func(t *testing.T, result string) {
-				t.Helper()
-
-				assert.Contains(t, result, "----")
-			},
+			want:    "find me once and find me twice\n----\nfind me once and find me twice",
 		},
 		{
-			name:       "truncation",
-			pattern:    "x",
-			data:       strings.Repeat("x ", 20),
-			maxMatches: 3,
-			checks: func(t *testing.T, result string) {
-				t.Helper()
-
-				assert.Contains(t, result, "[truncated: more matches]")
-			},
+			name:         "truncation",
+			pattern:      "x",
+			data:         strings.Repeat("x ", 20),
+			maxMatches:   3,
+			wantContains: "[truncated: more matches]",
 		},
 		{
 			name:      "no_match",
@@ -190,13 +178,7 @@ func TestExtractMatchContext(t *testing.T) {
 			name:    "context_ellipsis",
 			pattern: "TARGET",
 			data:    strings.Repeat("a", 100) + "TARGET" + strings.Repeat("b", 100),
-			checks: func(t *testing.T, result string) {
-				t.Helper()
-
-				assert.True(t, strings.HasPrefix(result, "..."))
-				assert.True(t, strings.HasSuffix(result, "..."))
-				assert.Contains(t, result, "TARGET")
-			},
+			want:    "..." + strings.Repeat("a", 80) + "TARGET" + strings.Repeat("b", 80) + "...",
 		},
 	}
 
@@ -208,11 +190,37 @@ func TestExtractMatchContext(t *testing.T) {
 				maxM = maxMatchesPerSection
 			}
 			result := extractMatchContext(re, []byte(tt.data), maxM)
-			if tt.wantEmpty {
+			switch {
+			case tt.wantEmpty:
 				assert.Empty(t, result)
-			} else if tt.checks != nil {
-				tt.checks(t, result)
+			case tt.wantContains != "":
+				assert.Contains(t, result, tt.wantContains)
+			default:
+				assert.Equal(t, tt.want, result)
 			}
+		})
+	}
+}
+
+func TestUnescapeLiteral(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "no_backslash", in: "hello world", want: "hello world"},
+		{name: "carriage_return_newline", in: "a\\r\\nb", want: "a\r\nb"},
+		{name: "tab", in: "x\\ty", want: "x\ty"},
+		{name: "unknown_escape_kept", in: "a\\zb", want: "a\\zb"},
+		{name: "trailing_backslash", in: "end\\", want: "end\\"},
+		{name: "mixed", in: "\\tvalue\\r", want: "\tvalue\r"},
+		{name: "empty", in: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, unescapeLiteral(tt.in))
 		})
 	}
 }

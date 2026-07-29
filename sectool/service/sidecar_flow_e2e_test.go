@@ -3,7 +3,7 @@
 package service
 
 import (
-	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,9 +13,7 @@ import (
 
 	"github.com/go-appsec/toolbox/sectool/mcpclient"
 	"github.com/go-appsec/toolbox/sectool/protocol"
-	"github.com/go-appsec/toolbox/sectool/service/proxy"
 	scsidecar "github.com/go-appsec/toolbox/sectool/service/proxy/protocol/sidecar"
-	"github.com/go-appsec/toolbox/sectool/service/store"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 )
@@ -38,46 +36,19 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	const adapterName = "custom-sidecar"
 	instanceID := uuid.NewString()
 
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
+	sb := startSidecarBackend(t, scsidecar.Config{})
+	backend, mcpClient := sb.backend, sb.mcp
 
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-
-	// Enable sidecars with the server itself as the core_query dispatcher; Run
-	// starts the backend (proxy + sidecar listener) once the core tools exist.
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	t.Cleanup(func() {
-		srv.RequestShutdown()
+	conn := sb.dial(t, sidecar.Registration{
+		Name:       adapterName,
+		Protocols:  []string{"custom/1"},
+		InstanceID: instanceID,
 	})
-
-	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
-
-	conn, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
-		Name:            adapterName,
-		Protocols:       []string{"custom/1"},
-		InstanceID:      instanceID,
-		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
-	ctx := t.Context()
 
 	host := []wire.Header{{Name: "Host", Value: "unit.test"}}
 
 	// 1. Plain request/response.
-	plainID, err := conn.PushFlow(ctx, wire.Flow{
+	plainID, err := conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag: "custom/1.req",
 		Request:     &wire.FlowMessage{Method: "GET", Path: "/thing", Headers: host},
 		Response:    &wire.FlowMessage{StatusCode: 200, Headers: []wire.Header{{Name: "Content-Type", Value: "application/json"}}, Body: []byte(`{"ok":true}`)},
@@ -85,15 +56,15 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. Two-phase: request first, response attached later under the same id.
-	twoPhaseID, err := conn.PushFlow(ctx, wire.Flow{
+	twoPhaseID, err := conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag: "custom/1.req",
 		Request:     &wire.FlowMessage{Method: "POST", Path: "/submit", Headers: host},
 	})
 	require.NoError(t, err)
-	require.NoError(t, conn.CompleteFlow(ctx, twoPhaseID, &wire.FlowMessage{StatusCode: 201}, time.Now()))
+	require.NoError(t, conn.CompleteFlow(t.Context(), twoPhaseID, &wire.FlowMessage{StatusCode: 201}, time.Now()))
 
 	// 3. Stream: parent + ordered children + close.
-	streamID, err := conn.PushFlow(ctx, wire.Flow{
+	streamID, err := conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag: "custom/1.stream",
 		Request:     &wire.FlowMessage{Method: "STREAM", Path: "/events", Headers: host},
 	})
@@ -101,7 +72,7 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	childPayloads := []string{"one", "two", "three"}
 	childIDs := make([]string, 0, len(childPayloads))
 	for _, payload := range childPayloads {
-		cid, cerr := conn.PushFlow(ctx, wire.Flow{
+		cid, cerr := conn.PushFlow(t.Context(), wire.Flow{
 			ProtocolTag:  "custom/1.chunk",
 			ParentFlowID: streamID,
 			Direction:    "server_to_client",
@@ -110,16 +81,16 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 		require.NoError(t, cerr)
 		childIDs = append(childIDs, cid)
 	}
-	require.NoError(t, conn.CompleteFlow(ctx, streamID, &wire.FlowMessage{StatusCode: 200}, time.Now()))
+	require.NoError(t, conn.CompleteFlow(t.Context(), streamID, &wire.FlowMessage{StatusCode: 200}, time.Now()))
 
 	// 4. Session/tunnel envelope with a nested child.
-	tunnelID, err := conn.PushFlow(ctx, wire.Flow{
+	tunnelID, err := conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag: "custom.tunnel",
 		Direction:   "bidirectional",
 		Request:     &wire.FlowMessage{Method: "TUNNEL", Path: "/custom/tunnel/1", Headers: []wire.Header{{Name: "Peer", Value: "abcd"}}},
 	})
 	require.NoError(t, err)
-	_, err = conn.PushFlow(ctx, wire.Flow{
+	_, err = conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag:  "custom.tunnel.msg",
 		ParentFlowID: tunnelID,
 		Direction:    "client_to_server",
@@ -128,7 +99,7 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	require.NoError(t, err)
 
 	// 5. Flow carrying body_raw/body_codec (logical Body differs from the wire form).
-	rawID, err := conn.PushFlow(ctx, wire.Flow{
+	rawID, err := conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag: "custom/1.bin",
 		Request:     &wire.FlowMessage{Method: "GET", Path: "/bin", Headers: host},
 		Response: &wire.FlowMessage{
@@ -142,7 +113,7 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	require.NoError(t, err)
 
 	// 6. Flow whose request parameter is reflected in the response body.
-	reflectID, err := conn.PushFlow(ctx, wire.Flow{
+	reflectID, err := conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag: "custom/1.req",
 		Request:     &wire.FlowMessage{Method: "GET", Path: "/search?q=reflectme123", Headers: host},
 		Response:    &wire.FlowMessage{StatusCode: 200, Headers: []wire.Header{{Name: "Content-Type", Value: "text/html"}}, Body: []byte("<p>results for reflectme123</p>")},
@@ -150,7 +121,7 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	require.NoError(t, err)
 
 	// 7. Mutated flow carrying sidecar-authored audit annotations (captured/mutated pairing).
-	mutatedID, err := conn.PushFlow(ctx, wire.Flow{
+	mutatedID, err := conn.PushFlow(t.Context(), wire.Flow{
 		ProtocolTag: "custom/1.mutated",
 		Request:     &wire.FlowMessage{Method: "POST", Path: "/mutated", Headers: host},
 		Response:    &wire.FlowMessage{StatusCode: 200},
@@ -159,7 +130,7 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("top_level_flows_filtered_by_adapter", func(t *testing.T) {
-		resp, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: adapterName, Limit: 100})
+		resp, perr := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: adapterName, Limit: 100})
 		require.NoError(t, perr)
 		got := flowIDs(resp.Flows)
 		assert.ElementsMatch(t, []string{plainID, twoPhaseID, streamID, tunnelID, rawID, reflectID, mutatedID}, got)
@@ -168,7 +139,7 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	})
 
 	t.Run("flow_get_surfaces_sidecar_annotations", func(t *testing.T) {
-		got, gerr := mcpClient.FlowGet(ctx, mutatedID, mcpclient.FlowGetOpts{})
+		got, gerr := mcpClient.FlowGet(t.Context(), mutatedID, mcpclient.FlowGetOpts{})
 		require.NoError(t, gerr)
 		assert.Equal(t, "mutated", got.Annotations["phase"])
 		assert.Equal(t, plainID, got.Annotations["parent_flow_id"])
@@ -178,13 +149,13 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	})
 
 	t.Run("flow_get_omits_absent_annotations", func(t *testing.T) {
-		got, gerr := mcpClient.FlowGet(ctx, plainID, mcpclient.FlowGetOpts{})
+		got, gerr := mcpClient.FlowGet(t.Context(), plainID, mcpclient.FlowGetOpts{})
 		require.NoError(t, gerr)
 		assert.Empty(t, got.Annotations)
 	})
 
 	t.Run("proxy_poll_lists_annotations_and_attribution", func(t *testing.T) {
-		resp, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", ProtocolTag: "custom/1.mutated", Limit: 100})
+		resp, perr := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", ProtocolTag: "custom/1.mutated", Limit: 100})
 		require.NoError(t, perr)
 		require.Len(t, resp.Flows, 1)
 		entry := resp.Flows[0]
@@ -196,54 +167,49 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 
 	t.Run("search_body_list_carries_attribution", func(t *testing.T) {
 		// full-text path (search_body) must carry the same attribution as the meta path
-		resp, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", SearchBody: "reflectme123", Limit: 100})
+		resp, perr := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", SearchBody: "reflectme123", Limit: 100})
 		require.NoError(t, perr)
-		var entry *protocol.FlowEntry
-		for i := range resp.Flows {
-			if resp.Flows[i].FlowID == reflectID {
-				entry = &resp.Flows[i]
-			}
-		}
-		require.NotNil(t, entry)
-		assert.Equal(t, adapterName, entry.Adapter)
-		assert.Equal(t, instanceID, entry.SidecarInstanceID)
+		i := slices.IndexFunc(resp.Flows, func(f protocol.FlowEntry) bool { return f.FlowID == reflectID })
+		require.GreaterOrEqual(t, i, 0)
+		assert.Equal(t, adapterName, resp.Flows[i].Adapter)
+		assert.Equal(t, instanceID, resp.Flows[i].SidecarInstanceID)
 	})
 
 	t.Run("find_reflected_on_adapter_flow", func(t *testing.T) {
-		resp, rerr := mcpClient.FindReflected(ctx, reflectID)
+		resp, rerr := mcpClient.FindReflected(t.Context(), reflectID)
 		require.NoError(t, rerr)
 		require.NotEmpty(t, resp.Reflections)
 		assert.Equal(t, "reflectme123", resp.Reflections[0].Value)
 	})
 
 	t.Run("protocol_tag_filter", func(t *testing.T) {
-		resp, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", ProtocolTag: "custom/1.stream", Limit: 100})
+		resp, perr := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", ProtocolTag: "custom/1.stream", Limit: 100})
 		require.NoError(t, perr)
 		assert.Equal(t, []string{streamID}, flowIDs(resp.Flows))
 	})
 
 	t.Run("stream_children_in_emission_order", func(t *testing.T) {
-		resp, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", ParentFlowID: streamID, Limit: 100})
+		resp, perr := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", ParentFlowID: streamID, Limit: 100})
 		require.NoError(t, perr)
 		assert.Equal(t, childIDs, flowIDs(resp.Flows))
 	})
 
 	t.Run("tunnel_child_nesting", func(t *testing.T) {
-		resp, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", ParentFlowID: tunnelID, Limit: 100})
+		resp, perr := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", ParentFlowID: tunnelID, Limit: 100})
 		require.NoError(t, perr)
 		require.Len(t, resp.Flows, 1)
 		assert.Equal(t, "inner", string(mustChildBody(t, backend, resp.Flows[0].FlowID)))
 	})
 
 	t.Run("two_phase_response_attached", func(t *testing.T) {
-		got, gerr := mcpClient.FlowGet(ctx, twoPhaseID, mcpclient.FlowGetOpts{})
+		got, gerr := mcpClient.FlowGet(t.Context(), twoPhaseID, mcpclient.FlowGetOpts{})
 		require.NoError(t, gerr)
 		assert.Equal(t, 201, got.Status)
 	})
 
 	t.Run("body_and_body_raw_round_trip", func(t *testing.T) {
 		// Tools operate on the logical Body.
-		got, gerr := mcpClient.FlowGet(ctx, rawID, mcpclient.FlowGetOpts{})
+		got, gerr := mcpClient.FlowGet(t.Context(), rawID, mcpclient.FlowGetOpts{})
 		require.NoError(t, gerr)
 		assert.Contains(t, got.RespBody, `"decoded":1`)
 		// The wire form and codec are retained for replay.
@@ -262,23 +228,28 @@ func TestSidecarFlowEmissionE2E(t *testing.T) {
 	})
 
 	t.Run("diff_flow_on_adapter_flows", func(t *testing.T) {
-		resp, derr := mcpClient.DiffFlow(ctx, mcpclient.DiffFlowOpts{FlowA: plainID, FlowB: rawID, Scope: "response_body"})
+		resp, derr := mcpClient.DiffFlow(t.Context(), mcpclient.DiffFlowOpts{FlowA: plainID, FlowB: rawID, Scope: "response_body"})
 		require.NoError(t, derr)
 		assert.False(t, resp.Same)
 		require.NotNil(t, resp.Response)
 	})
 
 	t.Run("core_invoke_reads_and_writes", func(t *testing.T) {
-		res, qerr := conn.CoreInvoke(ctx, "proxy_poll", map[string]any{"output_mode": "flows", "adapter": adapterName, "limit": 100})
+		res, qerr := conn.CoreInvoke(t.Context(), "proxy_poll", map[string]any{"output_mode": "flows", "adapter": adapterName, "limit": 100})
 		require.NoError(t, qerr)
 		assert.False(t, res.IsError)
 		assert.Contains(t, res.Content, plainID)
 
-		// write tools are invocable via core_invoke (dispatched, not rejected)
-		_, qerr = conn.CoreInvoke(ctx, "proxy_rule_add", map[string]any{
-			"rule_type": "request_header", "match": "X-A", "replace": "X-B",
+		// write tools are dispatched (not rejected) and take effect
+		addRes, qerr := conn.CoreInvoke(t.Context(), "proxy_rule_add", map[string]any{
+			"type": "request_header", "find": "X-A", "replace": "X-B",
 		})
 		require.NoError(t, qerr)
+		require.False(t, addRes.IsError, addRes.Content)
+
+		listRes, lerr := conn.CoreInvoke(t.Context(), "proxy_rule_list", map[string]any{})
+		require.NoError(t, lerr)
+		assert.Contains(t, listRes.Content, "X-B")
 	})
 }
 

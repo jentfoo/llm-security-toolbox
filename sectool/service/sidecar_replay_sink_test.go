@@ -81,17 +81,22 @@ func replayFlow() *types.Flow {
 // srcActive treats "src123" (replayFlow's parent) as an in-flight replay source.
 func srcActive(id string) bool { return id == "src123" }
 
+// newSink builds a replayRoutingSink over a fresh fake proxy history and replay store.
+func newSink() (*replayRoutingSink, *fakeFlowSink, *store.ReplayHistoryStore) {
+	history := newFakeFlowSink()
+	replay := store.NewReplayHistoryStore(store.NewMemStorage())
+	return &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}, history, replay
+}
+
 func TestReplayRoutingSink(t *testing.T) {
 	t.Parallel()
 
 	t.Run("replay_flow_routed_to_replay_store", func(t *testing.T) {
-		history := newFakeFlowSink()
-		replay := store.NewReplayHistoryStore(store.NewMemStorage())
-		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+		sink, history, replay := newSink()
 
 		id := sink.Store(replayFlow())
 		require.NotEmpty(t, id)
-		assert.Empty(t, history.flows, "replay must not land in proxy history")
+		assert.Empty(t, history.flows)
 
 		entry, ok := replay.Get(id)
 		require.True(t, ok)
@@ -104,9 +109,7 @@ func TestReplayRoutingSink(t *testing.T) {
 	})
 
 	t.Run("parent_not_source_delegates_to_history", func(t *testing.T) {
-		history := newFakeFlowSink()
-		replay := store.NewReplayHistoryStore(store.NewMemStorage())
-		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+		sink, history, replay := newSink()
 
 		f := replayFlow()
 		f.ParentFlowID = "other" // not an in-flight replay source
@@ -117,9 +120,7 @@ func TestReplayRoutingSink(t *testing.T) {
 	})
 
 	t.Run("dial_audit_not_misfiled", func(t *testing.T) {
-		history := newFakeFlowSink()
-		replay := store.NewReplayHistoryStore(store.NewMemStorage())
-		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+		sink, history, replay := newSink()
 
 		f := replayFlow() // parent is the active source, but a dial audit flow
 		f.ProtocolTag = wire.MethodDialUpstream
@@ -130,9 +131,7 @@ func TestReplayRoutingSink(t *testing.T) {
 	})
 
 	t.Run("get_bridges_to_replay_store", func(t *testing.T) {
-		history := newFakeFlowSink()
-		replay := store.NewReplayHistoryStore(store.NewMemStorage())
-		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+		sink, _, _ := newSink()
 
 		f := replayFlow()
 		id := sink.Store(f)
@@ -151,9 +150,7 @@ func TestReplayRoutingSink(t *testing.T) {
 	})
 
 	t.Run("complete_routes_to_replay_store", func(t *testing.T) {
-		history := newFakeFlowSink()
-		replay := store.NewReplayHistoryStore(store.NewMemStorage())
-		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+		sink, history, replay := newSink()
 
 		f := replayFlow()
 		f.Response = nil // deferred: response attached later
@@ -164,7 +161,7 @@ func TestReplayRoutingSink(t *testing.T) {
 		completedAt := f.StartedAt.Add(300 * time.Millisecond)
 		ok := sink.Complete(id, resp, completedAt, map[string]any{"phase": "mutated"})
 		require.True(t, ok)
-		assert.Empty(t, history.flows, "replay completion must not touch proxy history")
+		assert.Empty(t, history.flows)
 
 		entry, ok := replay.Get(id)
 		require.True(t, ok)
@@ -175,9 +172,7 @@ func TestReplayRoutingSink(t *testing.T) {
 	})
 
 	t.Run("zero_duration_completion_not_in_progress", func(t *testing.T) {
-		history := newFakeFlowSink()
-		replay := store.NewReplayHistoryStore(store.NewMemStorage())
-		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+		sink, _, replay := newSink()
 
 		f := replayFlow()
 		f.Response = nil
@@ -192,7 +187,7 @@ func TestReplayRoutingSink(t *testing.T) {
 
 		got, ok := sink.Get(id)
 		require.True(t, ok)
-		assert.False(t, got.CompletedAt.IsZero(), "completed replay must not look in-progress")
+		assert.False(t, got.CompletedAt.IsZero())
 		require.NotNil(t, got.Response)
 
 		re, ok := replay.Get(id)
@@ -201,9 +196,7 @@ func TestReplayRoutingSink(t *testing.T) {
 	})
 
 	t.Run("set_invoked_by_replay_flow", func(t *testing.T) {
-		history := newFakeFlowSink()
-		replay := store.NewReplayHistoryStore(store.NewMemStorage())
-		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+		sink, history, replay := newSink()
 
 		id := sink.Store(replayFlow())
 		require.True(t, sink.SetInvokedBy(id, "caller"))
@@ -221,9 +214,7 @@ func TestReplayRoutingSink(t *testing.T) {
 	})
 
 	t.Run("get_keeps_h2_unframed_body", func(t *testing.T) {
-		history := newFakeFlowSink()
-		replay := store.NewReplayHistoryStore(store.NewMemStorage())
-		sink := &replayRoutingSink{history: history, replay: replay, checkReplaySource: srcActive}
+		sink, _, _ := newSink()
 
 		f := replayFlow()
 		f.ProtocolTag = types.ProtocolH2

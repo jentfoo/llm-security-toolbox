@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -154,7 +155,7 @@ func TestMCP_NotesLifecycle(t *testing.T) {
 func TestMCP_NotesInProxyFlowListing(t *testing.T) {
 	t.Parallel()
 
-	srv, client, mockHTTP, _ := setupNotesEnabledServer(t)
+	_, client, mockHTTP, _ := setupNotesEnabledServer(t)
 
 	// Add proxy entries
 	mockHTTP.AddProxyEntry(
@@ -182,7 +183,7 @@ func TestMCP_NotesInProxyFlowListing(t *testing.T) {
 		"flow_ids": flowID1,
 		"content":  "IDOR vulnerability",
 	})
-	_ = noteResp
+	assert.NotEmpty(t, noteResp.NoteID)
 
 	// Poll again and verify notes are attached
 	pollResp2 := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, client, "proxy_poll", map[string]interface{}{
@@ -198,9 +199,6 @@ func TestMCP_NotesInProxyFlowListing(t *testing.T) {
 
 	// Second flow should have no notes
 	assert.Empty(t, pollResp2.Flows[1].Notes)
-
-	// Notes should not appear when notes are in the store but queried via a non-notes server
-	_ = srv
 }
 
 func TestMCP_NotesInCrawlFlowListing(t *testing.T) {
@@ -234,7 +232,7 @@ func TestMCP_NotesInCrawlFlowListing(t *testing.T) {
 		"flow_ids": "crawl-f1",
 		"content":  "Interesting endpoint",
 	})
-	_ = noteResp
+	assert.NotEmpty(t, noteResp.NoteID)
 
 	// Poll crawl flows
 	var crawlResp protocol.CrawlPollResponse
@@ -250,39 +248,34 @@ func TestMCP_NotesInCrawlFlowListing(t *testing.T) {
 	assert.Equal(t, "Interesting endpoint", crawlResp.Flows[0].Notes[0].Content)
 }
 
-func TestMCP_NotesToolsRegistered(t *testing.T) {
+func TestMCP_NotesToolRegistration(t *testing.T) {
 	t.Parallel()
 
-	_, client, _, _ := setupNotesEnabledServer(t)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	t.Cleanup(cancel)
-
-	result, err := client.ListTools(ctx, mcp.ListToolsRequest{})
-	require.NoError(t, err)
-
-	toolNames := make([]string, len(result.Tools))
-	for i, tool := range result.Tools {
-		toolNames[i] = tool.Name
+	cases := []struct {
+		name         string
+		notesEnabled bool
+	}{
+		{"enabled", true},
+		{"disabled", false},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var client *mcpclient.Client
+			if tc.notesEnabled {
+				_, client, _, _ = setupNotesEnabledServer(t)
+			} else {
+				_, client, _, _, _ = setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+			}
 
-	assert.Contains(t, toolNames, "notes_save")
-	assert.Contains(t, toolNames, "notes_list")
-}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			t.Cleanup(cancel)
 
-func TestMCP_NotesToolsNotRegisteredWithoutFlag(t *testing.T) {
-	t.Parallel()
+			result, err := client.ListTools(ctx, mcp.ListToolsRequest{})
+			require.NoError(t, err)
 
-	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	t.Cleanup(cancel)
-
-	result, err := mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
-	require.NoError(t, err)
-
-	for _, tool := range result.Tools {
-		assert.NotEqual(t, "notes_save", tool.Name)
-		assert.NotEqual(t, "notes_list", tool.Name)
+			names := toolNames(result)
+			assert.Equal(t, tc.notesEnabled, slices.Contains(names, "notes_save"))
+			assert.Equal(t, tc.notesEnabled, slices.Contains(names, "notes_list"))
+		})
 	}
 }

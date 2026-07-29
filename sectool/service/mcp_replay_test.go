@@ -42,6 +42,32 @@ func TestHandleReplaySend(t *testing.T) {
 		})
 		assert.NotEmpty(t, sendResp.FlowID)
 		assert.NotEmpty(t, sendResp.Duration)
+		assert.Equal(t, 200, sendResp.Status)
+		assert.Contains(t, mockHTTP.LastSentRequest(), "GET /replay-test HTTP/1.1")
+		assert.False(t, mockHTTP.LastSendInput().FollowRedirects) // omitted -> default false
+	})
+
+	t.Run("follow_redirects_propagates", func(t *testing.T) {
+		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+
+		mockHTTP.AddProxyEntry(
+			"GET /replay-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
+			"HTTP/1.1 200 OK\r\n\r\noriginal",
+			"",
+		)
+
+		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+			"output_mode": "flows",
+			"method":      "GET",
+		})
+		require.NotEmpty(t, listResp.Flows)
+
+		sendResp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+			"flow_id":          listResp.Flows[0].FlowID,
+			"follow_redirects": true,
+		})
+		assert.NotEmpty(t, sendResp.FlowID)
+		assert.True(t, mockHTTP.LastSendInput().FollowRedirects)
 	})
 
 	t.Run("missing_flow_id", func(t *testing.T) {
@@ -92,66 +118,41 @@ func TestHandleReplaySend(t *testing.T) {
 			"flow_id": crawlFlowID,
 		})
 		assert.NotEmpty(t, resp.FlowID)
+		assert.Contains(t, mockHTTP.LastSentRequest(), "GET /page HTTP/1.1")
 	})
 
-	t.Run("set_headers_array", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+	// set_headers accepts either an array of "Name: value" strings or a name→value
+	// object; both must reach the sent request identically.
+	t.Run("set_headers_shapes", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			setHeaders interface{}
+			want       string
+		}{
+			{"array", []interface{}{"X-Test-Header: ArrayFormat"}, "X-Test-Header: ArrayFormat"},
+			{"object", map[string]interface{}{"X-Test-Header": "ObjectFormat"}, "X-Test-Header: ObjectFormat"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
-		mockHTTP.AddProxyEntry(
-			"GET /header-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
-			"HTTP/1.1 200 OK\r\n\r\noriginal",
-			"",
-		)
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\n",
-			"ok",
-		)
+				mockHTTP.AddProxyEntry("GET /header-test HTTP/1.1\r\nHost: mock.test\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\noriginal", "")
+				mockHTTP.SetSendResult("HTTP/1.1 200 OK\r\n", "ok")
 
-		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
-			"output_mode": "flows",
-			"method":      "GET",
-		})
-		require.NotEmpty(t, listResp.Flows)
-		flowID := listResp.Flows[0].FlowID
+				listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
+					"output_mode": "flows",
+					"method":      "GET",
+				})
+				require.NotEmpty(t, listResp.Flows)
 
-		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id":     flowID,
-			"set_headers": []interface{}{"X-Test-Header: ArrayFormat"},
-		})
-		assert.NotEmpty(t, resp.FlowID)
-		sent := mockHTTP.LastSentRequest()
-		assert.Contains(t, sent, "X-Test-Header: ArrayFormat")
-	})
-
-	t.Run("set_headers_object", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		mockHTTP.AddProxyEntry(
-			"GET /header-test HTTP/1.1\r\nHost: mock.test\r\n\r\n",
-			"HTTP/1.1 200 OK\r\n\r\noriginal",
-			"",
-		)
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\n",
-			"ok",
-		)
-
-		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
-			"output_mode": "flows",
-			"method":      "GET",
-		})
-		require.NotEmpty(t, listResp.Flows)
-		flowID := listResp.Flows[0].FlowID
-
-		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id": flowID,
-			"set_headers": map[string]interface{}{
-				"X-Test-Header": "ObjectFormat",
-			},
-		})
-		assert.NotEmpty(t, resp.FlowID)
-		sent := mockHTTP.LastSentRequest()
-		assert.Contains(t, sent, "X-Test-Header: ObjectFormat")
+				resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
+					"flow_id":     listResp.Flows[0].FlowID,
+					"set_headers": tc.setHeaders,
+				})
+				assert.NotEmpty(t, resp.FlowID)
+				assert.Contains(t, mockHTTP.LastSentRequest(), tc.want)
+			})
+		}
 	})
 
 	t.Run("with_path_override", func(t *testing.T) {
@@ -360,33 +361,6 @@ func TestHandleReplaySend(t *testing.T) {
 		})
 		assert.True(t, result.IsError)
 		assert.Contains(t, ExtractMCPText(t, result), "application/x-www-form-urlencoded")
-	})
-
-	t.Run("with_follow_redirects", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		mockHTTP.AddProxyEntry(
-			"POST /api/users HTTP/1.1\r\nHost: original.test\r\nContent-Type: application/json\r\n\r\n{\"name\":\"test\"}",
-			"HTTP/1.1 200 OK\r\n\r\nok",
-			"",
-		)
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\n",
-			"modified",
-		)
-
-		listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
-			"output_mode": "flows",
-			"method":      "POST",
-		})
-		require.NotEmpty(t, listResp.Flows)
-		flowID := listResp.Flows[0].FlowID
-
-		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "replay_send", map[string]interface{}{
-			"flow_id":          flowID,
-			"follow_redirects": true,
-		})
-		assert.NotEmpty(t, resp.FlowID)
 	})
 
 	t.Run("with_body_replacement", func(t *testing.T) {
@@ -629,6 +603,7 @@ func TestHandleRequestSend(t *testing.T) {
 		})
 		assert.NotEmpty(t, resp.FlowID)
 		assert.Equal(t, 200, resp.Status)
+		assert.True(t, strings.HasPrefix(mockHTTP.LastSentRequest(), "GET "))
 	})
 
 	t.Run("missing_url", func(t *testing.T) {
@@ -651,88 +626,34 @@ func TestHandleRequestSend(t *testing.T) {
 		assert.Contains(t, ExtractMCPText(t, result), "invalid URL")
 	})
 
-	t.Run("headers_object", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
+	// headers accepts a name→value object, an array of "Name: value" strings, a
+	// JSON-string encoding of either, or a single "Name: value" string; all reach
+	// the sent request identically.
+	t.Run("header_shapes", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			headers interface{}
+			want    string
+		}{
+			{"object", map[string]interface{}{"X-Test-Header": "ObjectFormat"}, "X-Test-Header: ObjectFormat"},
+			{"array", []interface{}{"X-Test-Header: ArrayFormat"}, "X-Test-Header: ArrayFormat"},
+			{"string_array", `["X-String-Header: from-string-array"]`, "X-String-Header: from-string-array"},
+			{"string_object", `{"X-String-Header": "from-string-object"}`, "X-String-Header: from-string-object"},
+			{"single_string", "X-Test-Header: single-string", "X-Test-Header: single-string"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\n",
-			"ok",
-		)
-		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
-			"url":    "https://example.com/test",
-			"method": "GET",
-			"headers": map[string]interface{}{
-				"X-Test-Header": "ObjectFormat",
-			},
-		})
-		assert.NotEmpty(t, resp.FlowID)
-		sent := mockHTTP.LastSentRequest()
-		assert.Contains(t, sent, "X-Test-Header: ObjectFormat")
-	})
-
-	t.Run("headers_array", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\n",
-			"ok",
-		)
-		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
-			"url":    "https://example.com/test",
-			"method": "GET",
-			"headers": []interface{}{
-				"X-Test-Header: ArrayFormat",
-			},
-		})
-		assert.NotEmpty(t, resp.FlowID)
-		sent := mockHTTP.LastSentRequest()
-		assert.Contains(t, sent, "X-Test-Header: ArrayFormat")
-	})
-
-	t.Run("headers_string_array", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\n",
-			"ok",
-		)
-		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
-			"url":     "https://example.com/test",
-			"method":  "GET",
-			"headers": `["X-String-Header: from-string-array"]`,
-		})
-		assert.NotEmpty(t, resp.FlowID)
-		sent := mockHTTP.LastSentRequest()
-		assert.Contains(t, sent, "X-String-Header: from-string-array")
-	})
-
-	t.Run("headers_string_object", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		mockHTTP.SetSendResult(
-			"HTTP/1.1 200 OK\r\n",
-			"ok",
-		)
-		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
-			"url":     "https://example.com/test",
-			"method":  "GET",
-			"headers": `{"X-String-Header": "from-string-object"}`,
-		})
-		assert.NotEmpty(t, resp.FlowID)
-		sent := mockHTTP.LastSentRequest()
-		assert.Contains(t, sent, "X-String-Header: from-string-object")
-	})
-
-	t.Run("headers_single_string", func(t *testing.T) {
-		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
-
-		mockHTTP.SetSendResult("HTTP/1.1 200 OK\r\n", "ok")
-		resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
-			"url":     "https://example.com/test",
-			"headers": "X-Test-Header: single-string",
-		})
-		assert.NotEmpty(t, resp.FlowID)
-		assert.Contains(t, mockHTTP.LastSentRequest(), "X-Test-Header: single-string")
+				mockHTTP.SetSendResult("HTTP/1.1 200 OK\r\n", "ok")
+				resp := CallMCPToolJSONOK[protocol.ReplaySendResponse](t, mcpClient, "request_send", map[string]interface{}{
+					"url":     "https://example.com/test",
+					"headers": tc.headers,
+				})
+				assert.NotEmpty(t, resp.FlowID)
+				assert.Contains(t, mockHTTP.LastSentRequest(), tc.want)
+			})
+		}
 	})
 
 	t.Run("headers_unparseable_errors", func(t *testing.T) {
@@ -1269,8 +1190,6 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 	t.Parallel()
 
 	t.Run("replay_send_rejected", func(t *testing.T) {
-		t.Parallel()
-
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
 		}, protocol.WorkflowModeNone)
@@ -1289,8 +1208,6 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 	})
 
 	t.Run("replay_send_force_still_rejected", func(t *testing.T) {
-		t.Parallel()
-
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
 		}, protocol.WorkflowModeNone)
@@ -1310,8 +1227,6 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 	})
 
 	t.Run("request_send_rejected", func(t *testing.T) {
-		t.Parallel()
-
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
 		}, protocol.WorkflowModeNone)
@@ -1324,8 +1239,6 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 	})
 
 	t.Run("request_send_excluded_subdomain", func(t *testing.T) {
-		t.Parallel()
-
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, &config.Config{
 			ExcludeDomains: []string{"internal.corp"},
 		}, protocol.WorkflowModeNone)
@@ -1338,8 +1251,6 @@ func TestExecuteSend_DomainScoping(t *testing.T) {
 	})
 
 	t.Run("allowed_domain_succeeds", func(t *testing.T) {
-		t.Parallel()
-
 		_, mcpClient, mockHTTP, _, _ := setupMockMCPServer(t, &config.Config{
 			AllowedDomains: []string{"allowed.test"},
 		}, protocol.WorkflowModeNone)
@@ -1451,4 +1362,94 @@ func TestRebuildReplayTarget(t *testing.T) {
 			assert.Equal(t, tt.want, rebuildReplayTarget(tt.host, tt.scheme, tt.port))
 		})
 	}
+}
+
+func TestGetStringMapArg(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing_key", func(t *testing.T) {
+		assert.Nil(t, getStringMapArg(argRequest(map[string]interface{}{}), "headers", ":"))
+	})
+
+	t.Run("nil_value", func(t *testing.T) {
+		assert.Nil(t, getStringMapArg(argRequest(map[string]interface{}{"headers": nil}), "headers", ":"))
+	})
+
+	t.Run("bare_string_no_sep", func(t *testing.T) {
+		assert.Nil(t, getStringMapArg(argRequest(map[string]interface{}{"headers": "oops"}), "headers", ":"))
+	})
+
+	t.Run("string_encoded_object", func(t *testing.T) {
+		got := getStringMapArg(argRequest(map[string]interface{}{
+			"headers": `{"X-Test": "v", "X-Num": 2}`,
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": "v", "X-Num": "2"}, got)
+	})
+
+	t.Run("coerce_scalars", func(t *testing.T) {
+		got := getStringMapArg(argRequest(map[string]interface{}{"headers": map[string]interface{}{
+			"str":    "v",
+			"num":    float64(0),
+			"flag":   true,
+			"null":   nil,
+			"nested": map[string]interface{}{"a": "b"},
+			"list":   []interface{}{"a"},
+		}}), "headers", ":")
+
+		assert.Equal(t, map[string]string{
+			"str":  "v",
+			"num":  "0",
+			"flag": "true",
+			"null": "",
+		}, got)
+	})
+
+	t.Run("object_value_not_trimmed", func(t *testing.T) {
+		got := getStringMapArg(argRequest(map[string]interface{}{
+			"headers": map[string]interface{}{"X-Test": "  spaced  "},
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": "  spaced  "}, got)
+	})
+
+	t.Run("array_of_kv_strings", func(t *testing.T) {
+		got := getStringMapArg(argRequest(map[string]interface{}{
+			"headers": []interface{}{"X-Test: v", "Content-Type: text/html"},
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": "v", "Content-Type": "text/html"}, got)
+	})
+
+	t.Run("single_kv_string", func(t *testing.T) {
+		got := getStringMapArg(argRequest(map[string]interface{}{
+			"headers": "X-Test: v",
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": "v"}, got)
+	})
+
+	t.Run("form_separator", func(t *testing.T) {
+		got := getStringMapArg(argRequest(map[string]interface{}{
+			"set_form": []interface{}{"grant_type=client_credentials"},
+		}), "set_form", "=")
+
+		assert.Equal(t, map[string]string{"grant_type": "client_credentials"}, got)
+	})
+
+	t.Run("form_value_keeps_leading_space", func(t *testing.T) {
+		got := getStringMapArg(argRequest(map[string]interface{}{
+			"set_form": []interface{}{"scope= openid profile"},
+		}), "set_form", "=")
+
+		assert.Equal(t, map[string]string{"scope": " openid profile"}, got)
+	})
+
+	t.Run("kv_value_keeps_inner_whitespace", func(t *testing.T) {
+		got := getStringMapArg(argRequest(map[string]interface{}{
+			"headers": []interface{}{"X-Test:  v "},
+		}), "headers", ":")
+
+		assert.Equal(t, map[string]string{"X-Test": " v "}, got)
+	})
 }

@@ -20,7 +20,11 @@ func testMakeJWT(header, payload map[string]interface{}) string {
 		base64.RawURLEncoding.EncodeToString(p) + ".test-signature"
 }
 
-func TestMCP_JWTDecode(t *testing.T) {
+// JWT decode behaviors (expiry, alg none, bearer prefix, malformed variants) are
+// covered by jwt.TestDecodeJWT*; these assert only the MCP wiring: the jwt.Result is
+// JSON-serialized through the tool, error propagation, and the required-token guard.
+
+func TestHandleJWTDecode(t *testing.T) {
 	t.Parallel()
 
 	_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
@@ -43,49 +47,7 @@ func TestMCP_JWTDecode(t *testing.T) {
 		assert.Contains(t, result.Expiry, "expires in")
 	})
 
-	t.Run("expired_jwt", func(t *testing.T) {
-		token := testMakeJWT(
-			map[string]interface{}{"alg": "HS256"},
-			map[string]interface{}{"sub": "123", "exp": float64(time.Now().Add(-2 * time.Hour).Unix())},
-		)
-
-		var result jwt.Result
-		text := CallMCPToolTextOK(t, mcpClient, "jwt_decode", map[string]interface{}{
-			"token": token,
-		})
-		require.NoError(t, json.Unmarshal([]byte(text), &result))
-		assert.Contains(t, result.Expiry, "expired")
-	})
-
-	t.Run("alg_none", func(t *testing.T) {
-		token := testMakeJWT(
-			map[string]interface{}{"alg": "none"},
-			map[string]interface{}{"sub": "123", "exp": float64(time.Now().Add(1 * time.Hour).Unix())},
-		)
-
-		var result jwt.Result
-		text := CallMCPToolTextOK(t, mcpClient, "jwt_decode", map[string]interface{}{
-			"token": token,
-		})
-		require.NoError(t, json.Unmarshal([]byte(text), &result))
-		assert.Contains(t, result.Issues, "algorithm set to 'none' - signature not verified")
-	})
-
-	t.Run("bearer_prefix", func(t *testing.T) {
-		token := testMakeJWT(
-			map[string]interface{}{"alg": "HS256"},
-			map[string]interface{}{"sub": "123", "exp": float64(time.Now().Add(1 * time.Hour).Unix())},
-		)
-
-		var result jwt.Result
-		text := CallMCPToolTextOK(t, mcpClient, "jwt_decode", map[string]interface{}{
-			"token": "Bearer " + token,
-		})
-		require.NoError(t, json.Unmarshal([]byte(text), &result))
-		assert.Equal(t, "HS256", result.Header["alg"])
-	})
-
-	t.Run("malformed", func(t *testing.T) {
+	t.Run("error_propagates", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "jwt_decode", map[string]interface{}{
 			"token": "not-a-jwt",
 		})

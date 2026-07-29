@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -28,13 +29,14 @@ import (
 // invoke_tool delegation path.
 type toolSidecar struct {
 	sidecar.BaseHandler
+	t    *testing.T
 	conn *sidecar.Conn
 }
 
 func (*toolSidecar) OnShutdown(int) {}
 
 func (h *toolSidecar) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResult, error) {
-	ctx := context.Background()
+	ctx := h.t.Context()
 	if _, err := h.conn.CoreInvoke(ctx, "proxy_poll", map[string]any{"output_mode": "summary"}); err != nil {
 		return wire.InvokeToolResult{}, err
 	}
@@ -60,54 +62,29 @@ func TestSidecarToolsE2E(t *testing.T) {
 	const adapterName = "tool-sidecar"
 	const toolName = "custom_echo"
 
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: socket, NativeProxyPort: 0}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	require.NoError(t, backend.WaitReady(t.Context()))
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-	})
+	sb := startSidecarProxy(t, scsidecar.Config{})
 
 	// The sidecar registers before the MCP client connects, so its tool is composed
 	// into that client's session at connect.
-	conn, err := sidecar.Dial(t.Context(), socket, sidecar.Registration{
-		Name:            adapterName,
-		Protocols:       []string{"custom/1"},
-		ProtocolVersion: wire.ProtocolVersion{Major: wire.VersionMajor, Minor: wire.VersionMinor},
+	conn := sb.dial(t, sidecar.Registration{
+		Name:      adapterName,
+		Protocols: []string{"custom/1"},
 		MCPTools: []wire.MCPTool{{
 			Name:        toolName,
 			Description: "Echo a marker back",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"marker":{"type":"string"}},"required":["marker"]}`),
 		}},
 	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
 	// install up front: Serve's own install races inbound invoke_tool requests
-	h := &toolSidecar{conn: conn}
+	h := &toolSidecar{t: t, conn: conn}
 	conn.SetHandler(h)
 	go func() { _ = conn.Serve(t.Context(), h) }()
 
-	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
-	ctx := t.Context()
+	mcpClient := sb.connectMCP(t)
 
 	// The session-composed tool list converges shortly after connect.
 	require.Eventually(t, func() bool {
-		tools, lerr := mcpClient.ListTools(ctx)
+		tools, lerr := mcpClient.ListTools(t.Context())
 		if lerr != nil {
 			return false
 		}
@@ -116,7 +93,7 @@ func TestSidecarToolsE2E(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond)
 
 	t.Run("tool_listed_with_metadata", func(t *testing.T) {
-		tools, lerr := mcpClient.ListTools(ctx)
+		tools, lerr := mcpClient.ListTools(t.Context())
 		require.NoError(t, lerr)
 		tool, ok := findTool(tools, toolName)
 		require.True(t, ok)
@@ -125,7 +102,7 @@ func TestSidecarToolsE2E(t *testing.T) {
 	})
 
 	t.Run("core_tools_gain_sidecar_params", func(t *testing.T) {
-		tools, lerr := mcpClient.ListTools(ctx)
+		tools, lerr := mcpClient.ListTools(t.Context())
 		require.NoError(t, lerr)
 		poll, ok := findTool(tools, "proxy_poll")
 		require.True(t, ok)
@@ -137,19 +114,19 @@ func TestSidecarToolsE2E(t *testing.T) {
 	})
 
 	t.Run("invoke_delegates_and_returns_verbatim", func(t *testing.T) {
-		res, cerr := mcpClient.CallTool(ctx, toolName, map[string]any{"marker": "xyz"})
+		res, cerr := mcpClient.CallTool(t.Context(), toolName, map[string]any{"marker": "xyz"})
 		require.NoError(t, cerr)
 		assert.Equal(t, "echoed xyz", resultText(res))
 		require.NotNil(t, res.StructuredContent)
 
 		// The flow the handler pushed mid-call is captured under the adapter.
-		poll, perr := mcpClient.ProxyPoll(ctx, mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: adapterName, Limit: 100})
+		poll, perr := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: adapterName, Limit: 100})
 		require.NoError(t, perr)
 		assert.True(t, containsPath(poll.Flows, "/invoked"))
 	})
 
 	t.Run("invalid_arguments_rejected", func(t *testing.T) {
-		_, cerr := mcpClient.CallTool(ctx, toolName, map[string]any{})
+		_, cerr := mcpClient.CallTool(t.Context(), toolName, map[string]any{})
 		require.Error(t, cerr)
 		assert.Contains(t, cerr.Error(), "invalid arguments")
 	})
@@ -226,30 +203,9 @@ func TestSidecarCoreToolNameRejected(t *testing.T) {
 func TestSidecarToolsAbsentWithoutSidecar(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewNativeProxyBackend(0, t.TempDir(), 10*1024*1024, store.MemProvider, proxy.TimeoutConfig{}, false)
-	require.NoError(t, err)
-
-	srv, err := NewServerWithStorageDir(MCPServerFlags{
-		MCPPort:      -1,
-		WorkflowMode: protocol.WorkflowModeNone,
-		ConfigPath:   filepath.Join(t.TempDir(), "config.json"),
-	}, t.TempDir(), backend, newMockOastBackend(), newMockCrawlerBackend())
-	require.NoError(t, err)
-	srv.SetQuietLogging()
-
 	// Sidecars enabled but none connected: the surface must be unchanged.
-	require.NoError(t, backend.EnableSidecars(scsidecar.Config{Socket: filepath.Join(t.TempDir(), "sidecar.sock"), NativeProxyPort: 0}, srv, srv.replayHistoryStore))
-
-	go func() { _ = srv.Run(t.Context()) }()
-	srv.WaitTillStarted()
-	require.NoError(t, backend.WaitReady(t.Context()))
-	t.Cleanup(func() {
-		srv.RequestShutdown()
-	})
-
-	mcpClient, err := mcpclient.Connect(t.Context(), "http://"+srv.mcpServer.Addr()+"/mcp")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = mcpClient.Close() })
+	sb := startSidecarBackend(t, scsidecar.Config{})
+	mcpClient := sb.mcp
 
 	tools, err := mcpClient.ListTools(t.Context())
 	require.NoError(t, err)
@@ -263,19 +219,13 @@ func TestSidecarToolsAbsentWithoutSidecar(t *testing.T) {
 }
 
 func findTool(tools []mcp.Tool, name string) (mcp.Tool, bool) {
-	for _, t := range tools {
-		if t.Name == name {
-			return t, true
-		}
+	i := slices.IndexFunc(tools, func(tl mcp.Tool) bool { return tl.Name == name })
+	if i < 0 {
+		return mcp.Tool{}, false
 	}
-	return mcp.Tool{}, false
+	return tools[i], true
 }
 
 func containsPath(flows []protocol.FlowEntry, path string) bool {
-	for _, f := range flows {
-		if f.Path == path {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(flows, func(f protocol.FlowEntry) bool { return f.Path == path })
 }

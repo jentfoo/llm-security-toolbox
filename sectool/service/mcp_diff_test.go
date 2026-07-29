@@ -280,41 +280,13 @@ func TestHandleDiffFlow(t *testing.T) {
 			"scope":  "response_body",
 		})
 
+		// Wiring only: the tool routes to JSON diffing and reports a difference.
+		// Per-path added/removed/changed detail is covered by TestDiffJSONBodies.
 		assert.False(t, resp.Same)
 		require.NotNil(t, resp.Response)
 		require.NotNil(t, resp.Response.Body)
 		assert.Equal(t, "json", resp.Response.Body.Format)
-
-		// user.role changed from admin to viewer
-		var foundRoleChange bool
-		for _, c := range resp.Response.Body.Changed {
-			if c.Path == "user.role" {
-				foundRoleChange = true
-				assert.Equal(t, "admin", c.A)
-				assert.Equal(t, "viewer", c.B)
-			}
-		}
-		assert.True(t, foundRoleChange)
-
-		// user.mfa added
-		var foundMfaAdd bool
-		for _, a := range resp.Response.Body.Added {
-			if a.Path == "user.mfa" {
-				foundMfaAdd = true
-				break
-			}
-		}
-		assert.True(t, foundMfaAdd)
-
-		// active removed
-		var foundActiveRemove bool
-		for _, r := range resp.Response.Body.Removed {
-			if r.Path == "active" {
-				foundActiveRemove = true
-				break
-			}
-		}
-		assert.True(t, foundActiveRemove)
+		assert.NotEmpty(t, resp.Response.Body.Changed)
 	})
 
 	t.Run("json_auto_detect", func(t *testing.T) {
@@ -410,14 +382,18 @@ func TestHandleDiffFlow(t *testing.T) {
 			"host":        "example.com",
 		})
 		require.Len(t, listResp.Flows, 2)
+		flowB := listResp.Flows[1].FlowID
 
 		result := CallMCPTool(t, mcpClient, "diff_flow", map[string]interface{}{
 			"flow_a": listResp.Flows[0].FlowID,
-			"flow_b": listResp.Flows[1].FlowID,
+			"flow_b": flowB,
 			"scope":  "request_body",
 		})
 		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "request body")
+		text := ExtractMCPText(t, result)
+		assert.Contains(t, text, flowB)
+		assert.Contains(t, text, "request body")
+		assert.Contains(t, text, "gzip")
 	})
 
 	t.Run("identical_undecodable_same", func(t *testing.T) {
@@ -505,6 +481,11 @@ func TestHandleDiffFlow(t *testing.T) {
 		require.NotNil(t, diffResp.Response)
 		require.NotNil(t, diffResp.Response.Body)
 		assert.Equal(t, "json", diffResp.Response.Body.Format)
+		// gzip bodies must decode before diffing: the role change is visible.
+		require.Len(t, diffResp.Response.Body.Changed, 1)
+		assert.Equal(t, "role", diffResp.Response.Body.Changed[0].Path)
+		assert.Equal(t, "admin", diffResp.Response.Body.Changed[0].A)
+		assert.Equal(t, "viewer", diffResp.Response.Body.Changed[0].B)
 	})
 }
 
@@ -674,8 +655,9 @@ func TestDiffTextBodies(t *testing.T) {
 		body := []byte("same content\n")
 		result := diffTextBodies(body, body, 0)
 		require.NotNil(t, result)
-		// diffTextBodies always returns a BodyDiff (even if empty diff)
 		assert.Equal(t, "text", result.Format)
+		assert.Empty(t, result.Diff)
+		assert.Equal(t, "0 lines added, 0 removed", result.Summary)
 	})
 }
 

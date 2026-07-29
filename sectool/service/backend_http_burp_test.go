@@ -67,27 +67,6 @@ func TestParseSectoolComment(t *testing.T) {
 	}
 }
 
-func TestParseSectoolCommentRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		id    string
-		label string
-	}{
-		{"abc123", ""},
-		{"XyZ789", "my-rule"},
-		{"a1b2c3", "test:with:colons"},
-	}
-
-	for _, c := range cases {
-		comment := formatSectoolComment(c.id, c.label)
-		gotID, gotLabel, ok := parseSectoolComment(comment)
-		assert.True(t, ok)
-		assert.Equal(t, c.id, gotID)
-		assert.Equal(t, c.label, gotLabel)
-	}
-}
-
 func TestBurpBackendRules(t *testing.T) {
 	t.Parallel()
 
@@ -103,14 +82,7 @@ func TestBurpBackendRules(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mockServer := NewTestMCPServer(t)
-			client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(0))
-			require.NoError(t, client.Connect(t.Context()))
-			t.Cleanup(func() { _ = client.Close() })
-
-			backend := &BurpBackend{client: client}
-
-			var createdRuleIDs []string // Track rules for cleanup verification
+			backend, _ := newTestBurpBackend(t)
 
 			t.Run("list_empty", func(t *testing.T) {
 				rules, err := backend.ListRules(t.Context(), tc.websocket)
@@ -127,7 +99,6 @@ func TestBurpBackendRules(t *testing.T) {
 					Replace: "X-Test: value",
 				})
 				require.NoError(t, err)
-				createdRuleIDs = append(createdRuleIDs, rule.RuleID)
 
 				assert.NotEmpty(t, rule.RuleID)
 				assert.Equal(t, "test-add", rule.Label)
@@ -151,7 +122,6 @@ func TestBurpBackendRules(t *testing.T) {
 					Replace: "",
 				})
 				require.NoError(t, err)
-				createdRuleIDs = append(createdRuleIDs, rule.RuleID)
 
 				assert.True(t, rule.IsRegex)
 				assert.Equal(t, "^X-Remove.*$", rule.Find)
@@ -207,87 +177,66 @@ func TestBurpBackendRules(t *testing.T) {
 			})
 		})
 	}
+
+	t.Run("http_ws_isolation", func(t *testing.T) {
+		backend, _ := newTestBurpBackend(t)
+
+		httpRule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "http-only",
+			Type:  mcp.RuleTypeRequestHeader,
+		})
+		require.NoError(t, err)
+
+		wsRule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
+			Label: "ws-only",
+			Type:  "ws:both",
+		})
+		require.NoError(t, err)
+
+		// HTTP rule only in the HTTP list
+		httpRules, err := backend.ListRules(t.Context(), false)
+		require.NoError(t, err)
+		require.Len(t, httpRules, 1)
+		assert.Equal(t, httpRule.RuleID, httpRules[0].RuleID)
+		assert.Equal(t, mcp.RuleTypeRequestHeader, httpRules[0].Type)
+
+		// WS rule only in the WS list, with its ws: prefixed type
+		wsRules, err := backend.ListRules(t.Context(), true)
+		require.NoError(t, err)
+		require.Len(t, wsRules, 1)
+		assert.Equal(t, wsRule.RuleID, wsRules[0].RuleID)
+		assert.Equal(t, "ws:both", wsRules[0].Type)
+	})
 }
 
-func TestWsToBurpType(t *testing.T) {
+// TestWSTypeMapping locks the ws:* <-> Burp direction-string wire contract as a
+// bijection, with unknown/HTTP types passing through both mappers unchanged.
+func TestWSTypeMapping(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		input string
-		want  string
+		name string
+		ws   string
+		burp string
 	}{
-		{"ws:to-server", "client_to_server"},
-		{"ws:to-client", "server_to_client"},
-		{"ws:both", "both_directions"},
-		{"unknown", "unknown"},               // pass through unknown types
-		{"request_header", "request_header"}, // HTTP types pass through
+		{"to_server", "ws:to-server", "client_to_server"},
+		{"to_client", "ws:to-client", "server_to_client"},
+		{"both", "ws:both", "both_directions"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			assert.Equal(t, tt.want, wsToBurpType(tt.input))
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.burp, wsToBurpType(tt.ws))
+			assert.Equal(t, tt.ws, burpToWSType(tt.burp))
 		})
 	}
-}
 
-func TestBurpToWSType(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"client_to_server", "ws:to-server"},
-		{"server_to_client", "ws:to-client"},
-		{"both_directions", "ws:both"},
-		{"unknown", "unknown"},               // pass through unknown types
-		{"request_header", "request_header"}, // HTTP types pass through
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			assert.Equal(t, tt.want, burpToWSType(tt.input))
-		})
-	}
-}
-
-func TestBurpBackendRuleIsolation(t *testing.T) {
-	t.Parallel()
-
-	mockServer := NewTestMCPServer(t)
-	client := mcp.New(mockServer.URL(), mcp.WithHealthCheckInterval(0))
-	require.NoError(t, client.Connect(t.Context()))
-	t.Cleanup(func() { _ = client.Close() })
-
-	backend := &BurpBackend{client: client}
-
-	// Add HTTP rule
-	httpRule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label: "http-only",
-		Type:  mcp.RuleTypeRequestHeader,
+	t.Run("passthrough", func(t *testing.T) {
+		for _, v := range []string{"unknown", "request_header"} {
+			assert.Equal(t, v, wsToBurpType(v))
+			assert.Equal(t, v, burpToWSType(v))
+		}
 	})
-	require.NoError(t, err)
-
-	// Add WS rule with ws: prefixed type
-	wsRule, err := backend.AddRule(t.Context(), protocol.RuleEntry{
-		Label: "ws-only",
-		Type:  "ws:both",
-	})
-	require.NoError(t, err)
-
-	// HTTP rule should only appear in HTTP list
-	httpRules, err := backend.ListRules(t.Context(), false)
-	require.NoError(t, err)
-	require.Len(t, httpRules, 1)
-	assert.Equal(t, httpRule.RuleID, httpRules[0].RuleID)
-	assert.Equal(t, mcp.RuleTypeRequestHeader, httpRules[0].Type)
-
-	// WS rule should only appear in WS list with ws: prefixed type
-	wsRules, err := backend.ListRules(t.Context(), true)
-	require.NoError(t, err)
-	require.Len(t, wsRules, 1)
-	assert.Equal(t, wsRule.RuleID, wsRules[0].RuleID)
-	assert.Equal(t, "ws:both", wsRules[0].Type)
 }
 
 func TestBurpBackendConfigEditingDisabled(t *testing.T) {
