@@ -537,6 +537,7 @@ type Reflection struct {
 	Source       string   `json:"source"`
 	Value        string   `json:"value"`
 	Locations    []string `json:"locations"`
+	Encodings    []string `json:"encodings,omitempty"`     // non-raw encodings that matched (base64, html_entity, ...)
 	RawReflected bool     `json:"raw_reflected,omitempty"` // value has special chars and appears unencoded
 }
 

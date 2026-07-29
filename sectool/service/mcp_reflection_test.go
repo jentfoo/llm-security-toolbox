@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/base64"
+	"slices"
 	"strings"
 	"testing"
 
@@ -73,11 +75,21 @@ func TestHandleFindReflected(t *testing.T) {
 		"",
 	)
 
+	// Entry 5: query value reflected base64-encoded in JSON response
+	mockHTTP.AddProxyEntry(
+		"GET /echo?data=reflected-token-value HTTP/1.1\r\n"+
+			"Host: example.com\r\n\r\n",
+		"HTTP/1.1 200 OK\r\n"+
+			"Content-Type: application/json\r\n\r\n"+
+			`{"encoded":"`+base64.StdEncoding.EncodeToString([]byte("reflected-token-value"))+`"}`,
+		"",
+	)
+
 	listResp := CallMCPToolJSONOK[protocol.ProxyPollResponse](t, mcpClient, "proxy_poll", map[string]interface{}{
 		"output_mode": "flows",
 		"limit":       10,
 	})
-	require.Len(t, listResp.Flows, 5)
+	require.Len(t, listResp.Flows, 6)
 
 	t.Run("query_cookie_header_reflection", func(t *testing.T) {
 		resp := CallMCPToolJSONOK[protocol.FindReflectedResponse](t, mcpClient, "find_reflected", map[string]interface{}{
@@ -186,6 +198,17 @@ func TestHandleFindReflected(t *testing.T) {
 		assert.False(t, callbackRef.RawReflected)
 	})
 
+	t.Run("base64_encoded_reflection", func(t *testing.T) {
+		resp := CallMCPToolJSONOK[protocol.FindReflectedResponse](t, mcpClient, "find_reflected", map[string]interface{}{
+			"flow_id": listResp.Flows[5].FlowID,
+		})
+
+		dataRef := findReflectionByName(resp.Reflections, "data")
+		require.NotNil(t, dataRef)
+		assert.Equal(t, "query", dataRef.Source)
+		assert.Contains(t, dataRef.Encodings, "base64")
+	})
+
 	t.Run("missing_flow_id", func(t *testing.T) {
 		result := CallMCPTool(t, mcpClient, "find_reflected", map[string]interface{}{})
 		assert.True(t, result.IsError)
@@ -216,6 +239,16 @@ func TestExtractParams(t *testing.T) {
 			}
 		}
 		assert.True(t, found)
+	})
+
+	t.Run("bare_lf_query", func(t *testing.T) {
+		// tolerant parser accepts bare-LF requests; query must still be extracted
+		raw := []byte("GET /search?q=hello&page=1 HTTP/1.1\nHost: example.com\n\n")
+		params := extractParams(raw)
+
+		assert.True(t, slices.ContainsFunc(params, func(p protocol.Reflection) bool {
+			return p.Name == "q" && p.Source == "query" && p.Value == "hello"
+		}))
 	})
 
 	t.Run("url_decoded_query", func(t *testing.T) {
@@ -455,6 +488,19 @@ func TestFindReflections(t *testing.T) {
 		assert.Contains(t, reflections[0].Locations, "body:html_text")
 	})
 
+	t.Run("base64_body_match", func(t *testing.T) {
+		// body-source param reflected base64-encoded; label surfaced in Encodings
+		value := "session-token-xyz"
+		encoded := base64.StdEncoding.EncodeToString([]byte(value))
+		params := []protocol.Reflection{{Name: "token", Source: "body", Value: value}}
+		resp := []byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"echo\":\"" + encoded + "\"}")
+
+		reflections := findReflections(params, resp)
+		require.Len(t, reflections, 1)
+		assert.Equal(t, "token", reflections[0].Name)
+		assert.Contains(t, reflections[0].Encodings, "base64")
+	})
+
 	t.Run("header_reflection", func(t *testing.T) {
 		params := []protocol.Reflection{{Name: "redirect", Source: "query", Value: "https://evil.com"}}
 		resp := []byte("HTTP/1.1 302 Found\r\nLocation: https://evil.com\r\n\r\n")
@@ -688,6 +734,23 @@ func TestEncodingVariants(t *testing.T) {
 		require.NotEmpty(t, variants)
 		assert.Equal(t, "raw", variants[0].encoding)
 		assert.Equal(t, "test<value>", variants[0].encoded)
+	})
+
+	t.Run("base64_variant", func(t *testing.T) {
+		value := "reflected_value_123"
+		byLabel := make(map[string]string)
+		for _, v := range encodingVariants(value) {
+			byLabel[v.encoding] = v.encoded
+		}
+		assert.Equal(t, base64.StdEncoding.EncodeToString([]byte(value)), byLabel["base64"])
+		assert.Equal(t, base64.RawURLEncoding.EncodeToString([]byte(value)), byLabel["base64url"])
+	})
+
+	t.Run("short_value_no_base64", func(t *testing.T) {
+		// base64 of short values collides inside larger blobs, so it is guarded out
+		for _, v := range encodingVariants("ab") {
+			assert.NotContains(t, []string{"base64", "base64url"}, v.encoding)
+		}
 	})
 }
 

@@ -436,8 +436,8 @@ func (m *mcpServer) handleFlowGet(ctx context.Context, req mcp.CallToolRequest) 
 
 	// Extract version from request line
 	var version string
-	if idx := strings.Index(string(rawReq), "\r\n"); idx > 0 {
-		if parts := strings.SplitN(string(rawReq[:idx]), " ", 3); len(parts) >= 3 {
+	if end, _ := findFirstLineEnd(rawReq); end > 0 {
+		if parts := strings.SplitN(string(rawReq[:end]), " ", 3); len(parts) >= 3 {
 			version = parts[2]
 		}
 	}

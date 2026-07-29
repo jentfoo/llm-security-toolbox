@@ -35,6 +35,9 @@ func run(mcpURL, flowID string) error {
 		fmt.Printf("  %s %s (%s)\n", cliutil.Warning("→"), cliutil.Bold(r.Name), r.Source)
 		fmt.Printf("    Value: %s\n", r.Value)
 		fmt.Printf("    Found in: %s\n", strings.Join(r.Locations, ", "))
+		if len(r.Encodings) > 0 {
+			fmt.Printf("    Encodings: %s\n", strings.Join(r.Encodings, ", "))
+		}
 		if r.RawReflected {
 			fmt.Printf("    %s Reflected without encoding (not sanitized)\n", cliutil.Error("!"))
 		}

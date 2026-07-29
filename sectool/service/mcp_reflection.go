@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-analyze/bulk"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/go-appsec/toolbox/sectool/protocol"
@@ -70,7 +72,7 @@ Extracts parameters from the request (query string, form body, JSON body, multip
 
 Returns only parameters with at least one reflection. Skips values shorter than 4 characters.
 
-Locations indicate where: body:<context> (html_text, html_attribute, url, script, css, html_comment, json) or header:<name>. The raw_reflected flag signals special characters appeared unencoded (no sanitization).`),
+Locations indicate where: body:<context> (html_text, html_attribute, url, script, css, html_comment, json) or header:<name>. The encodings list names any non-raw encodings that matched (url_query, html_entity, js_unicode, base64, ...). The raw_reflected flag signals special characters appeared unencoded (no sanitization).`),
 		mcp.WithString("flow_id", mcp.Required(), mcp.Description("Flow ID (from proxy_poll, replay_send, or crawl_poll)")),
 	)
 }
@@ -119,8 +121,9 @@ func extractParams(rawReq []byte) []protocol.Reflection {
 	headerMap := parseHeadersToMap(headerStr)
 
 	// Extract request URI from the first line (e.g. "GET /path?q=1 HTTP/1.1")
+	le := detectLineEnding(reqHeaders)
 	var fullPath string
-	if firstLine, _, _ := strings.Cut(headerStr, "\r\n"); firstLine != "" {
+	if firstLine, _, _ := strings.Cut(headerStr, le); firstLine != "" {
 		if parts := strings.SplitN(firstLine, " ", 3); len(parts) >= 2 {
 			fullPath = parts[1]
 		}
@@ -237,6 +240,12 @@ func encodingVariants(value string) []encodedVariant {
 	add(url.PathEscape(value), "url_path")
 	add(html.EscapeString(value), "html_entity")
 
+	// base64 forms; guard length so short encodings don't collide inside larger base64 blobs
+	if b64 := base64.StdEncoding.EncodeToString([]byte(value)); len(b64) >= 16 {
+		add(b64, "base64")
+		add(base64.RawURLEncoding.EncodeToString([]byte(value)), "base64url")
+	}
+
 	if !strings.ContainsAny(value, `<>&'"/`) {
 		return variants
 	}
@@ -291,6 +300,7 @@ func findReflections(params []protocol.Reflection, rawResp []byte) []protocol.Re
 
 		var locations []string
 		var rawBodyMatch bool // at least one raw (unencoded) body match
+		encSet := make(map[string]bool)
 
 		seen := make(map[string]bool)
 		for _, v := range variants {
@@ -307,22 +317,36 @@ func findReflections(params []protocol.Reflection, rawResp []byte) []protocol.Re
 				}
 				if v.encoding == "raw" {
 					rawBodyMatch = true
+				} else {
+					encSet[v.encoding] = true
 				}
 			}
 		}
 
 		for headerName, headerVals := range respHeaderMap {
+			var matched bool
 			for _, hv := range headerVals {
-				if slices.ContainsFunc(variants, func(v encodedVariant) bool { return strings.Contains(hv, v.encoded) }) {
-					locations = append(locations, "header:"+headerName)
-					break
+				for _, v := range variants {
+					if strings.Contains(hv, v.encoded) {
+						matched = true
+						if v.encoding != "raw" {
+							encSet[v.encoding] = true
+						}
+					}
 				}
+			}
+			if matched {
+				locations = append(locations, "header:"+headerName)
 			}
 		}
 
 		if len(locations) > 0 {
 			sort.Strings(locations)
 			p.Locations = locations
+			if len(encSet) > 0 {
+				p.Encodings = bulk.MapKeysSlice(encSet)
+				slices.Sort(p.Encodings)
+			}
 			p.RawReflected = rawBodyMatch && strings.ContainsAny(p.Value, `<>&'"`)
 			reflections = append(reflections, p)
 		}
