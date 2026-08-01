@@ -330,13 +330,7 @@ func previewBody(body []byte, maxLen int, headers string) string {
 	if !utf8.Valid(decoded) || hasBinarySignature(decoded) || isBinaryContentType(extractHeader(headers, "Content-Type")) {
 		return "<BINARY:" + strconv.Itoa(len(decoded)) + " Bytes>"
 	}
-	s := string(decoded)
-	if utf8.RuneCountInString(s) <= maxLen {
-		return s
-	}
-	// Truncate at rune boundary
-	runes := []rune(s)
-	return string(runes[:maxLen]) + "..."
+	return util.TruncateString(string(decoded), maxLen)
 }
 
 // compressBody compresses body based on Content-Encoding value.

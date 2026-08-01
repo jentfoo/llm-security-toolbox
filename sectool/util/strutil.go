@@ -2,15 +2,12 @@ package util
 
 import "unicode/utf8"
 
-// TruncateString ensures the returned string is at most maxLen bytes,
+// TruncateString ensures the returned string is at most maxLen runes,
 // truncating on a rune boundary and adding a "..." suffix if necessary.
-func TruncateString(str string, maxLen int) string {
-	if len(str) <= maxLen || maxLen < 3 {
-		return str
+func TruncateString(s string, maxLen int) string {
+	if utf8.RuneCountInString(s) <= maxLen || maxLen < 3 {
+		return s
 	}
-	cut := maxLen - 3
-	for cut > 0 && !utf8.RuneStart(str[cut]) {
-		cut--
-	}
-	return str[:cut] + "..."
+	runes := []rune(s)
+	return string(runes[:maxLen-3]) + "..."
 }
