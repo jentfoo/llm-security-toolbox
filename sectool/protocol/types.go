@@ -238,7 +238,7 @@ type RuleDeleteResponse struct{}
 // ResponderEntry represents a registered proxy responder.
 type ResponderEntry struct {
 	ResponderID string            `json:"responder_id"`
-	Origin      string            `json:"origin"`
+	Host        string            `json:"host"`
 	Path        string            `json:"path"`
 	Method      string            `json:"method,omitempty"`
 	StatusCode  int               `json:"status_code"`

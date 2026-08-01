@@ -126,7 +126,7 @@ func (h *http1Handler) handleExchange(ctx context.Context, clientConn net.Conn, 
 	// response interception before rules and upstream send
 	if h.responseInterceptor != nil {
 		if intercepted := h.responseInterceptor.InterceptRequest(
-			strings.ToLower(target.Hostname), target.Port, PathWithoutQuery(req.Path), req.Method,
+			strings.ToLower(target.Hostname), PathWithoutQuery(req.Path), req.Method,
 		); intercepted != nil {
 			resp := BuildInterceptedH1Response(intercepted)
 			if h.maxBodyBytes > 0 && len(req.Body) > h.maxBodyBytes {
@@ -160,6 +160,12 @@ func (h *http1Handler) handleExchange(ctx context.Context, clientConn net.Conn, 
 	// dial on the plain path; the TLS path reuses the pre-dialed tunnel upstream
 	up := x.upstream
 	if up == nil {
+		// TLS tunnel with no reachable upstream: responders already served above, 502 the rest
+		if x.target != nil {
+			sendError(clientConn, 502, "Bad Gateway: host unreachable and no responder configured")
+			h.storeEntry(target, req, nil, localInterim(contResp), startTime, nil)
+			return false
+		}
 		upstreamAddr := target.Addr()
 		dialer := net.Dialer{Timeout: h.timeouts.DialTimeout}
 		upstreamConn, derr := dialer.DialContext(ctx, "tcp", upstreamAddr)
@@ -717,8 +723,16 @@ func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn n
 	go func() {
 		<-connCtx.Done()
 		_ = clientConn.Close()
-		_ = upstreamConn.Close()
+		if upstreamConn != nil {
+			_ = upstreamConn.Close()
+		}
 	}()
+
+	// nil upstream marks a responder-only tunnel; handleExchange serves responders or 502s
+	var up *upstreamPair
+	if upstreamConn != nil {
+		up = &upstreamPair{conn: upstreamConn, reader: upstreamReader}
+	}
 
 	for {
 		select {
@@ -727,10 +741,7 @@ func (h *http1Handler) HandleTLS(ctx context.Context, clientConn, upstreamConn n
 		default:
 		}
 
-		if !h.handleExchange(connCtx, clientConn, clientReader, h1Exchange{
-			target:   target,
-			upstream: &upstreamPair{conn: upstreamConn, reader: upstreamReader},
-		}) {
+		if !h.handleExchange(connCtx, clientConn, clientReader, h1Exchange{target: target, upstream: up}) {
 			return
 		}
 	}

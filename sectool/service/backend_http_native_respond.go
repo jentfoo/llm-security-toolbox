@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/go-appsec/toolbox/sectool/protocol"
@@ -23,8 +23,6 @@ type nativeStoredResponder struct {
 	ID         string            `msgpack:"id"`
 	Label      string            `msgpack:"l,omitempty"`
 	Host       string            `msgpack:"h"`
-	Port       int               `msgpack:"p"`
-	Scheme     string            `msgpack:"s"`
 	Path       string            `msgpack:"pa"`
 	Method     string            `msgpack:"m,omitempty"`
 	StatusCode int               `msgpack:"sc"`
@@ -33,13 +31,9 @@ type nativeStoredResponder struct {
 }
 
 func (r *nativeStoredResponder) toEntry() protocol.ResponderEntry {
-	origin := r.Scheme + "://" + r.Host
-	if (r.Scheme == schemeHTTPS && r.Port != 443) || (r.Scheme == schemeHTTP && r.Port != 80) {
-		origin += ":" + strconv.Itoa(r.Port)
-	}
 	return protocol.ResponderEntry{
 		ResponderID: r.ID,
-		Origin:      origin,
+		Host:        r.Host,
 		Path:        r.Path,
 		Method:      r.Method,
 		StatusCode:  r.StatusCode,
@@ -50,12 +44,12 @@ func (r *nativeStoredResponder) toEntry() protocol.ResponderEntry {
 }
 
 // InterceptRequest checks if a request matches a registered responder.
-func (b *NativeProxyBackend) InterceptRequest(host string, port int, path string, method string) *proxy.InterceptedResponse {
+func (b *NativeProxyBackend) InterceptRequest(host string, path string, method string) *proxy.InterceptedResponse {
 	b.respondersMu.RLock()
 	defer b.respondersMu.RUnlock()
 
 	for _, r := range b.responders {
-		if r.Host != host || r.Port != port || r.Path != path {
+		if r.Host != host || r.Path != path {
 			continue
 		}
 		if r.Method != "" && !strings.EqualFold(r.Method, method) {
@@ -74,9 +68,9 @@ func (b *NativeProxyBackend) InterceptRequest(host string, port int, path string
 	return nil
 }
 
-// AddResponder registers a custom response for a specific origin and path.
+// AddResponder registers a custom response for a specific host and path.
 func (b *NativeProxyBackend) AddResponder(ctx context.Context, input protocol.ResponderEntry) (*protocol.ResponderEntry, error) {
-	host, port, scheme, err := parseOrigin(input.Origin)
+	host, err := parseResponderHost(input.Host)
 	if err != nil {
 		return nil, err
 	}
@@ -99,8 +93,6 @@ func (b *NativeProxyBackend) AddResponder(ctx context.Context, input protocol.Re
 		ID:         ids.Generate(0),
 		Label:      input.Label,
 		Host:       host,
-		Port:       port,
-		Scheme:     scheme,
 		Path:       input.Path,
 		Method:     strings.ToUpper(input.Method),
 		StatusCode: statusCode,
@@ -184,27 +176,30 @@ func (b *NativeProxyBackend) saveResponders(responders []nativeStoredResponder) 
 	return b.responderStorage.Set(responderKey, data)
 }
 
-// parseOrigin parses a scheme://host[:port] origin into components.
-func parseOrigin(origin string) (host string, port int, scheme string, err error) {
-	u, err := url.Parse(origin)
-	if err != nil || (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) {
-		return "", 0, "", errors.New("invalid origin: must be http:// or https://")
+// parseResponderHost normalizes a responder host input to a lowercase hostname.
+// Accepts a bare hostname, host:port, or full URL; any scheme and port are
+// discarded, since responder matching is port- and scheme-agnostic.
+func parseResponderHost(input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", errors.New("host is required")
 	}
-	scheme = u.Scheme
-	host = u.Hostname()
-	if host == "" {
-		return "", 0, "", errors.New("invalid origin: missing hostname")
-	}
-	portStr := u.Port()
-	if portStr != "" {
-		port, err = strconv.Atoi(portStr)
+
+	// strip scheme (and any port) when given a full URL
+	if strings.Contains(input, "://") {
+		u, err := url.Parse(input)
 		if err != nil {
-			return "", 0, "", fmt.Errorf("invalid origin port: %s", portStr)
+			return "", fmt.Errorf("invalid host: %w", err)
 		}
-	} else if scheme == schemeHTTPS {
-		port = 443
-	} else {
-		port = 80
+		input = u.Hostname()
+	} else if host, _, err := net.SplitHostPort(input); err == nil {
+		input = host
 	}
-	return strings.ToLower(host), port, scheme, nil
+
+	if input == "" {
+		return "", errors.New("invalid host: missing hostname")
+	} else if strings.ContainsAny(input, "/?#") {
+		return "", errors.New("invalid host: pass only a hostname, no path")
+	}
+	return strings.ToLower(input), nil
 }

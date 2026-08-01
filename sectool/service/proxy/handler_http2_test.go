@@ -400,7 +400,7 @@ type h2MockInterceptor struct {
 	resp *InterceptedResponse
 }
 
-func (m *h2MockInterceptor) InterceptRequest(_ string, _ int, path string, _ string) *InterceptedResponse {
+func (m *h2MockInterceptor) InterceptRequest(_, path, _ string) *InterceptedResponse {
 	if path == m.path {
 		return m.resp
 	}

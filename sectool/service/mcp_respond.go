@@ -18,13 +18,13 @@ func (m *mcpServer) addRespondTools(rb ResponderBackend) {
 
 func (m *mcpServer) proxyRespondAddTool() mcp.Tool {
 	return mcp.NewTool("proxy_respond_add",
-		mcp.WithDescription(`Register a custom HTTP response for a specific origin and path.
+		mcp.WithDescription(`Register a custom HTTP response for a specific host and path.
 
-When the browser requests the matching URL through the proxy, the registered response is served directly without forwarding to upstream. Use this to set browser state (cookies, localStorage via JS, etc.) under the target site's origin.
+When the browser requests the matching URL through the proxy, the registered response is served directly without forwarding to upstream. Use this to set browser state (cookies, localStorage via JS, etc.) under the target site's origin. A responder answers over both HTTP and HTTPS and does not require the host to resolve.
 
 The response is stored in proxy history like a normal request.
 Responders persist until explicitly deleted with proxy_respond_delete.`),
-		mcp.WithString("origin", mcp.Required(), mcp.Description("Full origin: scheme://host[:port] (e.g., 'https://example.com', 'http://example.com:8080')")),
+		mcp.WithString("host", mcp.Required(), mcp.Description("Target hostname to intercept (e.g., 'example.com'). Matches over both HTTP and HTTPS; scheme and port are ignored.")),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Exact URL path to intercept (e.g., '/set-cookies'). Query strings are ignored during matching.")),
 		mcp.WithString("method", mcp.Description("HTTP method to match (e.g., 'GET'). Empty matches all methods.")),
 		mcp.WithNumber("status_code", mcp.Description("Response status code (default: 200)")),
@@ -49,9 +49,9 @@ func (m *mcpServer) proxyRespondListTool() mcp.Tool {
 
 func (m *mcpServer) handleProxyRespondAdd(rb ResponderBackend) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		origin := req.GetString("origin", "")
-		if origin == "" {
-			return errorResult("origin is required"), nil
+		host := req.GetString("host", "")
+		if host == "" {
+			return errorResult("host is required"), nil
 		}
 		path := req.GetString("path", "")
 		if path == "" {
@@ -64,7 +64,7 @@ func (m *mcpServer) handleProxyRespondAdd(rb ResponderBackend) func(ctx context.
 		}
 
 		input := protocol.ResponderEntry{
-			Origin:     origin,
+			Host:       host,
 			Path:       path,
 			Method:     req.GetString("method", ""),
 			StatusCode: req.GetInt("status_code", 0),
@@ -81,7 +81,7 @@ func (m *mcpServer) handleProxyRespondAdd(rb ResponderBackend) func(ctx context.
 			return errorResultFromErr("failed to add responder: ", err), nil
 		}
 
-		log.Printf("proxy/respond_add: created %s origin=%s path=%s label=%q", responder.ResponderID, origin, path, input.Label)
+		log.Printf("proxy/respond_add: created %s host=%s path=%s label=%q", responder.ResponderID, responder.Host, path, input.Label)
 		return jsonResult(responder)
 	}
 }

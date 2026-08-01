@@ -16,7 +16,7 @@ func TestHandleProxyRespondAdd(t *testing.T) {
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		resp := CallMCPToolJSONOK[protocol.ResponderEntry](t, mcpClient, "proxy_respond_add", map[string]interface{}{
-			"origin":      "https://example.com",
+			"host":        "example.com",
 			"path":        "/set-cookies",
 			"status_code": 200,
 			"headers":     map[string]interface{}{"Set-Cookie": "session=abc123"},
@@ -25,7 +25,7 @@ func TestHandleProxyRespondAdd(t *testing.T) {
 		})
 
 		assert.NotEmpty(t, resp.ResponderID)
-		assert.Equal(t, "https://example.com", resp.Origin)
+		assert.Equal(t, "example.com", resp.Host)
 		assert.Equal(t, "/set-cookies", resp.Path)
 		assert.Equal(t, 200, resp.StatusCode)
 		assert.Equal(t, "set-cookies", resp.Label)
@@ -36,8 +36,8 @@ func TestHandleProxyRespondAdd(t *testing.T) {
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		resp := CallMCPToolJSONOK[protocol.ResponderEntry](t, mcpClient, "proxy_respond_add", map[string]interface{}{
-			"origin": "https://example.com",
-			"path":   "/scalars",
+			"host": "example.com",
+			"path": "/scalars",
 			"headers": map[string]interface{}{
 				"Content-Length": 0,
 				"X-Flag":         true,
@@ -52,21 +52,21 @@ func TestHandleProxyRespondAdd(t *testing.T) {
 		assert.Empty(t, resp.Headers["X-Empty"])
 	})
 
-	t.Run("missing_origin", func(t *testing.T) {
+	t.Run("missing_host", func(t *testing.T) {
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "proxy_respond_add", map[string]interface{}{
 			"path": "/page",
 		})
 		assert.True(t, result.IsError)
-		assert.Contains(t, ExtractMCPText(t, result), "origin is required")
+		assert.Contains(t, ExtractMCPText(t, result), "host is required")
 	})
 
 	t.Run("missing_path", func(t *testing.T) {
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		result := CallMCPTool(t, mcpClient, "proxy_respond_add", map[string]interface{}{
-			"origin": "https://example.com",
+			"host": "example.com",
 		})
 		assert.True(t, result.IsError)
 		assert.Contains(t, ExtractMCPText(t, result), "path is required")
@@ -76,15 +76,15 @@ func TestHandleProxyRespondAdd(t *testing.T) {
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		CallMCPToolTextOK(t, mcpClient, "proxy_respond_add", map[string]interface{}{
-			"origin": "https://example.com",
-			"path":   "/a",
-			"label":  "dup",
+			"host":  "example.com",
+			"path":  "/a",
+			"label": "dup",
 		})
 
 		result := CallMCPTool(t, mcpClient, "proxy_respond_add", map[string]interface{}{
-			"origin": "https://example.com",
-			"path":   "/b",
-			"label":  "dup",
+			"host":  "example.com",
+			"path":  "/b",
+			"label": "dup",
 		})
 		assert.True(t, result.IsError)
 		assert.Contains(t, ExtractMCPText(t, result), "label already exists")
@@ -98,8 +98,8 @@ func TestHandleProxyRespondDelete(t *testing.T) {
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		resp := CallMCPToolJSONOK[protocol.ResponderEntry](t, mcpClient, "proxy_respond_add", map[string]interface{}{
-			"origin": "https://example.com",
-			"path":   "/page",
+			"host": "example.com",
+			"path": "/page",
 		})
 
 		CallMCPToolTextOK(t, mcpClient, "proxy_respond_delete", map[string]interface{}{
@@ -117,9 +117,9 @@ func TestHandleProxyRespondDelete(t *testing.T) {
 		_, mcpClient, _, _, _ := setupMockMCPServer(t, nil, protocol.WorkflowModeNone)
 
 		CallMCPToolTextOK(t, mcpClient, "proxy_respond_add", map[string]interface{}{
-			"origin": "https://example.com",
-			"path":   "/page",
-			"label":  "my-page",
+			"host":  "example.com",
+			"path":  "/page",
+			"label": "my-page",
 		})
 
 		CallMCPToolTextOK(t, mcpClient, "proxy_respond_delete", map[string]interface{}{
@@ -142,12 +142,12 @@ func TestHandleProxyRespondList(t *testing.T) {
 
 	// Add two
 	CallMCPToolTextOK(t, mcpClient, "proxy_respond_add", map[string]interface{}{
-		"origin": "https://example.com",
-		"path":   "/a",
+		"host": "example.com",
+		"path": "/a",
 	})
 	CallMCPToolTextOK(t, mcpClient, "proxy_respond_add", map[string]interface{}{
-		"origin": "https://example.com",
-		"path":   "/b",
+		"host": "example.com",
+		"path": "/b",
 	})
 
 	listResp = CallMCPToolJSONOK[protocol.ResponderListResponse](t, mcpClient, "proxy_respond_list", nil)

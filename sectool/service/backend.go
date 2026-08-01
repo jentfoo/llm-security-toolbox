@@ -99,7 +99,7 @@ type SidecarRegistry interface {
 // ResponderBackend defines the interface for managing proxy responders.
 // Only available when using the native proxy backend.
 type ResponderBackend interface {
-	// AddResponder registers a custom response for a specific origin and path.
+	// AddResponder registers a custom response for a specific host and path.
 	// ResponderID is assigned by the backend and returned in the result.
 	AddResponder(ctx context.Context, input protocol.ResponderEntry) (*protocol.ResponderEntry, error)
 

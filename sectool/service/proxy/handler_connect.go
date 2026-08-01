@@ -201,7 +201,13 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 			// Probe or use cached protocol
 			upstreamConn, negotiatedProto, probeErr = h.probeOrConnect(ctx, targetAddr, sni, hello.SupportedProtos)
 			if probeErr != nil {
-				return nil, probeErr
+				// upstream unreachable: present a basic single-SAN leaf so the handshake
+				// completes and the request can be served by a responder or a 502
+				cert, certErr := h.certManager.GetCertificate(sni, nil)
+				if certErr != nil {
+					return nil, certErr
+				}
+				return &tls.Config{Certificates: []tls.Certificate{*cert}}, nil
 			}
 
 			// Mint for SNI, mirroring the upstream leaf's SANs
@@ -271,7 +277,13 @@ func (h *connectHandler) handleTLS(ctx context.Context, clientConn net.Conn, cli
 		return
 	}
 
-	if probeErr != nil || upstreamConn == nil {
+	// upstream unreachable: a basic cert completed the handshake; serve a responder or 502
+	if probeErr != nil {
+		h.serveResponderTLS(ctx, clientTLS, clientTLSReader, target)
+		return
+	}
+
+	if upstreamConn == nil {
 		log.Printf("proxy: upstream probe failed: %v", probeErr)
 		_ = clientTLS.Close()
 		return
@@ -445,6 +457,13 @@ func (h *connectHandler) routeByProtocol(ctx context.Context, clientTLS net.Conn
 		UpstreamConn:   upstreamConn,
 		UpstreamReader: bufio.NewReader(upstreamConn),
 	})
+}
+
+// serveResponderTLS runs the HTTP/1.1 handler over the terminated TLS stream with no
+// upstream; a registered responder is served, otherwise a 502 is returned.
+func (h *connectHandler) serveResponderTLS(ctx context.Context, clientTLS net.Conn, clientReader *bufio.Reader, target *types.Target) {
+	defer func() { _ = clientTLS.Close() }()
+	h.http1Handler.HandleTLS(ctx, clientTLS, nil, clientReader, nil, target)
 }
 
 // upstreamMirrorSpec builds an additive cert spec from the upstream leaf's SANs

@@ -19,10 +19,10 @@ type InterceptedResponse struct {
 // Implementations must be safe for concurrent use and fast (no I/O on the hot path).
 type ResponseInterceptor interface {
 	// InterceptRequest checks if a request matches a registered responder.
-	// host is the target hostname (lowercase), port is the target port,
-	// path is the URL path (query string stripped), method is the HTTP method.
+	// host is the target hostname (lowercase), path is the URL path (query string
+	// stripped), method is the HTTP method. Matching is port- and scheme-agnostic.
 	// Returns the response to serve, or nil if no match.
-	InterceptRequest(host string, port int, path string, method string) *InterceptedResponse
+	InterceptRequest(host string, path string, method string) *InterceptedResponse
 }
 
 // BuildInterceptedH1Response converts an InterceptedResponse to a wire-serializable RawHTTP1Response.

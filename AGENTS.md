@@ -280,7 +280,7 @@ Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body place
 
 **Backend Interfaces (`sectool/service/backend.go`):**
 - `HttpBackend` - proxy history (get/regex), request sending, match/replace rules CRUD
-- `ResponderBackend` - custom canned-response registration by origin/path; native proxy only
+- `ResponderBackend` - custom canned-response registration by host/path (port- and scheme-agnostic); native proxy only
 - `OastBackend` - OAST session create/delete, event polling, session listing
 - `CrawlerBackend` - crawl session lifecycle and result retrieval
 
@@ -300,7 +300,7 @@ Bundles at `./sectool-requests/<flow_id>/`: `request.http` (headers + body place
 - `proxy_rule_list` - list match/replace rules
 - `proxy_rule_add` - add match/replace rule
 - `proxy_rule_delete` - delete rule
-- `proxy_respond_add` - register a canned response for a given origin/path; native proxy only
+- `proxy_respond_add` - register a canned response for a given host/path (port- and scheme-agnostic); native proxy only
 - `proxy_respond_delete` - delete a responder by ID or label
 - `proxy_respond_list` - list registered responders
 - `crawl_create` - start crawl from URLs or proxy flow seeds

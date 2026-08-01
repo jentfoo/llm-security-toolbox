@@ -647,7 +647,7 @@ type mockInterceptor struct {
 	resp *InterceptedResponse
 }
 
-func (m *mockInterceptor) InterceptRequest(host string, _ int, path, _ string) *InterceptedResponse {
+func (m *mockInterceptor) InterceptRequest(host, path, _ string) *InterceptedResponse {
 	if host == m.host && path == m.path {
 		return m.resp
 	}
@@ -714,6 +714,48 @@ func TestHandleExchange(t *testing.T) {
 			assert.Equal(t, 200, firstEntry(t, h.history).Response.StatusCode)
 		})
 	}
+
+	// a TLS tunnel with no reachable upstream serves a matching responder, else 502s
+	t.Run("no_upstream_serves_responder", func(t *testing.T) {
+		h := newHandler(t)
+		clientConn, proxyConn := net.Pipe()
+		t.Cleanup(func() { _ = clientConn.Close() })
+
+		go func() {
+			h.handleExchange(t.Context(), proxyConn, bufio.NewReader(proxyConn), h1Exchange{
+				target: &types.Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+			})
+			_ = proxyConn.Close()
+		}()
+
+		_, err := clientConn.Write([]byte("GET /canned HTTP/1.1\r\nHost: example.com\r\n\r\n"))
+		require.NoError(t, err)
+
+		respData, err := io.ReadAll(clientConn)
+		require.NoError(t, err)
+		assert.Contains(t, string(respData), "200")
+		assert.Contains(t, string(respData), cannedBody)
+	})
+
+	t.Run("no_upstream_no_responder_502", func(t *testing.T) {
+		h := newHandler(t)
+		clientConn, proxyConn := net.Pipe()
+		t.Cleanup(func() { _ = clientConn.Close() })
+
+		go func() {
+			h.handleExchange(t.Context(), proxyConn, bufio.NewReader(proxyConn), h1Exchange{
+				target: &types.Target{Hostname: "example.com", Port: 443, UsesHTTPS: true},
+			})
+			_ = proxyConn.Close()
+		}()
+
+		_, err := clientConn.Write([]byte("GET /miss HTTP/1.1\r\nHost: example.com\r\n\r\n"))
+		require.NoError(t, err)
+
+		respData, err := io.ReadAll(clientConn)
+		require.NoError(t, err)
+		assert.Contains(t, string(respData), "502")
+	})
 
 	// runExpect drives one exchange against upstreamResp, holding the request body back
 	// until the client has read the interim response. Returns the interim line, the

@@ -634,9 +634,9 @@ func (p *h2Proxy) processHeaders(buf *bytes.Buffer, streamID uint32, block []byt
 
 			// Check for response interception before rule application and forwarding
 			if p.handler.responseInterceptor != nil {
-				host, port := addr.Parse(stream.authority, stream.scheme)
+				host, _ := addr.Parse(stream.authority, stream.scheme)
 				if intercepted := p.handler.responseInterceptor.InterceptRequest(
-					host, port, PathWithoutQuery(stream.path), stream.method,
+					host, PathWithoutQuery(stream.path), stream.method,
 				); intercepted != nil {
 					stream.reqHeaders = headers
 					stream.mu.Unlock()
