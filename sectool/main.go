@@ -44,7 +44,7 @@ func main() {
 				now := time.Now()
 				next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 1, 0, now.Location())
 				time.Sleep(next.Sub(now))
-				fmt.Println("Date: " + time.Now().Format(time.RFC850))
+				_, _ = fmt.Fprintln(os.Stderr, "Date: "+time.Now().Format(time.RFC850))
 			}
 		}()
 
