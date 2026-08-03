@@ -89,11 +89,17 @@ type InvokeToolParams struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-// InvokeToolResult is the sidecar tool's result, returned verbatim to the MCP client.
+// InvokeToolResult is the sidecar tool's result. The result is returned to the
+// MCP client as structured content; sectool derives the text fallback from it.
 type InvokeToolResult struct {
-	// Content is markdown text.
+	// Result is the tool's result as a JSON object (the advertised output schema
+	// is an object; wrap plain-text results in a field, e.g. {"summary":"..."}).
+	Result json.RawMessage `json:"result,omitempty"`
+	// Deprecated: Content is deprecated, use Result.
+	// TODO - remove on wire major version bump
 	Content string `json:"content,omitempty"`
-	// StructuredContent is optional structured content.
+	// Deprecated: StructuredContent is deprecated, use Result.
+	// TODO - remove on wire major version bump
 	StructuredContent json.RawMessage `json:"structured_content,omitempty"`
 	IsError           bool            `json:"is_error,omitempty"`
 }

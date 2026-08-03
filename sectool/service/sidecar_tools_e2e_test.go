@@ -51,8 +51,7 @@ func (h *toolSidecar) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResu
 	}
 	_ = json.Unmarshal(p.Arguments, &args)
 	return wire.InvokeToolResult{
-		Content:           "echoed " + args.Marker,
-		StructuredContent: json.RawMessage(`{"done":true}`),
+		Result: json.RawMessage(`{"echoed":"` + args.Marker + `"}`),
 	}, nil
 }
 
@@ -116,8 +115,9 @@ func TestSidecarToolsE2E(t *testing.T) {
 	t.Run("invoke_delegates_and_returns_verbatim", func(t *testing.T) {
 		res, cerr := mcpClient.CallTool(t.Context(), toolName, map[string]any{"marker": "xyz"})
 		require.NoError(t, cerr)
-		assert.Equal(t, "echoed xyz", resultText(res))
+		// structured result surfaces, and the text fallback is derived from its JSON
 		require.NotNil(t, res.StructuredContent)
+		assert.JSONEq(t, `{"echoed":"xyz"}`, resultText(res))
 
 		// The flow the handler pushed mid-call is captured under the adapter.
 		poll, perr := mcpClient.ProxyPoll(t.Context(), mcpclient.ProxyPollOpts{OutputMode: "flows", Adapter: adapterName, Limit: 100})

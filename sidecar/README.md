@@ -463,7 +463,7 @@ MCPTools: []wire.MCPTool{
 }
 ```
 
-Invocation reaches `OnInvokeTool` with sectool-validated arguments. The handler may read state via `CoreInvoke` and emit flows via `PushFlow`.
+Invocation reaches `OnInvokeTool` with sectool-validated arguments. The handler may read state via `CoreInvoke` and emit flows via `PushFlow`. Return the result as a JSON object in `InvokeToolResult.Result` (the advertised output schema is an object; wrap plain-text results in a field, e.g. `{"summary":"..."}`); sectool returns it to the client as structured content and renders the text fallback from it.
 
 ### Proactive stream operations
 
@@ -668,7 +668,7 @@ The method behind agent `replay_send` and the destination side of `invoke_adapte
 
 **params:** `name` (string, a registered tool), `arguments` (raw JSON, sectool-validated against `input_schema`).
 
-**result:** `content` (string, optional markdown), `structured_content` (raw JSON, optional), `is_error` (bool, optional).
+**result:** `result` (a raw JSON object, the tool result; sectool derives the MCP text fallback from it), `is_error` (bool, optional).
 
 #### stream_open (sectool → sidecar)
 

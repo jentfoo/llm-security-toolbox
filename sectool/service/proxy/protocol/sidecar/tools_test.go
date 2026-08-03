@@ -131,7 +131,7 @@ func TestManagerInvokeTool(t *testing.T) {
 				var ip wire.InvokeToolParams
 				_ = json.Unmarshal(params, &ip)
 				gotName, gotArgs = ip.Name, ip.Arguments
-				return wire.InvokeToolResult{Content: "delegated"}, nil
+				return wire.InvokeToolResult{Result: json.RawMessage(`{"v":"delegated"}`)}, nil
 			},
 		})
 		go func() { _ = p.Run(t.Context()) }()
@@ -142,7 +142,7 @@ func TestManagerInvokeTool(t *testing.T) {
 
 		res, ierr := m.InvokeTool(t.Context(), "demo_tool", json.RawMessage(`{"x":1}`))
 		require.Nil(t, ierr)
-		assert.Equal(t, "delegated", res.Content)
+		assert.JSONEq(t, `{"v":"delegated"}`, string(res.Result))
 		assert.Equal(t, "demo_tool", gotName)
 		assert.JSONEq(t, `{"x":1}`, string(gotArgs))
 	})

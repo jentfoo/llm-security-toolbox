@@ -113,7 +113,7 @@ func (*toolTestHandler) OnShutdown(int) {}
 func (h *toolTestHandler) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResult, error) {
 	h.gotName = p.Name
 	h.gotArgs = p.Arguments
-	return wire.InvokeToolResult{Content: "ran " + p.Name, StructuredContent: json.RawMessage(`{"ok":true}`)}, nil
+	return wire.InvokeToolResult{Result: json.RawMessage(`{"ran":"` + p.Name + `"}`)}, nil
 }
 
 // shutdownHandler is a shutdown-only handler; other callbacks use BaseHandler defaults.
@@ -147,8 +147,7 @@ func TestConnInvokeTool(t *testing.T) {
 		rpcErr := srv.Call(ctx, wire.MethodInvokeTool,
 			wire.InvokeToolParams{Name: "ts_inject", Arguments: json.RawMessage(`{"a":1}`)}, &res)
 		require.Nil(t, rpcErr)
-		assert.Equal(t, "ran ts_inject", res.Content)
-		assert.JSONEq(t, `{"ok":true}`, string(res.StructuredContent))
+		assert.JSONEq(t, `{"ran":"ts_inject"}`, string(res.Result))
 		assert.Equal(t, "ts_inject", h.gotName)
 		assert.JSONEq(t, `{"a":1}`, string(h.gotArgs))
 	})

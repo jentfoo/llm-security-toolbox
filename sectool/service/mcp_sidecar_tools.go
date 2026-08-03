@@ -111,13 +111,18 @@ func (m *mcpServer) delegateSidecarTool(name string, schema *jsonschema.Schema) 
 	}
 }
 
+// sidecarToolOutputSchema declares that sidecar tools return an arbitrary JSON
+// object as structured content.
+var sidecarToolOutputSchema = json.RawMessage(`{"type":"object"}`)
+
 // sidecarToolDef builds an MCP tool definition from a sidecar's declaration,
 // carrying its raw input_schema and optional annotations verbatim.
 func sidecarToolDef(t wire.MCPTool, schemaRaw json.RawMessage) mcp.Tool {
 	out := mcp.Tool{
-		Name:           t.Name,
-		Description:    t.Description,
-		RawInputSchema: schemaRaw,
+		Name:            t.Name,
+		Description:     t.Description,
+		RawInputSchema:  schemaRaw,
+		RawOutputSchema: sidecarToolOutputSchema,
 	}
 	if len(t.Annotations) > 0 {
 		_ = json.Unmarshal(t.Annotations, &out.Annotations)
@@ -125,14 +130,33 @@ func sidecarToolDef(t wire.MCPTool, schemaRaw json.RawMessage) mcp.Tool {
 	return out
 }
 
-// sidecarToolResult converts a sidecar tool result into an MCP result, returning
-// its text and optional structured content to the client verbatim.
+// sidecarToolResult converts a sidecar tool result into an MCP result. The
+// structured result is returned to the client, with the raw JSON as the text
+// fallback for text-only clients.
 func sidecarToolResult(res wire.InvokeToolResult) *mcp.CallToolResult {
-	out := mcp.NewToolResultText(res.Content)
-	if len(res.StructuredContent) > 0 {
+	result := res.Result
+	// TODO - remove legacy StructuredContent/Content fallbacks on wire major version bump
+	if len(result) == 0 {
+		if len(res.StructuredContent) > 0 { //nolint:staticcheck // deprecated legacy fallback
+			result = res.StructuredContent //nolint:staticcheck // deprecated legacy fallback
+		} else if res.Content != "" { //nolint:staticcheck // deprecated legacy fallback
+			out := mcp.NewToolResultText(res.Content) //nolint:staticcheck // deprecated legacy fallback
+			out.IsError = res.IsError
+			return out
+		}
+	}
+
+	var out *mcp.CallToolResult
+	switch {
+	case len(result) == 0:
+		out = mcp.NewToolResultText("")
+	default:
 		var sc any
-		if err := json.Unmarshal(res.StructuredContent, &sc); err == nil {
-			out.StructuredContent = sc
+		if err := json.Unmarshal(result, &sc); err == nil {
+			out = mcp.NewToolResultStructured(sc, string(result))
+		} else {
+			// defensive: non-JSON payload falls back to raw text
+			out = mcp.NewToolResultText(string(result))
 		}
 	}
 	out.IsError = res.IsError
