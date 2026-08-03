@@ -7,6 +7,8 @@ Two ways to implement an adapter:
 - **[Go SDK](#go-sdk)** — the `sidecar` package handles registration, rule caching, and flow emission so your adapter focuses on parsing and sending protocol frames.
 - **[JSON-RPC 2.0 wire protocol](#json-rpc-20-wire-protocol)** — sidecars can be written in any language; they just speak the length-prefixed JSON-RPC 2.0 contract over a local socket.
 
+A shipped example: [sidenuclei](https://github.com/go-appsec/toolbox-sidenuclei) is a first-party Go sidecar that claims no connections at all — it polls captured flows via `core_invoke`, scans each endpoint with Nuclei, and files findings back as notes, showing how a sidecar reuses the core toolset on its own.
+
 ---
 
 ## Concepts
